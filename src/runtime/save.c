@@ -43,7 +43,7 @@
 #include "search.h"
 
 #ifdef LISP_FEATURE_SB_CORE_COMPRESSION
-# include <zlib.h>
+# include <zstd.h>
 #endif
 
 #define GENERAL_WRITE_FAILURE_MSG "error writing to core file"
@@ -93,49 +93,22 @@ write_bytes_to_file(FILE * file, char *addr, size_t bytes, int compression)
         }
 #ifdef LISP_FEATURE_SB_CORE_COMPRESSION
     } else if ((compression >= -1) && (compression <= 9)) {
-# define ZLIB_BUFFER_SIZE (1u<<16)
-        z_stream stream;
-        unsigned char* buf = successful_malloc(ZLIB_BUFFER_SIZE);
-        unsigned char * written, * end;
-        long total_written = 0;
-        int ret;
-        stream.zalloc = NULL;
-        stream.zfree = NULL;
-        stream.opaque = NULL;
-        stream.avail_in = bytes;
-        stream.next_in  = (void*)addr;
-        ret = deflateInit(&stream, compression);
-        if (ret != Z_OK)
-            lose("deflateInit: %i", ret);
-        do {
-            stream.avail_out = ZLIB_BUFFER_SIZE;
-            stream.next_out = buf;
-            ret = deflate(&stream, Z_FINISH);
-            if (ret < 0) lose("zlib deflate error: %i... exiting", ret);
-            written = buf;
-            end     = buf+ZLIB_BUFFER_SIZE-stream.avail_out;
-            total_written += end - written;
-            while (written < end) {
-                long count = fwrite(written, 1, end-written, file);
-                if (count > 0) {
-                    written += count;
-                } else {
-                    perror(GENERAL_WRITE_FAILURE_MSG);
-                    lose("core file is incomplete or corrupt");
-                }
-            }
-        } while (stream.avail_out == 0);
-        deflateEnd(&stream);
-        free(buf);
+        size_t bound_size = ZSTD_compressBound(bytes);
+        char* compressed = successful_malloc(bound_size);
+        size_t size = ZSTD_compress(compressed, bound_size, addr, bytes, compression);
+        if (ZSTD_isError(size))
+          lose("ZSTD_compress error: %s", ZSTD_getErrorName(size));
+        /* Write compressed length first */
+        fwrite(&size, sizeof(size_t), 1, file);
+        fwrite(compressed, 1, size, file);
         printf("compressed %lu bytes into %lu at level %i\n",
-               bytes, total_written, compression);
-# undef ZLIB_BUFFER_SIZE
+               bytes, size, compression);
 #endif
     } else {
 #ifdef LISP_FEATURE_SB_CORE_COMPRESSION
         lose("Unknown core compression level %i, exiting", compression);
 #else
-        lose("zlib-compressed core support not built in this runtime");
+        lose("zstd-compressed core support not built in this runtime");
 #endif
     }
 
