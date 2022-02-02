@@ -1054,6 +1054,73 @@ add_new_area(page_index_t first_page, size_t offset, size_t size)
     new_areas_index++;
 }
 
+#ifdef LISP_FEATURE_PARALLEL_GC
+static inline boolean
+large_unmovable_vector_p(lispobj object, lispobj header)
+{
+    return lowtag_of(object) == OTHER_POINTER_LOWTAG
+        && header != TRANS_LOCK_MAGIC
+        /* get_array_data() uses this predicate and it can come across
+         * a forwarding pointer. */
+        && !forwarding_pointer_p(header)
+        /* KLUDGE: we're assuming that all of the vector widetags
+         * whose transporters use copy_large_object() are between
+         * these two widetags. This might be fragile assumption. */
+        /* UPDATE FROM THE FUTURE: they moved around widetags, this
+           set is definitely wrong. */
+        && widetag_of(header) >= SIMPLE_ARRAY_UNSIGNED_BYTE_2_WIDETAG
+        && widetag_of(header) <= SIMPLE_ARRAY_WIDETAG
+        && page_table[find_page_index(native_pointer(object))] & SINGLE_OBJECT_FLAG;
+}
+#endif
+
+/* For the parallel GC, it is important that open regions are not
+ * scavenged. This check inserts some assertions to enforce that
+ * invariant. */
+#ifdef LISP_FEATURE_PARALLEL_GC
+#define GC_CHECK_REGION_OPENNESS 0
+#endif
+#if GC_CHECK_REGION_OPENNESS
+static inline boolean inside_open_region_p(void *ptr)
+{
+    page_index_t idx = find_page_index(ptr);
+
+    return idx != -1 /* not in dynamic space */
+        && page_table[idx].allocated & OPEN_REGION_PAGE_FLAG
+        && ptr >= page_address(idx) + page_table[idx].words_used_ / N_WORD_BYTES;
+}
+#endif
+
+#ifdef LISP_FEATURE_PARALLEL_GC
+static inline void
+close_large_open_region(void *object, long nbytes)
+{
+    long i;
+    long npages = CEILING(nbytes, GENCGC_PAGE_BYTES)/GENCGC_PAGE_BYTES;
+    page_index_t first_page = find_page_index(object);
+
+    gc_assert(page_address(first_page) == object);
+    gc_assert(page_table[first_page].flags & SINGLE_OBJECT_FLAG);
+
+    mutex_lock(&free_pages_lock);
+
+    for (i = 0; i < npages; i++) {
+        page_index_t idx = first_page + i;
+
+        gc_assert(page_table[idx].allocated & OPEN_REGION_PAGE_FLAG);
+        gc_assert(page_table[idx].words_used_ == 0);
+
+        page_table[idx].allocated &= ~OPEN_REGION_PAGE_FLAG;
+        set_page_bytes_used(first_page,
+                            i == npages-1 ? nbytes % PAGE_BYTES : PAGE_BYTES);
+    }
+
+    add_new_area(first_page, 0, nbytes);
+
+    mutex_unlock(&free_pages_lock);
+}
+#endif
+
 /* Update the PTEs for the alloc_region. The region may be added to
  * the new_areas.
  *

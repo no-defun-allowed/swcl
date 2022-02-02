@@ -15,6 +15,7 @@
 #ifndef _GC_PRIVATE_H_
 #define _GC_PRIVATE_H_
 
+#include "forwarding-ptr.h"
 #include "genesis/instance.h"
 #include "genesis/weak-pointer.h"
 #include "immobile-space.h"
@@ -35,10 +36,17 @@ lispobj copy_possibly_large_object(lispobj object, sword_t nwords,
 #define cons_region 0
 #endif
 
+#ifdef LISP_FEATURE_PARALLEL_GC
+#define CHECK_PGC_COPY_PRECONDITIONS(object) gc_assert(*native_pointer(object) == TRANS_LOCK_MAGIC);
+#else
+#define CHECK_PGC_COPY_PRECONDITIONS(object)
+#endif
+
 #define CHECK_COPY_PRECONDITIONS(object, nwords) \
     gc_dcheck(is_lisp_pointer(object)); \
     gc_dcheck(from_space_p(object)); \
-    gc_dcheck((nwords & 0x01) == 0)
+    gc_dcheck((nwords & 0x01) == 0); \
+    CHECK_PGC_COPY_PRECONDITIONS(object)
 
 #define CHECK_COPY_POSTCONDITIONS(copy, lowtag) \
     gc_dcheck(lowtag_of(copy) == lowtag); \
@@ -52,9 +60,26 @@ lispobj copy_possibly_large_object(lispobj object, sword_t nwords,
 #define NOTE_TRANSPORTING(old, new, nwords) /* do nothing */
 #endif
 
+static inline gc_copy_object_aux(lispobj *new, lispobj *old,
+                                 lispobj header, size_t nwords)
+{
+  /* Copy the first two words ahead of time, since the the forward
+   * pointer will overwrite them. */
+  new[0] = header;
+  new[1] = native_pointer(old)[1];
+  
+  /* Set forwarding pointer. */
+  new_lispobj = make_lispobj(new, tag);
+  set_forwarding_pointer(native_pointer(old), new_lispobj);
+  
+  /* Copy the object. */
+  memcpy(new+2, native_pointer(old)+2, nbytes - (N_WORD_BYTES*2));
+}
+
 extern uword_t gc_copied_nwords;
 static inline lispobj
-gc_copy_object(lispobj object, size_t nwords, void* region, int page_type)
+gc_copy_object(lispobj object, lispobj header, size_t nwords,
+               void* region, int page_type)
 {
     CHECK_COPY_PRECONDITIONS(object, nwords);
 
@@ -63,7 +88,7 @@ gc_copy_object(lispobj object, size_t nwords, void* region, int page_type)
     NOTE_TRANSPORTING(object, new,  nwords);
 
     /* Copy the object. */
-    memcpy(new,native_pointer(object),nwords*N_WORD_BYTES);
+    gc_copy_object_aux(new, object, header, nwords);
 
     return make_lispobj(new, lowtag_of(object));
 }
@@ -71,13 +96,13 @@ gc_copy_object(lispobj object, size_t nwords, void* region, int page_type)
 // Like above but copy potentially fewer words than are allocated.
 // ('old_nwords' can be, but does not have to be, smaller than 'nwords')
 static inline lispobj
-gc_copy_object_resizing(lispobj object, long nwords, void* region, int page_type,
-                        int old_nwords)
+gc_copy_object_resizing(lispobj object, lispobj header, long nwords,
+                        void* region, int page_type, int old_nwords)
 {
     CHECK_COPY_PRECONDITIONS(object, nwords);
     lispobj *new = gc_general_alloc(region, nwords*N_WORD_BYTES, page_type);
     NOTE_TRANSPORTING(object, new, old_nwords);
-    memcpy(new, native_pointer(object), old_nwords*N_WORD_BYTES);
+    gc_copy_object_aux(new, object, header, old_nwords);
     return make_lispobj(new, lowtag_of(object));
 }
 
