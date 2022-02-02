@@ -1,6 +1,9 @@
 #ifndef _FORWARDING_PTR_H_
 #define _FORWARDING_PTR_H_
 
+#define FORWARDING_POINTER_MAGIC 0x01
+#define TRANS_LOCK_MAGIC 0x02
+
 #ifndef LISP_FEATURE_GENCGC
 inline static boolean
 in_gc_p(void) {
@@ -12,7 +15,7 @@ inline static boolean
 forwarding_pointer_p(lispobj *pointer) {
     lispobj first_word=*pointer;
 #ifdef LISP_FEATURE_GENCGC
-    return (first_word == 0x01);
+    return (first_word == FORWARDING_POINTER_MAGIC);
 #else
     // FIXME: change 5c0d71f92c371769f911e6a2ac60b2dd9fbde349 added
     // an extra test here, which theoretically slowed things down.
@@ -50,8 +53,16 @@ static inline void set_forwarding_pointer(lispobj *addr, lispobj newspace_copy) 
   // that we're operating on a not-yet-forwarded object here.
 #ifdef LISP_FEATURE_GENCGC
     gc_dcheck(compacting_p());
-    addr[0] = 0x01;
     addr[1] = newspace_copy;
+# ifdef LISP_FEATURE_PARALLEL_GC
+    /* It is important that the FP magic is inserted after the actual
+     * FP, so that when other threads find the magic (possibly without
+     * needing to use a spinlock) the FP is guaranteed to be
+     * installed. */
+    gc_spin_unlock(pointer, FORWARDING_POINTER_MAGIC);
+# else
+    pointer[0] = FORWARDING_POINTER_MAGIC;
+# endif
 #else
     addr[0] = newspace_copy;
 #endif

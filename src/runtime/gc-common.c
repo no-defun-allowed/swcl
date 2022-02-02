@@ -64,6 +64,43 @@ os_vm_size_t thread_control_stack_size = DEFAULT_CONTROL_STACK_SIZE;
 sword_t (*const scavtab[256])(lispobj *where, lispobj object);
 uword_t gc_copied_nwords;
 
+#ifdef LISP_FEATURE_PARALLEL_GC
+static inline boolean
+large_unmovable_vector_p(lispobj object, lispobj header)
+{
+    return lowtag_of(object) == OTHER_POINTER_LOWTAG
+        && header != TRANS_LOCK_MAGIC
+        /* get_array_data() uses this predicate and it can come across
+         * a forwarding pointer. */
+        && !forwarding_pointer_p(header)
+        /* KLUDGE: we're assuming that all of the vector widetags
+         * whose transporters use copy_large_object() are between
+         * these two widetags. This might be fragile assumption. */
+        /* UPDATE FROM THE FUTURE: they moved around widetags, this
+           set is definitely wrong. */
+        && widetag_of(header) >= SIMPLE_ARRAY_UNSIGNED_BYTE_2_WIDETAG
+        && widetag_of(header) <= SIMPLE_ARRAY_WIDETAG
+        && page_table[find_page_index(native_pointer(object))] & SINGLE_OBJECT_FLAG;
+}
+#endif
+
+/* For the parallel GC, it is important that open regions are not
+ * scavenged. This check inserts some assertions to enforce that
+ * invariant. */
+#ifdef LISP_FEATURE_PARALLEL_GC
+#define GC_CHECK_REGION_OPENNESS 0
+#endif
+#if GC_CHECK_REGION_OPENNESS
+static inline boolean inside_open_region_p(void *ptr)
+{
+    page_index_t idx = find_page_index(ptr);
+
+    return idx != -1 /* not in dynamic space */
+        && page_table[idx].allocated & OPEN_REGION_PAGE_FLAG
+        && ptr >= page_address(idx) + page_table[idx].words_used_ / N_WORD_BYTES;
+}
+#endif
+
 /* If sb_sprof_enabled was used and the data are not in the final form
  * (in the *SAMPLES* instance) then all code remains live.
  * This is a weaker constraint than 'pin_all_dynamic_space_code'
