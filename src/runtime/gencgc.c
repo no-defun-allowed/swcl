@@ -2729,6 +2729,7 @@ static struct new_area new_areas_2[NUM_NEW_AREAS];
  * the process which are not scavenged. */
 static void newspace_full_scavenge(generation_index_t generation)
 {
+    printf("full scavenge\n");
     page_index_t i;
 
     FSHOW((stderr,
@@ -2777,6 +2778,7 @@ static void gc_close_all_regions()
 static void
 scavenge_newspace(generation_index_t generation)
 {
+    printf("doin %d\n", generation);
     /* Flush the current regions updating the page table. */
     gc_close_all_regions();
 
@@ -2831,7 +2833,7 @@ scavenge_newspace(generation_index_t generation)
             newspace_full_scavenge(generation);
 
         } else {
-
+            printf("incremental scavenge\n");
             int i;
             /* Work through previous_new_areas. */
             for (i = 0; i < previous_new_areas_index; i++) {

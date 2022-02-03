@@ -1,6 +1,9 @@
 #ifndef _FORWARDING_PTR_H_
 #define _FORWARDING_PTR_H_
 
+#define FORWARDING_POINTER_MAGIC 0x01
+#define TRANSPORT_LOCK_MAGIC     0x02
+
 #ifndef LISP_FEATURE_GENCGC
 inline static boolean
 in_gc_p(void) {
@@ -12,7 +15,7 @@ inline static boolean
 forwarding_pointer_p(lispobj *pointer) {
     lispobj first_word=*pointer;
 #ifdef LISP_FEATURE_GENCGC
-    return (first_word == 0x01);
+    return (first_word == FORWARDING_POINTER_MAGIC);
 #else
     // FIXME: change 5c0d71f92c371769f911e6a2ac60b2dd9fbde349 added
     // an extra test here, which theoretically slowed things down.
@@ -51,13 +54,30 @@ set_forwarding_pointer(lispobj *pointer, lispobj newspace_copy) {
   // that we're operating on a not-yet-forwarded object here.
 #ifdef LISP_FEATURE_GENCGC
     gc_dcheck(compacting_p());
-    pointer[0]=0x01;
+    pointer[0]=FORWARDING_POINTER_MAGIC;
     pointer[1]=newspace_copy;
 #else
     pointer[0]=newspace_copy;
 #endif
     return newspace_copy;
 }
+
+#ifdef LISP_FEATURE_PARALLEL_GC
+static inline boolean
+grab_forwarding_pointer(lispobj *pointer) {
+  while (1) {
+    lispobj read = pointer[0];
+    if (read == FORWARDING_POINTER_MAGIC)
+      /* Another thread already installed a forwarding pointer. */
+      return false;
+    if (read != TRANSPORT_LOCK_MAGIC &&
+        __atomic_compare_exchange_n(pointer, &read, TRANSPORT_LOCK_MAGIC,
+                                    false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+      /* We just claimed this object. */
+      return true;
+  }
+}
+#endif
 
 /// Chase the pointer in 'word' if it points to a forwarded object.
 static inline lispobj follow_maybe_fp(lispobj word)

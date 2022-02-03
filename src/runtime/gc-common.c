@@ -103,11 +103,11 @@ copy_object(lispobj object, sword_t nwords)
 
 #ifdef LISP_FEATURE_PPC64
 // unevenly spaced pointer lowtags
-static void (*scav_ptr[16])(lispobj *where, lispobj object); /* forward decl */
+static void (*scav_ptr[16])(lispobj *where, lispobj object, lispobj header); /* forward decl */
 #define PTR_SCAVTAB_INDEX(ptr) (ptr & 15)
 #else
 // evenly spaced pointer lowtags
-static void (*scav_ptr[4])(lispobj *where, lispobj object); /* forward decl */
+static void (*scav_ptr[4])(lispobj *where, lispobj object, lispobj header); /* forward decl */
 #define PTR_SCAVTAB_INDEX(ptr) ((uint32_t)ptr>>(N_LOWTAG_BITS-2))&3
 #endif
 
@@ -130,7 +130,7 @@ static inline void scav1(lispobj* addr, lispobj object)
         if (forwarding_pointer_p(native_pointer(object)))
             *addr = forwarding_pointer_value(native_pointer(object));
         else
-            scav_ptr[PTR_SCAVTAB_INDEX(object)](addr, object);
+            scav_ptr[PTR_SCAVTAB_INDEX(object)](addr, object, *native_pointer(object));
     }
 #else
     page_index_t page;
@@ -142,8 +142,19 @@ static inline void scav1(lispobj* addr, lispobj object)
         if (page_table[page].gen == from_space) {
             if (forwarding_pointer_p(native_pointer(object)))
                 *addr = forwarding_pointer_value(native_pointer(object));
-            else if (!pinned_p(object, page))
-                scav_ptr[PTR_SCAVTAB_INDEX(object)](addr, object);
+            else if (!pinned_p(object, page)) {
+#ifdef LISP_FEATURE_PARALLEL_GC
+                lispobj header = *native_pointer(object);
+                if (grab_forwarding_pointer(native_pointer(object)))
+                    scav_ptr[PTR_SCAVTAB_INDEX(object)](addr, object, header);
+                else
+                    /* We lost the race, but at least we got a
+                       forwarding pointer. */
+                    *addr = forwarding_pointer_value(native_pointer(object));
+#else
+                scav_ptr[PTR_SCAVTAB_INDEX(object)](addr, object, header);
+#endif
+            }
         }
     }
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
