@@ -15,7 +15,11 @@ inline static boolean
 forwarding_pointer_p(lispobj *pointer) {
     lispobj first_word=*pointer;
 #ifdef LISP_FEATURE_GENCGC
+# ifdef LISP_FEATURE_PARALLEL_GC
+    return (first_word == FORWARDING_POINTER_MAGIC || first_word == TRANSPORT_LOCK_MAGIC);
+# else
     return (first_word == FORWARDING_POINTER_MAGIC);
+# endif
 #else
     // FIXME: change 5c0d71f92c371769f911e6a2ac60b2dd9fbde349 added
     // an extra test here, which theoretically slowed things down.
@@ -37,6 +41,8 @@ forwarding_pointer_p(lispobj *pointer) {
 static inline lispobj
 forwarding_pointer_value(lispobj *pointer) {
 #ifdef LISP_FEATURE_GENCGC
+    /* We do an atomic load so that we will eventually read the write. */
+    while (__atomic_load_n(pointer, __ATOMIC_SEQ_CST) == TRANSPORT_LOCK_MAGIC);
     return pointer[1];
 #else
     return pointer[0];
@@ -54,30 +60,43 @@ set_forwarding_pointer(lispobj *pointer, lispobj newspace_copy) {
   // that we're operating on a not-yet-forwarded object here.
 #ifdef LISP_FEATURE_GENCGC
     gc_dcheck(compacting_p());
+# ifdef LISP_FEATURE_PARALLEL_GC
+    pointer[1]=newspace_copy;
+    /* This really must happen after storing the forwarding pointer. */
+    __atomic_store(pointer, FORWARDING_POINTER_MAGIC, __ATOMIC_SEQ_CST);
+# else
     pointer[0]=FORWARDING_POINTER_MAGIC;
     pointer[1]=newspace_copy;
+#endif
 #else
     pointer[0]=newspace_copy;
 #endif
     return newspace_copy;
 }
 
-#ifdef LISP_FEATURE_PARALLEL_GC
+/* Try to claim the object at 'pointer', and if we win, optionally
+   write the clobbered header to 'write_header'. */
 static inline boolean
-grab_forwarding_pointer(lispobj *pointer) {
+grab_forwarding_pointer(lispobj *pointer, lispobj *write_header) {
+#ifdef LISP_FEATURE_PARALLEL_GC
   while (1) {
-    lispobj read = pointer[0];
+    lispobj read = __atomic_load_n(pointer, __ATOMIC_SEQ_CST);
     if (read == FORWARDING_POINTER_MAGIC)
       /* Another thread already installed a forwarding pointer. */
       return false;
     if (read != TRANSPORT_LOCK_MAGIC &&
         __atomic_compare_exchange_n(pointer, &read, TRANSPORT_LOCK_MAGIC,
-                                    false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+                                    false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
       /* We just claimed this object. */
+      if (write_header) *write_header = read;
       return true;
+    }
   }
-}
+#else
+  if (write_header) *write_header = pointer[0];
+  return !forwarding_pointer_p(pointer);
 #endif
+}
 
 /// Chase the pointer in 'word' if it points to a forwarded object.
 static inline lispobj follow_maybe_fp(lispobj word)

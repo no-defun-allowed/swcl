@@ -66,7 +66,8 @@ extern void *gc_general_alloc(sword_t nbytes,int page_type_flag);
 
 extern uword_t gc_copied_nwords;
 static inline lispobj
-gc_general_copy_object(lispobj object, size_t nwords, int page_type_flag)
+gc_general_copy_object(lispobj object, size_t nwords, lispobj header,
+                       int page_type_flag)
 {
     CHECK_COPY_PRECONDITIONS(object, nwords);
 
@@ -76,6 +77,7 @@ gc_general_copy_object(lispobj object, size_t nwords, int page_type_flag)
     /* Copy the object. */
     gc_copied_nwords += nwords;
     memcpy(new,native_pointer(object),nwords*N_WORD_BYTES);
+    new[0] = header;
 
     note_transported_object(object, new);
 
@@ -85,13 +87,15 @@ gc_general_copy_object(lispobj object, size_t nwords, int page_type_flag)
 // Like above but copy potentially fewer words than are allocated.
 // ('old_nwords' can be, but does not have to be, smaller than 'nwords')
 static inline lispobj
-gc_copy_object_resizing(lispobj object, long nwords, int page_type_flag,
+gc_copy_object_resizing(lispobj object, long nwords, lispobj header,
+                        int page_type_flag,
                         int old_nwords)
 {
     CHECK_COPY_PRECONDITIONS(object, nwords);
     lispobj *new = gc_general_alloc(nwords*N_WORD_BYTES, page_type_flag);
     gc_copied_nwords += old_nwords;
     memcpy(new, native_pointer(object), old_nwords*N_WORD_BYTES);
+    new[0] = header;
     note_transported_object(object, new);
     return make_lispobj(new, lowtag_of(object));
 }
@@ -123,7 +127,7 @@ extern void gc_common_init();
 extern boolean test_weak_triggers(int (*)(lispobj), void (*)(lispobj));
 
 lispobj  copy_unboxed_object(lispobj object, sword_t nwords);
-lispobj  copy_object(lispobj object, sword_t nwords);
+lispobj  copy_object(lispobj object, sword_t nwords, lispobj header);
 lispobj  copy_possibly_large_object(lispobj object, sword_t nwords, int page_type_flag);
 
 lispobj *search_read_only_space(void *pointer);

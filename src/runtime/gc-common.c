@@ -96,9 +96,9 @@ os_vm_size_t bytes_consed_between_gcs = 12*1024*1024;
 
 /* to copy a boxed object */
 lispobj
-copy_object(lispobj object, sword_t nwords)
+copy_object(lispobj object, sword_t nwords, lispobj header)
 {
-    return gc_general_copy_object(object, nwords, PAGE_TYPE_MIXED);
+    return gc_general_copy_object(object, nwords, header, PAGE_TYPE_MIXED);
 }
 
 #ifdef LISP_FEATURE_PPC64
@@ -143,9 +143,9 @@ static inline void scav1(lispobj* addr, lispobj object)
             if (forwarding_pointer_p(native_pointer(object)))
                 *addr = forwarding_pointer_value(native_pointer(object));
             else if (!pinned_p(object, page)) {
-#ifdef LISP_FEATURE_PARALLEL_GC
                 lispobj header = *native_pointer(object);
-                if (grab_forwarding_pointer(native_pointer(object)))
+#ifdef LISP_FEATURE_PARALLEL_GC
+                if (grab_forwarding_pointer(native_pointer(object), NULL))
                     scav_ptr[PTR_SCAVTAB_INDEX(object)](addr, object, header);
                 else
                     /* We lost the race, but at least we got a
@@ -272,7 +272,7 @@ void scan_binding_stack()
 #endif
 }
 
-static lispobj trans_short_boxed(lispobj object);
+static lispobj trans_short_boxed(lispobj object, lispobj header);
 
 extern int pin_all_dynamic_space_code;
 static struct code *
@@ -431,10 +431,9 @@ scav_fun_header(lispobj *where, lispobj object)
  */
 
 int n_unboxed_instances;
-static inline lispobj copy_instance(lispobj object)
+static inline lispobj copy_instance(lispobj object, lispobj header)
 {
     // Object is an un-forwarded object in from_space
-    lispobj header = *(lispobj*)(object - INSTANCE_POINTER_LOWTAG);
     int original_length = instance_length(header);
 
     int page_type = PAGE_TYPE_MIXED;
@@ -475,7 +474,7 @@ static inline lispobj copy_instance(lispobj object)
          * Otherwise, don't add anything because a padding slot exists */
         int new_length = original_length + (original_length & 1);
         copy = gc_copy_object_resizing(object, 1 + (new_length|1),
-                                       page_type,
+                                       header, page_type,
                                        1 + (original_length|1));
         lispobj *base = native_pointer(copy);
         /* store the old address as the hash value */
@@ -497,17 +496,18 @@ static inline lispobj copy_instance(lispobj object)
                instance_length(*base));
 #endif
     } else {
-        copy = gc_general_copy_object(object, 1 + (original_length|1), page_type);
+        copy = gc_general_copy_object(object, 1 + (original_length|1),
+                                      header, page_type);
     }
     set_forwarding_pointer(native_pointer(object), copy);
     return copy;
 }
 
 static sword_t
-scav_instance_pointer(lispobj *where, lispobj object)
+scav_instance_pointer(lispobj *where, lispobj object, lispobj header)
 {
     gc_dcheck(instancep(object));
-    lispobj copy = copy_instance(object);
+    lispobj copy = copy_instance(object, header);
     *where = copy;
 
     struct instance* node = INSTANCE(copy);
@@ -521,8 +521,8 @@ scav_instance_pointer(lispobj *where, lispobj object)
             // as its 'next' will not satisfy instancep(), but that's ok.
             while (instancep(object = node->slots[INSTANCE_DATA_START]) // node.next
                    && from_space_p(object)
-                   && !forwarding_pointer_p(native_pointer(object))) {
-                copy = copy_instance(object);
+                   && !grab_forwarding_pointer(native_pointer(object), &header)) {
+                copy = copy_instance(object, header);
                 node->slots[INSTANCE_DATA_START] = copy;
                 node = INSTANCE(copy);
                 // We don't have to stop upon seeing an instance with a different layout.
@@ -669,10 +669,13 @@ size_immediate(lispobj __attribute__((unused)) *where)
   scav_##suffix(lispobj *where, lispobj header) { \
       return 1 + scavenge(where+1, sizer(header)); \
   } \
-  static lispobj trans_##suffix(lispobj object) { \
-      return copy_object(object, 1 + sizer(*native_pointer(object))); \
+  static lispobj trans_##suffix(lispobj object, lispobj header) { \
+    return copy_object(object, 1 + sizer(header), header);        \
   } \
-  static sword_t size_##suffix(lispobj *where) { return 1 + sizer(*where); }
+  static sword_t size_##suffix(lispobj *where, lispobj header) { \
+    (void)where;                                                 \
+    return 1 + sizer(header);                                    \
+  }
 
 DEF_SCAV_BOXED(boxed, BOXED_NWORDS)
 DEF_SCAV_BOXED(short_boxed, SHORT_BOXED_NWORDS)
