@@ -145,7 +145,8 @@ static inline void scav1(lispobj* addr, lispobj object)
             else if (!pinned_p(object, page)) {
                 lispobj header = *native_pointer(object);
 #ifdef LISP_FEATURE_PARALLEL_GC
-                if (grab_forwarding_pointer(native_pointer(object), NULL))
+                if (large_object_p(object) ||
+                    grab_forwarding_pointer(native_pointer(object), NULL))
                     scav_ptr[PTR_SCAVTAB_INDEX(object)](addr, object, header);
                 else
                     /* We lost the race, but at least we got a
@@ -335,7 +336,7 @@ trans_code(struct code *code)
 }
 
 static sword_t
-scav_fun_pointer(lispobj *where, lispobj object)
+scav_fun_pointer(lispobj *where, lispobj object, lispobj header)
 {
     gc_dcheck(functionp(object));
 
@@ -343,9 +344,9 @@ scav_fun_pointer(lispobj *where, lispobj object)
     lispobj copy;
     // object may be a simple-fun header, a funcallable instance, or closure
     if (widetag_of(fun) != SIMPLE_FUN_WIDETAG) {
-        copy = trans_short_boxed(object);
+        copy = trans_short_boxed(object, header);
     } else {
-        uword_t offset = (HeaderValue(*fun) & FUN_HEADER_NWORDS_MASK) * N_WORD_BYTES;
+        uword_t offset = (HeaderValue(header) & FUN_HEADER_NWORDS_MASK) * N_WORD_BYTES;
         /* Transport the whole code object */
         struct code *code = trans_code((struct code *) ((uword_t) fun - offset));
         copy  = make_lispobj((char*)code + offset, FUN_POINTER_LOWTAG);

@@ -1625,6 +1625,23 @@ static uword_t adjust_obj_ptes(page_index_t first_page,
  * go through the adjustment motions even though nothing happens.
  *
  */
+boolean
+large_object_p(lispobj object)
+{
+    /* We use this to determine if the parallel GC should install a
+       forwarding pointer lock. */
+    page_index_t first_page;
+    if (forwarding_pointer_p(native_pointer(object))) return false;
+    /* Check whether it's a large object. */
+    first_page = find_page_index((void *)native_pointer(object));
+    gc_assert(first_page >= 0);
+    os_vm_size_t nbytes = sizetab[widetag_of(object)](native_pointer(object)) * N_WORD_BYTES;
+    /* This should be equivalent to the large object test in
+       copy_possibly_large_object. */
+    return page_single_obj_p(first_page) &&
+      (nbytes >= LARGE_OBJECT_SIZE || (rounded - nbytes < rounded / 128));
+}
+
 lispobj
 copy_possibly_large_object(lispobj object, sword_t nwords, int page_type_flag)
 {
