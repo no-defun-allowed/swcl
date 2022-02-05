@@ -140,7 +140,11 @@ static inline void scav1(lispobj* addr, lispobj object)
     // anyway, and if the object was already forwarded, we never need pinned_p.
     if ((page = find_page_index((void*)object)) >= 0) {
         if (page_table[page].gen == from_space) {
+# ifdef LISP_FEATURE_PARALLEL_GC
+            if (grab_forwarding_lock(native_pointer(object)))
+# else
             if (forwarding_pointer_p(native_pointer(object)))
+# endif
                 *addr = forwarding_pointer_value(native_pointer(object));
             else if (!pinned_p(object, page))
                 scav_ptr[PTR_SCAVTAB_INDEX(object)](addr, object);
@@ -271,7 +275,7 @@ trans_code(struct code *code)
     gc_dcheck(!pin_all_dynamic_space_code);
 #endif
     /* if object has already been transported, just return pointer */
-    if (forwarding_pointer_p((lispobj *)code)) {
+    if (!grab_forwarding_lock((lispobj *)code)) {
         return (struct code *)native_pointer(forwarding_pointer_value((lispobj*)code));
     }
 
@@ -289,6 +293,7 @@ trans_code(struct code *code)
 #endif
 
     set_forwarding_pointer((lispobj *)code, l_new_code);
+    release_forwarding_lock((lispobj *)code);
 
     struct code *new_code = (struct code *) native_pointer(l_new_code);
     sword_t displacement = l_new_code - l_code;
@@ -344,6 +349,7 @@ scav_fun_pointer(lispobj *where, lispobj object)
         set_forwarding_pointer(fun, copy);
         *where = copy;
     }
+    release_forwarding_lock(fun);
 
     CHECK_COPY_POSTCONDITIONS(copy, FUN_POINTER_LOWTAG);
     return 1;
@@ -489,6 +495,7 @@ static inline lispobj copy_instance(lispobj object)
         copy = gc_general_copy_object(object, 1 + (original_length|1), page_type);
     }
     set_forwarding_pointer(native_pointer(object), copy);
+    release_forwarding_lock(native_pointer(object));
     return copy;
 }
 
@@ -547,12 +554,13 @@ trans_list(lispobj object)
     /* Grab the cdr: set_forwarding_pointer will clobber it in GENCGC  */
     lispobj cdr = CONS(object)->cdr;
     set_forwarding_pointer((lispobj *)CONS(object), new_list_pointer);
+    release_forwarding_lock(native_pointer(object));
 
     /* Try to linearize the list in the cdr direction to help reduce
      * paging. */
     while (listp(cdr) && from_space_p(cdr)) {
         lispobj* native_cdr = (lispobj*)CONS(cdr);
-        if (forwarding_pointer_p(native_cdr)) {  // Might as well fix now.
+        if (!grab_forwarding_lock(native_cdr)) {  // Might as well fix now.
             cdr = forwarding_pointer_value(native_cdr);
             break;
         }
@@ -566,6 +574,7 @@ trans_list(lispobj object)
         set_forwarding_pointer(native_cdr,
                                copy->cdr = make_lispobj(cdr_copy,
                                                         LIST_POINTER_LOWTAG));
+        release_forwarding_lock(native_cdr);
         copy = cdr_copy;
         cdr = next;
     }
@@ -608,6 +617,7 @@ scav_other_pointer(lispobj *where, lispobj object)
         set_forwarding_pointer(first_pointer, copy);
         *where = copy;
     }
+    release_forwarding_lock(first_pointer);
     CHECK_COPY_POSTCONDITIONS(copy, OTHER_POINTER_LOWTAG);
     return 1;
 }

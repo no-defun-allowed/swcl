@@ -13,6 +13,9 @@ in_gc_p(void) {
 
 inline static boolean
 forwarding_pointer_p(lispobj *pointer) {
+#ifdef LISP_FEATURE_PARALLEL_GC
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+#endif
     lispobj first_word=*pointer;
 #ifdef LISP_FEATURE_GENCGC
     return (first_word == 0x01);
@@ -40,7 +43,7 @@ forwarding_pointer_value(lispobj *pointer) {
 # ifdef LISP_FEATURE_PARALLEL_GC
     /* Make sure we don't reorder around reading the header and
        forwarding pointer value...somehow. */
-    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
 # endif
     return pointer[1];
 #else
@@ -118,7 +121,7 @@ release_forwarding_lock(lispobj *pointer) {
 static inline boolean
 grab_forwarding_lock(lispobj *pointer) {
   /* Only this thread has access, so don't actually lock. */
-  return forwarding_pointer_p(pointer);
+  return !forwarding_pointer_p(pointer);
 }
 static inline void
 release_forwarding_lock(lispobj *pointer) {
