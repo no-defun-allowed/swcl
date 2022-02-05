@@ -1,6 +1,9 @@
 #ifndef _FORWARDING_PTR_H_
 #define _FORWARDING_PTR_H_
 
+extern void gc_allocate_lock_table(void);
+extern uword_t *gc_object_lock_table;
+
 #ifndef LISP_FEATURE_GENCGC
 inline static boolean
 in_gc_p(void) {
@@ -34,6 +37,11 @@ forwarding_pointer_p(lispobj *pointer) {
 static inline lispobj
 forwarding_pointer_value(lispobj *pointer) {
 #ifdef LISP_FEATURE_GENCGC
+# ifdef LISP_FEATURE_PARALLEL_GC
+    /* Make sure we don't reorder around reading the header and
+       forwarding pointer value...somehow. */
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+# endif
     return pointer[1];
 #else
     return pointer[0];
@@ -51,8 +59,14 @@ set_forwarding_pointer(lispobj *pointer, lispobj newspace_copy) {
   // that we're operating on a not-yet-forwarded object here.
 #ifdef LISP_FEATURE_GENCGC
     gc_dcheck(compacting_p());
-    pointer[0]=0x01;
     pointer[1]=newspace_copy;
+# ifdef LISP_FEATURE_PARALLEL_GC
+    /* This write better only be seen _after_ the write of the actual
+       forwarding pointer, or we're hosed. */
+    __atomic_store_n(pointer, 0x01, __ATOMIC_RELEASE);
+# else
+    pointer[0]=0x01;
+# endif
 #else
     pointer[0]=newspace_copy;
 #endif
@@ -72,4 +86,44 @@ static inline lispobj follow_fp(lispobj ptr)
       ? forwarding_pointer_value(native_pointer(ptr)) : ptr;
 }
 
+#ifdef LISP_FEATURE_PARALLEL_GC
+// Play with this to vary the space-sharing tradeoff.
+#define BITS_PER_LOCK_ADDRESS 1
+static inline boolean
+grab_forwarding_lock(lispobj *pointer) {
+  uword_t delta = ((char*)pointer - (char*)DYNAMIC_SPACE_START) / N_WORD_BYTES / 2 * BITS_PER_LOCK_ADDRESS;
+  uword_t word_index = delta / N_WORD_BITS;
+  uword_t bit_index = delta % N_WORD_BITS;
+  uword_t bit_to_set = (uword_t)(1) << bit_index;
+  while (1) {
+    if (forwarding_pointer_p(pointer))
+      /* Lost the race. */
+      return false;
+    if (!(__atomic_fetch_or(pointer + word_index, bit_to_set, __ATOMIC_ACQUIRE) & bit_to_set))
+      /* We successfully flipped the bit; this object belongs to us
+         now. */
+      return true;
+  }
+}
+
+static inline void
+release_forwarding_lock(lispobj *pointer) {
+  uword_t delta = ((char*)pointer - (char*)DYNAMIC_SPACE_START) / N_WORD_BYTES / 2 * BITS_PER_LOCK_ADDRESS;
+  uword_t word_index = delta / N_WORD_BITS;
+  uword_t bit_index = delta % N_WORD_BITS;
+  uword_t bit_to_set = (uword_t)(1) << bit_index;
+  __atomic_fetch_and(gc_object_lock_table + word_index, ~bit_to_set, __ATOMIC_RELEASE);
+}
+#else
+static inline boolean
+grab_forwarding_lock(lispobj *pointer) {
+  /* Only this thread has access, so don't actually lock. */
+  return forwarding_pointer_p(pointer);
+}
+static inline void
+release_forwarding_lock(lispobj *pointer) {
+  /* Ditto - don't actually unlock either. */
+  (void)pointer;
+}
+#endif
 #endif

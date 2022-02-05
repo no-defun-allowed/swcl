@@ -4749,6 +4749,7 @@ static void gc_allocate_ptes()
     if (gc_card_mark == NULL)
         lose("failed to calloc() %ld bytes", num_gc_cards);
 
+    gc_allocate_lock_table();
 
     gc_common_init();
     hopscotch_create(&pinned_objects, HOPSCOTCH_HASH_FUN_DEFAULT, 0 /* hashset */,
