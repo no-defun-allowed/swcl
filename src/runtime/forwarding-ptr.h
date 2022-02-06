@@ -1,5 +1,6 @@
 #ifndef _FORWARDING_PTR_H_
 #define _FORWARDING_PTR_H_
+#include <stdbool.h>
 
 extern void gc_allocate_lock_table(void);
 extern uword_t *gc_object_lock_table;
@@ -92,6 +93,18 @@ static inline lispobj follow_fp(lispobj ptr)
 #ifdef LISP_FEATURE_PARALLEL_GC
 // Play with this to vary the space-sharing tradeoff.
 #define BITS_PER_LOCK_ADDRESS 1
+extern uword_t DYNAMIC_SPACE_START;
+#include <stdio.h>
+
+static inline void
+release_forwarding_lock(lispobj *pointer) {
+  uword_t delta = ((char*)pointer - (char*)DYNAMIC_SPACE_START) / N_WORD_BYTES / 2 * BITS_PER_LOCK_ADDRESS;
+  uword_t word_index = delta / N_WORD_BITS;
+  uword_t bit_index = delta % N_WORD_BITS;
+  uword_t bit_to_set = (uword_t)(1) << bit_index;
+  __atomic_fetch_and(gc_object_lock_table + word_index, ~bit_to_set, __ATOMIC_RELEASE);
+}
+
 static inline boolean
 grab_forwarding_lock(lispobj *pointer) {
   uword_t delta = ((char*)pointer - (char*)DYNAMIC_SPACE_START) / N_WORD_BYTES / 2 * BITS_PER_LOCK_ADDRESS;
@@ -102,21 +115,28 @@ grab_forwarding_lock(lispobj *pointer) {
     if (forwarding_pointer_p(pointer))
       /* Lost the race. */
       return false;
-    if (!(__atomic_fetch_or(pointer + word_index, bit_to_set, __ATOMIC_ACQUIRE) & bit_to_set))
+    if (!(__atomic_fetch_or(gc_object_lock_table + word_index, bit_to_set, __ATOMIC_ACQUIRE) & bit_to_set))
       /* We successfully flipped the bit; this object belongs to us
-         now. */
+         now. */ {
+      if (forwarding_pointer_p(pointer)) {
+        /* Still lost the race in the end. */
+        release_forwarding_lock(pointer);
+        return false;
+      }
       return true;
+    }
   }
 }
 
-static inline void
-release_forwarding_lock(lispobj *pointer) {
+static inline boolean
+is_locked_p(lispobj *pointer) {
   uword_t delta = ((char*)pointer - (char*)DYNAMIC_SPACE_START) / N_WORD_BYTES / 2 * BITS_PER_LOCK_ADDRESS;
   uword_t word_index = delta / N_WORD_BITS;
   uword_t bit_index = delta % N_WORD_BITS;
   uword_t bit_to_set = (uword_t)(1) << bit_index;
-  __atomic_fetch_and(gc_object_lock_table + word_index, ~bit_to_set, __ATOMIC_RELEASE);
+  return gc_object_lock_table[word_index] & bit_to_set;
 }
+
 #else
 static inline boolean
 grab_forwarding_lock(lispobj *pointer) {

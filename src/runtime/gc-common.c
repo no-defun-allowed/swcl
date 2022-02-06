@@ -141,13 +141,16 @@ static inline void scav1(lispobj* addr, lispobj object)
     if ((page = find_page_index((void*)object)) >= 0) {
         if (page_table[page].gen == from_space) {
 # ifdef LISP_FEATURE_PARALLEL_GC
-            if (grab_forwarding_lock(native_pointer(object)))
+            if (!grab_forwarding_lock(native_pointer(object)))
 # else
             if (forwarding_pointer_p(native_pointer(object)))
 # endif
                 *addr = forwarding_pointer_value(native_pointer(object));
             else if (!pinned_p(object, page))
                 scav_ptr[PTR_SCAVTAB_INDEX(object)](addr, object);
+            else release_forwarding_lock(native_pointer(object));
+            if (is_locked_p(native_pointer(object)))
+              lose("object still locked @ %p", object);
         }
     }
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
@@ -268,14 +271,17 @@ void scan_binding_stack()
 static lispobj trans_short_boxed(lispobj object);
 
 extern int pin_all_dynamic_space_code;
+/* The parallel GC may have already locked the code in
+   scav_fun_pointer or trans_code_header, so we shouldn't try to lock
+   the code again then. */
 static struct code *
-trans_code(struct code *code)
+trans_code_aux(struct code *code, boolean locked_already)
 {
 #ifdef LISP_FEATURE_GENCGC
     gc_dcheck(!pin_all_dynamic_space_code);
 #endif
     /* if object has already been transported, just return pointer */
-    if (!grab_forwarding_lock((lispobj *)code)) {
+    if (!locked_already && !grab_forwarding_lock((lispobj *)code)) {
         return (struct code *)native_pointer(forwarding_pointer_value((lispobj*)code));
     }
 
@@ -288,12 +294,15 @@ trans_code(struct code *code)
                                            PAGE_TYPE_CODE);
 
 #ifdef LISP_FEATURE_GENCGC
-    if (l_new_code == l_code)
+    if (l_new_code == l_code) {
+        if (!locked_already) release_forwarding_lock((lispobj *)code);
         return code;
+    }
 #endif
 
     set_forwarding_pointer((lispobj *)code, l_new_code);
-    release_forwarding_lock((lispobj *)code);
+    if (!locked_already)
+      release_forwarding_lock((lispobj *)code);
 
     struct code *new_code = (struct code *) native_pointer(l_new_code);
     sword_t displacement = l_new_code - l_code;
@@ -328,6 +337,12 @@ trans_code(struct code *code)
     return new_code;
 }
 
+static struct code *
+trans_code(struct code *code)
+{
+    return trans_code_aux(code, false);
+}
+
 static sword_t
 scav_fun_pointer(lispobj *where, lispobj object)
 {
@@ -341,15 +356,15 @@ scav_fun_pointer(lispobj *where, lispobj object)
     } else {
         uword_t offset = (HeaderValue(*fun) & FUN_HEADER_NWORDS_MASK) * N_WORD_BYTES;
         /* Transport the whole code object */
-        struct code *code = trans_code((struct code *) ((uword_t) fun - offset));
-        copy  = make_lispobj((char*)code + offset, FUN_POINTER_LOWTAG);
+        struct code *code = trans_code_aux((struct code *) ((uword_t) fun - offset), true);
+        copy = make_lispobj((char*)code + offset, FUN_POINTER_LOWTAG);
     }
 
     if (copy != object) { // large code won't undergo physical copy
         set_forwarding_pointer(fun, copy);
         *where = copy;
     }
-    release_forwarding_lock(fun);
+    release_forwarding_lock(native_pointer(object));
 
     CHECK_COPY_POSTCONDITIONS(copy, FUN_POINTER_LOWTAG);
     return 1;
@@ -358,7 +373,7 @@ scav_fun_pointer(lispobj *where, lispobj object)
 static lispobj
 trans_code_header(lispobj object)
 {
-    struct code *ncode = trans_code((struct code *) native_pointer(object));
+    struct code *ncode = trans_code_aux((struct code *) native_pointer(object), true);
     return make_lispobj(ncode, OTHER_POINTER_LOWTAG);
 }
 
@@ -495,7 +510,6 @@ static inline lispobj copy_instance(lispobj object)
         copy = gc_general_copy_object(object, 1 + (original_length|1), page_type);
     }
     set_forwarding_pointer(native_pointer(object), copy);
-    release_forwarding_lock(native_pointer(object));
     return copy;
 }
 
@@ -504,36 +518,38 @@ scav_instance_pointer(lispobj *where, lispobj object)
 {
     gc_dcheck(instancep(object));
     lispobj copy = copy_instance(object);
+    release_forwarding_lock(native_pointer(object));
     *where = copy;
 
-    struct instance* node = INSTANCE(copy);
-    lispobj layout = instance_layout((lispobj*)node);
-    if (layout) {
-        if (forwarding_pointer_p((lispobj*)LAYOUT(layout)))
-            layout = forwarding_pointer_value((lispobj*)LAYOUT(layout));
-        if (lockfree_list_node_layout_p(LAYOUT(layout))) {
-            // Copy chain of lockfree list nodes to consecutive memory addresses,
-            // just like trans_list does.  A logically deleted node will break the chain,
-            // as its 'next' will not satisfy instancep(), but that's ok.
-            while (instancep(object = node->slots[INSTANCE_DATA_START]) // node.next
-                   && from_space_p(object)
-                   && !forwarding_pointer_p(native_pointer(object))) {
-                copy = copy_instance(object);
-                node->slots[INSTANCE_DATA_START] = copy;
-                node = INSTANCE(copy);
-                // We don't have to stop upon seeing an instance with a different layout.
-                // The only other object in the 'next' chain could be *TAIL-ATOM* if we reach
-                // the end. It's possible that all of the tests in the 'while' loop are met
-                // by *TAIL-ATOM* though probably not, because it is in pseudo-static space
-                // which is never from_space. But even we iterate one more time, it's fine,
-                // despite tail-atom's layout not having the custom GC bit set - it has the
-                // 'next' pointer in the required slot. So even if we somehow copy it in
-                // this loop (vs when scavenging the symbol referencing it), the iteration
-                // after this will stop because forwarding_pointer_p will be true next time
-                // due to the fact that *TAIL-ATOM* is its own 'next' (behaving like NIL).
-            }
-        }
-    }
+    /* Do the lockfree list copying stuff yourself. */
+    /* struct instance* node = INSTANCE(copy); */
+    /* lispobj layout = instance_layout((lispobj*)node); */
+    /* if (layout) { */
+    /*     if (forwarding_pointer_p((lispobj*)LAYOUT(layout))) */
+    /*         layout = forwarding_pointer_value((lispobj*)LAYOUT(layout)); */
+    /*     if (lockfree_list_node_layout_p(LAYOUT(layout))) { */
+    /*         // Copy chain of lockfree list nodes to consecutive memory addresses, */
+    /*         // just like trans_list does.  A logically deleted node will break the chain, */
+    /*         // as its 'next' will not satisfy instancep(), but that's ok. */
+    /*         while (instancep(object = node->slots[INSTANCE_DATA_START]) // node.next */
+    /*                && from_space_p(object) */
+    /*                && !forwarding_pointer_p(native_pointer(object))) { */
+    /*             copy = copy_instance(object); */
+    /*             node->slots[INSTANCE_DATA_START] = copy; */
+    /*             node = INSTANCE(copy); */
+    /*             // We don't have to stop upon seeing an instance with a different layout. */
+    /*             // The only other object in the 'next' chain could be *TAIL-ATOM* if we reach */
+    /*             // the end. It's possible that all of the tests in the 'while' loop are met */
+    /*             // by *TAIL-ATOM* though probably not, because it is in pseudo-static space */
+    /*             // which is never from_space. But even we iterate one more time, it's fine, */
+    /*             // despite tail-atom's layout not having the custom GC bit set - it has the */
+    /*             // 'next' pointer in the required slot. So even if we somehow copy it in */
+    /*             // this loop (vs when scavenging the symbol referencing it), the iteration */
+    /*             // after this will stop because forwarding_pointer_p will be true next time */
+    /*             // due to the fact that *TAIL-ATOM* is its own 'next' (behaving like NIL). */
+    /*         } */
+    /*     } */
+    /* } */
 
     return 1;
 }
@@ -574,7 +590,7 @@ trans_list(lispobj object)
         set_forwarding_pointer(native_cdr,
                                copy->cdr = make_lispobj(cdr_copy,
                                                         LIST_POINTER_LOWTAG));
-        release_forwarding_lock(native_cdr);
+        release_forwarding_lock((lispobj *)native_cdr);
         copy = cdr_copy;
         cdr = next;
     }
