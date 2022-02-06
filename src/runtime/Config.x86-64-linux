@@ -48,9 +48,9 @@ CFLAGS += -Wunused-parameter -fno-omit-frame-pointer -momit-leaf-frame-pointer
 DISABLE_PIE=no
 
 ifdef LISP_FEATURE_IMMOBILE_SPACE
-  GC_SRC = fullcgc.c gencgc.c traceroot.c immobile-space.c elf.c
+  GC_SRC = fullcgc.c gencgc.c gc-worker.c traceroot.c immobile-space.c elf.c
 else
-  GC_SRC = fullcgc.c gencgc.c traceroot.c
+  GC_SRC = fullcgc.c gencgc.c gc-worker.c traceroot.c
 endif
 
 ifdef LISP_FEATURE_SB_LINKABLE_RUNTIME

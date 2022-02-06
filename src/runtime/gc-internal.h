@@ -186,8 +186,12 @@ extern lispobj fdefn_callee_lispobj(struct fdefn *fdefn);
 
 #ifdef LISP_FEATURE_PARALLEL_GC
 #define LOCKING(where, body) { thread_mutex_lock(&where); body thread_mutex_unlock(&where); }
+#define PGC_LOCK(where) thread_mutex_lock(&where)
+#define PGC_UNLOCK(where) thread_mutex_unlock(&where)
 #else
 #define LOCKING(where, body) body
+#define PGC_LOCK(where) (void)0
+#define PGC_UNLOCK(where) (void)0
 #endif
 
 #endif /* _GC_INTERNAL_H_ */

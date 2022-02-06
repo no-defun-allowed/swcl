@@ -41,11 +41,22 @@ gc_general_alloc(sword_t nbytes, int page_type_flag)
 {
     void *gc_alloc_with_region(struct alloc_region*,sword_t,int);
     struct alloc_region* r = 0;
+#ifdef LISP_FEATURE_PARALLEL_GC
+    if (is_gc_thread) {
+      switch (page_type_flag) {
+      case PAGE_TYPE_MIXED: r = &tl_mixed_region; break;
+      case PAGE_TYPE_CODE: r = &tl_code_region; break;
+      case PAGE_TYPE_UNBOXED: r = &tl_unboxed_region; break;
+      }
+      goto chosen;
+    }
+#endif
     switch (page_type_flag) {
     case PAGE_TYPE_MIXED: r = &mixed_region; break;
     case PAGE_TYPE_CODE: r = &code_region; break;
     case PAGE_TYPE_UNBOXED: r = &unboxed_region; break;
     }
+ chosen:
     if (r) return gc_alloc_with_region(r, nbytes, page_type_flag);
     lose("bad page type flag: %d", page_type_flag);
 }

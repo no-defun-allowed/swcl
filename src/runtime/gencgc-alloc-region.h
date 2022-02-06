@@ -30,11 +30,20 @@ struct alloc_region {
 // One region for each of PAGE_TYPE_{MIXED,UNBOXED,CODE}
 // CONS is not used yet. We distinguish at the call sites
 // between PAGE_TYPE_MIXED and BOXED, but they are the same for now.
-extern struct alloc_region  gc_alloc_region[3];
+extern struct alloc_region gc_alloc_region[3];
 #define mixed_region   gc_alloc_region[0]
 #define unboxed_region gc_alloc_region[1]
 #define code_region    gc_alloc_region[2]
 #define cons_region    mixed_region
+
+#ifdef LISP_FEATURE_PARALLEL_GC
+#include <stdbool.h>
+extern __thread boolean is_gc_thread; 
+extern __thread struct alloc_region  gc_thread_alloc_region[3];
+#define tl_mixed_region   gc_thread_alloc_region[0]
+#define tl_unboxed_region gc_thread_alloc_region[1]
+#define tl_code_region    gc_thread_alloc_region[2]
+#endif
 
 extern generation_index_t from_space, new_space;
 extern int gencgc_alloc_profiler;

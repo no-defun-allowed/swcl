@@ -1026,6 +1026,10 @@ static struct new_area *new_areas;
 static int new_areas_index;
 int new_areas_index_hwm; // high water mark
 
+#ifdef LISP_FEATURE_PARALLEL_GC
+static pthread_mutex_t new_areas_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
 /* Add a new area to new_areas. */
 static void
 add_new_area(page_index_t first_page, size_t offset, size_t size)
@@ -1033,13 +1037,16 @@ add_new_area(page_index_t first_page, size_t offset, size_t size)
     if (!(first_page < record_new_regions_below))
         return;
 
+    PGC_LOCK(new_areas_lock);
     /* Ignore if full. */
     // Technically overflow occurs at 1+ this number, but it's not worth
     // losing sleep (or splitting hairs) over one potentially wasted array cell.
     // i.e. overflow did not necessarily happen if we needed _exactly_ this
     // many areas. But who cares? The limit should not be approached at all.
-    if (new_areas_index >= NUM_NEW_AREAS)
+    if (new_areas_index >= NUM_NEW_AREAS) {
+        PGC_UNLOCK(new_areas_lock);
         return;
+    }
 
     size_t new_area_start = npage_bytes(first_page) + offset;
     int i, c;
@@ -1053,6 +1060,7 @@ add_new_area(page_index_t first_page, size_t offset, size_t size)
                i, c, new_area_start, area_end));*/
         if (new_area_start == area_end) {
             new_areas[i].size += size;
+            PGC_UNLOCK(new_areas_lock);
             return;
         }
     }
@@ -1064,6 +1072,7 @@ add_new_area(page_index_t first_page, size_t offset, size_t size)
            "/new_area %d page %d offset %d size %d\n",
            new_areas_index, first_page, offset, size));*/
     new_areas_index++;
+    PGC_UNLOCK(new_areas_lock);
 }
 
 /* Update the PTEs for the alloc_region. The region may be added to
