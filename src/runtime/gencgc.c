@@ -61,6 +61,7 @@
 #include "forwarding-ptr.h"
 #include "lispregs.h"
 #include "var-io.h"
+#include "gc-worker.h"
 
 /* forward declarations */
 page_index_t  gc_find_freeish_pages(page_index_t *restart_page_ptr, sword_t nbytes,
@@ -1071,6 +1072,7 @@ add_new_area(page_index_t first_page, size_t offset, size_t size)
     /*FSHOW((stderr,
            "/new_area %d page %d offset %d size %d\n",
            new_areas_index, first_page, offset, size));*/
+    printf("added area\n");
     new_areas_index++;
     PGC_UNLOCK(new_areas_lock);
 }
@@ -2725,7 +2727,7 @@ scavenge_root_gens(generation_index_t from, generation_index_t to)
  * pointers to the from space.
  *
  * Write-protected pages could potentially be written by alloc however
- * to avoid having to handle re-scavenging of write-protected pages
+f * to avoid having to handle re-scavenging of write-protected pages
  * gc_alloc() does not write to write-protected pages.
  *
  * New areas of objects allocated are recorded alternatively in the two
@@ -2733,22 +2735,24 @@ scavenge_root_gens(generation_index_t from, generation_index_t to)
 static struct new_area new_areas_1[NUM_NEW_AREAS];
 static struct new_area new_areas_2[NUM_NEW_AREAS];
 
-/* Do one full scan of the new space generation. This is not enough to
- * complete the job as new objects may be added to the generation in
- * the process which are not scavenged. */
-static void newspace_full_scavenge(generation_index_t generation)
-{
-    page_index_t i;
+static generation_index_t generation_to_scavenge;
+static page_index_t search_from;
+struct page_info_t {
+  boolean found;
+  page_index_t first;
+  page_index_t last;
+};
 
-    FSHOW((stderr,
-           "/starting one full scan of newspace generation %d\n",
-           generation));
-    for (i = 0; i < next_free_page; i++) {
-        if ((page_table[i].gen == generation) && page_boxed_p(i)
+static struct page_info_t find_next_full_page(void)
+{
+    struct page_info_t found = {false, 0, 0};
+    PGC_LOCK(new_areas_lock);
+    for (page_index_t i = search_from; i < next_free_page; i++) {
+        if ((page_table[i].gen == generation_to_scavenge) && page_boxed_p(i)
             && (page_bytes_used(i) != 0)
             && !PAGE_WRITEPROTECTED_P(i)) {
             page_index_t last_page;
-
+            
             /* The scavenge will start at the scan_start_offset of
              * page i.
              *
@@ -2757,17 +2761,49 @@ static void newspace_full_scavenge(generation_index_t generation)
             for (last_page = i; ;last_page++) {
                 /* Check whether this is the last page in this
                  * contiguous block */
-                if (page_ends_contiguous_block_p(last_page, generation))
-                    break;
+              if (page_ends_contiguous_block_p(last_page, generation_to_scavenge))
+                  break;
             }
 
+            found = (struct page_info_t){true, i, last_page};
+            printf("found %u %u\n", i, last_page);
             record_new_regions_below = 1 + last_page;
-            heap_scavenge(page_scan_start(i),
-                          (lispobj*)(page_address(last_page)
-                                     + page_bytes_used(last_page)));
-            i = last_page;
+            search_from = last_page + 1;
+            break;
         }
     }
+    PGC_UNLOCK(new_areas_lock);
+    return found;
+}
+
+/* Do one full scan of the new space generation. This is not enough to
+ * complete the job as new objects may be added to the generation in
+ * the process which are not scavenged. */
+static void newspace_full_scavenge_aux(void)
+{
+    while (1) {
+        struct page_info_t page = find_next_full_page();
+        if (!page.found) break;
+        heap_scavenge(page_scan_start(page.first),
+                      (lispobj*)(page_address(page.last)
+                                 + page_bytes_used(page.last)));
+    }
+}
+
+static void newspace_full_scavenge(generation_index_t generation)
+{
+    generation_to_scavenge = generation;
+    search_from = 0;
+    printf("starting full scan\n");
+    FSHOW((stderr,
+           "/starting one full scan of newspace generation %d\n",
+           generation));
+#ifdef LISP_FEATURE_PARALLEL_GC
+    pgc_fork(newspace_full_scavenge_aux);
+    pgc_join();
+#else
+    newspace_full_scavenge_aux();
+#endif
     /* Enable recording of all new allocation regions */
     record_new_regions_below = 1 + page_table_pages;
     FSHOW((stderr,
@@ -4658,6 +4694,9 @@ gc_init(void)
     *pflagbits = WP_CLEARED_FLAG;
     gc_assert(test.write_protected_cleared);
     gc_assert(leaf_obj_widetag_p(FILLER_WIDETAG));
+#ifdef LISP_FEATURE_PARALLEL_GC
+    pgc_init();
+#endif
 }
 
 int gc_card_table_nbits;
