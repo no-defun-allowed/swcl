@@ -83,6 +83,14 @@ int sb_sprof_enabled;
 //    AND all embedded functions.
 static lispobj (*transother[64])(lispobj object);
 sword_t (*sizetab[256])(lispobj *where);
+
+#ifdef LISP_FEATURE_PARALLEL_GC
+# ifndef LISP_FEATURE_WIN32
+pthread_mutex_t weak_pointer_chain_mutex = PTHREAD_MUTEX_INITIALIZER;
+# else
+# error "Haven't written this for win32 yet."
+# endif
+#endif
 struct weak_pointer *weak_pointer_chain = WEAK_POINTER_CHAIN_END;
 struct cons *weak_vectors;
 
@@ -1137,6 +1145,15 @@ void smash_weak_pointers(void)
  * processed automatically; only the yougest generation is GC'd by
  * default. On the other hand, all applications will need an
  * occasional full GC anyway, so it's not that bad either.  */
+#ifdef LISP_FEATURE_PARALLEL_GC
+# ifndef LISP_FEATURE_WIN32
+pthread_mutex_t weak_objects_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t weak_hash_tables_mutex = PTHREAD_MUTEX_INITIALIZER;
+# else
+# error "Haven't written this for win32 yet."
+# endif
+#endif
+
 struct hash_table *weak_hash_tables = NULL;
 struct hopscotch_table weak_objects; // other than weak pointers
 
@@ -1184,11 +1201,13 @@ extern uword_t gc_private_cons(uword_t, uword_t);
 
 void add_to_weak_vector_list(lispobj* vector, lispobj header)
 {
-    if (!(header & WEAK_VECTOR_VISITED_BIT)) {
-        weak_vectors = (struct cons*)gc_private_cons((uword_t)vector,
-                                                     (uword_t)weak_vectors);
-        *vector |= WEAK_VECTOR_VISITED_BIT;
-    }
+    LOCKING(weak_objects_mutex, {
+        if (!(header & WEAK_VECTOR_VISITED_BIT)) {
+          weak_vectors = (struct cons*)gc_private_cons((uword_t)vector,
+                                                       (uword_t)weak_vectors);
+          *vector |= WEAK_VECTOR_VISITED_BIT;
+        }
+    });
 }
 
 static inline void add_trigger(lispobj triggering_object, lispobj* plivened_object)
@@ -1547,10 +1566,12 @@ scav_vector_t(lispobj *where, lispobj header)
          * then we don't know that we already did it, and we'll do it again.
          * This is the same as occurs on all other objects */
         if (defer) {
-            NON_FAULTING_STORE(hash_table->next_weak_hash_table
-                               = (lispobj)weak_hash_tables,
-                               &hash_table->next_weak_hash_table);
-            weak_hash_tables = hash_table;
+            LOCKING(weak_hash_tables_mutex, {
+                NON_FAULTING_STORE(hash_table->next_weak_hash_table
+                                   = (lispobj)weak_hash_tables,
+                                   &hash_table->next_weak_hash_table);
+                weak_hash_tables = hash_table;
+            });
         }
     }
  done:

@@ -252,8 +252,10 @@ static inline void add_to_weak_pointer_chain(struct weak_pointer *wp) {
      * In cheneygc, chaining is performed in 'trans_weak_pointer'
      * which works just as well, since an object is transported
      * at most once per GC cycle */
-    wp->next = weak_pointer_chain;
-    weak_pointer_chain = wp;
+    LOCKING(weak_pointer_chain_mutex, {
+        wp->next = weak_pointer_chain;
+        weak_pointer_chain = wp;
+    });
 }
 
 #include "genesis/layout.h"

@@ -30,6 +30,9 @@
 #include "gc-assert.h"
 #include "code.h"
 extern const char *widetag_names[];
+#ifdef LISP_FEATURE_PARALLEL_GC
+extern pthread_mutex_t weak_pointer_chain_mutex;
+#endif
 extern struct weak_pointer *weak_pointer_chain; /* in gc-common.c */
 
 #ifdef LISP_FEATURE_GENCGC
@@ -180,5 +183,11 @@ instance_scan(void (*proc)(lispobj*, sword_t, uword_t),
 extern int simple_fun_index(struct code*, struct simple_fun*);
 
 extern lispobj fdefn_callee_lispobj(struct fdefn *fdefn);
+
+#ifdef LISP_FEATURE_PARALLEL_GC
+#define LOCKING(where, body) { thread_mutex_lock(&where); body thread_mutex_unlock(&where); }
+#else
+#define LOCKING(where, body) body
+#endif
 
 #endif /* _GC_INTERNAL_H_ */
