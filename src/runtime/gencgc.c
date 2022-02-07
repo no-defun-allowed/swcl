@@ -2743,6 +2743,8 @@ static struct new_area new_areas_2[NUM_NEW_AREAS];
 
 static generation_index_t generation_to_scavenge;
 static page_index_t search_from;
+static page_index_t previous_new_areas_index;
+static struct new_area *previous_new_areas;
 struct page_info_t {
   boolean found;
   page_index_t first;
@@ -2818,6 +2820,26 @@ static void newspace_full_scavenge(generation_index_t generation)
            generation));
 }
 
+static void newspace_incremental_scavenge(void)
+{
+    while (1) {
+        /* Work through previous_new_areas. */
+      PGC_LOCK(new_areas_lock);
+      if (search_from == previous_new_areas_index) {
+          PGC_UNLOCK(new_areas_lock);
+          return;
+      }
+      page_index_t page = previous_new_areas[search_from].page;
+      size_t offset = previous_new_areas[search_from].offset;
+      size_t size = previous_new_areas[search_from].size;
+      search_from++;
+      PGC_UNLOCK(new_areas_lock);
+      gc_assert(size % (2*N_WORD_BYTES) == 0);
+      lispobj *start = (lispobj*)(page_address(page) + offset);
+      heap_scavenge(start, (lispobj*)((char*)start + size));
+  }
+}
+
 static void gc_close_all_regions()
 {
     ensure_region_closed(&code_region, PAGE_TYPE_CODE);
@@ -2841,7 +2863,6 @@ scavenge_newspace(generation_index_t generation)
 
     /* Flush the current regions updating the page table. */
     gc_close_all_regions();
-    printf("found %d areas\n", new_areas_index);
 
     /*FSHOW((stderr,
              "The first scan is finished; current_new_areas_index=%d.\n",
@@ -2860,8 +2881,8 @@ scavenge_newspace(generation_index_t generation)
                 break; // still no work to do
         }
         /* Move the current to the previous new areas */
-        struct new_area *previous_new_areas = new_areas;
-        int previous_new_areas_index = new_areas_index;
+        previous_new_areas = new_areas;
+        previous_new_areas_index = new_areas_index;
         /* Note the max new_areas used. */
         if (new_areas_index > new_areas_index_hwm)
             new_areas_index_hwm = new_areas_index;
@@ -2884,18 +2905,18 @@ scavenge_newspace(generation_index_t generation)
             newspace_full_scavenge(generation);
 
         } else {
-
-            int i;
-            /* Work through previous_new_areas. */
-            for (i = 0; i < previous_new_areas_index; i++) {
-                page_index_t page = previous_new_areas[i].page;
-                size_t offset = previous_new_areas[i].offset;
-                size_t size = previous_new_areas[i].size;
-                gc_assert(size % (2*N_WORD_BYTES) == 0);
-                lispobj *start = (lispobj*)(page_address(page) + offset);
-                heap_scavenge(start, (lispobj*)((char*)start + size));
+            generation_to_scavenge = generation;
+            search_from = 0;
+#ifdef LISP_FEATURE_PARALLEL_GC
+            if (previous_new_areas_index >= 10) {
+                pgc_fork(newspace_incremental_scavenge);
+                pgc_join();
+            } else {
+                newspace_incremental_scavenge();
             }
-
+#else
+            newspace_incremental_scavenge();
+#endif
         }
         /* Flush the current regions updating the page table. */
         gc_close_all_regions();

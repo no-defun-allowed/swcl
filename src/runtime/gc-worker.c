@@ -6,7 +6,7 @@
 #include "gencgc-alloc-region.h"
 #include "gencgc-internal.h"
 
-#define GC_WORKER_THREADS 4
+#define GC_WORKER_THREADS 8
 
 #ifdef LISP_FEATURE_PARALLEL_GC
 _Thread_local boolean is_gc_thread = false;
