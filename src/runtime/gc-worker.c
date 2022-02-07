@@ -6,7 +6,7 @@
 #include "gencgc-alloc-region.h"
 #include "gencgc-internal.h"
 
-#define GC_WORKER_THREADS 8
+#define GC_WORKER_THREADS 4
 
 #ifdef LISP_FEATURE_PARALLEL_GC
 _Thread_local boolean is_gc_thread = false;
@@ -33,9 +33,9 @@ static void pgc_close_thread_regions(void)
 static void* pgc_gc_worker(void* uninteresting_argument)
 {
     (void)uninteresting_argument;
-    pgc_init_thread();
     while (true) {
       sem_wait(&new_work);
+      pgc_init_thread();
       worker_action();
       pgc_close_thread_regions();
       sem_post(&finished_work);

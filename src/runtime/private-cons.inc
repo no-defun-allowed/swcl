@@ -66,7 +66,7 @@ static struct cons* private_cons_impl()
     page_index_t page = private_cons_page_chain;
     page_bytes_t bytes_used;
     struct cons* cons;
-
+    gc_assert(thread_mutex_lock(&free_pages_lock) == 0);
     if (page >= 0 && (bytes_used = page_bytes_used(page)) < GENCGC_CARD_BYTES) {
         cons = (struct cons*)(page_address(page) + bytes_used);
     } else {
@@ -76,7 +76,6 @@ static struct cons* private_cons_impl()
                                   SINGLE_OBJECT_FLAG | PAGE_TYPE_UNBOXED, 0);
         // See question about last_page in gc_alloc_large
         set_alloc_start_page(PAGE_TYPE_UNBOXED, 0, page);
-
         struct cons* page_header = (struct cons*)page_address(page);
         if (PRIVATE_CONS_DEBUG)
             fprintf(stderr, "GC-private page @ %p\n", page_header);
@@ -93,6 +92,7 @@ static struct cons* private_cons_impl()
         cons = page_header + 1;
     }
     set_page_bytes_used(page, bytes_used + 2*N_WORD_BYTES);
+    gc_assert(thread_mutex_unlock(&free_pages_lock) == 0);
     return cons;
 }
 

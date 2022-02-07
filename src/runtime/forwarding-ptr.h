@@ -15,9 +15,10 @@ in_gc_p(void) {
 inline static boolean
 forwarding_pointer_p(lispobj *pointer) {
 #ifdef LISP_FEATURE_PARALLEL_GC
-    __atomic_thread_fence(__ATOMIC_ACQUIRE);
-#endif
+    lispobj first_word=__atomic_load_n(pointer, __ATOMIC_ACQUIRE);
+#else
     lispobj first_word=*pointer;
+#endif
 #ifdef LISP_FEATURE_GENCGC
     return (first_word == 0x01);
 #else
@@ -44,9 +45,10 @@ forwarding_pointer_value(lispobj *pointer) {
 # ifdef LISP_FEATURE_PARALLEL_GC
     /* Make sure we don't reorder around reading the header and
        forwarding pointer value...somehow. */
-    __atomic_thread_fence(__ATOMIC_ACQUIRE);
-# endif
+    return __atomic_load_n(pointer + 1, __ATOMIC_ACQUIRE);
+# else
     return pointer[1];
+#endif
 #else
     return pointer[0];
 #endif

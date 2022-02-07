@@ -967,8 +967,6 @@ gc_alloc_new_region(sword_t nbytes, int page_type_flag, struct alloc_region *all
         set_page_scan_start_offset(i,
             addr_diff(page_address(i), alloc_region->start_addr));
     }
-    ret = thread_mutex_unlock(&free_pages_lock);
-    gc_assert(ret == 0);
 
     /* If the first page was only partial, don't check whether it's
      * zeroed (it won't be) and don't zero it (since the parts that
@@ -979,6 +977,9 @@ gc_alloc_new_region(sword_t nbytes, int page_type_flag, struct alloc_region *all
     }
 
     INSTRUMENTING(zero_dirty_pages(first_page, last_page, page_type_flag), et_bzeroing);
+
+    ret = thread_mutex_unlock(&free_pages_lock);
+    gc_assert(ret == 0);
 
 #ifdef LISP_FEATURE_DARWIN_JIT
     if (page_type_flag == PAGE_TYPE_CODE) {
@@ -1448,10 +1449,12 @@ gc_find_freeish_pages(page_index_t *restart_page_ptr, sword_t nbytes,
     gc_assert(most_bytes_found_to);
     // most_bytes_found_to is the upper exclusive bound on the found range.
     // next_free_page is the high water mark of most_bytes_found_to.
+    PGC_LOCK(new_areas_lock);
     if (most_bytes_found_to > next_free_page) {
         next_free_page = most_bytes_found_to;
         set_alloc_pointer((lispobj)(page_address(next_free_page)));
     }
+    PGC_UNLOCK(new_areas_lock);
     *restart_page_ptr = most_bytes_found_from;
     return most_bytes_found_to-1;
 }
@@ -1655,9 +1658,13 @@ copy_possibly_large_object(lispobj object, sword_t nwords, int page_type_flag)
           adjust_obj_ptes(first_page, nwords, new_space,
                           SINGLE_OBJECT_FLAG | page_type_flag);
 
+        /* This seems to have become the "any and all info on pages
+           and generations" lock. */
+        PGC_LOCK(free_pages_lock);
         generations[from_space].bytes_allocated -= (bytes_freed + nbytes);
         generations[new_space].bytes_allocated += nbytes;
         bytes_allocated -= bytes_freed;
+        PGC_UNLOCK(free_pages_lock);
 
         /* Add the region to the new_areas if requested. */
         if (page_type_flag & BOXED_PAGE_FLAG)
@@ -2745,6 +2752,7 @@ struct page_info_t {
 static struct page_info_t find_next_full_page(void)
 {
     struct page_info_t found = {false, 0, 0};
+    PGC_LOCK(free_pages_lock);
     PGC_LOCK(new_areas_lock);
     for (page_index_t i = search_from; i < next_free_page; i++) {
         if ((page_table[i].gen == generation_to_scavenge) && page_boxed_p(i)
@@ -2771,6 +2779,7 @@ static struct page_info_t find_next_full_page(void)
         }
     }
     PGC_UNLOCK(new_areas_lock);
+    PGC_UNLOCK(free_pages_lock);
     return found;
 }
 
@@ -3886,7 +3895,7 @@ static void scan_explicit_pins(__attribute__((unused)) struct thread* th)
         }
     }
 }
-
+#define COLLECT_GC_STATS
 int show_gc_generation_throughput = 0;
 /* Garbage collect a generation. If raise is 0 then the remains of the
  * generation are not raised to the next generation. */
