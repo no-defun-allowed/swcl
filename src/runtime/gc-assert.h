@@ -17,7 +17,6 @@
 #define gc_abort()                                                     \
   lose("GC invariant lost, file \"%s\", line %d", __FILE__, __LINE__)
 
-#define DEBUG
 /// Enable extra debug-only checks if DEBUG
 #ifdef DEBUG
 # define gc_dcheck(ex) gc_assert(ex)

@@ -378,12 +378,23 @@ void update_immobile_nursery_bits()
 #endif
 }
 
+#ifdef LISP_FEATURE_PARALLEL_GC
+static pthread_mutex_t immobile_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
 /* Turn a white object grey. Also enqueue the object for re-scan if required */
 void
 enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
 {
     gc_assert(widetag_of(ptr) != SIMPLE_FUN_WIDETAG); // can't enliven interior pointer
-    gc_assert(immobile_obj_gen_bits(ptr) == from_space);
+    PGC_LOCK(immobile_lock);
+    // gc_assert(immobile_obj_gen_bits(ptr) == from_space);
+    if (immobile_obj_gen_bits(ptr) != from_space) {
+      /* Some other thread (hopefully) already enlivened this
+         object. Oh well. */
+      PGC_UNLOCK(immobile_lock);
+      return;
+    }
     int pointerish = !leaf_obj_widetag_p(widetag_of(ptr));
     int bits = (pointerish ? 0 : IMMOBILE_OBJ_VISITED_FLAG);
     // enlivening makes the object appear as if written, so that
@@ -413,6 +424,7 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
             else
                 SET_WP_FLAG(page_index, WRITE_PROTECT_CLEARED);
         }
+        PGC_UNLOCK(immobile_lock);
         return; // No need to enqueue.
     }
 
@@ -420,7 +432,10 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
 
     // Do nothing if either we don't need to look for pointers in this object,
     // or the work queue has already overflowed, causing a full scan.
-    if (!pointerish || immobile_scav_queue_count > QCAPACITY) return;
+    if (!pointerish || immobile_scav_queue_count > QCAPACITY) {
+      PGC_UNLOCK(immobile_lock);
+      return;
+    }
 
     // count is either less than or equal to QCAPACITY.
     // If equal, just bump the count to signify overflow.
@@ -429,6 +444,7 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
         immobile_scav_queue_head = (immobile_scav_queue_head + 1) & (QCAPACITY - 1);
     }
     ++immobile_scav_queue_count;
+    PGC_UNLOCK(immobile_lock);
 }
 
 /* If 'addr' points to an immobile object, then make the object

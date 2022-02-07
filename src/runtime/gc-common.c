@@ -157,8 +157,6 @@ static inline void scav1(lispobj* addr, lispobj object)
             else if (!pinned_p(object, page))
                 scav_ptr[PTR_SCAVTAB_INDEX(object)](addr, object);
             else release_forwarding_lock(native_pointer(object));
-            if (is_locked_p(native_pointer(object)))
-              lose("object still locked @ %p", object);
         }
     }
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
@@ -1213,10 +1211,11 @@ void add_to_weak_vector_list(lispobj* vector, lispobj header)
 static inline void add_trigger(lispobj triggering_object, lispobj* plivened_object)
 {
     if (is_lisp_pointer(*plivened_object)) // Nonpointer objects are ignored
-        hopscotch_put(&weak_objects, triggering_object,
-                      gc_private_cons((uword_t)plivened_object,
-                                       hopscotch_get(&weak_objects,
-                                                     triggering_object, 0)));
+        LOCKING(weak_objects_mutex, {
+            hopscotch_put(&weak_objects, triggering_object,
+                          gc_private_cons((uword_t)plivened_object,
+                                          hopscotch_get(&weak_objects,
+                                                        triggering_object, 0)));});
 }
 
 int debug_weak_ht = 0;

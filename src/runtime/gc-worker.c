@@ -1,15 +1,16 @@
 #include <stdbool.h>
+#include <stdio.h>
 #include <semaphore.h>
 #include "interr.h"
 #include "gc-internal.h"
 #include "gencgc-alloc-region.h"
 #include "gencgc-internal.h"
 
-#define GC_WORKER_THREADS 1
+#define GC_WORKER_THREADS 8
 
 #ifdef LISP_FEATURE_PARALLEL_GC
-__thread boolean is_gc_thread = false;
-__thread struct alloc_region gc_thread_alloc_region[3];
+_Thread_local boolean is_gc_thread = false;
+_Thread_local struct alloc_region gc_thread_alloc_region[3];
 static sem_t new_work;
 static sem_t finished_work;
 static void (*worker_action)(void);

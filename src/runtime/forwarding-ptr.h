@@ -90,9 +90,9 @@ static inline lispobj follow_fp(lispobj ptr)
       ? forwarding_pointer_value(native_pointer(ptr)) : ptr;
 }
 
+#define BITS_PER_LOCK_ADDRESS 1
 #ifdef LISP_FEATURE_PARALLEL_GC
 // Play with this to vary the space-sharing tradeoff.
-#define BITS_PER_LOCK_ADDRESS 1
 extern uword_t DYNAMIC_SPACE_START;
 #include <stdio.h>
 
@@ -147,6 +147,11 @@ static inline void
 release_forwarding_lock(lispobj *pointer) {
   /* Ditto - don't actually unlock either. */
   (void)pointer;
+}
+static inline boolean
+is_locked_p(lispobj *pointer) {
+  (void)pointer;
+  return false;
 }
 #endif
 #endif

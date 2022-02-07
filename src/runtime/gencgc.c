@@ -1072,7 +1072,6 @@ add_new_area(page_index_t first_page, size_t offset, size_t size)
     /*FSHOW((stderr,
            "/new_area %d page %d offset %d size %d\n",
            new_areas_index, first_page, offset, size));*/
-    printf("added area\n");
     new_areas_index++;
     PGC_UNLOCK(new_areas_lock);
 }
@@ -2727,7 +2726,7 @@ scavenge_root_gens(generation_index_t from, generation_index_t to)
  * pointers to the from space.
  *
  * Write-protected pages could potentially be written by alloc however
-f * to avoid having to handle re-scavenging of write-protected pages
+ * to avoid having to handle re-scavenging of write-protected pages
  * gc_alloc() does not write to write-protected pages.
  *
  * New areas of objects allocated are recorded alternatively in the two
@@ -2766,8 +2765,7 @@ static struct page_info_t find_next_full_page(void)
             }
 
             found = (struct page_info_t){true, i, last_page};
-            printf("found %u %u\n", i, last_page);
-            record_new_regions_below = 1 + last_page;
+            // record_new_regions_below = 1 + last_page;
             search_from = last_page + 1;
             break;
         }
@@ -2794,7 +2792,8 @@ static void newspace_full_scavenge(generation_index_t generation)
 {
     generation_to_scavenge = generation;
     search_from = 0;
-    printf("starting full scan\n");
+    record_new_regions_below = 1 + page_table_pages;
+        
     FSHOW((stderr,
            "/starting one full scan of newspace generation %d\n",
            generation));
@@ -2805,7 +2804,6 @@ static void newspace_full_scavenge(generation_index_t generation)
     newspace_full_scavenge_aux();
 #endif
     /* Enable recording of all new allocation regions */
-    record_new_regions_below = 1 + page_table_pages;
     FSHOW((stderr,
            "/done with one full scan of newspace generation %d\n",
            generation));
@@ -2834,6 +2832,7 @@ scavenge_newspace(generation_index_t generation)
 
     /* Flush the current regions updating the page table. */
     gc_close_all_regions();
+    printf("found %d areas\n", new_areas_index);
 
     /*FSHOW((stderr,
              "The first scan is finished; current_new_areas_index=%d.\n",
