@@ -38,7 +38,7 @@ extern struct alloc_region gc_alloc_region[3];
 
 #ifdef LISP_FEATURE_PARALLEL_GC
 #include <stdbool.h>
-extern _Thread_local boolean is_gc_thread; 
+extern _Thread_local boolean is_gc_thread;
 extern _Thread_local struct alloc_region  gc_thread_alloc_region[3];
 #define tl_mixed_region   gc_thread_alloc_region[0]
 #define tl_unboxed_region gc_thread_alloc_region[1]

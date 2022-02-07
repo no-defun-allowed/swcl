@@ -1002,7 +1002,7 @@ gc_alloc_new_region(sword_t nbytes, int page_type_flag, struct alloc_region *all
  * If new_area overflows NUM_NEW_AREAS then it stops adding them. The
  * later code must detect this and handle it, probably by doing a full
  * scavenge of a generation. */
-#define NUM_NEW_AREAS 512
+#define NUM_NEW_AREAS 2048
 
 /* 'record_new_regions_below' is the page number (strictly) below which
  * allocations must be tracked. Choosing the boundary cases with care allows
@@ -2761,7 +2761,7 @@ static struct page_info_t find_next_full_page(void)
             && (page_bytes_used(i) != 0)
             && !PAGE_WRITEPROTECTED_P(i)) {
             page_index_t last_page;
-            
+
             /* The scavenge will start at the scan_start_offset of
              * page i.
              *
@@ -2804,7 +2804,7 @@ static void newspace_full_scavenge(generation_index_t generation)
     generation_to_scavenge = generation;
     search_from = 0;
     record_new_regions_below = 1 + page_table_pages;
-        
+
     FSHOW((stderr,
            "/starting one full scan of newspace generation %d\n",
            generation));

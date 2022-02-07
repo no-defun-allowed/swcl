@@ -427,7 +427,7 @@ then
 	    then
 		echo "No threads on this platform."
 	    else
-		WITH_FEATURES="$WITH_FEATURES :sb-thread"
+		WITH_FEATURES="$WITH_FEATURES :sb-thread :parallel-gc"
 		echo "Enabling threads due to --fancy."
 	    fi
             ;;
