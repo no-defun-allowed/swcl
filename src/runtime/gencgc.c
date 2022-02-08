@@ -980,7 +980,7 @@ gc_alloc_new_region(sword_t nbytes, int page_type_flag, struct alloc_region *all
     gc_assert(ret == 0);
 
     INSTRUMENTING(zero_dirty_pages(first_page, last_page, page_type_flag), et_bzeroing);
-    
+
 #ifdef LISP_FEATURE_DARWIN_JIT
     if (page_type_flag == PAGE_TYPE_CODE) {
         page_index_t first = first_page;
@@ -2823,7 +2823,7 @@ static void newspace_incremental_scavenge(void)
     PGC_LOCK(new_areas_lock);
     running_incremental_scavenge_threads++;
     PGC_UNLOCK(new_areas_lock);
-    
+
  again:
     /* Work through new_areas. */
     PGC_LOCK(new_areas_lock);
@@ -2923,13 +2923,9 @@ scavenge_newspace(generation_index_t generation)
             generation_to_scavenge = generation;
             search_from = 0;
 #ifdef LISP_FEATURE_PARALLEL_GC
-            if (new_areas_index >= 10) {
-                pgc_fork(newspace_incremental_scavenge);
-                pgc_join();
-                gc_assert(running_incremental_scavenge_threads == 0);
-            } else {
-                newspace_incremental_scavenge();
-            }
+            pgc_fork(newspace_incremental_scavenge);
+            pgc_join();
+            gc_assert(running_incremental_scavenge_threads == 0);
 #else
             newspace_incremental_scavenge();
 #endif
