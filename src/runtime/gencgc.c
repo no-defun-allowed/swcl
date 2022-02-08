@@ -2807,6 +2807,7 @@ static void newspace_full_scavenge(generation_index_t generation)
            generation));
 #ifdef LISP_FEATURE_PARALLEL_GC
     pgc_fork(newspace_full_scavenge_aux);
+    newspace_full_scavenge_aux();
     pgc_join();
 #else
     newspace_full_scavenge_aux();
@@ -2861,6 +2862,7 @@ static void newspace_incremental_scavenge(void)
                 goto again;
             }
             PGC_UNLOCK(new_areas_lock);
+            sched_yield();
         }
     }
 }
@@ -2924,6 +2926,7 @@ scavenge_newspace(generation_index_t generation)
             search_from = 0;
 #ifdef LISP_FEATURE_PARALLEL_GC
             pgc_fork(newspace_incremental_scavenge);
+            newspace_incremental_scavenge();
             pgc_join();
             gc_assert(running_incremental_scavenge_threads == 0);
 #else
