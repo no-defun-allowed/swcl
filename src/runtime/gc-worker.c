@@ -1,12 +1,12 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <semaphore.h>
+#include <pthread.h>
 #include "interr.h"
 #include "gc-internal.h"
 #include "gencgc-alloc-region.h"
 #include "gencgc-internal.h"
-
-#define GC_WORKER_THREADS 8
+#include "gc-worker.h"
 
 #ifdef LISP_FEATURE_PARALLEL_GC
 _Thread_local boolean is_gc_thread = false;
@@ -33,9 +33,9 @@ static void pgc_close_thread_regions(void)
 static void* pgc_gc_worker(void* uninteresting_argument)
 {
     (void)uninteresting_argument;
+    pgc_init_thread();
     while (true) {
       sem_wait(&new_work);
-      pgc_init_thread();
       worker_action();
       pgc_close_thread_regions();
       sem_post(&finished_work);
@@ -46,17 +46,19 @@ static void* pgc_gc_worker(void* uninteresting_argument)
 #define for_pgc_threads for (int i = 0; i < GC_WORKER_THREADS; i++)
 void pgc_init(void)
 {
-    pthread_t uninteresting_thread_id;
+    pthread_t thread_id;
     if (sem_init(&new_work, 0, 0) != 0)
         lose("sem_init failed");
     if (sem_init(&finished_work, 0, 0) != 0)
         lose("sem_init failed");
-    for_pgc_threads
-        if (pthread_create(&uninteresting_thread_id,
+    for_pgc_threads {
+        if (pthread_create(&thread_id,
                            NULL,
                            pgc_gc_worker,
                            NULL) != 0)
-          lose("pthread_create failed");
+            lose("pthread_create failed");
+        pthread_setname_np(thread_id, "Parallel GC");
+    }
 }
 
 void pgc_fork(void (*action)(void)) {

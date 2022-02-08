@@ -976,11 +976,11 @@ gc_alloc_new_region(sword_t nbytes, int page_type_flag, struct alloc_region *all
         first_page++;
     }
 
-    INSTRUMENTING(zero_dirty_pages(first_page, last_page, page_type_flag), et_bzeroing);
-
     ret = thread_mutex_unlock(&free_pages_lock);
     gc_assert(ret == 0);
 
+    INSTRUMENTING(zero_dirty_pages(first_page, last_page, page_type_flag), et_bzeroing);
+    
 #ifdef LISP_FEATURE_DARWIN_JIT
     if (page_type_flag == PAGE_TYPE_CODE) {
         page_index_t first = first_page;
@@ -2739,12 +2739,9 @@ scavenge_root_gens(generation_index_t from, generation_index_t to)
  * New areas of objects allocated are recorded alternatively in the two
  * new_areas arrays below. */
 static struct new_area new_areas_1[NUM_NEW_AREAS];
-static struct new_area new_areas_2[NUM_NEW_AREAS];
 
 static generation_index_t generation_to_scavenge;
 static page_index_t search_from;
-static page_index_t previous_new_areas_index;
-static struct new_area *previous_new_areas;
 struct page_info_t {
   boolean found;
   page_index_t first;
@@ -2767,7 +2764,7 @@ static struct page_info_t find_next_full_page(void)
              *
              * We need to find the full extent of this contiguous
              * block in case objects span pages. */
-            for (last_page = i; ;last_page++) {
+            for (last_page = i; ; last_page++) {
                 /* Check whether this is the last page in this
                  * contiguous block */
               if (page_ends_contiguous_block_p(last_page, generation_to_scavenge))
@@ -2820,24 +2817,52 @@ static void newspace_full_scavenge(generation_index_t generation)
            generation));
 }
 
+static uword_t running_incremental_scavenge_threads = 0;
 static void newspace_incremental_scavenge(void)
 {
-    while (1) {
-        /* Work through previous_new_areas. */
-      PGC_LOCK(new_areas_lock);
-      if (search_from == previous_new_areas_index) {
-          PGC_UNLOCK(new_areas_lock);
-          return;
-      }
-      page_index_t page = previous_new_areas[search_from].page;
-      size_t offset = previous_new_areas[search_from].offset;
-      size_t size = previous_new_areas[search_from].size;
-      search_from++;
+    PGC_LOCK(new_areas_lock);
+    running_incremental_scavenge_threads++;
+    PGC_UNLOCK(new_areas_lock);
+    
+ again:
+    /* Work through new_areas. */
+    PGC_LOCK(new_areas_lock);
+    if (new_areas_index >= NUM_NEW_AREAS) {
+        /* Overflowed the new set, so fall back to a full
+           scavenge. */
+      running_incremental_scavenge_threads--;
       PGC_UNLOCK(new_areas_lock);
-      gc_assert(size % (2*N_WORD_BYTES) == 0);
-      lispobj *start = (lispobj*)(page_address(page) + offset);
-      heap_scavenge(start, (lispobj*)((char*)start + size));
-  }
+      return;
+    } else if (new_areas_index > 0) {
+        new_areas_index--;
+        page_index_t page = new_areas[new_areas_index].page;
+        size_t offset = new_areas[new_areas_index].offset;
+        size_t size = new_areas[new_areas_index].size;
+        PGC_UNLOCK(new_areas_lock);
+        gc_assert(size % (2*N_WORD_BYTES) == 0);
+        lispobj *start = (lispobj*)(page_address(page) + offset);
+        heap_scavenge(start, (lispobj*)((char*)start + size));
+        goto again;
+    } else {
+        running_incremental_scavenge_threads--;
+        PGC_UNLOCK(new_areas_lock);
+        while (1) {
+            /* Might be finished now. */
+            PGC_LOCK(new_areas_lock);
+            if (running_incremental_scavenge_threads == 0) {
+                /* There won't be any more work, as no other thread is
+                   running, and thus no work can be produced.  */
+                PGC_UNLOCK(new_areas_lock);
+                return;
+            }
+            if (new_areas_index > 0) {
+                running_incremental_scavenge_threads++;
+                PGC_UNLOCK(new_areas_lock);
+                goto again;
+            }
+            PGC_UNLOCK(new_areas_lock);
+        }
+    }
 }
 
 static void gc_close_all_regions()
@@ -2880,20 +2905,10 @@ scavenge_newspace(generation_index_t generation)
             if (!new_areas_index && !immobile_scav_queue_count)
                 break; // still no work to do
         }
-        /* Move the current to the previous new areas */
-        previous_new_areas = new_areas;
-        previous_new_areas_index = new_areas_index;
-        /* Note the max new_areas used. */
-        if (new_areas_index > new_areas_index_hwm)
-            new_areas_index_hwm = new_areas_index;
-
-        /* Prepare to record new areas. Alternate between using new_areas_1 and 2 */
-        new_areas = (new_areas == new_areas_1) ? new_areas_2 : new_areas_1;
-        new_areas_index = 0;
 
         scavenge_immobile_newspace();
         /* Check whether previous_new_areas had overflowed. */
-        if (previous_new_areas_index >= NUM_NEW_AREAS) {
+        if (new_areas_index >= NUM_NEW_AREAS) {
 
             /* New areas of objects allocated have been lost so need to do a
              * full scan to be sure! If this becomes a problem try
@@ -2901,16 +2916,17 @@ scavenge_newspace(generation_index_t generation)
             if (gencgc_verbose) {
                 SHOW("new_areas overflow, doing full scavenge");
             }
-
+            new_areas_index = 0;
             newspace_full_scavenge(generation);
 
         } else {
             generation_to_scavenge = generation;
             search_from = 0;
 #ifdef LISP_FEATURE_PARALLEL_GC
-            if (previous_new_areas_index >= 10) {
+            if (new_areas_index >= 10) {
                 pgc_fork(newspace_incremental_scavenge);
                 pgc_join();
+                gc_assert(running_incremental_scavenge_threads == 0);
             } else {
                 newspace_incremental_scavenge();
             }
