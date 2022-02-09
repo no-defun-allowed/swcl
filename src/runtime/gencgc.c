@@ -1449,12 +1449,12 @@ gc_find_freeish_pages(page_index_t *restart_page_ptr, sword_t nbytes,
     gc_assert(most_bytes_found_to);
     // most_bytes_found_to is the upper exclusive bound on the found range.
     // next_free_page is the high water mark of most_bytes_found_to.
-    PGC_LOCK(new_areas_lock);
+
     if (most_bytes_found_to > next_free_page) {
         next_free_page = most_bytes_found_to;
         set_alloc_pointer((lispobj)(page_address(next_free_page)));
     }
-    PGC_UNLOCK(new_areas_lock);
+
     *restart_page_ptr = most_bytes_found_from;
     return most_bytes_found_to-1;
 }
