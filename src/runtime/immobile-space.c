@@ -386,6 +386,13 @@ static pthread_mutex_t immobile_lock = PTHREAD_MUTEX_INITIALIZER;
 void
 maybe_enliven_immobile_obj(lispobj *ptr, int rescan)
 {
+    /* Take a stab in the dark before grabbing the lock. We could have
+       a stale read which detects that an object is white, but then we
+       will grab the lock, and find out we were wrong. But this will
+       filter out objects in generations that are not even being
+       considered now. */
+    if (immobile_obj_gen_bits(ptr) != from_space)
+        return;
     PGC_LOCK(immobile_lock);
     if (immobile_obj_gen_bits(ptr) == from_space)
         enliven_immobile_obj(ptr, rescan);
