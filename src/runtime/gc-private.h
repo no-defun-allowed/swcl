@@ -181,6 +181,7 @@ static inline boolean filler_obj_p(lispobj* obj) {
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
 
 extern void enliven_immobile_obj(lispobj*,int);
+extern void maybe_enliven_immobile_obj(lispobj*,int,generation_index_t);
 
 #define IMMOBILE_OBJ_VISITED_FLAG    0x10
 

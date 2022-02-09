@@ -382,17 +382,25 @@ void update_immobile_nursery_bits()
 static pthread_mutex_t immobile_lock = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
+/* The interface from parallel GC. */
+void
+maybe_enliven_immobile_obj(lispobj *ptr, int rescan, generation_index_t gen)
+{
+    PGC_LOCK(immobile_lock);
+    if (immobile_obj_gen_bits(ptr) == gen)
+        enliven_immobile_obj(ptr, rescan);
+    PGC_UNLOCK(immobile_lock);
+}
+
 /* Turn a white object grey. Also enqueue the object for re-scan if required */
 void
 enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
 {
     gc_assert(widetag_of(ptr) != SIMPLE_FUN_WIDETAG); // can't enliven interior pointer
-    PGC_LOCK(immobile_lock);
     // gc_assert(immobile_obj_gen_bits(ptr) == from_space);
     if (immobile_obj_gen_bits(ptr) != from_space) {
       /* Some other thread (hopefully) already enlivened this
          object. Oh well. */
-      PGC_UNLOCK(immobile_lock);
       return;
     }
     int pointerish = !leaf_obj_widetag_p(widetag_of(ptr));
@@ -424,7 +432,6 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
             else
                 SET_WP_FLAG(page_index, WRITE_PROTECT_CLEARED);
         }
-        PGC_UNLOCK(immobile_lock);
         return; // No need to enqueue.
     }
 
@@ -432,10 +439,7 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
 
     // Do nothing if either we don't need to look for pointers in this object,
     // or the work queue has already overflowed, causing a full scan.
-    if (!pointerish || immobile_scav_queue_count > QCAPACITY) {
-      PGC_UNLOCK(immobile_lock);
-      return;
-    }
+    if (!pointerish || immobile_scav_queue_count > QCAPACITY) return;
 
     // count is either less than or equal to QCAPACITY.
     // If equal, just bump the count to signify overflow.
@@ -444,7 +448,6 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
         immobile_scav_queue_head = (immobile_scav_queue_head + 1) & (QCAPACITY - 1);
     }
     ++immobile_scav_queue_count;
-    PGC_UNLOCK(immobile_lock);
 }
 
 /* If 'addr' points to an immobile object, then make the object

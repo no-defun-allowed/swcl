@@ -163,8 +163,7 @@ static inline void scav1(lispobj* addr, lispobj object)
     // Test immobile_space_p() only if object was definitely not in dynamic space
     else if (immobile_space_p(object)) {
         lispobj *ptr = base_pointer(object);
-        if (immobile_obj_gen_bits(ptr) == from_space)
-            enliven_immobile_obj(ptr, 1);
+        maybe_enliven_immobile_obj(ptr, 1, from_space);
     }
 #endif
 #if (N_WORD_BITS == 32) && defined(LISP_FEATURE_GENCGC)
@@ -188,10 +187,11 @@ inline void gc_scav_pair(lispobj where[2])
 // that may contain object headers.
 void heap_scavenge(lispobj *start, lispobj *end)
 {
-    lispobj *object_ptr;
+    lispobj *object_ptr, *last_object_ptr = NULL;
 
     for (object_ptr = start; object_ptr < end;) {
         lispobj object = *object_ptr;
+        last_object_ptr = object_ptr;
         if (other_immediate_lowtag_p(object))
             /* It's some sort of header object or another. */
             object_ptr += (scavtab[header_widetag(object)])(object_ptr, object);
@@ -203,8 +203,8 @@ void heap_scavenge(lispobj *start, lispobj *end)
     // This assertion is usually the one that fails when something
     // is subtly wrong with the heap, so definitely always do it.
     if (object_ptr != end)
-        lose("heap_scavenge failure: Final object pointer %p, start %p, end %p",
-             object_ptr, start, end);
+        lose("heap_scavenge failure: Final object pointer %p, start %p, end %p, after scavenging %p",
+             object_ptr, start, end, last_object_ptr);
 }
 
 // Scavenge a block of memory from 'start' extending for 'n_words'
