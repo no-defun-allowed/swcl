@@ -578,6 +578,7 @@ trans_list(lispobj object)
     set_forwarding_pointer((lispobj *)CONS(object), new_list_pointer);
     release_forwarding_lock(native_pointer(object));
 
+#if 0
     /* Try to linearize the list in the cdr direction to help reduce
      * paging. */
     while (listp(cdr) && from_space_p(cdr)) {
@@ -600,6 +601,8 @@ trans_list(lispobj object)
         copy = cdr_copy;
         cdr = next;
     }
+#endif
+
     copy->cdr = cdr;
     return new_list_pointer;
 }

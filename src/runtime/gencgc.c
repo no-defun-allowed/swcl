@@ -2744,8 +2744,8 @@ static generation_index_t generation_to_scavenge;
 static page_index_t search_from;
 struct page_info_t {
   boolean found;
-  page_index_t first;
-  page_index_t last;
+  lispobj *start;
+  lispobj *end;
 };
 
 static struct page_info_t find_next_full_page(void)
@@ -2771,7 +2771,9 @@ static struct page_info_t find_next_full_page(void)
                   break;
             }
 
-            found = (struct page_info_t){true, i, last_page};
+            found = (struct page_info_t){true,
+                                         page_address(i),
+                                         (lispobj*)(page_address(last_page) + page_bytes_used(last_page))};
             // record_new_regions_below = 1 + last_page;
             search_from = last_page + 1;
             break;
@@ -2790,9 +2792,7 @@ static void newspace_full_scavenge_aux(void)
     while (1) {
         struct page_info_t page = find_next_full_page();
         if (!page.found) break;
-        heap_scavenge(page_scan_start(page.first),
-                      (lispobj*)(page_address(page.last)
-                                 + page_bytes_used(page.last)));
+        heap_scavenge(page.start, page.end);
     }
 }
 
