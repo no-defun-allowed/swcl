@@ -976,10 +976,10 @@ gc_alloc_new_region(sword_t nbytes, int page_type_flag, struct alloc_region *all
         first_page++;
     }
 
+    INSTRUMENTING(zero_dirty_pages(first_page, last_page, page_type_flag), et_bzeroing);
+
     ret = thread_mutex_unlock(&free_pages_lock);
     gc_assert(ret == 0);
-
-    INSTRUMENTING(zero_dirty_pages(first_page, last_page, page_type_flag), et_bzeroing);
 
 #ifdef LISP_FEATURE_DARWIN_JIT
     if (page_type_flag == PAGE_TYPE_CODE) {
