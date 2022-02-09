@@ -1026,6 +1026,7 @@ struct new_area {
 };
 static struct new_area *new_areas;
 static int new_areas_index;
+boolean new_areas_p = false;
 int new_areas_index_hwm; // high water mark
 
 #ifdef LISP_FEATURE_PARALLEL_GC
@@ -1070,6 +1071,7 @@ add_new_area(page_index_t first_page, size_t offset, size_t size)
     new_areas[new_areas_index].page = first_page;
     new_areas[new_areas_index].offset = offset;
     new_areas[new_areas_index].size = size;
+    __atomic_store_n(&new_areas_p, true, __ATOMIC_SEQ_CST);
     /*FSHOW((stderr,
            "/new_area %d page %d offset %d size %d\n",
            new_areas_index, first_page, offset, size));*/
@@ -2821,47 +2823,49 @@ static void newspace_full_scavenge(generation_index_t generation)
 static uword_t running_incremental_scavenge_threads = 0;
 static void newspace_incremental_scavenge(void)
 {
-    PGC_LOCK(new_areas_lock);
-    running_incremental_scavenge_threads++;
-    PGC_UNLOCK(new_areas_lock);
+    __atomic_fetch_add(&running_incremental_scavenge_threads, 1, __ATOMIC_SEQ_CST);
 
- again:
-    /* Work through new_areas. */
-    PGC_LOCK(new_areas_lock);
-    if (new_areas_index >= NUM_NEW_AREAS) {
-        /* Overflowed the new set, so fall back to a full
-           scavenge. */
-      running_incremental_scavenge_threads--;
-      PGC_UNLOCK(new_areas_lock);
-      return;
-    } else if (new_areas_index > 0) {
-        new_areas_index--;
-        page_index_t page = new_areas[new_areas_index].page;
-        size_t offset = new_areas[new_areas_index].offset;
-        size_t size = new_areas[new_areas_index].size;
-        PGC_UNLOCK(new_areas_lock);
-        gc_assert(size % (2*N_WORD_BYTES) == 0);
-        lispobj *start = (lispobj*)(page_address(page) + offset);
-        heap_scavenge(start, (lispobj*)((char*)start + size));
-        goto again;
-    } else {
-        running_incremental_scavenge_threads--;
-        PGC_UNLOCK(new_areas_lock);
+    while (1) {
+        if (__atomic_load_n(&new_areas_p, __ATOMIC_SEQ_CST)) {
+            /* Work through new_areas. */
+            while (1) {
+                PGC_LOCK(new_areas_lock);
+                if (new_areas_index >= NUM_NEW_AREAS) {
+                    /* Overflowed the new set, so fall back to a full
+                       scavenge. */
+                    __atomic_fetch_sub(&running_incremental_scavenge_threads, 1, __ATOMIC_SEQ_CST);
+                    PGC_UNLOCK(new_areas_lock);
+                    return;
+                } else if (new_areas_index > 0) {
+                    new_areas_index--;
+                    page_index_t page = new_areas[new_areas_index].page;
+                    size_t offset = new_areas[new_areas_index].offset;
+                    size_t size = new_areas[new_areas_index].size;
+                    if (new_areas_index == 0)
+                        __atomic_store_n(&new_areas_p, false, __ATOMIC_SEQ_CST);
+                    PGC_UNLOCK(new_areas_lock);
+                    gc_assert(size % (2*N_WORD_BYTES) == 0);
+                    lispobj *start = (lispobj*)(page_address(page) + offset);
+                    heap_scavenge(start, (lispobj*)((char*)start + size));
+                } else {
+                    __atomic_store_n(&new_areas_p, false, __ATOMIC_SEQ_CST);
+                    PGC_UNLOCK(new_areas_lock);
+                    break;
+                }
+            }
+        }
+        __atomic_fetch_sub(&running_incremental_scavenge_threads, 1, __ATOMIC_SEQ_CST);
         while (1) {
-            /* Might be finished now. */
-            PGC_LOCK(new_areas_lock);
-            if (running_incremental_scavenge_threads == 0) {
+            if (__atomic_load_n(&running_incremental_scavenge_threads, __ATOMIC_SEQ_CST) == 0) {
                 /* There won't be any more work, as no other thread is
                    running, and thus no work can be produced.  */
-                PGC_UNLOCK(new_areas_lock);
                 return;
             }
-            if (new_areas_index > 0) {
-                running_incremental_scavenge_threads++;
-                PGC_UNLOCK(new_areas_lock);
-                goto again;
+            if (__atomic_load_n(&new_areas_p, __ATOMIC_SEQ_CST)) {
+                /* Back to work. */
+                __atomic_fetch_add(&running_incremental_scavenge_threads, 1, __ATOMIC_SEQ_CST);
+                break;
             }
-            PGC_UNLOCK(new_areas_lock);
             sched_yield();
         }
     }
@@ -2925,6 +2929,7 @@ scavenge_newspace(generation_index_t generation)
             generation_to_scavenge = generation;
             search_from = 0;
 #ifdef LISP_FEATURE_PARALLEL_GC
+            gc_assert(running_incremental_scavenge_threads == 0);
             pgc_fork(newspace_incremental_scavenge);
             newspace_incremental_scavenge();
             pgc_join();

@@ -1,7 +1,7 @@
 #ifndef GC_WORKER_H
 #define GC_WORKER_H
 
-#define GC_WORKER_THREADS 8
+#define GC_WORKER_THREADS 2
 
 #ifdef LISP_FEATURE_PARALLEL_GC
 extern void pgc_init(void);
