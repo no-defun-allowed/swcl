@@ -384,10 +384,10 @@ static pthread_mutex_t immobile_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* The interface from parallel GC. */
 void
-maybe_enliven_immobile_obj(lispobj *ptr, int rescan, generation_index_t gen)
+maybe_enliven_immobile_obj(lispobj *ptr, int rescan)
 {
     PGC_LOCK(immobile_lock);
-    if (immobile_obj_gen_bits(ptr) == gen)
+    if (immobile_obj_gen_bits(ptr) == from_space)
         enliven_immobile_obj(ptr, rescan);
     PGC_UNLOCK(immobile_lock);
 }
@@ -397,7 +397,7 @@ void
 enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
 {
     gc_assert(widetag_of(ptr) != SIMPLE_FUN_WIDETAG); // can't enliven interior pointer
-    // gc_assert(immobile_obj_gen_bits(ptr) == from_space);
+    gc_assert(immobile_obj_gen_bits(ptr) == from_space);
     if (immobile_obj_gen_bits(ptr) != from_space) {
       /* Some other thread (hopefully) already enlivened this
          object. Oh well. */

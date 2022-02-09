@@ -163,7 +163,7 @@ static inline void scav1(lispobj* addr, lispobj object)
     // Test immobile_space_p() only if object was definitely not in dynamic space
     else if (immobile_space_p(object)) {
         lispobj *ptr = base_pointer(object);
-        maybe_enliven_immobile_obj(ptr, 1, from_space);
+        maybe_enliven_immobile_obj(ptr, 1);
     }
 #endif
 #if (N_WORD_BITS == 32) && defined(LISP_FEATURE_GENCGC)

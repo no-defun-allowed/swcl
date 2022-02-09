@@ -47,11 +47,15 @@ if expr "$BASE" : '^/.*' > /dev/null; [ $? != 0 ]; then
 fi
 
 CORE_DEFINED=no
+BOOT_WITH=exec
 
 for arg in "$@"; do
     case "$arg" in
         --core)
           CORE_DEFINED=yes
+          ;;
+        --profile-locks)
+          BOOT_WITH=mutrace
           ;;
         --help)
           echo "usage: run-sbcl.sh sbcl-options*"
@@ -72,9 +76,9 @@ fi
 if build_directory_p "$BASE"; then
     export SBCL_HOME
     if [ "$CORE_DEFINED" = "no" ]; then
-	SBCL_HOME="$BASE"/obj/sbcl-home exec "$BASE"/src/runtime/sbcl --core "$CORE" "$@"
+	SBCL_HOME="$BASE"/obj/sbcl-home $BOOT_WITH "$BASE"/src/runtime/sbcl --core "$CORE" "$@"
     else
-	SBCL_HOME="$BASE"/obj/sbcl-home exec "$BASE"/src/runtime/sbcl "$@"
+	SBCL_HOME="$BASE"/obj/sbcl-home $BOOT_WITH "$BASE"/src/runtime/sbcl "$@"
     fi
 else
     echo "No built SBCL here ($BASE): run 'sh make.sh' first!"
