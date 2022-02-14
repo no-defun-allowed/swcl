@@ -950,20 +950,28 @@ gc_alloc_new_region(sword_t nbytes, int page_type_flag, struct alloc_region *all
     gc_assert(find_page_index(alloc_region->start_addr) == first_page);
 
     /* Set up the pages. */
-
+#ifdef LISP_FEATURE_PARALLEL_GC
+#define STORE(where, val) __atomic_store_n(&where, val, __ATOMIC_RELEASE)
+#else
+#define STORE(where, val) where = val
+#endif
     /* The first page may have already been in use. */
     /* If so, just assert that it's consistent, otherwise, set it up. */
     if (page_bytes_used(first_page)) {
         gc_assert(page_table[first_page].type == page_type_flag);
         gc_assert(page_table[first_page].gen == gc_alloc_generation);
     } else {
-        page_table[first_page].gen = gc_alloc_generation;
+        // Atomic store here, because we need to make sure that
+        // another GC thread will see the right generation for this
+        // page, would it encounter pointers to this page. i.e. this
+        // store better happen-before any writes involving this page.
+        STORE(page_table[first_page].gen, gc_alloc_generation);
     }
     page_table[first_page].type = OPEN_REGION_PAGE_FLAG | page_type_flag;
 
     for (i = first_page+1; i <= last_page; i++) {
         page_table[i].type = OPEN_REGION_PAGE_FLAG | page_type_flag;
-        page_table[i].gen = gc_alloc_generation;
+        STORE(page_table[i].gen, gc_alloc_generation);
         set_page_scan_start_offset(i,
             addr_diff(page_address(i), alloc_region->start_addr));
     }
@@ -977,7 +985,7 @@ gc_alloc_new_region(sword_t nbytes, int page_type_flag, struct alloc_region *all
     }
 
     INSTRUMENTING(zero_dirty_pages(first_page, last_page, page_type_flag), et_bzeroing);
-
+    
     ret = thread_mutex_unlock(&free_pages_lock);
     gc_assert(ret == 0);
 
@@ -1027,7 +1035,6 @@ struct new_area {
 static struct new_area *new_areas;
 static int new_areas_index;
 boolean new_areas_p = false;
-int new_areas_index_hwm; // high water mark
 
 #ifdef LISP_FEATURE_PARALLEL_GC
 static pthread_mutex_t new_areas_lock = PTHREAD_MUTEX_INITIALIZER;

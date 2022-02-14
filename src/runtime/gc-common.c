@@ -147,7 +147,11 @@ static inline void scav1(lispobj* addr, lispobj object)
     // looking in a hashset. 9 times out of 10 times we need to read that word
     // anyway, and if the object was already forwarded, we never need pinned_p.
     if ((page = find_page_index((void*)object)) >= 0) {
-        if (page_table[page].gen == from_space) {
+        // We perform an atomic load so that we load the right
+        // generation for a newly allocated page. See
+        // gc_alloc_new_region for the other half of this
+        // acquire-release thing.
+        if (__atomic_load_n(&page_table[page].gen, __ATOMIC_ACQUIRE) == from_space) {
 # ifdef LISP_FEATURE_PARALLEL_GC
             if (!grab_forwarding_lock(native_pointer(object)))
 # else
