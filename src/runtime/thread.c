@@ -1030,6 +1030,11 @@ alloc_thread_struct(void* spaces, lispobj start_routine) {
     gc_init_region(&th->mixed_tlab);
     gc_init_region(&th->cons_tlab);
 #endif
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    int bitmap_bits_per_heap_byte = 8 /* bits/byte */ * N_WORD_BYTES * 2;
+    th->allocation_bitmap_base =
+      (char*)((intptr_t)allocation_bitmap - ((intptr_t)DYNAMIC_SPACE_START / bitmap_bits_per_heap_byte));
+#endif
 #ifdef LISP_FEATURE_SB_THREAD
     /* This parallels the same logic in globals.c for the
      * single-threaded foreign_function_call_active, KLUDGE and

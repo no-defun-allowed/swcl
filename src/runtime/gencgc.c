@@ -43,6 +43,7 @@
 #include "gc-internal.h"
 #include "gc-private.h"
 #include "gencgc-private.h"
+#include "mark-region.h"
 #include "thread.h"
 #include "pseudo-atomic.h"
 #include "alloc.h"
@@ -4761,6 +4762,9 @@ gc_init(void)
 #if defined(LISP_FEATURE_SB_SAFEPOINT)
     extern void safepoint_init(void);
     safepoint_init();
+#endif
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    mrgc_init();
 #endif
 }
 
