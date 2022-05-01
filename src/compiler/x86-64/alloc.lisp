@@ -266,17 +266,20 @@
                         (inst or :byte alloc-tn lowtag))
                       (inst jmp DONE))))))))
   ;; Mark into the allocation bitmap. This is no fun to try to pretend
-  ;; to be a register allocator with, so I don't try.
+  ;; to be a register allocator with, so I don't try. We can still clobber
+  ;; TEMP if we were given one, which minimizes the damage a bit.
   #+mark-region-gc
-  (let ((another-temp (if (location= alloc-tn rax-tn) rbx-tn rax-tn)))
+  (let ((another-temp (or temp (if (location= alloc-tn rax-tn) rbx-tn rax-tn))))
     (inst push alloc-tn)
-    (inst push another-temp)
+    (unless (eq another-temp temp)
+      (inst push another-temp))
     (inst mov another-temp
           (thread-slot-ea thread-allocation-bitmap-base-slot
                           #+gs-seg thread-temp))
     (inst sar alloc-tn 4)               ; 2^4 bytes of heap per bit
     (inst bts (ea another-temp) alloc-tn)
-    (inst pop another-temp)
+    (unless (eq another-temp temp)
+      (inst pop another-temp))
     (inst pop alloc-tn))
   t)
 
