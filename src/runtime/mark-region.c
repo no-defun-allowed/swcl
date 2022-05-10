@@ -5,17 +5,22 @@
 #include "core.h"
 #include "interr.h"
 #include "globals.h"
+#include "lispobj.h"
 
-char *allocation_bitmap, *grey_bitmap, *black_bitmap;
+uword_t *allocation_bitmap, *mark_bitmap, *line_bytemap;
 
-static void allocate_bitmap(char **bitmap, const char *description) {
-  *bitmap = calloc(dynamic_space_size / N_WORD_BYTES / 2, 1);
+static void allocate_bitmap(uword_t **bitmap, int divisor,
+                            const char *description) {
+  *bitmap = calloc(dynamic_space_size / divisor, 1);
   if (!*bitmap)
     lose("Failed to allocate %s", description);
 }
 
 void mrgc_init() {
-  allocate_bitmap(&allocation_bitmap, "allocation bitmap");
-  allocate_bitmap(&grey_bitmap, "grey bitmap");
-  allocate_bitmap(&black_bitmap, "black bitmap");
+  int bytes_per_heap_byte = N_WORD_BYTES * 2 * 8;
+  allocate_bitmap(&allocation_bitmap, bytes_per_heap_byte,
+                  "allocation bitmap");
+  allocate_bitmap(&black_bitmap, bytes_per_heap_byte,
+                  "mark bitmap");
+  allocate_bitmap(&line_bytemap, LINE_SIZE, "line bytemap");
 }

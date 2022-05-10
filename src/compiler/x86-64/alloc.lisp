@@ -268,6 +268,9 @@
   ;; Mark into the allocation bitmap. This is no fun to try to pretend
   ;; to be a register allocator with, so I don't try. We can still clobber
   ;; TEMP if we were given one, which minimizes the damage a bit.
+  ;; Note that ALLOCATE can be called to allocate multiple objects at once,
+  ;; but this is (currently) only done with cons cells, and we don't need to
+  ;; use the allocation bitmap to work with derived pointers to cons pages.
   #+mark-region-gc
   (let ((another-temp (or temp (if (location= alloc-tn rax-tn) rbx-tn rax-tn))))
     (inst push alloc-tn)
