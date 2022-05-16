@@ -9,6 +9,13 @@
 #endif
 
 #define USING_LAYOUT TRACE_NAME##_using_layout
+#define TRACE_PAIR TRACE_NAME##_pair
+
+static void TRACE_PAIR(lispobj* where)
+{
+    ACTION(where[0]);
+    ACTION(where[1]);
+}
 
 static void USING_LAYOUT(lispobj layout, lispobj* where, int nslots)
 {
@@ -76,7 +83,7 @@ static void TRACE_NAME(lispobj* where)
             boolean defer = 1;
             if (weakness != WEAKNESS_KEY_AND_VALUE)
                 defer = scan_weak_hashtable(hash_table, alivep_funs[weakness],
-                                            mark_pair);
+                                            TRACE_PAIR);
             if (defer) {
                 hash_table->next_weak_hash_table = (lispobj)weak_hash_tables;
                 weak_hash_tables = hash_table;
