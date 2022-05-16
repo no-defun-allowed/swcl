@@ -20,7 +20,7 @@ void mrgc_init() {
   int bytes_per_heap_byte = N_WORD_BYTES * 2 * 8;
   allocate_bitmap(&allocation_bitmap, bytes_per_heap_byte,
                   "allocation bitmap");
-  allocate_bitmap(&black_bitmap, bytes_per_heap_byte,
+  allocate_bitmap(&mark_bitmap, bytes_per_heap_byte,
                   "mark bitmap");
   allocate_bitmap(&line_bytemap, LINE_SIZE, "line bytemap");
 }
