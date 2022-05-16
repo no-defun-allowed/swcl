@@ -34,7 +34,7 @@ static void USING_LAYOUT(lispobj layout, lispobj* where, int nslots)
             ACTION(slots[i]);
 }
 
-static void trace_object(lispobj* where)
+static void TRACE_NAME(lispobj* where)
 {
     lispobj header = *where;
     int widetag = header_widetag(header);
