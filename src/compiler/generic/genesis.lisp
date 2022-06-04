@@ -190,6 +190,7 @@
 (defstruct page
   (type nil :type (member nil :code :list :mixed))
   (words-used 0)
+  (large nil)
   scan-start) ; byte offset from base of the space
 
 ;;; a GENESIS-time representation of a memory space (e.g. read-only
@@ -416,15 +417,18 @@
              ;; CMUCL incorrectly warns that the result of ADJUST-ARRAY
              ;; must not be discarded.
              #+host-quirks-cmu (declare (notinline adjust-array))
-             (let ((start-page (page-index start-word-index))
-                   (end-page (page-index (+ start-word-index (1- count)))))
+             (let* ((start-page (page-index start-word-index))
+                    (end-page (page-index (+ start-word-index (1- count))))
+                    (large-p (> end-page start-page)))
                (unless (> (length (gspace-page-table gspace)) end-page)
                  (adjust-array (gspace-page-table gspace) (1+ end-page)
                                :initial-element nil))
-               (when (> end-page start-page)
-                 (assert (alignedp start-word-index)))
                (loop for page-index from start-page to end-page
                      for pte = (pte page-index)
+                     when large-p
+                       do (assert (null (page-type pte)) ()
+                                  "large objects should have their own pages")
+                          (setf (page-large pte) t)
                      do (if (null (page-type pte))
                             (setf (page-type pte) page-type)
                             (assert (eq (page-type pte) page-type))))))
@@ -3667,6 +3671,9 @@ III. initially undefined function references (alphabetically):
                               (:mixed (incf n-mixed) #b011))
                             0)))
         (setf (bvref-word ptes pte-offset) (logior sso type-bits))
+        (when (page-large pte)
+          ;; LSB of usage indicates a large object on its own page.
+          (incf usage))
         (macrolet ((setter ()
                      ;; KLUDGE to avoid compiler note about one or the other
                      ;; branch of this IF being unreachable.
