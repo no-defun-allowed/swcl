@@ -174,10 +174,6 @@ struct hopscotch_table pinned_objects;
 /* This is always 0 except during gc_and_save() */
 lispobj lisp_init_function;
 
-static inline boolean page_free_p(page_index_t page) {
-    return (page_table[page].type == FREE_PAGE_FLAG);
-}
-
 static inline boolean boxed_type_p(int type) { return type > 1; }
 static inline boolean page_boxed_p(page_index_t page) {
     // ignore SINGLE_OBJECT_FLAG and OPEN_REGION_PAGE_FLAG
@@ -273,23 +269,6 @@ static inline void reset_page_flags(page_index_t page) {
     // to not-write-protected, which is what you want for allocation.
     assign_page_card_marks(page, CARD_MARKED);
 }
-
-/* SIMD-within-a-register algorithms
- *
- * from https://graphics.stanford.edu/~seander/bithacks.html
- */
-#ifdef LISP_FEATURE_SOFT_CARD_MARKS
-static inline uword_t word_haszero(uword_t word) {
-  return ((word - 0x0101010101010101LL) & ~word & 0x8080808080808080LL) != 0;
-}
-static inline uword_t word_has_stickymark(uword_t word) {
-  return word_haszero(word ^ 0x0202020202020202LL);
-}
-#include "genesis/cardmarks.h"
-int page_cards_all_marked_nonsticky(page_index_t page) {
-    return cardseq_all_marked_nonsticky(page_to_card_index(page));
-}
-#endif
 
 /// External function for calling from Lisp.
 page_index_t ext_find_page_index(void *addr) { return find_page_index(addr); }
@@ -977,30 +956,6 @@ static inline boolean __attribute__((unused)) region_closed_p(struct alloc_regio
 #else
 #define INSTRUMENTING(expression, metric) expression
 #endif
-
-/* Test whether page 'index' can continue a non-large-object region
- * having specified 'gen' and 'type' values. It must not be pinned
- * and must be marked but not referenced from the stack */
-static inline boolean
-page_extensible_p(page_index_t index, generation_index_t gen, int type) {
-#ifdef LISP_FEATURE_BIG_ENDIAN /* TODO: implement this as single comparison */
-    int attributes_match =
-           page_table[index].type == type
-        && page_table[index].gen == gen
-        && !gc_page_pins[index];
-#else
-    /* Test 'gen' and 'type' as one comparison.
-     * The type is at 1 byte prior to 'gen' in the page structure.
-     */
-    int attributes_match =
-        *(int16_t*)(&page_table[index].gen-1) == ((gen<<8)|type);
-#endif
-#ifdef LISP_FEATURE_SOFT_CARD_MARKS
-    return attributes_match && page_cards_all_marked_nonsticky(index);
-#else
-    return attributes_match && !PAGE_WRITEPROTECTED_P(index);
-#endif
-}
 
 void gc_heap_exhausted_error_or_lose (sword_t available, sword_t requested) never_returns;
 
@@ -4328,7 +4283,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
         generations[SCRATCH_GENERATION].bytes_allocated = 0;
     }
 #ifdef COLLECT_GC_STATS
-    if (show_gc_generation_throughput) {
+    /* if (show_gc_generation_throughput) */ {
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);
     long et_nsec = (t1.tv_sec - t0.tv_sec)*1000000000 + (t1.tv_nsec - t0.tv_nsec);

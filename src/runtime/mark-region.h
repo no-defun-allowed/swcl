@@ -7,5 +7,7 @@
 
 extern uword_t *allocation_bitmap, *mark_bitmap, *line_bytemap;
 extern void mrgc_init();
+
+typedef intptr_t line_index_t;
 #endif
 #endif

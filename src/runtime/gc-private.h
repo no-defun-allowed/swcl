@@ -17,6 +17,7 @@
 
 #include "genesis/instance.h"
 #include "genesis/weak-pointer.h"
+#include "genesis/config.h"
 #include "immobile-space.h"
 #include "code.h"
 
@@ -55,14 +56,14 @@ lispobj copy_potential_large_object(lispobj object, sword_t nwords,
 
 /* For debugging purposes, you can make this macro as complicated as you like,
  * such as checking various other aspects of the object in 'old' */
-#if GC_LOGGING
-#define NOTE_TRANSPORTING(old, new, nwords) really_note_transporting(old,new,nwords)
-void really_note_transporting(lispobj old,void*new,sword_t nwords);
-#elif defined COLLECT_GC_STATS && COLLECT_GC_STATS
+//#if GC_LOGGING
+//#define NOTE_TRANSPORTING(old, new, nwords) really_note_transporting(old,new,nwords)
+//void really_note_transporting(lispobj old,void*new,sword_t nwords);
+//#elifdef COLLECT_GC_STATS
 #define NOTE_TRANSPORTING(old, new, nwords) gc_copied_nwords += nwords
-#else
-#define NOTE_TRANSPORTING(old, new, nwords) /* do nothing */
-#endif
+//#else
+//#define NOTE_TRANSPORTING(old, new, nwords) /* do nothing */
+//#endif
 
 extern uword_t gc_copied_nwords;
 static inline lispobj

@@ -421,6 +421,8 @@
                (unless (> (length (gspace-page-table gspace)) end-page)
                  (adjust-array (gspace-page-table gspace) (1+ end-page)
                                :initial-element nil))
+               (when (> end-page start-page)
+                 (assert (alignedp start-word-index)))
                (loop for page-index from start-page to end-page
                      for pte = (pte page-index)
                      do (if (null (page-type pte))
@@ -494,6 +496,14 @@
       ;; Avoid switching between :CODE and :MIXED on a page
       (unless (or (alignedp (gspace-free-word-index gspace))
                   (eq (get-frontier-page-type) page-type))
+        (realign-frontier))
+      ;; Objects don't span pages
+      (let* ((free-ptr (gspace-free-word-index gspace))
+             (avail (- (align-up free-ptr words-per-page) free-ptr)))
+        (when (< avail n-words)
+          (realign-frontier)))
+      ;; Large objects live on their own pages
+      (when (>= n-words words-per-page)
         (realign-frontier))
       (let ((word-index (gspace-claim-n-words gspace n-words)))
         (assign-page-type page-type word-index n-words)

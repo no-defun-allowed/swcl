@@ -100,4 +100,49 @@ static inline enum prot_mode protection_mode(page_index_t page) {
 }
 #endif
 
+static inline boolean page_free_p(page_index_t page) {
+    return (page_table[page].type == FREE_PAGE_FLAG);
+}
+
+/* SIMD-within-a-register algorithms
+ *
+ * from https://graphics.stanford.edu/~seander/bithacks.html
+ */
+#ifdef LISP_FEATURE_SOFT_CARD_MARKS
+static inline uword_t word_haszero(uword_t word) {
+  return ((word - 0x0101010101010101LL) & ~word & 0x8080808080808080LL) != 0;
+}
+static inline uword_t word_has_stickymark(uword_t word) {
+  return word_haszero(word ^ 0x0202020202020202LL);
+}
+#include "genesis/cardmarks.h"
+static int page_cards_all_marked_nonsticky(page_index_t page) {
+    return cardseq_all_marked_nonsticky(page_to_card_index(page));
+}
+#endif
+
+/* Test whether page 'index' can continue a non-large-object region
+ * having specified 'gen' and 'type' values. It must not be pinned
+ * and must be marked but not referenced from the stack */
+static inline boolean
+page_extensible_p(page_index_t index, generation_index_t gen, int type) {
+#ifdef LISP_FEATURE_BIG_ENDIAN /* TODO: implement this as single comparison */
+    int attributes_match =
+           page_table[index].type == type
+        && page_table[index].gen == gen
+        && !gc_page_pins[index];
+#else
+    /* Test 'gen' and 'type' as one comparison.
+     * The type is at 1 byte prior to 'gen' in the page structure.
+     */
+    int attributes_match =
+        *(int16_t*)(&page_table[index].gen-1) == ((gen<<8)|type);
+#endif
+#ifdef LISP_FEATURE_SOFT_CARD_MARKS
+    return attributes_match && page_cards_all_marked_nonsticky(index);
+#else
+    return attributes_match && !PAGE_WRITEPROTECTED_P(index);
+#endif
+}
+
 #endif /* _GENCGC_PRIVATE_H_ */
