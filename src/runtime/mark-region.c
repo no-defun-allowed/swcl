@@ -24,7 +24,7 @@
  * compacting easier. */
 
 uword_t *allocation_bitmap, *mark_bitmap, *line_bytemap;
-uword_t line_count;
+line_index_t line_count;
 
 static void allocate_bitmap(uword_t **bitmap, int divisor,
                             const char *description) {
@@ -89,9 +89,9 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
 /* Fast path for allocation, wherein we use another chunk that the
  * thread already claimed. */
 boolean try_allocate_small_after_region(sword_t nbytes, struct alloc_region *region) {
-  return try_allocate_small(nbytes, region,
-                            address_line(region->end_addr),
-                            address_line(page_address(1 + find_page_index(region->end_addr))));
+  /* We search to the end of this page. */
+  line_index_t end = address_line(PTR_ALIGN_UP(region->end_addr, GENCGC_PAGE_BYTES));
+  return try_allocate_small(nbytes, region, address_line(region->end_addr), end);
 }
 
 /* try_allocate_small_from_pages updates the start pointer to after the
@@ -106,6 +106,7 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
                            address_line(page_address(where)),
                            address_line(page_address(where + 1)))) {
       page_table[where].type |= OPEN_REGION_PAGE_FLAG;
+      set_page_scan_start_offset(where, 0);
       *start = where + 1;
       return true;
     }
@@ -124,4 +125,29 @@ boolean try_allocate_large(sword_t nbytes, struct alloc_region *region,
 
   }
   return false;
+}
+
+void mr_update_closed_region(struct alloc_region *region) {
+  /* alloc_regions never span multiple pages. */
+  page_index_t the_page = find_page_index(region->start_addr);
+  if (region->free_pointer > region->start_addr) {
+    /* Did allocate something. We just say we used the whole page;
+     * in terms of pressure on the GC, we basically did, as we can't reuse
+     * the page (currently). */
+    page_bytes_t page_bytes_used = page_bytes_used(the_page);
+    set_page_bytes_used(the_page, GENCGC_PAGE_BYTES);
+    generation_index_t gen = page_table[the_page].gen;
+    /* We just used the rest of the page. */
+    generations[gen].bytes_allocated += GENCGC_PAGE_BYTES - page_bytes_used;
+  } else {
+    /* Didn't actually allocate anything. */
+    reset_page_flags(the_page);
+  }
+}
+
+uword_t lines_used() {
+  uword_t count = 0;
+  for (line_index_t line = 0; line < line_count; line++)
+    if (line_bytemap[line]) count++;
+  return count;
 }

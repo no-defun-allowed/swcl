@@ -62,7 +62,6 @@ static void TRACE_NAME(lispobj* where)
         // so the table will not need rehash as a result of gc.
         // Ergo, those may be treated just like ordinary simple vectors.
         // However, weakness remains as a special case.
-#ifdef DO_WP_LIVENESS
         if (vector_flagp(header, VectorWeak)) {
             if (!vector_flagp(header, VectorHashing)) {
                 add_to_weak_vector_list(where, header);
@@ -90,7 +89,6 @@ static void TRACE_NAME(lispobj* where)
             }
             return;
         }
-#endif
         break;
 #if defined(LISP_FEATURE_X86) || defined(LISP_FEATURE_X86_64) || defined (LISP_FEATURE_ARM64)
     /* on x86[-64], closure->fun is a fixnum-qua-pointer. Convert it to a lisp
@@ -137,12 +135,8 @@ static void TRACE_NAME(lispobj* where)
         break;
     case WEAK_POINTER_WIDETAG:
         weakptr = (struct weak_pointer*)where;
-#ifdef DO_WP_LIVENESS
         if (is_lisp_pointer(weakptr->value) && interesting_pointer_p(weakptr->value))
             add_to_weak_pointer_chain(weakptr);
-#else
-        ACTION(weakptr->value);
-#endif
         return;
     default:
         if (leaf_obj_widetag_p(widetag)) return;

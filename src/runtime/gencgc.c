@@ -105,11 +105,6 @@ extern FILE *gc_activitylog();
  * as when it is non-large and pinned. So the helpers might be needed anyway.
  */
 
-enum {
-    SCRATCH_GENERATION = PSEUDO_STATIC_GENERATION+1,
-    NUM_GENERATIONS
-};
-
 /* Largest allocation seen since last GC. */
 os_vm_size_t large_allocation = 0;
 int n_gcs;
@@ -254,7 +249,7 @@ page_index_t contiguous_block_final_page(page_index_t first) {
 /* We maintain the invariant that pages with FREE_PAGE_FLAG have
  * scan_start of zero, to optimize page_ends_contiguous_block_p().
  * Clear all the flags that don't pertain to a free page. */
-static inline void reset_page_flags(page_index_t page) {
+void reset_page_flags(page_index_t page) {
     page_table[page].scan_start_offset_ = 0;
 #ifdef LISP_FEATURE_DARWIN_JIT
     // Whenever a page was mapped as code, it potentially needs to be remapped on the next use.

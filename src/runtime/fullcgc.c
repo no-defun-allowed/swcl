@@ -308,7 +308,6 @@ void gc_mark_range(lispobj* where, long count) {
 #include "weak-hash-pred.inc"
 
 #define ACTION __mark_obj
-#define DO_WP_LIVENESS
 #define TRACE_NAME trace_object
 #include "trace-object.inc"
 

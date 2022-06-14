@@ -145,4 +145,12 @@ page_extensible_p(page_index_t index, generation_index_t gen, int type) {
 #endif
 }
 
+enum {
+    SCRATCH_GENERATION = PSEUDO_STATIC_GENERATION+1,
+    NUM_GENERATIONS
+};
+
+extern struct generation generations[NUM_GENERATIONS];
+
+void reset_page_flags(page_index_t page);
 #endif /* _GENCGC_PRIVATE_H_ */
