@@ -199,7 +199,6 @@
    (make-array (/ sb-vm:gencgc-page-bytes 128)
                :element-type '(unsigned-byte 8)
                :initial-element 0))
-  (large nil)
   scan-start) ; byte offset from base of the space
 
 ;;; a GENESIS-time representation of a memory space (e.g. read-only
@@ -430,33 +429,28 @@
              ;; must not be discarded.
              #+host-quirks-cmu (declare (notinline adjust-array))
              (let* ((start-page (page-index start-word-index))
-                    (end-page (page-index (+ start-word-index (1- count))))
-                    (large-p (> end-page start-page)))
+                    (end-page (page-index (+ start-word-index (1- count)))))
                (unless (> (length (gspace-page-table gspace)) end-page)
                  (adjust-array (gspace-page-table gspace) (1+ end-page)
                                :initial-element nil))
+               (when (> end-page start-page)
+                 (assert (alignedp start-word-index)))
                (loop for page-index from start-page to end-page
                      for pte = (pte page-index)
-                     do (cond
-                          (large-p
-                           (assert (null (page-type pte)) ()
-                                   "large objects should have their own pages")
-                           (setf (page-large pte) t))
-                          (t
-                           ;; Mark used lines for the mark-region GC.
-                           (let ((first-line (line-index start-word-index))
-                                 ;; Note we want the index of the last word, not
-                                 ;; the end of the object as such.
-                                 (last-line (line-index (+ start-word-index n-words -1))))
-                             (loop for line from first-line to last-line
-                                   do (setf (aref (page-line-bytemap pte) line) 1)))
-                           ;; Mark the start of the object for mark-region GC.
-                           (let ((word-in-page (mod start-word-index words-per-page)))
-                             (multiple-value-bind (word-index bit-index)
-                                 (floor (floor word-in-page 2) sb-vm:n-word-bits)
-                               (setf (ldb (byte 1 bit-index)
-                                          (aref (page-allocation-bitmap pte) word-index))
-                                     1)))))
+                     do ;; Mark used lines for the mark-region GC.
+                        (let ((first-line (line-index start-word-index))
+                              ;; Note we want the index of the last word, not
+                              ;; the end of the object as such.
+                              (last-line (line-index (+ start-word-index n-words -1))))
+                          (loop for line from first-line to last-line
+                                do (setf (aref (page-line-bytemap pte) line) 1)))
+                        ;; Mark the start of the object for mark-region GC.
+                        (let ((word-in-page (mod start-word-index words-per-page)))
+                          (multiple-value-bind (word-index bit-index)
+                              (floor (floor word-in-page 2) sb-vm:n-word-bits)
+                            (setf (ldb (byte 1 bit-index)
+                                       (aref (page-allocation-bitmap pte) word-index))
+                                  1)))
                         (if (null (page-type pte))
                             (setf (page-type pte) page-type)
                             (assert (eq (page-type pte) page-type))))))
@@ -3699,9 +3693,6 @@ III. initially undefined function references (alphabetically):
                               (:mixed (incf n-mixed) #b011))
                             0)))
         (setf (bvref-word ptes pte-offset) (logior sso type-bits))
-        (when (page-large pte)
-          ;; LSB of usage indicates a large object on its own page.
-          (incf usage))
         (macrolet ((setter ()
                      ;; KLUDGE to avoid compiler note about one or the other
                      ;; branch of this IF being unreachable.
