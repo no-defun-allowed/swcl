@@ -23,6 +23,7 @@
  * phase, rather than copying and marking in one pass, to make parallel
  * compacting easier. */
 
+/* Initialisation */
 uword_t *allocation_bitmap, *mark_bitmap, *line_bytemap;
 line_index_t line_count;
 
@@ -35,7 +36,7 @@ static void allocate_bitmap(uword_t **bitmap, int divisor,
 }
 
 void mrgc_init() {
-  int bytes_per_heap_byte = N_WORD_BYTES * 2 * 8;
+  int bytes_per_heap_byte = N_WORD_BITS * 2;
   allocate_bitmap(&allocation_bitmap, bytes_per_heap_byte,
                   "allocation bitmap");
   allocate_bitmap(&mark_bitmap, bytes_per_heap_byte,
@@ -44,6 +45,8 @@ void mrgc_init() {
   line_count = dynamic_space_size / LINE_SIZE;
 }
 
+/* Line arithmetic */
+
 static inline char *line_address(line_index_t line) {
   return (char*)(DYNAMIC_SPACE_START + (line * LINE_SIZE));
 }
@@ -51,6 +54,15 @@ static inline char *line_address(line_index_t line) {
 static inline line_index_t address_line(void *address) {
   return ((uintptr_t)address - DYNAMIC_SPACE_START) / LINE_SIZE;
 }
+
+uword_t lines_used() {
+  uword_t count = 0;
+  for (line_index_t line = 0; line < line_count; line++)
+    if (line_bytemap[line]) count++;
+  return count;
+}
+
+/* Allocation slow-path */
 
 /* Allocation of small objects is done by finding contiguous lines
  * that can fit the object to allocate. Small objects can span lines
@@ -86,7 +98,7 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
   }
 }
 
-/* Fast path for allocation, wherein we use another chunk that the
+/* Medium path for allocation, wherein we use another chunk that the
  * thread already claimed. */
 boolean try_allocate_small_after_region(sword_t nbytes, struct alloc_region *region) {
   /* We search to the end of this page. */
@@ -116,10 +128,7 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
 boolean try_allocate_large(sword_t nbytes, struct alloc_region *region,
                            int page_type, generation_index_t gen,
                            page_index_t *start, page_index_t end) {
-  /* We need at least one not-entirely-filled page to ensure
-   * page_ends_contiguous_block_p will still work. */
-  int pages_needed = ALIGN_UP(nbytes + 1, GENCGC_PAGE_BYTES) / GENCGC_PAGE_BYTES;
-
+  int pages_needed = ALIGN_UP(nbytes, GENCGC_PAGE_BYTES) / GENCGC_PAGE_BYTES;
   page_index_t where = *start;
   while (1) {
 
@@ -137,7 +146,7 @@ void mr_update_closed_region(struct alloc_region *region) {
     page_bytes_t page_bytes_used = page_bytes_used(the_page);
     set_page_bytes_used(the_page, GENCGC_PAGE_BYTES);
     generation_index_t gen = page_table[the_page].gen;
-    /* We just used the rest of the page. */
+    /* Report that we used the rest of the page. */
     generations[gen].bytes_allocated += GENCGC_PAGE_BYTES - page_bytes_used;
   } else {
     /* Didn't actually allocate anything. */
@@ -145,9 +154,20 @@ void mr_update_closed_region(struct alloc_region *region) {
   }
 }
 
-uword_t lines_used() {
-  uword_t count = 0;
-  for (line_index_t line = 0; line < line_count; line++)
-    if (line_bytemap[line]) count++;
-  return count;
+/* Core file I/O */
+
+void bitmap_sizes(core_entry_elt_t n_ptes, sword_t *where) {
+  sword_t bytes_of_heap = n_ptes * GENCGC_PAGE_BYTES;
+  where[0] = bytes_of_heap / (N_WORD_BITS * 2); /* allocation bitmap size */
+  where[1] = bytes_of_heap / LINE_SIZE;         /* line bytemap size */
+}
+
+void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
+  sword_t sizes[2];
+  bitmap_sizes(n_ptes, sizes);
+  sword_t allocation_bitmap_size = sizes[0], line_bytemap_size = sizes[1];
+  if (read(fd, allocation_bitmap, allocation_bitmap_size) != allocation_bitmap_size)
+    lose("failed to read allocation bitmap from core");
+  if (read(fd, line_bytemap, line_bytemap_size) != line_bytemap_size)
+    lose("failed to read line bytemap from core");
 }

@@ -3708,6 +3708,16 @@ III. initially undefined function references (alphabetically):
     (let ((posn (file-position core-file)))
       (file-position core-file (* sb-c:+backend-page-bytes+ (1+ data-page)))
       (write-bigvec-as-sequence ptes core-file :end pte-bytes)
+      #+mark-region-gc
+      (progn
+        (dotimes (page-index n-ptes)
+          (map 'nil write-word
+               (page-allocation-bitmap
+                (aref (gspace-page-table gspace) page-index))))
+        (dotimes (page-index n-ptes)
+          (map 'nil (lambda (b) (write-byte b core-file))
+               (page-line-bytemap
+                (aref (gspace-page-table gspace) page-index)))))
       (force-output core-file)
       (file-position core-file posn))
     (mapc write-word

@@ -5681,6 +5681,10 @@ void gc_load_corefile_ptes(int card_table_nbits,
 #endif
     }
 
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    load_corefile_bitmaps(fd, n_ptes);
+#endif
+
 #ifdef LISP_FEATURE_DARWIN_JIT
     darwin_jit_code_pages_kludge();
     /* For some reason doing an early pthread_jit_write_protect_np sometimes fails.
