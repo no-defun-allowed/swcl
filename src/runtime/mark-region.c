@@ -1,4 +1,6 @@
 #include <stdbool.h>
+#include <string.h>
+#include <unistd.h>
 #include "align.h"
 #include "os.h"
 #include "gc.h"
@@ -24,10 +26,11 @@
  * compacting easier. */
 
 /* Initialisation */
-uword_t *allocation_bitmap, *mark_bitmap, *line_bytemap;
+uword_t *allocation_bitmap, *mark_bitmap;
+char *line_bytemap;
 line_index_t line_count;
 
-static void allocate_bitmap(uword_t **bitmap, int divisor,
+static void allocate_bitmap(void **bitmap, int divisor,
                             const char *description) {
   *bitmap = calloc(dynamic_space_size / divisor, 1);
   if (!*bitmap)
@@ -36,7 +39,7 @@ static void allocate_bitmap(uword_t **bitmap, int divisor,
 }
 
 void mrgc_init() {
-  int bytes_per_heap_byte = N_WORD_BITS * 2;
+  int bytes_per_heap_byte = 8 /* bits/byte */ << N_LOWTAG_BITS;
   allocate_bitmap(&allocation_bitmap, bytes_per_heap_byte,
                   "allocation bitmap");
   allocate_bitmap(&mark_bitmap, bytes_per_heap_byte,
@@ -93,6 +96,7 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
       region->start_addr = line_address(chunk_start);
       region->free_pointer = line_address(chunk_start) + nbytes;
       region->end_addr = line_address(chunk_end);
+      memset(region->start_addr, 0, region->end_addr - region->start_addr);
       return true;
     }
   }
@@ -139,15 +143,20 @@ boolean try_allocate_large(sword_t nbytes, struct alloc_region *region,
 void mr_update_closed_region(struct alloc_region *region) {
   /* alloc_regions never span multiple pages. */
   page_index_t the_page = find_page_index(region->start_addr);
+  page_table[the_page].type &= ~(OPEN_REGION_PAGE_FLAG);
   if (region->free_pointer > region->start_addr) {
     /* Did allocate something. We just say we used the whole page;
      * in terms of pressure on the GC, we basically did, as we can't reuse
-     * the page (currently). */
+     * the page before a collection to provide accurate line marks
+     * (currently). This could be alleviated if we track which lines
+     * were actually used by the mutator. */
     page_bytes_t page_bytes_used = page_bytes_used(the_page);
     set_page_bytes_used(the_page, GENCGC_PAGE_BYTES);
     generation_index_t gen = page_table[the_page].gen;
     /* Report that we used the rest of the page. */
-    generations[gen].bytes_allocated += GENCGC_PAGE_BYTES - page_bytes_used;
+    os_vm_size_t just_used = GENCGC_PAGE_BYTES - page_bytes_used;
+    generations[gen].bytes_allocated += just_used;
+    bytes_allocated += just_used;
   } else {
     /* Didn't actually allocate anything. */
     reset_page_flags(the_page);
@@ -158,7 +167,7 @@ void mr_update_closed_region(struct alloc_region *region) {
 
 void bitmap_sizes(core_entry_elt_t n_ptes, sword_t *where) {
   sword_t bytes_of_heap = n_ptes * GENCGC_PAGE_BYTES;
-  where[0] = bytes_of_heap / (N_WORD_BITS * 2); /* allocation bitmap size */
+  where[0] = bytes_of_heap / (8 << N_LOWTAG_BITS); /* allocation bitmap size */
   where[1] = bytes_of_heap / LINE_SIZE;         /* line bytemap size */
 }
 
@@ -166,8 +175,10 @@ void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
   sword_t sizes[2];
   bitmap_sizes(n_ptes, sizes);
   sword_t allocation_bitmap_size = sizes[0], line_bytemap_size = sizes[1];
+  printf("reading %x byte alloation bitmap at %x\n", sizes[0], lseek(fd, 0, SEEK_CUR));
   if (read(fd, allocation_bitmap, allocation_bitmap_size) != allocation_bitmap_size)
     lose("failed to read allocation bitmap from core");
+  printf("reading %x byte line bytemap at %x\n", sizes[1], lseek(fd, 0, SEEK_CUR));
   if (read(fd, line_bytemap, line_bytemap_size) != line_bytemap_size)
     lose("failed to read line bytemap from core");
 }

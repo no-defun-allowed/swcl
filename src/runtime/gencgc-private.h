@@ -151,6 +151,7 @@ enum {
 };
 
 extern struct generation generations[NUM_GENERATIONS];
+extern os_vm_size_t bytes_allocated;
 
 void reset_page_flags(page_index_t page);
 #endif /* _GENCGC_PRIVATE_H_ */

@@ -191,7 +191,9 @@
   (type nil :type (member nil :code :list :mixed))
   (words-used 0)
   (allocation-bitmap
-   (make-array (/ sb-vm:gencgc-page-bytes sb-vm:n-lowtag-bits sb-vm:n-word-bits)
+   (make-array (/ sb-vm:gencgc-page-bytes
+                  (ash 1 sb-vm:n-lowtag-bits)
+                  sb-vm:n-word-bits)
                :element-type 'sb-vm:word
                :initial-element 0))
   (line-bytemap

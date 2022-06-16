@@ -392,9 +392,10 @@ save_to_filehandle(FILE *file, char *filename, lispobj init_function,
         extern void bitmap_sizes(core_entry_elt_t, sword_t*);
         sword_t sizes[2];
         bitmap_sizes(next_free_page, sizes);
-        extern uword_t *allocation_bitmap, *line_bytemap;
+        extern uword_t *allocation_bitmap;
+        extern char *line_bytemap;
         write_bytes(file, (char*)allocation_bitmap, sizes[0], core_start_pos, COMPRESSION_LEVEL_NONE, 0);
-        write_bytes(file, (char*)line_bytemap, sizes[1], core_start_pos, COMPRESSION_LEVEL_NONE, 0);
+        write_bytes(file, line_bytemap, sizes[1], core_start_pos, COMPRESSION_LEVEL_NONE, 0);
 #endif
         write_lispobj(offset, file);
     }
