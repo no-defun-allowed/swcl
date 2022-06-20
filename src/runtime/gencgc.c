@@ -275,15 +275,6 @@ npage_bytes(page_index_t npages)
     return ((os_vm_size_t)npages)*GENCGC_PAGE_BYTES;
 }
 
-/* Check that X is a higher address than Y and return offset from Y to
- * X in bytes. */
-static inline os_vm_size_t
-addr_diff(void *x, void *y)
-{
-    gc_assert(x >= y);
-    return (uintptr_t)x - (uintptr_t)y;
-}
-
 /* an array of generation structures. There needs to be one more
  * generation structure than actual generations as the oldest
  * generation is temporarily raised then lowered. */

@@ -30,7 +30,7 @@ uword_t *allocation_bitmap, *mark_bitmap;
 char *line_bytemap;
 line_index_t line_count;
 
-static void allocate_bitmap(void **bitmap, int divisor,
+static void allocate_bitmap(uword_t **bitmap, int divisor,
                             const char *description) {
   *bitmap = calloc(dynamic_space_size / divisor, 1);
   if (!*bitmap)
@@ -44,7 +44,7 @@ void mrgc_init() {
                   "allocation bitmap");
   allocate_bitmap(&mark_bitmap, bytes_per_heap_byte,
                   "mark bitmap");
-  allocate_bitmap(&line_bytemap, LINE_SIZE, "line bytemap");
+  allocate_bitmap((uword_t**)&line_bytemap, LINE_SIZE, "line bytemap");
   line_count = dynamic_space_size / LINE_SIZE;
 }
 
@@ -70,16 +70,14 @@ uword_t lines_used() {
 /* Allocation of small objects is done by finding contiguous lines
  * that can fit the object to allocate. Small objects can span lines
  * but cannot pages, so we examine lines in each page separately. */
-static line_index_t find_free_line(line_index_t start, line_index_t end) {
-  for (line_index_t where = start; where < end; where++)
-    if (!line_bytemap[where]) return where;
-  return -1;
-}
-static line_index_t find_used_line(line_index_t start, line_index_t end) {
-  for (line_index_t where = start; where < end; where++)
-    if (line_bytemap[where]) return where;
-  return end;
-}
+#define DEF_FINDER(name, type, test, fail) \
+  static type name(type start, type end) { \
+    for (type where = start; where < end; where++) \
+      if (test) return where; \
+    return fail; }
+
+DEF_FINDER(find_free_line, line_index_t, !line_bytemap[where], -1);
+DEF_FINDER(find_used_line, line_index_t, line_bytemap[where], end);
 
 /* Try to find space to fit a new object in the lines between `start`
  * and `end`. Updates `region` and returns true if we succeed, keeps
@@ -96,9 +94,11 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
       region->start_addr = line_address(chunk_start);
       region->free_pointer = line_address(chunk_start) + nbytes;
       region->end_addr = line_address(chunk_end);
-      memset(region->start_addr, 0, region->end_addr - region->start_addr);
+      memset(region->start_addr, 0, addr_diff(region->end_addr, region->start_addr));
       return true;
     }
+    if (chunk_end == end) return false;
+    where = chunk_end;
   }
 }
 
@@ -121,7 +121,8 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
         try_allocate_small(nbytes, region,
                            address_line(page_address(where)),
                            address_line(page_address(where + 1)))) {
-      page_table[where].type |= OPEN_REGION_PAGE_FLAG;
+      page_table[where].type = page_type | OPEN_REGION_PAGE_FLAG;
+      page_table[where].gen = gen;
       set_page_scan_start_offset(where, 0);
       *start = where + 1;
       return true;
@@ -129,13 +130,35 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
   return false;
 }
 
-boolean try_allocate_large(sword_t nbytes, struct alloc_region *region,
+/* Allocation annoying-path */
+
+DEF_FINDER(find_free_page, page_index_t, page_free_p(where), -1);
+DEF_FINDER(find_used_page, page_index_t, !page_free_p(where), end);
+
+boolean try_allocate_large(sword_t nbytes,
                            int page_type, generation_index_t gen,
                            page_index_t *start, page_index_t end) {
   int pages_needed = ALIGN_UP(nbytes, GENCGC_PAGE_BYTES) / GENCGC_PAGE_BYTES;
+  uword_t remainder = nbytes % GENCGC_PAGE_BYTES;
   page_index_t where = *start;
   while (1) {
-
+    page_index_t chunk_start = find_free_page(where, end);
+    if (chunk_start == -1) return false;
+    page_index_t chunk_end = find_used_page(chunk_start, end);
+    if (chunk_end - chunk_start >= pages_needed) {
+      page_index_t last_page = chunk_start + pages_needed - 1;
+      for (page_index_t p = chunk_start; p < last_page; p++) {
+        page_table[where].type = page_type;
+        page_table[where].gen = gen;
+        set_page_bytes_used(where,
+                            (p == last_page && remainder > 0) ? remainder
+                            : GENCGC_PAGE_BYTES);
+      }
+      *start = chunk_start + pages_needed;
+      return true;
+    }
+    if (chunk_end == end) return false;
+    where = chunk_end;
   }
   return false;
 }
@@ -143,13 +166,13 @@ boolean try_allocate_large(sword_t nbytes, struct alloc_region *region,
 void mr_update_closed_region(struct alloc_region *region) {
   /* alloc_regions never span multiple pages. */
   page_index_t the_page = find_page_index(region->start_addr);
-  page_table[the_page].type &= ~(OPEN_REGION_PAGE_FLAG);
   if (region->free_pointer > region->start_addr) {
     /* Did allocate something. We just say we used the whole page;
      * in terms of pressure on the GC, we basically did, as we can't reuse
      * the page before a collection to provide accurate line marks
      * (currently). This could be alleviated if we track which lines
      * were actually used by the mutator. */
+    page_table[the_page].type &= ~(OPEN_REGION_PAGE_FLAG);
     page_bytes_t page_bytes_used = page_bytes_used(the_page);
     set_page_bytes_used(the_page, GENCGC_PAGE_BYTES);
     generation_index_t gen = page_table[the_page].gen;
@@ -175,10 +198,8 @@ void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
   sword_t sizes[2];
   bitmap_sizes(n_ptes, sizes);
   sword_t allocation_bitmap_size = sizes[0], line_bytemap_size = sizes[1];
-  printf("reading %x byte alloation bitmap at %x\n", sizes[0], lseek(fd, 0, SEEK_CUR));
   if (read(fd, allocation_bitmap, allocation_bitmap_size) != allocation_bitmap_size)
     lose("failed to read allocation bitmap from core");
-  printf("reading %x byte line bytemap at %x\n", sizes[1], lseek(fd, 0, SEEK_CUR));
   if (read(fd, line_bytemap, line_bytemap_size) != line_bytemap_size)
     lose("failed to read line bytemap from core");
 }

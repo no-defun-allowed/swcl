@@ -145,6 +145,15 @@ page_extensible_p(page_index_t index, generation_index_t gen, int type) {
 #endif
 }
 
+/* Check that X is a higher address than Y and return offset from Y to
+ * X in bytes. */
+static inline os_vm_size_t
+addr_diff(void *x, void *y)
+{
+    gc_assert(x >= y);
+    return (uintptr_t)x - (uintptr_t)y;
+}
+
 enum {
     SCRATCH_GENERATION = PSEUDO_STATIC_GENERATION+1,
     NUM_GENERATIONS
