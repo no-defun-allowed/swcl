@@ -1,6 +1,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
+
 #include "align.h"
 #include "os.h"
 #include "gc.h"
@@ -8,12 +9,20 @@
 #include "mark-region.h"
 #include "validate.h"
 #include "gc-assert.h"
+#include "gc-internal.h"
 #include "gencgc-internal.h"
 #include "gencgc-private.h"
 #include "core.h"
 #include "interr.h"
 #include "globals.h"
 #include "lispobj.h"
+#include "queue.h"
+
+#include "genesis/cons.h" 
+#include "genesis/gc-tables.h"
+#include "genesis/hash-table.h"
+#include "genesis/closure.h"
+#include "gc-private.h"
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -135,32 +144,32 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
 DEF_FINDER(find_free_page, page_index_t, page_free_p(where), -1);
 DEF_FINDER(find_used_page, page_index_t, !page_free_p(where), end);
 
-boolean try_allocate_large(sword_t nbytes,
-                           int page_type, generation_index_t gen,
-                           page_index_t *start, page_index_t end) {
+page_index_t try_allocate_large(sword_t nbytes,
+                                int page_type, generation_index_t gen,
+                                page_index_t *start, page_index_t end) {
   int pages_needed = ALIGN_UP(nbytes, GENCGC_PAGE_BYTES) / GENCGC_PAGE_BYTES;
   uword_t remainder = nbytes % GENCGC_PAGE_BYTES;
   page_index_t where = *start;
   while (1) {
     page_index_t chunk_start = find_free_page(where, end);
-    if (chunk_start == -1) return false;
+    if (chunk_start == -1) return -1;
     page_index_t chunk_end = find_used_page(chunk_start, end);
     if (chunk_end - chunk_start >= pages_needed) {
       page_index_t last_page = chunk_start + pages_needed - 1;
       for (page_index_t p = chunk_start; p < last_page; p++) {
-        page_table[where].type = page_type;
+        page_table[where].type = SINGLE_OBJECT_FLAG | page_type;
         page_table[where].gen = gen;
         set_page_bytes_used(where,
                             (p == last_page && remainder > 0) ? remainder
                             : GENCGC_PAGE_BYTES);
       }
       *start = chunk_start + pages_needed;
-      return true;
+      return chunk_start;
     }
-    if (chunk_end == end) return false;
+    if (chunk_end == end) return -1;
     where = chunk_end;
   }
-  return false;
+  return -1;
 }
 
 void mr_update_closed_region(struct alloc_region *region) {
@@ -202,4 +211,169 @@ void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
     lose("failed to read allocation bitmap from core");
   if (read(fd, line_bytemap, line_bytemap_size) != line_bytemap_size)
     lose("failed to read line bytemap from core");
+}
+
+/* Marking */
+
+static generation_index_t generation_being_collected;
+static bool object_marked_p(lispobj object) {
+  uword_t index = (uword_t)(object >> N_LOWTAG_BITS);
+  uword_t bit_index = index % N_WORD_BITS, word_index = index / N_WORD_BITS;
+  return mark_bitmap[word_index] & (1 << bit_index);
+}
+static void set_mark_bit(lispobj object) {
+  uword_t index = (uword_t)(object >> N_LOWTAG_BITS);
+  uword_t bit_index = index % N_WORD_BITS, word_index = index / N_WORD_BITS;
+  mark_bitmap[word_index] |= (1 << bit_index);
+}
+static int pointer_survived_gc_yet(lispobj object) {
+  return page_table[find_page_index((void*)object)].gen != generation_being_collected ||
+         object_marked_p(object);
+}
+
+static struct Qblock *mark_queue;
+static struct Qblock *recycle_queue;
+
+static struct Qblock *grab_qblock() {
+  struct Qblock *block;
+  if (recycle_queue) {
+    block = recycle_queue;
+    recycle_queue = recycle_queue->next;
+  } else {
+    block = malloc(QBLOCK_BYTES);
+    if (!block) lose("Failed to allocate new mark-queue block");
+  }
+  block->count = 0;
+  return block;
+}
+static void recycle_qblock(struct Qblock *block) {
+  block->next = recycle_queue;
+  recycle_queue = block;
+}
+
+static void add_words_used(void *where, page_words_t count) {
+  page_index_t p = find_page_index(where);
+  uword_t byte_count = count * N_WORD_BYTES;
+  for (; byte_count >= GENCGC_PAGE_BYTES;
+       byte_count -= GENCGC_PAGE_BYTES, p++)
+    set_page_bytes_used(p, GENCGC_PAGE_BYTES);
+  set_page_bytes_used(p, page_bytes_used(p) + byte_count);
+}
+
+static void mark_cons_line(struct cons *c) {
+  /* CONS cells never span lines, because they are aligned on
+   * cons pages. */
+  line_bytemap[address_line(c)] = 1;
+  add_words_used(c, 2);
+}
+static void mark_lines(lispobj *p) {
+  /* TODO: Don't really need to mark lines if the object is large, as
+   * we don't try to reuse single object pages. */
+  page_words_t word_count = OBJECT_SIZE(*p, p);
+  line_index_t first = address_line(p), last = address_line(p + word_count - 1);
+  for (line_index_t line = first; line <= last; line++) line_bytemap[line] = 1;
+  add_words_used(p, word_count);
+}
+
+static void mark1(lispobj object) {
+  if (!pointer_survived_gc_yet(object)) {
+    set_mark_bit(object);
+    if (mark_queue == NULL || mark_queue->count == QBLOCK_CAPACITY) {
+      /* How would this look if we do parallel marking? At the moment I
+       * would guess that we link blocks up to mark_queue only when they
+       * are "published" to the global queue, not upon creating them. */
+      struct Qblock *n = grab_qblock();
+      n->next = mark_queue;
+      mark_queue = n;
+    }
+    mark_queue->elements[mark_queue->count++] = object;
+  }
+}
+
+static void mark(lispobj object) {
+  if (is_lisp_pointer(object)) mark1((lispobj)native_pointer(object));
+}
+
+static bool interesting_pointer_p(lispobj object) {
+  page_index_t p = find_page_index(native_pointer(object));
+  return p >= 0 && page_table[p].gen == generation_being_collected;
+}
+
+#define ACTION mark
+#define TRACE_NAME trace_other_object
+/* I don't see why this table should be an .inc thingy. It isn't
+ * paramaterized like we have done for trace-object.inc, so there
+ * isn't really a reason to have multiple copies of the functions and
+ * table laying around. */
+#define HT_ENTRY_LIVENESS_FUN_ARRAY_NAME mr_alivep_funs
+#include "trace-object.inc"
+
+static void trace_object(lispobj object) {
+  if (listp(object)) {
+    struct cons *c = CONS(object);
+    mark_cons_line(c);
+    mark(c->car); mark(c->cdr);
+  } else {
+    lispobj *p = native_pointer(object);
+    mark_lines(p);
+    trace_other_object(p);
+  }
+}
+
+static lispobj dequeue() {
+  gc_assert(mark_queue != NULL);
+  gc_assert(mark_queue->count);
+  lispobj v = mark_queue->elements[mark_queue->count--];
+  if (mark_queue->count == 0) mark_queue = mark_queue->next;
+  return v;
+}
+
+static void trace_everything() {
+  while (mark_queue != NULL ||
+         (test_weak_triggers(pointer_survived_gc_yet, mark) && mark_queue != NULL)) {
+    trace_object(dequeue());
+  }
+}
+
+/* Conservative pointer scanning */
+static lispobj last_address_in(uword_t bitword, uword_t word_index) {
+  /* TODO: Make this portable? MSVC uses _BitScanForward64 and
+   * we should probably have a portable fallback too. */
+  return DYNAMIC_SPACE_START + ((word_index * N_WORD_BITS + __builtin_ctz(bitword)) << N_LOWTAG_BITS);
+}
+
+static lispobj find_object(uword_t address) {
+  page_index_t p = find_page_index((void*)address);
+  if (page_table[p].type == PAGE_TYPE_CONS) {
+    /* CONS cells are always aligned, and the mutator is allowed to be lazy
+     * w.r.t putting down allocation bits, so just use alignment. */
+    return ALIGN_DOWN(address, 1 << N_LOWTAG_BITS) + LIST_POINTER_LOWTAG;
+  } else {
+    /* Go scanning for the object. */
+    uword_t first_bit_index = (address - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
+    uword_t first_word_index = first_bit_index / N_WORD_BITS;
+    /* Something a bit odd here: as we use mark1 on the result
+     * of find_object, we just have to produce something that isn't
+     * a list pointer; even though we're really producing fixnums here.
+     * The rest of marking doesn't mind what the lowtag is, as it
+     * operates on native pointers, after deciding the pointer isn't a
+     * list pointer. */
+    if (mark_bitmap[first_word_index]) {
+      /* Return the last location not after the address provided. */
+      /* Supposing first_bit_index = 5, we compute
+       * all_not_after = (1 << 6) - 1 = ...000111111
+       * i.e. all bits not above bit #5 set. */
+      uword_t all_not_after = (1 << (first_bit_index % N_WORD_BITS + 1)) - 1;
+      return last_address_in(mark_bitmap[first_word_index] & all_not_after, first_word_index);
+    }
+    for (uword_t i = first_word_index - 1; i > 0; i--)
+      if (mark_bitmap[i])
+        /* Return the last location. */
+        return last_address_in(mark_bitmap[i], i);
+    lose("find_object fell through on %ld?", address);
+  }
+}
+
+void mr_preserve_pointer(uword_t address) {
+  mark1(find_object(address));
 }

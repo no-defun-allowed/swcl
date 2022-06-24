@@ -1,5 +1,7 @@
 // -*- mode: c -*-
 
+#include "weak-hash-pred.inc"
+
 #ifndef ACTION
 #error "Need ACTION to be defined"
 #endif
@@ -81,7 +83,7 @@ static void TRACE_NAME(lispobj* where)
             int weakness = hashtable_weakness(hash_table);
             boolean defer = 1;
             if (weakness != WEAKNESS_KEY_AND_VALUE)
-                defer = scan_weak_hashtable(hash_table, alivep_funs[weakness],
+                defer = scan_weak_hashtable(hash_table, HT_ENTRY_LIVENESS_FUN_ARRAY_NAME[weakness],
                                             TRACE_PAIR);
             if (defer) {
                 hash_table->next_weak_hash_table = (lispobj)weak_hash_tables;

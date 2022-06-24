@@ -304,11 +304,9 @@ void gc_mark_range(lispobj* where, long count) {
         gc_mark_obj(where[i]);
 }
 
-#define HT_ENTRY_LIVENESS_FUN_ARRAY_NAME alivep_funs
-#include "weak-hash-pred.inc"
-
 #define ACTION __mark_obj
 #define TRACE_NAME trace_object
+#define HT_ENTRY_LIVENESS_FUN_ARRAY_NAME alivep_funs
 #include "trace-object.inc"
 
 void prepare_for_full_mark_phase()
