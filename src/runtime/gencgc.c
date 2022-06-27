@@ -2528,6 +2528,9 @@ static void pin_object(lispobj object)
 
 static boolean NO_SANITIZE_MEMORY preserve_pointer(uword_t word)
 {
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    lose("This won't work for MR.");
+#endif
 #ifdef LISP_FEATURE_METASPACE
     extern lispobj valid_metaspace_ptr_p(void* addr);
 #endif
@@ -3047,6 +3050,9 @@ static page_index_t scan_boxed_root_cards_non_spanning(page_index_t page, genera
  * By construction, objects will never span cards */
 static page_index_t scan_mixed_root_cards(page_index_t page, generation_index_t gen)
 {
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    lose("No small mixed in mark-region yet.");
+#endif
     do {
         lispobj* start = (void*)page_address(page);
         long card = addr_to_card_index(start);
@@ -3816,7 +3822,11 @@ conservative_stack_scan(struct thread* th,
         // since there is no memory on the 0th page.
         // (most OSes don't let users map memory there, though they used to).
         if (word >= BACKEND_PAGE_BYTES && potential_heap_pointer(word)) {
+#ifdef LISP_FEATURE_MARK_REGION_GC
+            mr_preserve_pointer(word);
+#else
             preserve_pointer(word);
+#endif
         }
     }
 }
@@ -4115,10 +4125,14 @@ garbage_collect_generation(generation_index_t generation, int raise,
     }
 
     if (!compacting_p()) {
+#ifdef LISP_FEATURE_MARK_REGION_GC
+        mr_collect_garbage();
+#else
         extern void execute_full_mark_phase();
         extern void execute_full_sweep_phase();
         execute_full_mark_phase();
         execute_full_sweep_phase();
+#endif
         goto maybe_verify;
     }
 
@@ -4511,9 +4525,12 @@ collect_garbage(generation_index_t last_gen)
         fprintf(stderr, "Pre-GC:\n");
         print_generation_stats();
     }
-
-    page_index_t initial_nfp = next_free_page;
+    
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    {
+#else
     if (gc_mark_only) {
+#endif
         garbage_collect_generation(PSEUDO_STATIC_GENERATION, 0,
                                    cur_thread_approx_stackptr);
         goto finish;
@@ -4916,6 +4933,10 @@ lisp_alloc(int largep, struct alloc_region *region, sword_t nbytes,
         return new_obj;
     }
 
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    if (try_allocate_small_after_region(nbytes, region)) return region->start_addr;
+#endif
+    
     /* We don't want to count nbytes against auto_gc_trigger unless we
      * have to: it speeds up the tenuring of objects and slows down
      * allocation. However, unless we do so when allocating _very_
@@ -4971,6 +4992,28 @@ lisp_alloc(int largep, struct alloc_region *region, sword_t nbytes,
         allocator_record_backtrace(__builtin_frame_address(0), thread);
 #endif
 
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
+    gc_assert(ret);
+    largep = nbytes >= (GENCGC_PAGE_BYTES / 4 * 3);
+    page_index_t alloc_start = get_alloc_start_page(page_type, largep);
+    if (largep) {
+        page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,
+                                                   &alloc_start, page_table_pages);
+        if (new_page == -1) gc_heap_exhausted_error_or_lose(0, nbytes);
+        new_obj = page_address(new_page);
+    } else {
+        boolean success =
+            try_allocate_small_from_pages(nbytes, region, page_type,
+                                          gc_alloc_generation,
+                                          &alloc_start, page_table_pages);
+        if (!success) gc_heap_exhausted_error_or_lose(0, nbytes);
+        new_obj = region->start_addr;
+    }
+    set_alloc_start_page(page_type, largep, alloc_start);
+    ret = mutex_release(&free_pages_lock);
+    gc_assert(ret);
+#else
     if (largep) return gc_alloc_large(nbytes, page_type);
 
     int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
@@ -4998,6 +5041,7 @@ lisp_alloc(int largep, struct alloc_region *region, sword_t nbytes,
         // Request > 4 words, forcing a new page to be claimed.
         gc_alloc_new_region(6 * N_WORD_BYTES, page_type, region, 1); // do release
     }
+#endif
 
     return new_obj;
 }

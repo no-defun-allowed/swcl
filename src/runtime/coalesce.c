@@ -203,6 +203,7 @@ static uword_t coalesce_range(lispobj* where, lispobj* limit, uword_t arg)
  * It's not wrong to fail to coalesce things that could have been */
 void coalesce_similar_objects()
 {
+#ifndef LISP_FEATURE_MARK_REGION_GC // no hope this works on MR yet
     struct hopscotch_table ht;
     uword_t arg = (uword_t)&ht;
 
@@ -224,4 +225,5 @@ void coalesce_similar_objects()
     coalesce_range(current_dynamic_space, get_alloc_pointer(), arg);
 #endif
     hopscotch_destroy(&ht);
+#endif
 }
