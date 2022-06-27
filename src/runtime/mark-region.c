@@ -171,12 +171,14 @@ page_index_t try_allocate_large(sword_t nbytes,
     page_index_t chunk_end = find_used_page(chunk_start, end);
     if (chunk_end - chunk_start >= pages_needed) {
       page_index_t last_page = chunk_start + pages_needed - 1;
-      for (page_index_t p = chunk_start; p < last_page; p++) {
+      for (page_index_t p = chunk_start; p <= last_page; p++) {
         page_table[p].type = SINGLE_OBJECT_FLAG | page_type;
         page_table[p].gen = gen;
         set_page_bytes_used(p,
                             (p == last_page && remainder > 0) ? remainder
                             : GENCGC_PAGE_BYTES);
+        set_page_scan_start_offset(p,
+                                   GENCGC_PAGE_BYTES * (p - chunk_start));
       }
       *start = chunk_start + pages_needed;
       memset(page_address(chunk_start), 0, pages_needed * GENCGC_PAGE_BYTES);
@@ -350,7 +352,7 @@ static void trace_object(lispobj object) {
 static lispobj dequeue() {
   gc_assert(mark_queue != NULL);
   gc_assert(mark_queue->count);
-  lispobj v = mark_queue->elements[mark_queue->count--];
+  lispobj v = mark_queue->elements[--mark_queue->count];
   if (mark_queue->count == 0) {
     struct Qblock *next = mark_queue->next;
     recycle_qblock(mark_queue);
@@ -466,4 +468,11 @@ void mr_collect_garbage() {
   printf("[GC]\n");
   trace_everything();
   sweep();
+}
+
+void draw_page_table() {
+  for (int i = 0; i < 4000; i++) {
+    if (i % 50 == 0) printf("\n");
+    printf("%c%c", 64 + page_table[i].type, '0' + page_table[i].gen);
+  }
 }
