@@ -47,6 +47,7 @@
 #include "interr.h"             /* for lose() */
 #include "alloc.h"
 #include "gc-internal.h"
+#include "mark-region.h"
 #include "pseudo-atomic.h"
 #include "interrupt.h"
 #include "lispregs.h"

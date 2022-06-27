@@ -296,7 +296,7 @@ static void mark_lines(lispobj *p) {
   if (in_static_space_p((lispobj)p)) return;
   /* TODO: Don't really need to mark lines if the object is large, as
    * we don't try to reuse single object pages. */
-  page_words_t word_count = OBJECT_SIZE(*p, p);
+  page_words_t word_count = object_size2(p, widetag_of(p));
   line_index_t first = address_line(p), last = address_line(p + word_count - 1);
   for (line_index_t line = first; line <= last; line++) line_bytemap[line] = 1;
   add_words_used(p, word_count);

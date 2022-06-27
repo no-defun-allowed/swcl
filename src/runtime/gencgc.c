@@ -4538,7 +4538,8 @@ collect_garbage(generation_index_t last_gen)
         fprintf(stderr, "Pre-GC:\n");
         print_generation_stats();
     }
-    
+
+    page_index_t initial_nfp = next_free_page;
 #ifdef LISP_FEATURE_MARK_REGION_GC
     {
 #else
@@ -5009,7 +5010,7 @@ lisp_alloc(int largep, struct alloc_region *region, sword_t nbytes,
     int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
     gc_assert(ret);
     largep = nbytes >= (GENCGC_PAGE_BYTES / 4 * 3);
-    page_index_t alloc_start = get_alloc_start_page(page_type, largep);
+    page_index_t alloc_start = get_alloc_start_page(page_type);
     if (largep) {
         page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,
                                                    &alloc_start, page_table_pages);
@@ -5024,7 +5025,7 @@ lisp_alloc(int largep, struct alloc_region *region, sword_t nbytes,
         if (!success) gc_heap_exhausted_error_or_lose(0, nbytes);
         new_obj = region->start_addr;
     }
-    set_alloc_start_page(page_type, largep, alloc_start);
+    set_alloc_start_page(page_type, alloc_start);
     ret = mutex_release(&free_pages_lock);
     gc_assert(ret);
 #else
