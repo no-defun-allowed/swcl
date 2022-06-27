@@ -1208,6 +1208,14 @@ add_new_area(page_index_t first_page, size_t offset, size_t size)
  * from a region's free pointer would be redundant (newspace scavenging
  * can open/close/open/close a region several times on the same page).
  */
+#ifdef LISP_FEATURE_MARK_REGION_GC
+void
+gc_close_region(struct alloc_region *alloc_region, int page_type)
+{
+    (void)page_type;
+    mr_update_closed_region(alloc_region);
+}
+#else
 void
 gc_close_region(struct alloc_region *alloc_region, int page_type)
 {
@@ -1297,6 +1305,7 @@ gc_close_region(struct alloc_region *alloc_region, int page_type)
     }
     gc_set_region_empty(alloc_region);
 }
+#endif
 
 /* Allocate a possibly large object. */
 void *gc_alloc_large(sword_t nbytes, int page_type)
@@ -3740,10 +3749,14 @@ conservative_stack_scan(struct thread* th,
      * GC while handling an interruption */
 
     __attribute__((unused)) void (*context_method)(os_context_register_t) =
+#ifdef LISP_FEATURE_MARK_REGION_GC
+        (void (*)(os_context_register_t))mr_preserve_pointer;
+#else
 #ifdef LISP_FEATURE_SOFT_CARD_MARKS
         gen == 0 ? sticky_preserve_pointer : (void (*)(os_context_register_t))preserve_pointer;
 #else
         (void (*)(os_context_register_t))preserve_pointer;
+#endif
 #endif
 
     void* esp = (void*)-1;
@@ -4936,7 +4949,7 @@ lisp_alloc(int largep, struct alloc_region *region, sword_t nbytes,
 #ifdef LISP_FEATURE_MARK_REGION_GC
     if (try_allocate_small_after_region(nbytes, region)) return region->start_addr;
 #endif
-    
+
     /* We don't want to count nbytes against auto_gc_trigger unless we
      * have to: it speeds up the tenuring of objects and slows down
      * allocation. However, unless we do so when allocating _very_
@@ -5003,6 +5016,7 @@ lisp_alloc(int largep, struct alloc_region *region, sword_t nbytes,
         if (new_page == -1) gc_heap_exhausted_error_or_lose(0, nbytes);
         new_obj = page_address(new_page);
     } else {
+        ensure_region_closed(region, page_type);
         boolean success =
             try_allocate_small_from_pages(nbytes, region, page_type,
                                           gc_alloc_generation,

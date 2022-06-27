@@ -23,9 +23,9 @@ extern boolean try_allocate_small_after_region(sword_t nbytes,
 extern page_index_t try_allocate_large(sword_t nbytes,
                                        int page_type, generation_index_t gen,
                                        page_index_t *start, page_index_t end);
+extern void mr_update_closed_region(struct alloc_region *region);
 
 extern void mr_preserve_pointer(uword_t address);
-
 extern void mr_collect_garbage();
 #endif
 #endif

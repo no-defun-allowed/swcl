@@ -18,7 +18,7 @@
 #include "lispobj.h"
 #include "queue.h"
 
-#include "genesis/cons.h" 
+#include "genesis/cons.h"
 #include "genesis/gc-tables.h"
 #include "genesis/hash-table.h"
 #include "genesis/closure.h"
@@ -137,8 +137,9 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
                                       page_index_t *start, page_index_t end) {
   printf("try_allocate_small_f_p(%lu, %d, %d, %ld, %ld)\n", nbytes, page_type, gen, *start, end);
   for (page_index_t where = *start; where < end; where++)
-    if (page_bytes_used(where) <= GENCGC_PAGE_BYTES - nbytes &&
-        (page_free_p(where) || page_extensible_p(where, gen, page_type)) &&
+    if (//page_bytes_used(where) <= GENCGC_PAGE_BYTES - nbytes &&
+        //(page_free_p(where) || page_extensible_p(where, gen, page_type)) &&
+        page_free_p(where) &&
         try_allocate_small(nbytes, region,
                            address_line(page_address(where)),
                            address_line(page_address(where + 1)))) {
@@ -146,6 +147,7 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
       page_table[where].gen = gen;
       set_page_scan_start_offset(where, 0);
       *start = where + 1;
+      printf(" => %ld\n", where);
       return 1;
     }
   return 0;
@@ -170,14 +172,15 @@ page_index_t try_allocate_large(sword_t nbytes,
     if (chunk_end - chunk_start >= pages_needed) {
       page_index_t last_page = chunk_start + pages_needed - 1;
       for (page_index_t p = chunk_start; p < last_page; p++) {
-        page_table[where].type = SINGLE_OBJECT_FLAG | page_type;
-        page_table[where].gen = gen;
-        set_page_bytes_used(where,
+        page_table[p].type = SINGLE_OBJECT_FLAG | page_type;
+        page_table[p].gen = gen;
+        set_page_bytes_used(p,
                             (p == last_page && remainder > 0) ? remainder
                             : GENCGC_PAGE_BYTES);
       }
       *start = chunk_start + pages_needed;
       memset(page_address(chunk_start), 0, pages_needed * GENCGC_PAGE_BYTES);
+      printf(" => %ld\n", chunk_start);
       return chunk_start;
     }
     if (chunk_end == end) return -1;
@@ -189,6 +192,7 @@ page_index_t try_allocate_large(sword_t nbytes,
 void mr_update_closed_region(struct alloc_region *region) {
   /* alloc_regions never span multiple pages. */
   page_index_t the_page = find_page_index(region->start_addr);
+  printf("closing %lu\n", the_page);
   if (region->free_pointer > region->start_addr) {
     /* Did allocate something. We just say we used the whole page;
      * in terms of pressure on the GC, we basically did, as we can't reuse
@@ -385,16 +389,16 @@ static lispobj find_object(uword_t address) {
      * The rest of marking doesn't mind what the lowtag is, as it
      * operates on native pointers, after deciding the pointer isn't a
      * list pointer. */
-    if (mark_bitmap[first_word_index]) {
+    if (allocation_bitmap[first_word_index]) {
       /* Return the last location not after the address provided. */
       /* Supposing first_bit_index = 5, we compute
        * all_not_after = (1 << 6) - 1 = ...000111111
        * i.e. all bits not above bit #5 set. */
       uword_t all_not_after = (1 << (first_bit_index % N_WORD_BITS + 1)) - 1;
-      return last_address_in(mark_bitmap[first_word_index] & all_not_after, first_word_index);
+      return last_address_in(allocation_bitmap[first_word_index] & all_not_after, first_word_index);
     }
     for (uword_t i = first_word_index - 1; i > 0; i--)
-      if (mark_bitmap[i])
+      if (allocation_bitmap[i])
         /* Return the last location. */
         return last_address_in(mark_bitmap[i], i);
     lose("find_object fell through on %ld?", address);
@@ -402,7 +406,8 @@ static lispobj find_object(uword_t address) {
 }
 
 void mr_preserve_pointer(uword_t address) {
-  mark1(find_object(address));
+  if (is_lisp_pointer(address) && find_page_index((void*)address) > -1)
+    mark1(find_object(address));
 }
 
 /* Sweeping ("regioning"?) */
@@ -446,7 +451,7 @@ static void sweep() {
   bytes_allocated = 0;
   for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
     generations[g].bytes_allocated = 0;
-  
+
   for (page_index_t p = 0; p < page_table_pages; p++) {
     if (page_words_used(p) == 0) {
       reset_page_flags(p);
