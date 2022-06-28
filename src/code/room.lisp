@@ -183,6 +183,9 @@
 (defun map-objects-in-range (fun start end &optional (strict-bound t))
   (declare (type function fun))
   (declare (dynamic-extent fun))
+  #+mark-region-gc
+  (declare (ignore fun start end strict-bound)) ; Have to work it out first.
+  #-mark-region-gc
   (let ((start (descriptor-sap start))
         (end (descriptor-sap end)))
     (loop

@@ -35,9 +35,10 @@
  * compacting easier. */
 
 /* Initialisation */
-uword_t *allocation_bitmap, *mark_bitmap, *static_mark_bitmap;
+uword_t *allocation_bitmap, *mark_bitmap;
 char *line_bytemap;
 line_index_t line_count;
+uword_t mark_bitmap_size;
 
 static void allocate_bitmap(uword_t **bitmap, uword_t size,
                             const char *description) {
@@ -48,10 +49,9 @@ static void allocate_bitmap(uword_t **bitmap, uword_t size,
 
 void mrgc_init() {
   int bytes_per_heap_byte = 8 /* bits/byte */ << N_LOWTAG_BITS;
-  allocate_bitmap(&allocation_bitmap, dynamic_space_size / bytes_per_heap_byte,
-                  "allocation bitmap");
-  allocate_bitmap(&mark_bitmap, dynamic_space_size / bytes_per_heap_byte,
-                  "mark bitmap");
+  mark_bitmap_size = dynamic_space_size / bytes_per_heap_byte;
+  allocate_bitmap(&allocation_bitmap, mark_bitmap_size, "allocation bitmap");
+  allocate_bitmap(&mark_bitmap, mark_bitmap_size, "mark bitmap");
   allocate_bitmap((uword_t**)&line_bytemap,
                   dynamic_space_size / LINE_SIZE,
                   "line bytemap");
@@ -135,8 +135,7 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
                                       page_index_t *start, page_index_t end) {
   // printf("try_allocate_small_f_p(%lu, %d, %d, %ld, %ld)\n", nbytes, page_type, gen, *start, end);
   for (page_index_t where = *start; where < end; where++)
-    if (page_bytes_used(where) <= GENCGC_PAGE_BYTES - nbytes &&
-        (page_free_p(where) || page_extensible_p(where, gen, page_type)) &&
+    if (page_free_p(where) &&
         try_allocate_small(nbytes, region,
                            address_line(page_address(where)),
                            address_line(page_address(where + 1)))) {
@@ -304,19 +303,24 @@ static void mark_lines(lispobj *p) {
 }
 
 static void mark(lispobj object) {
-  if (is_lisp_pointer(object) &&
-      !pointer_survived_gc_yet(object) &&
-      leaf_obj_widetag_p((unsigned char)widetag_of((lispobj*)object))) {
-    set_mark_bit(object);
-    if (mark_queue == NULL || mark_queue->count == QBLOCK_CAPACITY) {
-      /* How would this look if we do parallel marking? At the moment I
-       * would guess that we link blocks up to mark_queue only when they
-       * are "published" to the global queue, not upon creating them. */
-      struct Qblock *n = grab_qblock();
-      n->next = mark_queue;
-      mark_queue = n;
+  if (is_lisp_pointer(object) && in_dynamic_space(object)) {
+    lispobj *np = native_pointer(object);
+    if (embedded_obj_p(widetag_of(np))) {
+      lispobj *base = fun_code_header(np);
+      object = make_lispobj(base, OTHER_POINTER_LOWTAG);
     }
-    mark_queue->elements[mark_queue->count++] = object;
+    if (!pointer_survived_gc_yet(object)) {
+      set_mark_bit(object);
+      if (mark_queue == NULL || mark_queue->count == QBLOCK_CAPACITY) {
+        /* How would this look if we do parallel marking? At the moment I
+         * would guess that we link blocks up to mark_queue only when they
+         * are "published" to the global queue, not upon creating them. */
+        struct Qblock *n = grab_qblock();
+        n->next = mark_queue;
+        mark_queue = n;
+      }
+      mark_queue->elements[mark_queue->count++] = object;
+    }
   }
 }
 
@@ -456,6 +460,7 @@ static void sweep() {
   gc_dispose_private_pages();
   cull_weak_hash_tables(mr_alivep_funs);
 
+  /* Calculate byte counts */
   bytes_allocated = 0;
   for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
     generations[g].bytes_allocated = 0;
@@ -468,6 +473,9 @@ static void sweep() {
       generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
     }
   }
+
+  /* Prune allocation bitmap */
+  memcpy(allocation_bitmap, mark_bitmap, mark_bitmap_size);
 }
 
 extern lispobj lisp_init_function, gc_object_watcher;
@@ -480,10 +488,10 @@ void trace_static_roots() {
     trace_object(obj);
     where += listp(obj) ? 2 : headerobj_size(where);
   }
-  trace_object(lisp_package_vector);
-  if (lisp_init_function) trace_object(lisp_init_function);
-  if (gc_object_watcher) trace_object(gc_object_watcher);
-  if (alloc_profile_data) trace_object(alloc_profile_data);
+  mark(lisp_package_vector);
+  if (lisp_init_function) mark(lisp_init_function);
+  if (gc_object_watcher) mark(gc_object_watcher);
+  if (alloc_profile_data) mark(alloc_profile_data);
 }
 
 void mr_collect_garbage() {
@@ -500,6 +508,10 @@ void mr_collect_garbage() {
 void draw_page_table() {
   for (int i = 0; i < 4000; i++) {
     if (i % 50 == 0) printf("\n");
-    printf("%c%c", 64 + page_table[i].type, '0' + page_table[i].gen);
+    printf("\033[%c;9%cm%c%c\033[0m",
+           (page_table[i].type & SINGLE_OBJECT_FLAG) ? '1' : '0',
+           '0' + (page_table[i].type & 7),
+           64 + page_table[i].type,
+           '0' + page_table[i].gen);
   }
 }

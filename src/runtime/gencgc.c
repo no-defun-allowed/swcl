@@ -532,12 +532,16 @@ void gc_gen_report_to_file(int filedes, FILE *file)
                 words_allocated += page_words_used(page);
             }
         struct generation* gen = &generations[gen_num];
+        /* This wouldn't appear to hold for how mark-region GC treats pages.
+         * TODO: Write what should hold. */
+#ifndef LISP_FEATURE_MARK_REGION_GC
         if (gen_num == 0)
             gc_assert(gen->bytes_allocated ==
                       (words_allocated+eden_words_allocated) << WORD_SHIFT);
         else {
             gc_assert(gen->bytes_allocated == words_allocated << WORD_SHIFT);
         }
+#endif
         page_index_t n_dirty;
         count_generation_pages(gen_num, &n_dirty);
         uword_t waste = npage_bytes(tot_pages) - (words_allocated<<WORD_SHIFT);
@@ -4140,6 +4144,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
     if (!compacting_p()) {
 #ifdef LISP_FEATURE_MARK_REGION_GC
         mr_collect_garbage();
+        RESET_ALLOC_START_PAGES();
 #else
         extern void execute_full_mark_phase();
         extern void execute_full_sweep_phase();
