@@ -139,7 +139,6 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
         try_allocate_small(nbytes, region,
                            address_line(page_address(where)),
                            address_line(page_address(where + 1)))) {
-      if (where == 1213) printf("got small 1213 for %d\n", page_type);
       page_table[where].type = page_type | OPEN_REGION_PAGE_FLAG;
       page_table[where].gen = gen;
       set_page_scan_start_offset(where, 0);
@@ -169,7 +168,6 @@ page_index_t try_allocate_large(sword_t nbytes,
     if (chunk_end - chunk_start >= pages_needed) {
       page_index_t last_page = chunk_start + pages_needed - 1;
       for (page_index_t p = chunk_start; p <= last_page; p++) {
-        if (p == 1213) printf("got large 1213 for %d offset %lu size %lu\n", page_type, p - chunk_start, nbytes);
         page_table[p].type = SINGLE_OBJECT_FLAG | page_type;
         page_table[p].gen = gen;
         set_page_bytes_used(p,
@@ -314,8 +312,6 @@ static void mark_lines(lispobj *p) {
 }
 
 static void mark(lispobj object) {
-  if (find_page_index((void*)object) == 1213)
-    printf("mark(%lx)\n", object);
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
     lispobj *np = native_pointer(object);
     if (embedded_obj_p(widetag_of(np))) {
@@ -535,7 +531,7 @@ void check_one_page_mark(page_index_t p) {
   /* The first unused word will be 0 as we always zero */
   while (where < end && *where != 0) {
     uword_t size = headerobj_size(where);
-    if (!allocation_bit_marked(where))
+    if (!allocation_bit_marked(where) && widetag_of(where) != FILLER_WIDETAG)
       printf("No allocation bit for %p where there should be\n", where);
     for (lispobj *between = where + 2; between < where + size; between += 2)
       if (allocation_bit_marked(between))
@@ -544,7 +540,7 @@ void check_one_page_mark(page_index_t p) {
   }
 }
 void check_page_marks() {
-  for (page_index_t p = 0; p < 4000; p++)
+  for (page_index_t p = 0; p < 32000; p++)
     /* Check small non-cons pages that didn't come from genesis */
     if (page_table[p].type != FREE_PAGE_FLAG &&
         page_table[p].type != PAGE_TYPE_CONS &&
@@ -563,7 +559,6 @@ void mr_preserve_pointer(uword_t address) {
 void mr_collect_garbage() {
   uword_t prior_bytes = bytes_allocated;
   check_page_marks();
-  __builtin_abort();
   printf("[GC");
   reset_statistics();
   trace_static_roots();
