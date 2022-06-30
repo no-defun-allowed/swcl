@@ -5123,6 +5123,9 @@ lispobj AMD64_SYSV_ABI alloc_code_object(unsigned total_words, unsigned boxed)
     ((lispobj*)code)[total_words-1] = 0; // zeroize the simple-fun table count
     THREAD_JIT(1);
 
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    set_allocation_bit_mark(code);
+#endif
     return make_lispobj(code, OTHER_POINTER_LOWTAG);
 }
 

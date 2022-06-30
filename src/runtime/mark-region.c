@@ -36,7 +36,7 @@
 
 /* Initialisation */
 uword_t *allocation_bitmap, *mark_bitmap;
-char *line_bytemap;
+char *line_bytemap;             /* 1 if line used, 0 if not used */
 line_index_t line_count;
 uword_t mark_bitmap_size;
 
@@ -139,6 +139,7 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
         try_allocate_small(nbytes, region,
                            address_line(page_address(where)),
                            address_line(page_address(where + 1)))) {
+      if (where == 1213) printf("got small 1213 for %d\n", page_type);
       page_table[where].type = page_type | OPEN_REGION_PAGE_FLAG;
       page_table[where].gen = gen;
       set_page_scan_start_offset(where, 0);
@@ -168,6 +169,7 @@ page_index_t try_allocate_large(sword_t nbytes,
     if (chunk_end - chunk_start >= pages_needed) {
       page_index_t last_page = chunk_start + pages_needed - 1;
       for (page_index_t p = chunk_start; p <= last_page; p++) {
+        if (p == 1213) printf("got large 1213 for %d offset %lu size %lu\n", page_type, p - chunk_start, nbytes);
         page_table[p].type = SINGLE_OBJECT_FLAG | page_type;
         page_table[p].gen = gen;
         set_page_bytes_used(p,
@@ -179,6 +181,8 @@ page_index_t try_allocate_large(sword_t nbytes,
       *start = chunk_start + pages_needed;
       memset(page_address(chunk_start), 0, pages_needed * GENCGC_PAGE_BYTES);
       //printf(" => %ld\n", chunk_start);
+      bytes_allocated += nbytes;
+      generations[gen].bytes_allocated += nbytes;
       return chunk_start;
     }
     if (chunk_end == end) return -1;
@@ -209,6 +213,7 @@ void mr_update_closed_region(struct alloc_region *region) {
     /* Didn't actually allocate anything. */
     reset_page_flags(the_page);
   }
+  gc_set_region_empty(region);
 }
 
 /* Core file I/O */
@@ -222,25 +227,28 @@ void bitmap_sizes(core_entry_elt_t n_ptes, sword_t *where) {
 void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
   sword_t sizes[2];
   bitmap_sizes(n_ptes, sizes);
-  sword_t allocation_bitmap_size = sizes[0], line_bytemap_size = sizes[1];
+  lseek(fd, ALIGN_UP(lseek(fd, 0, SEEK_CUR), N_WORD_BYTES), SEEK_SET);
+  printf("loading allocations for %lu pages from %016lx\n", n_ptes, lseek(fd, 0, SEEK_CUR));
+  sword_t allocation_bitmap_size = sizes[0];
   if (read(fd, allocation_bitmap, allocation_bitmap_size) != allocation_bitmap_size)
     lose("failed to read allocation bitmap from core");
-  if (read(fd, line_bytemap, line_bytemap_size) != line_bytemap_size)
-    lose("failed to read line bytemap from core");
+  printf("now at %016lx\n", lseek(fd, 0, SEEK_CUR));
 }
 
 /* Marking */
 
 static generation_index_t generation_being_collected;
+
+#define ANY(x) !!(x)
 static boolean object_marked_p(lispobj object) {
   uword_t index = (uword_t)((object - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS);
   uword_t bit_index = index % N_WORD_BITS, word_index = index / N_WORD_BITS;
-  return mark_bitmap[word_index] & (1 << bit_index);
+  return ANY(mark_bitmap[word_index] & ((uword_t)(1) << bit_index));
 }
 static void set_mark_bit(lispobj object) {
   uword_t index = (uword_t)((object - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS);
   uword_t bit_index = index % N_WORD_BITS, word_index = index / N_WORD_BITS;
-  mark_bitmap[word_index] |= (1 << bit_index);
+  mark_bitmap[word_index] |= ((uword_t)(1) << bit_index);
 }
 
 static boolean in_dynamic_space(lispobj object) {
@@ -281,10 +289,13 @@ static void free_mark_list() {
 static void add_words_used(void *where, page_words_t count) {
   page_index_t p = find_page_index(where);
   uword_t byte_count = count * N_WORD_BYTES;
-  for (; byte_count >= GENCGC_PAGE_BYTES;
-       byte_count -= GENCGC_PAGE_BYTES, p++)
+  while (byte_count >= GENCGC_PAGE_BYTES) {
     set_page_bytes_used(p, GENCGC_PAGE_BYTES);
-  set_page_bytes_used(p, page_bytes_used(p) + byte_count);
+    byte_count -= GENCGC_PAGE_BYTES;
+    p++;
+  }
+  if (byte_count)
+    set_page_bytes_used(p, page_bytes_used(p) + byte_count);
 }
 
 static void mark_cons_line(struct cons *c) {
@@ -303,6 +314,8 @@ static void mark_lines(lispobj *p) {
 }
 
 static void mark(lispobj object) {
+  if (find_page_index((void*)object) == 1213)
+    printf("mark(%lx)\n", object);
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
     lispobj *np = native_pointer(object);
     if (embedded_obj_p(widetag_of(np))) {
@@ -325,8 +338,7 @@ static void mark(lispobj object) {
 }
 
 static boolean interesting_pointer_p(lispobj object) {
-  page_index_t p = find_page_index(native_pointer(object));
-  return p >= 0 && page_table[p].gen == generation_being_collected;
+  return in_dynamic_space(object);
 }
 
 #define ACTION mark
@@ -382,6 +394,31 @@ static lispobj *last_address_in(uword_t bitword, uword_t word_index) {
   return (lispobj*)x;
 }
 
+static lispobj fix_pointer(lispobj *p, uword_t original) {
+  if (embedded_obj_p(widetag_of(p))) {
+      lispobj *base = fun_code_header(p);
+      return make_lispobj(base, OTHER_POINTER_LOWTAG);
+  }
+  lispobj l = compute_lispobj(p);
+  if (listp(l))
+    lose("CONS on non-cons page, %p on page %lu, header %lx, derived from %lx",
+         p, find_page_index(p), *p, original);
+  return l;
+}
+
+boolean allocation_bit_marked(void *address) {
+  uword_t first_bit_index = ((uword_t)(address) - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
+  uword_t first_word_index = first_bit_index / N_WORD_BITS;
+  uword_t masked_out = allocation_bitmap[first_word_index] & ((uword_t)(1) << (first_bit_index % N_WORD_BITS));
+  return ANY(masked_out);
+}
+
+void set_allocation_bit_mark(void *address) {
+  uword_t first_bit_index = ((uword_t)(address) - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
+  uword_t first_word_index = first_bit_index / N_WORD_BITS;
+  allocation_bitmap[first_word_index] |= ((uword_t)(1) << (first_bit_index % N_WORD_BITS));
+}
+
 static lispobj find_object(uword_t address) {
   page_index_t p = find_page_index((void*)address);
   if (page_table[p].type == PAGE_TYPE_CONS) {
@@ -392,25 +429,20 @@ static lispobj find_object(uword_t address) {
     /* Go scanning for the object. */
     uword_t first_bit_index = (address - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
     uword_t first_word_index = first_bit_index / N_WORD_BITS;
-    if (allocation_bitmap[first_word_index]) {
-      /* Return the last location not after the address provided. */
-      /* Supposing first_bit_index = 5, we compute
-       * all_not_after = (1 << 6) - 1 = ...000111111
-       * i.e. all bits not above bit #5 set. */
-      uword_t all_not_after = (1 << (first_bit_index % N_WORD_BITS + 1)) - 1;
-      return compute_lispobj(last_address_in(allocation_bitmap[first_word_index] & all_not_after, first_word_index));
-    }
+    /* Return the last location not after the address provided. */
+    /* Supposing first_bit_index = 5, we compute
+     * all_not_after = (1 << 6) - 1 = ...000111111
+     * i.e. all bits not above bit #5 set. */
+    uword_t all_not_after = ((uword_t)(1) << ((first_bit_index % N_WORD_BITS) + 1)) - 1;
+    if (allocation_bitmap[first_word_index] & all_not_after)
+      return fix_pointer(last_address_in(allocation_bitmap[first_word_index] & all_not_after, first_word_index),
+                         address);
     for (uword_t i = first_word_index - 1; i > 0; i--)
       if (allocation_bitmap[i])
         /* Return the last location. */
-        return compute_lispobj(last_address_in(allocation_bitmap[i], i));
+        return fix_pointer(last_address_in(allocation_bitmap[i], i), address);
     lose("find_object fell through on %ld?", address);
   }
-}
-
-void mr_preserve_pointer(uword_t address) {
-  if (is_lisp_pointer(address) && find_page_index((void*)address) > -1)
-    mark(find_object(address));
 }
 
 /* Sweeping ("regioning"?) */
@@ -453,6 +485,7 @@ static void reset_statistics() {
     generations[g].bytes_allocated = 0;
   for (page_index_t p = 0; p <= page_table_pages; p++)
     set_page_bytes_used(p, 0);
+  memset(line_bytemap, 0, line_count);
 }
 
 static void sweep() {
@@ -466,7 +499,7 @@ static void sweep() {
     generations[g].bytes_allocated = 0;
 
   for (page_index_t p = 0; p < page_table_pages; p++) {
-    if (page_words_used(p) == 0) {
+    if (page_words_used(p) == 0 && !page_free_p(p)) {
       reset_page_flags(p);
     } else {
       bytes_allocated += page_bytes_used(p);
@@ -476,13 +509,14 @@ static void sweep() {
 
   /* Prune allocation bitmap */
   memcpy(allocation_bitmap, mark_bitmap, mark_bitmap_size);
+  memset(mark_bitmap, 0, mark_bitmap_size);
 }
 
 extern lispobj lisp_init_function, gc_object_watcher;
 void trace_static_roots() {
   trace_other_object((lispobj*)NIL_SYMBOL_SLOTS_START);
-  lispobj* where = (lispobj*)STATIC_SPACE_OBJECTS_START;
-  lispobj* end = static_space_free_pointer;
+  lispobj *where = (lispobj*)STATIC_SPACE_OBJECTS_START;
+  lispobj *end = static_space_free_pointer;
   while (where < end) {
     lispobj obj = compute_lispobj(where);
     trace_object(obj);
@@ -494,15 +528,59 @@ void trace_static_roots() {
   if (alloc_profile_data) mark(alloc_profile_data);
 }
 
+/* This only works if we allocate contiguously into pages, which we
+ * currently do. */
+void check_one_page_mark(page_index_t p) {
+  lispobj *start = page_address(p), *end = page_address(p + 1), *where = start;
+  /* The first unused word will be 0 as we always zero */
+  while (where < end && *where != 0) {
+    uword_t size = headerobj_size(where);
+    if (!allocation_bit_marked(where))
+      printf("No allocation bit for %p where there should be\n", where);
+    for (lispobj *between = where + 2; between < where + size; between += 2)
+      if (allocation_bit_marked(between))
+        printf("Allocation bit for %p when there shouldn't be, inside %lx\n", between, compute_lispobj(where));
+    where += size;
+  }
+}
+void check_page_marks() {
+  for (page_index_t p = 0; p < 4000; p++)
+    /* Check small non-cons pages that didn't come from genesis */
+    if (page_table[p].type != FREE_PAGE_FLAG &&
+        page_table[p].type != PAGE_TYPE_CONS &&
+        !(page_table[p].type & SINGLE_OBJECT_FLAG) &&
+        page_table[p].gen != PSEUDO_STATIC_GENERATION)
+      check_one_page_mark(p);
+}
+
+/* Entry points */
+
+void mr_preserve_pointer(uword_t address) {
+  if (is_lisp_pointer(address) && find_page_index((void*)address) > -1)
+    mark(find_object(address));
+}
+
 void mr_collect_garbage() {
   uword_t prior_bytes = bytes_allocated;
+  check_page_marks();
+  __builtin_abort();
   printf("[GC");
   reset_statistics();
   trace_static_roots();
   trace_everything();
   sweep();
   free_mark_list();
-  printf(" %lu -> %lu, %lu traced]\n", prior_bytes, bytes_allocated, traced);
+  printf(" %luM -> %luM, %lu traced]\n", prior_bytes >> 20, bytes_allocated >> 20, traced);
+}
+
+/* Useful hacky stuff */
+
+void find_references_to(lispobj something) {
+  for (uword_t i = 0; i < (dynamic_space_size / N_WORD_BYTES); i++) {
+    lispobj *p = (lispobj*)(DYNAMIC_SPACE_START + i * N_WORD_BYTES);
+    if (labs(*p - something) < 64)
+      printf("%p: %lx\n", p, *p);
+  }
 }
 
 void draw_page_table() {

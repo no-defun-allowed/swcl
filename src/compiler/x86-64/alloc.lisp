@@ -279,8 +279,8 @@
     (inst mov another-temp
           (thread-slot-ea thread-allocation-bitmap-base-slot
                           #+gs-seg thread-temp))
-    (inst sar alloc-tn 4)               ; 2^4 bytes of heap per bit
-    (inst bts (ea another-temp) alloc-tn)
+    (inst shr :qword alloc-tn n-lowtag-bits)
+    (inst bts :qword (ea another-temp) alloc-tn)
     (unless (eq another-temp temp)
       (inst pop another-temp))
     (inst pop alloc-tn))
