@@ -135,10 +135,12 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
                                       page_index_t *start, page_index_t end) {
   // printf("try_allocate_small_f_p(%lu, %d, %d, %ld, %ld)\n", nbytes, page_type, gen, *start, end);
   for (page_index_t where = *start; where < end; where++)
-    if (page_free_p(where) &&
+    if (page_bytes_used(where) <= GENCGC_PAGE_BYTES - nbytes &&
+        (page_free_p(where) || page_extensible_p(where, gen, page_type)) &&
         try_allocate_small(nbytes, region,
                            address_line(page_address(where)),
                            address_line(page_address(where + 1)))) {
+      gc_assert(page_table[where].type == FREE_PAGE_FLAG || page_table[where].type == page_type);
       page_table[where].type = page_type | OPEN_REGION_PAGE_FLAG;
       page_table[where].gen = gen;
       set_page_scan_start_offset(where, 0);
@@ -315,6 +317,7 @@ static void mark(lispobj object) {
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
     lispobj *np = native_pointer(object);
     if (embedded_obj_p(widetag_of(np))) {
+      set_mark_bit(object);
       lispobj *base = fun_code_header(np);
       object = make_lispobj(base, OTHER_POINTER_LOWTAG);
     }
@@ -524,31 +527,6 @@ void trace_static_roots() {
   if (alloc_profile_data) mark(alloc_profile_data);
 }
 
-/* This only works if we allocate contiguously into pages, which we
- * currently do. */
-void check_one_page_mark(page_index_t p) {
-  lispobj *start = page_address(p), *end = page_address(p + 1), *where = start;
-  /* The first unused word will be 0 as we always zero */
-  while (where < end && *where != 0) {
-    uword_t size = headerobj_size(where);
-    if (!allocation_bit_marked(where) && widetag_of(where) != FILLER_WIDETAG)
-      printf("No allocation bit for %p where there should be\n", where);
-    for (lispobj *between = where + 2; between < where + size; between += 2)
-      if (allocation_bit_marked(between))
-        printf("Allocation bit for %p when there shouldn't be, inside %lx\n", between, compute_lispobj(where));
-    where += size;
-  }
-}
-void check_page_marks() {
-  for (page_index_t p = 0; p < 32000; p++)
-    /* Check small non-cons pages that didn't come from genesis */
-    if (page_table[p].type != FREE_PAGE_FLAG &&
-        page_table[p].type != PAGE_TYPE_CONS &&
-        !(page_table[p].type & SINGLE_OBJECT_FLAG) &&
-        page_table[p].gen != PSEUDO_STATIC_GENERATION)
-      check_one_page_mark(p);
-}
-
 /* Entry points */
 
 void mr_preserve_pointer(uword_t address) {
@@ -558,12 +536,13 @@ void mr_preserve_pointer(uword_t address) {
 
 void mr_collect_garbage() {
   uword_t prior_bytes = bytes_allocated;
-  check_page_marks();
   printf("[GC");
   reset_statistics();
   trace_static_roots();
   trace_everything();
   sweep();
+  lispobj somewhere;
+  //verify_heap(&somewhere, VERIFY_POST_GC);
   free_mark_list();
   printf(" %luM -> %luM, %lu traced]\n", prior_bytes >> 20, bytes_allocated >> 20, traced);
 }

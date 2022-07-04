@@ -1,5 +1,7 @@
 /* -*- Mode: C -*- */
 
+#include "walk-heap.h"
+
 static int
 is_in_stack_space(lispobj ptr)
 {
@@ -130,7 +132,11 @@ verify_pointer(lispobj thing, lispobj *where, struct verify_state *state)
         // If it's within the dynamic space it should point to a used page.
         FAIL_IF(page_free_p(target_page_index), "free page");
         FAIL_IF(!(page_table[target_page_index].type & OPEN_REGION_PAGE_FLAG)
+#ifdef LISP_FEATURE_MARK_REGION_GC
+                && !allocation_bit_marked(native_pointer(thing)),
+#else
                 && (thing & (GENCGC_PAGE_BYTES-1)) >= page_bytes_used(target_page_index),
+#endif
                 "unallocated space");
     } else {
         // The object pointed to must not have been discarded as garbage.
@@ -284,7 +290,7 @@ static int verify_headered_object(lispobj* object, sword_t nwords,
 
 static int verify_range(lispobj* start, lispobj* end, struct verify_state* state)
 {
-    lispobj* where = start;
+  lispobj* where = next_object(start, 0, end); /* find first marked object */
     if (state->flags & VERIFYING_GENERATIONAL && find_page_index(start)>=0) {
         page_index_t page = find_page_index(start);
         if (page_table[page].type == PAGE_TYPE_CONS)
@@ -300,7 +306,7 @@ static int verify_range(lispobj* start, lispobj* end, struct verify_state* state
         }
         return 0;
     }
-    while (where < end) {
+    while (where) {
         int widetag = is_header(*where) ? header_widetag(*where) : LIST_POINTER_LOWTAG;
         /* Technically we should wait until after performing the widetag validity
          * tests before calling the sizer.  Otherwise the lossage message would
@@ -317,7 +323,7 @@ static int verify_range(lispobj* start, lispobj* end, struct verify_state* state
             // the default verification logic, so brute-force skip them
             // regardless of whether the page type is PAGE_TYPE_CONS.
             if (*where == (uword_t)-1 && where[1] == (uword_t)-1) {
-                where +=2;
+                where = next_object(where, 2, end);
                 continue;
             }
 #endif
@@ -369,7 +375,7 @@ static int verify_range(lispobj* start, lispobj* end, struct verify_state* state
         } else {
             if (verify_headered_object(where, nwords, state)) break;
         }
-        where += nwords;
+        where = next_object(where, nwords, end);
     }
     return 0;
 }
