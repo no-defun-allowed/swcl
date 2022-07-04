@@ -116,7 +116,7 @@ int n_gcs;
 
 /* the verbosity level. All non-error messages are disabled at level 0;
  * and only a few rare messages are printed at level 1. */
-boolean gencgc_verbose = 0;
+boolean gencgc_verbose = 1;
 
 /* FIXME: At some point enable the various error-checking things below
  * and see what they say. */
@@ -124,7 +124,7 @@ boolean gencgc_verbose = 0;
 /* We hunt for pointers to old-space, when GCing generations >= verify_gen.
  * Set verify_gens to HIGHEST_NORMAL_GENERATION + 2 to disable this kind of
  * check. */
-generation_index_t verify_gens = 0; //HIGHEST_NORMAL_GENERATION + 2;
+generation_index_t verify_gens = HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
 boolean pre_verify_gen_0 = 0; // FIXME: should be named 'pre_verify_gc'
@@ -3457,10 +3457,17 @@ walk_generation(uword_t (*proc)(lispobj*,lispobj*,uword_t),
                 if (page_ends_contiguous_block_p(last_page, page_table[i].gen))
                     break;
 
+#ifdef LISP_FEATURE_MARK_REGION_GC
+            uword_t result =
+                proc((lispobj*)page_address(i),
+                     (lispobj*)page_address(last_page + 1),
+                     extra);
+#else
             uword_t result =
                 proc((lispobj*)page_address(i),
                      (lispobj*)page_address(last_page) + page_words_used(last_page),
                      extra);
+#endif
             if (result) return result;
 
             i = last_page;
@@ -4115,10 +4122,14 @@ garbage_collect_generation(generation_index_t generation, int raise,
 
     /* Scavenge the Lisp functions of the interrupt handlers */
     if (GC_LOGGING) fprintf(gc_activitylog(), "begin scavenge sighandlers\n");
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    mr_preserve_range(lisp_sig_handlers, NSIG);
+#else
     if (compacting_p())
         scavenge(lisp_sig_handlers, NSIG);
     else
         gc_mark_range(lisp_sig_handlers, NSIG);
+#endif
 
     /* Scavenge the binding stacks. */
     if (GC_LOGGING) fprintf(gc_activitylog(), "begin scavenge thread roots\n");
@@ -4127,16 +4138,25 @@ garbage_collect_generation(generation_index_t generation, int raise,
         for_each_thread(th) {
             scav_binding_stack((lispobj*)th->binding_stack_start,
                                (lispobj*)get_binding_stack_pointer(th),
-                               compacting_p() ? 0 : gc_mark_obj);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+                               mr_preserve_pointer
+#else
+                               compacting_p() ? 0 : gc_mark_obj
+#endif
+                               );
 #ifdef LISP_FEATURE_SB_THREAD
             /* do the tls as well */
             lispobj* from = &th->lisp_thread;
             lispobj* to = (lispobj*)(SymbolValue(FREE_TLS_INDEX,0) + (char*)th);
             sword_t nwords = to - from;
+#ifdef LISP_FEATURE_MARK_REGION_GC
+            mr_preserve_range(from, nwords);
+#else
             if (compacting_p())
                 scavenge(from, nwords);
             else
                 gc_mark_range(from, nwords);
+#endif
 #endif
         }
     }

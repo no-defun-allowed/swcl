@@ -534,6 +534,11 @@ void mr_preserve_pointer(uword_t address) {
     mark(find_object(address));
 }
 
+void mr_preserve_range(lispobj *from, sword_t nwords) {
+  for (sword_t n = 0; n < nwords; n++)
+    mark(from[n]);
+}
+
 void mr_collect_garbage() {
   uword_t prior_bytes = bytes_allocated;
   printf("[GC");
@@ -541,8 +546,6 @@ void mr_collect_garbage() {
   trace_static_roots();
   trace_everything();
   sweep();
-  lispobj somewhere;
-  //verify_heap(&somewhere, VERIFY_POST_GC);
   free_mark_list();
   printf(" %luM -> %luM, %lu traced]\n", prior_bytes >> 20, bytes_allocated >> 20, traced);
 }

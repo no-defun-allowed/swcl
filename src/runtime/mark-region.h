@@ -28,6 +28,7 @@ extern void mr_update_closed_region(struct alloc_region *region);
 extern boolean allocation_bit_marked(void *pointer);
 extern void set_allocation_bit_mark(void *pointer);
 extern void mr_preserve_pointer(uword_t address);
+extern void mr_preserve_range(lispobj *from, sword_t nwords);
 extern void mr_collect_garbage();
 #endif
 #endif

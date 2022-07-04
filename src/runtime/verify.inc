@@ -434,10 +434,12 @@ int verify_heap(__attribute__((unused)) lispobj* cur_thread_approx_stackptr,
     state.object_addr = 0;
     state.object_gen = 0;
     for_each_thread(th) {
+        fprintf(stderr, " [thread bindings]");
         if (verify((lispobj)th->binding_stack_start,
                    (lispobj*)get_binding_stack_pointer(th), &state,
                    VERIFYING_UNFORMATTED)) goto out;
 #ifdef LISP_FEATURE_SB_THREAD
+        fprintf(stderr, " [thread TLS]");
         if (verify((lispobj)&th->lisp_thread,
                    (lispobj*)(SymbolValue(FREE_TLS_INDEX,0) + (char*)th), &state,
                    VERIFYING_UNFORMATTED))
