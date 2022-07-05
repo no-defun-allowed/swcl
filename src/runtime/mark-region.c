@@ -291,7 +291,7 @@ static void free_mark_list() {
   }
 }
 
-static void add_words_used(void *where, page_words_t count) {
+static void add_words_used(void *where, uword_t count) {
   page_index_t p = find_page_index(where);
   uword_t byte_count = count * N_WORD_BYTES;
   while (byte_count >= GENCGC_PAGE_BYTES) {
@@ -327,7 +327,7 @@ static void mark(lispobj object) {
       lose("Cons pointer %lx to non-cons page", object);
     
     lispobj *np = native_pointer(object);
-    if (embedded_obj_p(widetag_of(np))) {
+    if (functionp(object) && embedded_obj_p(widetag_of(np))) {
       set_mark_bit(object);     /* This makes verify happy. */
       lispobj *base = fun_code_header(np);
       object = make_lispobj(base, OTHER_POINTER_LOWTAG);
@@ -443,7 +443,13 @@ static lispobj find_object(uword_t address) {
     /* Supposing first_bit_index = 5, we compute
      * all_not_after = (1 << 6) - 1 = ...000111111
      * i.e. all bits not above bit #5 set. */
-    uword_t all_not_after = ((uword_t)(1) << ((first_bit_index % N_WORD_BITS) + 1)) - 1;
+    uword_t all_not_after;
+    /* Need to ensure we don't overflow while trying to generate
+     * all bits set. */
+    if (first_bit_index % N_WORD_BITS == N_WORD_BITS - 1)
+      all_not_after = ~0;
+    else
+      all_not_after = ((uword_t)(1) << ((first_bit_index % N_WORD_BITS) + 1)) - 1;
     if (allocation_bitmap[first_word_index] & all_not_after)
       return fix_pointer(last_address_in(allocation_bitmap[first_word_index] & all_not_after, first_word_index),
                          address);
@@ -560,9 +566,10 @@ void mr_preserve_object(lispobj obj) {
   add_words_used(n, object_size(n));
 }
 
-void mr_collect_garbage() {  
+static unsigned int collection = 0;
+void mr_collect_garbage() {
   uword_t prior_bytes = bytes_allocated;
-  printf("[GC");
+  printf("[GC #%d", ++collection);
   reset_statistics();
   trace_static_roots();
   trace_everything();
