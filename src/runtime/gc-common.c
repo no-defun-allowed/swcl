@@ -51,6 +51,7 @@
 #include "var-io.h"
 #include "search.h"
 #include "murmur_hash.h"
+#include "mark-region.h"
 
 #ifdef LISP_FEATURE_SPARC
 #define LONG_FLOAT_SIZE 4
@@ -1788,7 +1789,11 @@ cull_weak_hash_table_bucket(struct hash_table *hash_table,
                 cons->car = make_lispobj(cons + 1, LIST_POINTER_LOWTAG);
                 cons[1].car = make_fixnum(index);  // which cell became free
                 cons[1].cdr = make_fixnum(bucket); // which chain was it in
+#ifdef LISP_FEATURE_MARK_REGION_GC
+                mr_preserve_object(cons->car);
+#else
                 if (!compacting_p()) gc_mark_obj(cons->car);
+#endif
             } else { // small values
                 cons = (struct cons*)
                   gc_general_alloc(cons_region, sizeof(struct cons), PAGE_TYPE_CONS);
@@ -1800,7 +1805,11 @@ cull_weak_hash_table_bucket(struct hash_table *hash_table,
             notice_pointer_store(&hash_table->smashed_cells);
             hash_table->smashed_cells = make_lispobj(cons, LIST_POINTER_LOWTAG);
             // ensure this cons doesn't get smashed into (0 . 0) by full gc
+#ifdef LISP_FEATURE_MARK_REGION_GC
+            mr_preserve_object(hash_table->smashed_cells);
+#else
             if (!compacting_p()) gc_mark_obj(hash_table->smashed_cells);
+#endif
 
         } else {
             if (fix_pointers) { // Follow FPs as necessary

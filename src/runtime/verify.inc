@@ -133,7 +133,8 @@ verify_pointer(lispobj thing, lispobj *where, struct verify_state *state)
         FAIL_IF(page_free_p(target_page_index), "free page");
         FAIL_IF(!(page_table[target_page_index].type & OPEN_REGION_PAGE_FLAG)
 #ifdef LISP_FEATURE_MARK_REGION_GC
-                && !allocation_bit_marked(native_pointer(thing)),
+                && (!allocation_bit_marked(native_pointer(thing))
+                    || !line_marked(thing)),
 #else
                 && (thing & (GENCGC_PAGE_BYTES-1)) >= page_bytes_used(target_page_index),
 #endif
@@ -292,9 +293,11 @@ static int verify_range(lispobj* start, lispobj* end, struct verify_state* state
 {
   lispobj* where = next_object(start, 0, end); /* find first marked object */
     if (state->flags & VERIFYING_GENERATIONAL && find_page_index(start)>=0) {
-        page_index_t page = find_page_index(start);
+#ifndef LISP_FEATURE_MARK_REGION_GC /* We use a global bitmap */
+      page_index_t page = find_page_index(start);
         if (page_table[page].type == PAGE_TYPE_CONS)
             gc_assert(page_words_used(page) <=  MAX_CONSES_PER_PAGE*CONS_SIZE);
+#endif
     }
     if ((state->flags & VERIFYING_UNFORMATTED)) {
         while (where < end) {

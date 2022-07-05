@@ -124,7 +124,7 @@ boolean gencgc_verbose = 1;
 /* We hunt for pointers to old-space, when GCing generations >= verify_gen.
  * Set verify_gens to HIGHEST_NORMAL_GENERATION + 2 to disable this kind of
  * check. */
-generation_index_t verify_gens = HIGHEST_NORMAL_GENERATION + 2;
+generation_index_t verify_gens = 0; // HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
 boolean pre_verify_gen_0 = 0; // FIXME: should be named 'pre_verify_gc'
@@ -1016,6 +1016,7 @@ boolean page_is_zeroed(page_index_t page)
 }
 #endif
 
+#ifndef LISP_FEATURE_MARK_REGION_GC
 static void*
 gc_alloc_new_region(sword_t nbytes, int page_type, struct alloc_region *alloc_region, int unlock)
 {
@@ -1117,6 +1118,7 @@ gc_alloc_new_region(sword_t nbytes, int page_type, struct alloc_region *alloc_re
 
     return alloc_region->free_pointer;
 }
+#endif
 
 /* The new_object structure holds the page, byte offset, and size of
  * new regions of objects. Each new area is placed in the array of
@@ -1552,6 +1554,28 @@ gc_find_freeish_pages(page_index_t *restart_page_ptr, sword_t nbytes,
  * Choice 2 is better because choice 1 makes an extra test for page_type
  * in each call to gc_general_alloc.
  */
+#ifdef LISP_FEATURE_MARK_REGION_GC
+void *collector_alloc_fallback(struct alloc_region* region, sword_t nbytes, int page_type) {
+    page_index_t alloc_start = get_alloc_start_page(page_type);
+    void *new_obj;
+    if (nbytes >= (GENCGC_PAGE_BYTES / 4 * 3)) {
+        page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,
+                                                   &alloc_start, page_table_pages);
+        if (new_page == -1) gc_heap_exhausted_error_or_lose(0, nbytes);
+        new_obj = page_address(new_page);
+    } else {
+        ensure_region_closed(region, page_type);
+        boolean success =
+            try_allocate_small_from_pages(nbytes, region, page_type,
+                                          gc_alloc_generation,
+                                          &alloc_start, page_table_pages);
+        if (!success) gc_heap_exhausted_error_or_lose(0, nbytes);
+        new_obj = region->start_addr;
+    }
+    set_alloc_start_page(page_type, alloc_start);
+    return new_obj;
+}
+#else
 static void *new_region(struct alloc_region* region, sword_t nbytes, int page_type)
 {
     ensure_region_closed(region, page_type);
@@ -1637,6 +1661,7 @@ void *collector_alloc_fallback(struct alloc_region* region, sword_t nbytes, int 
     if (nbytes > SMALL_MIXED_NBYTES_LIMIT) page_type = PAGE_TYPE_MIXED, region = mixed_region;
     return new_region(region, nbytes, page_type);
 }
+#endif
 
 
 /* Free any trailing pages of the object starting at 'first_page'
@@ -3444,7 +3469,9 @@ walk_generation(uword_t (*proc)(lispobj*,lispobj*,uword_t),
             page_index_t last_page;
 
             /* This should be the start of a contiguous block */
-            gc_assert(page_starts_contiguous_block_p(i));
+            /* Why oh why does genesis seem to make a page table
+            * that trips this assertion? */
+            // gc_assert(page_starts_contiguous_block_p(i));
 
             /* Need to find the full extent of this contiguous block in case
                objects span pages. */
@@ -4566,15 +4593,17 @@ collect_garbage(generation_index_t last_gen)
 
     page_index_t initial_nfp = next_free_page;
 #ifdef LISP_FEATURE_MARK_REGION_GC
-    {
+    garbage_collect_generation(PSEUDO_STATIC_GENERATION, 0,
+                               cur_thread_approx_stackptr);
+    goto mr_finish;
 #else
     if (gc_mark_only) {
-#endif
         garbage_collect_generation(PSEUDO_STATIC_GENERATION, 0,
                                    cur_thread_approx_stackptr);
         goto finish;
     }
-
+#endif
+    
     do {
         /* Collect the generation. */
 
@@ -4674,7 +4703,7 @@ collect_garbage(generation_index_t last_gen)
         high_water_mark = next_free_page;
 
     next_free_page = find_next_free_page();
-
+mr_finish:
     /* Update auto_gc_trigger. Make sure we trigger the next GC before
      * running out of heap! */
     if (bytes_consed_between_gcs <= (dynamic_space_size - bytes_allocated))

@@ -10,8 +10,8 @@
 #error "Need TRACE_NAME to be defined"
 #endif
 
-#define USING_LAYOUT TRACE_NAME##_using_layout
-#define TRACE_PAIR TRACE_NAME##_pair
+#define USING_LAYOUT TRACE_NAME ## _using_layout
+#define TRACE_PAIR TRACE_NAME ## _pair
 
 static void TRACE_PAIR(lispobj* where)
 {

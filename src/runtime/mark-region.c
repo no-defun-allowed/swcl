@@ -75,6 +75,10 @@ uword_t lines_used() {
   return count;
 }
 
+boolean line_marked(void *pointer) {
+  return line_bytemap[address_line(pointer)];
+}
+
 /* Allocation slow-path */
 
 /* Allocation of small objects is done by finding contiguous lines
@@ -159,7 +163,7 @@ DEF_FINDER(find_used_page, page_index_t, !page_free_p(where), end);
 page_index_t try_allocate_large(sword_t nbytes,
                                 int page_type, generation_index_t gen,
                                 page_index_t *start, page_index_t end) {
-  //printf("try_allocate_large(%lu, %d, %d, %ld, %ld)\n", nbytes, page_type, gen, *start, end);
+  // printf("try_allocate_large(%lu, %d, %d, %ld, %ld)\n", nbytes, page_type, gen, *start, end);
   int pages_needed = ALIGN_UP(nbytes, GENCGC_PAGE_BYTES) / GENCGC_PAGE_BYTES;
   uword_t remainder = nbytes % GENCGC_PAGE_BYTES;
   page_index_t where = *start;
@@ -180,7 +184,7 @@ page_index_t try_allocate_large(sword_t nbytes,
       }
       *start = chunk_start + pages_needed;
       memset(page_address(chunk_start), 0, pages_needed * GENCGC_PAGE_BYTES);
-      //printf(" => %ld\n", chunk_start);
+      // printf(" => %ld\n", chunk_start);
       bytes_allocated += nbytes;
       generations[gen].bytes_allocated += nbytes;
       return chunk_start;
@@ -279,6 +283,7 @@ static void recycle_qblock(struct Qblock *block) {
   recycle_queue = block;
 }
 static void free_mark_list() {
+  gc_assert(mark_queue == NULL);
   while (recycle_queue) {
     struct Qblock *old = recycle_queue;
     recycle_queue = recycle_queue->next;
@@ -307,7 +312,7 @@ static void mark_cons_line(struct cons *c) {
 static void mark_lines(lispobj *p) {
   /* TODO: Don't really need to mark lines if the object is large, as
    * we don't try to reuse single object pages. */
-  page_words_t word_count = object_size2(p, widetag_of(p));
+  uword_t word_count = object_size(p);
   line_index_t first = address_line(p), last = address_line(p + word_count - 1);
   for (line_index_t line = first; line <= last; line++) line_bytemap[line] = 1;
   add_words_used(p, word_count);
@@ -315,9 +320,15 @@ static void mark_lines(lispobj *p) {
 
 static void mark(lispobj object) {
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
+    unsigned char page_type = page_table[find_page_index(object)].type & PAGE_TYPE_MASK;
+    if (!listp(object) && page_type == PAGE_TYPE_CONS)
+      lose("Non-cons pointer %lx to cons page", object);
+    if (listp(object) && page_type != PAGE_TYPE_CONS)
+      lose("Cons pointer %lx to non-cons page", object);
+    
     lispobj *np = native_pointer(object);
     if (embedded_obj_p(widetag_of(np))) {
-      set_mark_bit(object);
+      set_mark_bit(object);     /* This makes verify happy. */
       lispobj *base = fun_code_header(np);
       object = make_lispobj(base, OTHER_POINTER_LOWTAG);
     }
@@ -487,11 +498,15 @@ static void reset_statistics() {
   memset(line_bytemap, 0, line_count);
 }
 
+extern void gc_close_collector_regions(int flag);
 static void sweep() {
   local_smash_weak_pointers();
   gc_dispose_private_pages();
   cull_weak_hash_tables(mr_alivep_funs);
-
+  /* Culling hash tables may allocate, so make sure we don't
+   * lose those allocations. */
+  gc_close_collector_regions(0);
+  
   /* Calculate byte counts */
   bytes_allocated = 0;
   for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
@@ -539,7 +554,13 @@ void mr_preserve_range(lispobj *from, sword_t nwords) {
     mark(from[n]);
 }
 
-void mr_collect_garbage() {
+void mr_preserve_object(lispobj obj) {
+  set_mark_bit(obj);
+  lispobj *n = native_pointer(obj);
+  add_words_used(n, object_size(n));
+}
+
+void mr_collect_garbage() {  
   uword_t prior_bytes = bytes_allocated;
   printf("[GC");
   reset_statistics();
@@ -547,7 +568,9 @@ void mr_collect_garbage() {
   trace_everything();
   sweep();
   free_mark_list();
-  printf(" %luM -> %luM, %lu traced]\n", prior_bytes >> 20, bytes_allocated >> 20, traced);
+  printf(" %luM -> %luM, %lu traced, fragmentation = %.4f]\n",
+         prior_bytes >> 20, bytes_allocated >> 20, traced,
+         (double)(lines_used() * LINE_SIZE) / (double)(bytes_allocated));
 }
 
 /* Useful hacky stuff */
@@ -562,7 +585,7 @@ void find_references_to(lispobj something) {
 
 void draw_page_table() {
   for (int i = 0; i < 4000; i++) {
-    if (i % 50 == 0) printf("\n");
+    if (i % 50 == 0) printf("\n%4d ", i);
     printf("\033[%c;9%cm%c%c\033[0m",
            (page_table[i].type & SINGLE_OBJECT_FLAG) ? '1' : '0',
            '0' + (page_table[i].type & 7),
