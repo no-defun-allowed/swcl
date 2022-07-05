@@ -52,10 +52,8 @@ void mrgc_init() {
   mark_bitmap_size = dynamic_space_size / bytes_per_heap_byte;
   allocate_bitmap(&allocation_bitmap, mark_bitmap_size, "allocation bitmap");
   allocate_bitmap(&mark_bitmap, mark_bitmap_size, "mark bitmap");
-  allocate_bitmap((uword_t**)&line_bytemap,
-                  dynamic_space_size / LINE_SIZE,
-                  "line bytemap");
   line_count = dynamic_space_size / LINE_SIZE;
+  allocate_bitmap((uword_t**)&line_bytemap, line_count, "line bytemap");
 }
 
 /* Line arithmetic */
@@ -84,10 +82,10 @@ boolean line_marked(void *pointer) {
 /* Allocation of small objects is done by finding contiguous lines
  * that can fit the object to allocate. Small objects can span lines
  * but cannot pages, so we examine lines in each page separately. */
-#define DEF_FINDER(name, type, test, fail) \
-  static type name(type start, type end) { \
+#define DEF_FINDER(name, type, test, fail)         \
+  static type name(type start, type end) {         \
     for (type where = start; where < end; where++) \
-      if (test) return where; \
+      if (test) return where;                      \
     return fail; }
 
 DEF_FINDER(find_free_line, line_index_t, !line_bytemap[where], -1);
@@ -320,7 +318,7 @@ static void mark_lines(lispobj *p) {
 
 static void mark(lispobj object) {
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
-    unsigned char page_type = page_table[find_page_index(object)].type & PAGE_TYPE_MASK;
+    unsigned char page_type = page_table[find_page_index(native_pointer(object))].type & PAGE_TYPE_MASK;
     if (!listp(object) && page_type == PAGE_TYPE_CONS)
       lose("Non-cons pointer %lx to cons page", object);
     if (listp(object) && page_type != PAGE_TYPE_CONS)
@@ -564,6 +562,7 @@ void mr_preserve_object(lispobj obj) {
   set_mark_bit(obj);
   lispobj *n = native_pointer(obj);
   add_words_used(n, object_size(n));
+  mark_lines(n);
 }
 
 static unsigned int collection = 0;

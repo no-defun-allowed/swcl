@@ -4,7 +4,7 @@
 #include "lispobj.h"
 #include "core.h"
 
-#define LINE_SIZE 128
+#define LINE_SIZE 64
 
 extern uword_t *allocation_bitmap, *mark_bitmap;
 extern char *line_bytemap;

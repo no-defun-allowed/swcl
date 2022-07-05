@@ -291,7 +291,7 @@ static int verify_headered_object(lispobj* object, sword_t nwords,
 
 static int verify_range(lispobj* start, lispobj* end, struct verify_state* state)
 {
-  lispobj* where = next_object(start, 0, end); /* find first marked object */
+    lispobj* where = start;
     if (state->flags & VERIFYING_GENERATIONAL && find_page_index(start)>=0) {
 #ifndef LISP_FEATURE_MARK_REGION_GC /* We use a global bitmap */
       page_index_t page = find_page_index(start);
@@ -309,6 +309,7 @@ static int verify_range(lispobj* start, lispobj* end, struct verify_state* state
         }
         return 0;
     }
+    where = next_object(start, 0, end); /* find first marked object */
     while (where) {
         int widetag = is_header(*where) ? header_widetag(*where) : LIST_POINTER_LOWTAG;
         /* Technically we should wait until after performing the widetag validity
