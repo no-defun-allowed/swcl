@@ -353,10 +353,6 @@ static boolean interesting_pointer_p(lispobj object) {
 
 #define ACTION mark
 #define TRACE_NAME trace_other_object
-/* I don't see why this table should be an .inc thingy. It isn't
- * paramaterized like we have done for trace-object.inc, so there
- * isn't really a reason to have multiple copies of the functions and
- * table laying around. */
 #define HT_ENTRY_LIVENESS_FUN_ARRAY_NAME mr_alivep_funs
 #include "trace-object.inc"
 
