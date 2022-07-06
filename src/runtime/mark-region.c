@@ -318,11 +318,13 @@ static void mark_lines(lispobj *p) {
 
 static void mark(lispobj object) {
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
+    /*
     unsigned char page_type = page_table[find_page_index(native_pointer(object))].type & PAGE_TYPE_MASK;
     if (!listp(object) && page_type == PAGE_TYPE_CONS)
       lose("Non-cons pointer %lx to cons page", object);
     if (listp(object) && page_type != PAGE_TYPE_CONS)
       lose("Cons pointer %lx to non-cons page", object);
+    */
     
     lispobj *np = native_pointer(object);
     if (functionp(object) && embedded_obj_p(widetag_of(np))) {
@@ -600,6 +602,8 @@ void draw_page_table() {
            (page_table[i].type & SINGLE_OBJECT_FLAG) ? '1' : '0',
            '0' + (page_table[i].type & 7),
            64 + page_table[i].type,
-           '0' + page_table[i].gen);
+           // '0' + page_table[i].gen
+           '0' + (unsigned char)(10.0 * (double)page_bytes_used(i) / (double)GENCGC_PAGE_BYTES)
+           );
   }
 }
