@@ -52,6 +52,7 @@
 #include "search.h"
 #include "murmur_hash.h"
 #include "mark-region.h"
+#include "walk-heap.h"
 
 #ifdef LISP_FEATURE_SPARC
 #define LONG_FLOAT_SIZE 4
@@ -1770,7 +1771,11 @@ cull_weak_hash_table_bucket(struct hash_table *hash_table,
                 notice_pointer_store(&hash_table->culled_values);
                 hash_table->culled_values = list;
                 // ensure this cons doesn't get smashed into (0 . 0) by full gc
+#ifdef LISP_FEATURE_MARK_REGION_GC
+                mr_preserve_object(list);
+#else
                 if (!compacting_p()) gc_mark_obj(list);
+#endif
             }
             kv_vector[2 * index] = empty_symbol;
             kv_vector[2 * index + 1] = empty_symbol;
@@ -2014,10 +2019,12 @@ gc_search_space3(void *pointer, lispobj * const start, void *limit)
         if (pointer < (void*)(where+count)) return where;
     }
 #else
-    for ( ; (void*)where < limit ; where += count) {
+    where = next_object(where, 0, limit);
+    while (where) {
         count = object_size(where);
         /* Check whether the pointer is within this object. */
         if (pointer < (void*)(where+count)) return where;
+        where = next_object(where, count, limit);
     }
 #endif
     return NULL;

@@ -522,6 +522,9 @@ static void sweep() {
     } else {
       bytes_allocated += page_bytes_used(p);
       generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
+      /* next_free_page is only maintained for page walking - we
+       * reuse partially filled pages, so it's not useful for allocation */
+      next_free_page = p + 1;
     }
   }
 
@@ -574,9 +577,10 @@ void mr_collect_garbage() {
   trace_everything();
   sweep();
   free_mark_list();
-  printf(" %luM -> %luM, %lu traced, fragmentation = %.4f]\n",
+  printf(" %luM -> %luM, %lu traced, fragmentation = %.4f, page hwm = %ld]\n",
          prior_bytes >> 20, bytes_allocated >> 20, traced,
-         (double)(lines_used() * LINE_SIZE) / (double)(bytes_allocated));
+         (double)(lines_used() * LINE_SIZE) / (double)(bytes_allocated),
+         next_free_page);
 }
 
 /* Useful hacky stuff */
