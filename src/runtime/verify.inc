@@ -131,14 +131,14 @@ verify_pointer(lispobj thing, lispobj *where, struct verify_state *state)
     if (target_page_index >= 0) {
         // If it's within the dynamic space it should point to a used page.
         FAIL_IF(page_free_p(target_page_index), "free page");
-        FAIL_IF(!(page_table[target_page_index].type & OPEN_REGION_PAGE_FLAG)
 #ifdef LISP_FEATURE_MARK_REGION_GC
-                && (!allocation_bit_marked(native_pointer(thing))
-                    || !line_marked(thing)),
+        FAIL_IF(!allocation_bit_marked(native_pointer(thing)), "no allocation mark");
+        FAIL_IF(!line_marked(native_pointer(thing)), "no line mark");
 #else
+        FAIL_IF(!(page_table[target_page_index].type & OPEN_REGION_PAGE_FLAG)
                 && (thing & (GENCGC_PAGE_BYTES-1)) >= page_bytes_used(target_page_index),
-#endif
                 "unallocated space");
+#endif
     } else {
         // The object pointed to must not have been discarded as garbage.
         FAIL_IF(!other_immediate_lowtag_p(*native_pointer(thing)) ||
@@ -438,12 +438,14 @@ int verify_heap(__attribute__((unused)) lispobj* cur_thread_approx_stackptr,
     state.object_addr = 0;
     state.object_gen = 0;
     for_each_thread(th) {
-        fprintf(stderr, " [thread bindings]");
+        if (verbose)
+            fprintf(stderr, " [thread bindings]");
         if (verify((lispobj)th->binding_stack_start,
                    (lispobj*)get_binding_stack_pointer(th), &state,
                    VERIFYING_UNFORMATTED)) goto out;
 #ifdef LISP_FEATURE_SB_THREAD
-        fprintf(stderr, " [thread TLS]");
+        if (verbose)
+            fprintf(stderr, " [thread TLS]");
         if (verify((lispobj)&th->lisp_thread,
                    (lispobj*)(SymbolValue(FREE_TLS_INDEX,0) + (char*)th), &state,
                    VERIFYING_UNFORMATTED))

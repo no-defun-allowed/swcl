@@ -116,7 +116,7 @@ int n_gcs;
 
 /* the verbosity level. All non-error messages are disabled at level 0;
  * and only a few rare messages are printed at level 1. */
-boolean gencgc_verbose = 0;
+boolean gencgc_verbose = 1;
 
 /* FIXME: At some point enable the various error-checking things below
  * and see what they say. */
@@ -124,7 +124,7 @@ boolean gencgc_verbose = 0;
 /* We hunt for pointers to old-space, when GCing generations >= verify_gen.
  * Set verify_gens to HIGHEST_NORMAL_GENERATION + 2 to disable this kind of
  * check. */
-generation_index_t verify_gens = HIGHEST_NORMAL_GENERATION + 2;
+generation_index_t verify_gens = 0; // HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
 boolean pre_verify_gen_0 = 0; // FIXME: should be named 'pre_verify_gc'
@@ -2550,6 +2550,7 @@ static void pin_object(lispobj object)
     }
 }
 
+#ifndef LISP_FEATURE_MARK_REGION_GC
 #if !GENCGC_IS_PRECISE || defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64
 /* Take a possible pointer to a Lisp object and mark its page in the
  * page_table so that it will not be relocated during a GC.
@@ -2566,9 +2567,6 @@ static void pin_object(lispobj object)
 
 static boolean NO_SANITIZE_MEMORY preserve_pointer(uword_t word)
 {
-#ifdef LISP_FEATURE_MARK_REGION_GC
-    lose("This won't work for MR.");
-#endif
 #ifdef LISP_FEATURE_METASPACE
     extern lispobj valid_metaspace_ptr_p(void* addr);
 #endif
@@ -2674,6 +2672,7 @@ static void sticky_preserve_pointer(os_context_register_t register_word)
     }
     preserve_pointer(word);
 }
+#endif
 #endif
 #endif
 
@@ -4085,7 +4084,11 @@ garbage_collect_generation(generation_index_t generation, int raise,
                 // is pseudo-static, but let's use the right pinning function.
                 // (This line of code is so rarely executed that it doesn't
                 // impact performance to search for the object)
+#ifdef LISP_FEATURE_MARK_REGION_GC
+                mr_preserve_pointer(fun);
+#else
                 preserve_pointer(fun);
+#endif
 #else
                 pin_exact_root(fun);
 #endif

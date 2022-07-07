@@ -142,7 +142,6 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
         try_allocate_small(nbytes, region,
                            address_line(page_address(where)),
                            address_line(page_address(where + 1)))) {
-      gc_assert(page_table[where].type == FREE_PAGE_FLAG || page_table[where].type == page_type);
       page_table[where].type = page_type | OPEN_REGION_PAGE_FLAG;
       page_table[where].gen = gen;
       set_page_scan_start_offset(where, 0);
@@ -196,6 +195,8 @@ page_index_t try_allocate_large(sword_t nbytes,
 void mr_update_closed_region(struct alloc_region *region) {
   /* alloc_regions never span multiple pages. */
   page_index_t the_page = find_page_index(region->start_addr);
+  if (!(page_table[the_page].type & OPEN_REGION_PAGE_FLAG))
+    lose("Page %lu wasn't open", the_page);
   //printf("closing %lu\n", the_page);
   if (region->free_pointer > region->start_addr) {
     /* Did allocate something. We just say we used the whole page;
@@ -238,8 +239,6 @@ void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
 }
 
 /* Marking */
-
-static generation_index_t generation_being_collected;
 
 #define ANY(x) !!(x)
 static boolean object_marked_p(lispobj object) {
@@ -400,7 +399,7 @@ static lispobj dequeue() {
   if (!input_block) lose("Called dequeue() with no work to do");
   lispobj v = input_block->elements[--input_block->count];
   if (input_block->count > PREFETCH_DISTANCE)
-    __builtin_prefetch(input_block->elements[input_block->count - PREFETCH_DISTANCE]);
+    __builtin_prefetch(native_pointer(input_block->elements[input_block->count - PREFETCH_DISTANCE]));
   return v;
 }
 
