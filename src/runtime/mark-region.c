@@ -230,11 +230,11 @@ void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
   sword_t sizes[2];
   bitmap_sizes(n_ptes, sizes);
   lseek(fd, ALIGN_UP(lseek(fd, 0, SEEK_CUR), N_WORD_BYTES), SEEK_SET);
-  printf("loading allocations for %lu pages from %016lx\n", n_ptes, lseek(fd, 0, SEEK_CUR));
+  // printf("loading allocations for %lu pages from %016lx\n", n_ptes, lseek(fd, 0, SEEK_CUR));
   sword_t allocation_bitmap_size = sizes[0];
   if (read(fd, allocation_bitmap, allocation_bitmap_size) != allocation_bitmap_size)
     lose("failed to read allocation bitmap from core");
-  printf("now at %016lx\n", lseek(fd, 0, SEEK_CUR));
+  // printf("now at %016lx\n", lseek(fd, 0, SEEK_CUR));
 }
 
 /* Marking */
@@ -261,14 +261,19 @@ static boolean pointer_survived_gc_yet(lispobj object) {
   return !in_dynamic_space(object) || object_marked_p(object);
 }
 
-static struct Qblock *mark_queue;
-static struct Qblock *recycle_queue;
+static struct Qblock *grey_list;
+static struct Qblock *recycle_list;
+
+/* The "input packet" and "output packet" from "A Parallel, Incremental
+ * and Concurrent GC for Servers". */
+static struct Qblock *input_block;
+static struct Qblock *output_block;
 
 static struct Qblock *grab_qblock() {
   struct Qblock *block;
-  if (recycle_queue) {
-    block = recycle_queue;
-    recycle_queue = recycle_queue->next;
+  if (recycle_list) {
+    block = recycle_list;
+    recycle_list = recycle_list->next;
   } else {
     block = malloc(QBLOCK_BYTES);
     if (!block) lose("Failed to allocate new mark-queue block");
@@ -277,14 +282,14 @@ static struct Qblock *grab_qblock() {
   return block;
 }
 static void recycle_qblock(struct Qblock *block) {
-  block->next = recycle_queue;
-  recycle_queue = block;
+  block->next = recycle_list;
+  recycle_list = block;
 }
 static void free_mark_list() {
-  gc_assert(mark_queue == NULL);
-  while (recycle_queue) {
-    struct Qblock *old = recycle_queue;
-    recycle_queue = recycle_queue->next;
+  gc_assert(grey_list == NULL);
+  while (recycle_list) {
+    struct Qblock *old = recycle_list;
+    recycle_list = recycle_list->next;
     free(old);
   }
 }
@@ -334,15 +339,15 @@ static void mark(lispobj object) {
     }
     if (!pointer_survived_gc_yet(object)) {
       set_mark_bit(object);
-      if (mark_queue == NULL || mark_queue->count == QBLOCK_CAPACITY) {
-        /* How would this look if we do parallel marking? At the moment I
-         * would guess that we link blocks up to mark_queue only when they
-         * are "published" to the global queue, not upon creating them. */
+      if (!output_block || output_block->count == QBLOCK_CAPACITY) {
         struct Qblock *n = grab_qblock();
-        n->next = mark_queue;
-        mark_queue = n;
+        if (output_block) {
+          output_block->next = grey_list;
+          grey_list = output_block;
+        }
+        output_block = n;
       }
-      mark_queue->elements[mark_queue->count++] = object;
+      output_block->elements[output_block->count++] = object;
     }
   }
 }
@@ -370,22 +375,39 @@ static void trace_object(lispobj object) {
   }
 }
 
+static boolean work_to_do() {
+  return ANY((input_block && input_block->count) || output_block || grey_list);
+}
+
+#define PREFETCH_DISTANCE 16
 static lispobj dequeue() {
-  gc_assert(mark_queue != NULL);
-  gc_assert(mark_queue->count);
-  lispobj v = mark_queue->elements[--mark_queue->count];
-  if (mark_queue->count == 0) {
-    struct Qblock *next = mark_queue->next;
-    recycle_qblock(mark_queue);
-    mark_queue = next;
+  if (!input_block || !input_block->count) {
+    if (input_block) recycle_qblock(input_block);
+    if (output_block) {
+      /* Reuse input block */
+      input_block = output_block;
+      output_block = NULL;
+    } else if (grey_list) {
+      /* Take from grey block */
+      input_block = grey_list;
+      grey_list = grey_list->next;
+    } else {
+      /* No more work to do */
+      input_block = NULL;
+    }
   }
+  
+  if (!input_block) lose("Called dequeue() with no work to do");
+  lispobj v = input_block->elements[--input_block->count];
+  if (input_block->count > PREFETCH_DISTANCE)
+    __builtin_prefetch(input_block->elements[input_block->count - PREFETCH_DISTANCE]);
   return v;
 }
 
 uword_t traced;
 static void trace_everything() {
-  while (mark_queue != NULL ||
-         (test_weak_triggers(pointer_survived_gc_yet, mark) && mark_queue != NULL)) {
+  while (work_to_do() ||
+         (test_weak_triggers(pointer_survived_gc_yet, mark) && work_to_do())) {
     traced++;
     trace_object(dequeue());
   }
