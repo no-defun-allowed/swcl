@@ -116,7 +116,7 @@ int n_gcs;
 
 /* the verbosity level. All non-error messages are disabled at level 0;
  * and only a few rare messages are printed at level 1. */
-boolean gencgc_verbose = 1;
+boolean gencgc_verbose = 0;
 
 /* FIXME: At some point enable the various error-checking things below
  * and see what they say. */
@@ -124,7 +124,7 @@ boolean gencgc_verbose = 1;
 /* We hunt for pointers to old-space, when GCing generations >= verify_gen.
  * Set verify_gens to HIGHEST_NORMAL_GENERATION + 2 to disable this kind of
  * check. */
-generation_index_t verify_gens = 0; // HIGHEST_NORMAL_GENERATION + 2;
+generation_index_t verify_gens = HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
 boolean pre_verify_gen_0 = 0; // FIXME: should be named 'pre_verify_gc'
@@ -4603,7 +4603,7 @@ collect_garbage(generation_index_t last_gen)
         goto finish;
     }
 #endif
-    
+
     do {
         /* Collect the generation. */
 
@@ -5639,7 +5639,7 @@ gc_and_save(char *filename, boolean prepend_runtime,
 
     THREAD_JIT(0);
     // Scrub remaining garbage
-    zero_all_free_ranges();
+    // zero_all_free_ranges();
     // Assert that defrag will not move the init_function
     gc_assert(!immobile_space_p(lisp_init_function));
     // Defragment and set all objects' generations to pseudo-static

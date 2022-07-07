@@ -325,7 +325,7 @@ static void mark(lispobj object) {
     if (listp(object) && page_type != PAGE_TYPE_CONS)
       lose("Cons pointer %lx to non-cons page", object);
     */
-    
+
     lispobj *np = native_pointer(object);
     if (functionp(object) && embedded_obj_p(widetag_of(np))) {
       set_mark_bit(object);     /* This makes verify happy. */
@@ -508,7 +508,7 @@ static void sweep() {
   /* Culling hash tables may allocate, so make sure we don't
    * lose those allocations. */
   gc_close_collector_regions(0);
-  
+
   /* Calculate byte counts */
   bytes_allocated = 0;
   for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
@@ -569,16 +569,18 @@ void mr_preserve_object(lispobj obj) {
 static unsigned int collection = 0;
 void mr_collect_garbage() {
   uword_t prior_bytes = bytes_allocated;
-  printf("[GC #%d", ++collection);
+  // printf("[GC #%d", ++collection);
   reset_statistics();
   trace_static_roots();
   trace_everything();
   sweep();
   free_mark_list();
+  /*
   printf(" %luM -> %luM, %lu traced, fragmentation = %.4f, page hwm = %ld]\n",
          prior_bytes >> 20, bytes_allocated >> 20, traced,
          (double)(lines_used() * LINE_SIZE) / (double)(bytes_allocated),
          next_free_page);
+  */
 }
 
 /* Useful hacky stuff */
