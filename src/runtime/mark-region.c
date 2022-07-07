@@ -583,6 +583,12 @@ void mr_collect_garbage() {
   */
 }
 
+void zero_all_free_ranges() {
+  for (line_index_t l = 0; l < line_count; l++)
+    if (!line_bytemap[l])
+      memset(line_address(l), 0, LINE_SIZE);
+}
+
 /* Useful hacky stuff */
 
 void find_references_to(lispobj something) {

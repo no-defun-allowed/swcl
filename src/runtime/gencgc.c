@@ -5451,6 +5451,7 @@ void
 unhandled_sigmemoryfault(void __attribute__((unused)) *addr)
 {}
 
+#ifndef LISP_FEATURE_MARK_REGION_GC
 static void
 zero_all_free_ranges() /* called only by gc_and_save() */
 {
@@ -5470,6 +5471,7 @@ zero_all_free_ranges() /* called only by gc_and_save() */
     bzero((char*)region, 3*sizeof (struct alloc_region));
 #endif
 }
+#endif
 
 /* Things to do before doing a final GC before saving a core (without
  * purify).
