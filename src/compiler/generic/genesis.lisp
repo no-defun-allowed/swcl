@@ -429,14 +429,6 @@
                                :initial-element nil))
                (when (> end-page start-page)
                  (assert (alignedp start-word-index)))
-               ;; Mark the start of the object for mark-region GC.
-               (let ((pte (pte start-page))
-                     (word-in-page (mod start-word-index words-per-page)))
-                   (multiple-value-bind (word-index bit-index)
-                       (floor (floor word-in-page 2) sb-vm:n-word-bits)
-                     (setf (ldb (byte 1 bit-index)
-                                (aref (page-allocation-bitmap pte) word-index))
-                           1)))
                (loop for page-index from start-page to end-page
                      for pte = (pte page-index)
                      do (if (null (page-type pte))
@@ -446,6 +438,14 @@
              (let* ((start-page (page-index start-word-index))
                     (end-word-index (+ start-word-index n-words))
                     (end-page (page-index (1- end-word-index))))
+               ;; Mark the start of the object for mark-region GC.
+               (let ((pte (pte start-page))
+                     (word-in-page (mod start-word-index words-per-page)))
+                 (multiple-value-bind (word-index bit-index)
+                     (floor (floor word-in-page 2) sb-vm:n-word-bits)
+                   (setf (ldb (byte 1 bit-index)
+                              (aref (page-allocation-bitmap pte) word-index))
+                         1)))
                ;; pages from start to end (exclusive) must be full
                (loop for index from start-page below end-page
                      do (setf (page-words-used (pte index)) words-per-page))
