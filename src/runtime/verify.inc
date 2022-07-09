@@ -132,14 +132,26 @@ verify_pointer(lispobj thing, lispobj *where, struct verify_state *state)
         // If it's within the dynamic space it should point to a used page.
         FAIL_IF(page_free_p(target_page_index), "free page");
 #ifdef LISP_FEATURE_MARK_REGION_GC
+        lispobj *native = native_pointer(thing);
+        boolean embedded = embedded_obj_p(widetag_of(native));
         /* CONS cells can miss marks before GC */
         if (page_table[target_page_index].type != PAGE_TYPE_CONS || (state->flags & VERIFY_POST_GC))
             /* Embedded objects also don't get marked */
-            if (!embedded_obj_p(widetag_of(native_pointer(thing))))
-                FAIL_IF(!allocation_bit_marked(native_pointer(thing)), "no allocation mark");
+            if (!embedded)
+                FAIL_IF(!allocation_bit_marked(native), "no allocation mark");
         /* Line marks are often out of date before GC */
-        if (state->flags & VERIFY_POST_GC)
-            FAIL_IF(!line_marked(native_pointer(thing)), "no line mark");
+        if (state->flags & VERIFY_POST_GC) {
+            FAIL_IF(!line_marked(native), "no line mark");
+            /* Don't try to call object_size on embedded objects */
+            if (!embedded) {
+                uword_t size = object_size(native);
+                for (uword_t word = 0; word < size; word++) {
+                    char why[50];
+                    snprintf(why, sizeof(why), "no allocation mark on word %lx", word);
+                    FAIL_IF(!line_marked(native + word), why);
+                }
+            }
+        }
 #else
         FAIL_IF(!(page_table[target_page_index].type & OPEN_REGION_PAGE_FLAG)
                 && (thing & (GENCGC_PAGE_BYTES-1)) >= page_bytes_used(target_page_index),
