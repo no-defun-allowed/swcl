@@ -539,7 +539,7 @@ static void sweep() {
     generations[g].bytes_allocated = 0;
 
   for (page_index_t p = 0; p < page_table_pages; p++) {
-    if (page_words_used(p) == 0 && !page_free_p(p)) {
+    if (page_words_used(p) == 0) {
       reset_page_flags(p);
     } else {
       bytes_allocated += page_bytes_used(p);
