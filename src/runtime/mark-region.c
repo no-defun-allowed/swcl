@@ -275,7 +275,7 @@ static struct Qblock *grab_qblock() {
     block = recycle_list;
     recycle_list = recycle_list->next;
   } else {
-    block = malloc(QBLOCK_BYTES);
+    block = os_allocate(QBLOCK_BYTES);
     if (!block) lose("Failed to allocate new mark-queue block");
   }
   block->count = 0;
@@ -290,7 +290,7 @@ static void free_mark_list() {
   while (recycle_list) {
     struct Qblock *old = recycle_list;
     recycle_list = recycle_list->next;
-    free(old);
+    os_deallocate(old, QBLOCK_BYTES);
   }
 }
 
@@ -323,14 +323,6 @@ static void mark_lines(lispobj *p) {
 
 static void mark(lispobj object) {
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
-    /*
-    unsigned char page_type = page_table[find_page_index(native_pointer(object))].type & PAGE_TYPE_MASK;
-    if (!listp(object) && page_type == PAGE_TYPE_CONS)
-      lose("Non-cons pointer %lx to cons page", object);
-    if (listp(object) && page_type != PAGE_TYPE_CONS)
-      lose("Cons pointer %lx to non-cons page", object);
-    */
-
     lispobj *np = native_pointer(object);
     if (functionp(object) && embedded_obj_p(widetag_of(np))) {
       set_mark_bit(object);     /* This makes verify happy. */
@@ -542,6 +534,7 @@ static void sweep() {
       reset_page_flags(p);
     } else {
       bytes_allocated += page_bytes_used(p);
+      page_table[p].gen = 1;
       generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
       /* next_free_page is only maintained for page walking - we
        * reuse partially filled pages, so it's not useful for allocation */

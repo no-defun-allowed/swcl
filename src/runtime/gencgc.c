@@ -2139,6 +2139,7 @@ maybe_adjust_large_object(lispobj* where, page_index_t first_page, sword_t nword
 static uword_t small_pins_vector[SMALL_MAX_PINS];
 
 uword_t gc_pinned_nwords;
+#ifndef LISP_FEATURE_MARK_REGION_GC
 static void refine_ambiguous_roots()
 {
     void gc_heapsort_uwords(uword_t*, int);
@@ -2234,6 +2235,7 @@ static void refine_ambiguous_roots()
         putc('\n', stderr);
     }
 }
+#endif
 
 /* After scavenging of the roots is done, we go back to the pinned objects
  * and look within them for pointers. */
@@ -2502,6 +2504,7 @@ int sb_introspect_pinnedp(lispobj obj) {
  * the number of keys in the hashtable.
  */
 #define PAGE_PINNED 0xFF
+#ifndef LISP_FEATURE_MARK_REGION_GC
 static void pin_object(lispobj object)
 {
     if (!compacting_p()) {
@@ -2550,7 +2553,6 @@ static void pin_object(lispobj object)
     }
 }
 
-#ifndef LISP_FEATURE_MARK_REGION_GC
 #if !GENCGC_IS_PRECISE || defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64
 /* Take a possible pointer to a Lisp object and mark its page in the
  * page_table so that it will not be relocated during a GC.
@@ -2673,9 +2675,12 @@ static void sticky_preserve_pointer(os_context_register_t register_word)
     preserve_pointer(word);
 }
 #endif
-#endif
-#endif
+#endif // imprecise
+#endif // not mark-region
 
+#ifdef LISP_FEATURE_MARK_REGION_GC
+#define pin_exact_root(r) (void)(r)
+#else
 /* Pin an unambiguous descriptor object which may or may not be a pointer.
  * Ignore immediate objects, and heuristically skip some objects that are
  * known to be pinned without looking in pinned_objects.
@@ -2710,6 +2715,7 @@ static void pin_exact_root(lispobj obj)
     }
     pin_object(obj);
 }
+#endif
 
 
 /* Return true if 'ptr' is OK to be on a write-protected page
@@ -4102,6 +4108,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
     }
 #endif
 
+#ifndef LISP_FEATURE_MARK_REGION_GC
     /* Remove any key from pinned_objects this does not identify an object.
      * This is done more efficiently by delaying until after all keys are
      * inserted rather than at each insertion */
@@ -4118,7 +4125,8 @@ garbage_collect_generation(generation_index_t generation, int raise,
      * will not attempt to relocate their contents. */
     if (compacting_p())
         move_pinned_pages_to_newspace();
-
+#endif
+    
     /* Scavenge all the rest of the roots. */
 
 #if GENCGC_IS_PRECISE
@@ -4191,18 +4199,19 @@ garbage_collect_generation(generation_index_t generation, int raise,
         }
     }
 
-    if (!compacting_p()) {
 #ifdef LISP_FEATURE_MARK_REGION_GC
-        mr_collect_garbage();
-        RESET_ALLOC_START_PAGES();
+    mr_collect_garbage();
+    RESET_ALLOC_START_PAGES();
+    goto maybe_verify;
 #else
+    if (!compacting_p()) {
         extern void execute_full_mark_phase();
         extern void execute_full_sweep_phase();
         execute_full_mark_phase();
         execute_full_sweep_phase();
-#endif
         goto maybe_verify;
     }
+#endif
 
     if (GC_LOGGING) fprintf(gc_activitylog(), "begin scavenge static roots\n");
     heap_scavenge((lispobj*)NIL_SYMBOL_SLOTS_START, (lispobj*)NIL_SYMBOL_SLOTS_END);
