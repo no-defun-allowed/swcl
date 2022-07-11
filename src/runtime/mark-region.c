@@ -125,6 +125,7 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
 boolean try_allocate_small_after_region(sword_t nbytes, struct alloc_region *region) {
   /* Can't do this if we have no page. */
   if (!region->start_addr) return 0;
+  gc_assert(!page_free_p(find_page_index(region->start_addr)));
   /* We search to the end of this page. */
   line_index_t end = address_line(PTR_ALIGN_UP(region->end_addr, GENCGC_PAGE_BYTES));
   return try_allocate_small(nbytes, region, address_line(region->end_addr), end);
@@ -236,9 +237,6 @@ void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
   if (read(fd, allocation_bitmap, allocation_bitmap_size) != allocation_bitmap_size)
     lose("failed to read allocation bitmap from core");
   printf("now at %016lx\n", lseek(fd, 0, SEEK_CUR));
-
-  lispobj here = 42;
-  verify_heap(&here, VERIFY_PRE_GC);
 }
 
 /* Marking */
@@ -451,6 +449,7 @@ void set_allocation_bit_mark(void *address) {
 
 static lispobj find_object(uword_t address) {
   page_index_t p = find_page_index((void*)address);
+  if (page_free_p(p)) return 0;
   if (page_table[p].type == PAGE_TYPE_CONS) {
     /* CONS cells are always aligned, and the mutator is allowed to be lazy
      * w.r.t putting down allocation bits, so just use alignment. */
@@ -477,7 +476,7 @@ static lispobj find_object(uword_t address) {
       if (allocation_bitmap[i])
         /* Return the last location. */
         return fix_pointer(last_address_in(allocation_bitmap[i], i), address);
-    lose("find_object fell through on %ld?", address);
+    lose("find_object fell through on 0x%lx?", address);
   }
 }
 
@@ -574,8 +573,10 @@ void trace_static_roots() {
 /* Entry points */
 
 void mr_preserve_pointer(uword_t address) {
-  if (is_lisp_pointer(address) && find_page_index((void*)address) > -1)
-    mark(find_object(address));
+  if (is_lisp_pointer(address) && find_page_index((void*)address) > -1) {
+    lispobj obj = find_object(address);
+    if (obj) mark(obj);
+  }
 }
 
 void mr_preserve_range(lispobj *from, sword_t nwords) {

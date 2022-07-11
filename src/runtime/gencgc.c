@@ -127,7 +127,7 @@ boolean gencgc_verbose = 1;
 generation_index_t verify_gens = 0; // HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
-boolean pre_verify_gen_0 = 1; // FIXME: should be named 'pre_verify_gc'
+boolean pre_verify_gen_0 = 0; // FIXME: should be named 'pre_verify_gc'
 
 
 /*
@@ -5644,7 +5644,7 @@ gc_and_save(char *filename, boolean prepend_runtime,
 
     THREAD_JIT(0);
     // Scrub remaining garbage
-    // zero_all_free_ranges();
+    zero_all_free_ranges();
     // Assert that defrag will not move the init_function
     gc_assert(!immobile_space_p(lisp_init_function));
     // Defragment and set all objects' generations to pseudo-static

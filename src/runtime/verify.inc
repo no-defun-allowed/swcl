@@ -146,9 +146,11 @@ verify_pointer(lispobj thing, lispobj *where, struct verify_state *state)
             if (!embedded) {
                 uword_t size = object_size(native);
                 for (uword_t word = 0; word < size; word++) {
+                  if (!line_marked(native + word)) {
                     char why[50];
                     snprintf(why, sizeof(why), "no allocation mark on word %lx", word);
                     FAIL_IF(!line_marked(native + word), why);
+                  }
                 }
             }
         }
