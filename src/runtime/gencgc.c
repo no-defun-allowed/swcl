@@ -62,6 +62,7 @@
 #include "forwarding-ptr.h"
 #include "lispregs.h"
 #include "var-io.h"
+#include "walk-heap.h"
 
 /* forward declarations */
 extern FILE *gc_activitylog();
@@ -124,7 +125,7 @@ boolean gencgc_verbose = 1;
 /* We hunt for pointers to old-space, when GCing generations >= verify_gen.
  * Set verify_gens to HIGHEST_NORMAL_GENERATION + 2 to disable this kind of
  * check. */
-generation_index_t verify_gens = 0; // HIGHEST_NORMAL_GENERATION + 2;
+generation_index_t verify_gens = 0 // HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
 boolean pre_verify_gen_0 = 0; // FIXME: should be named 'pre_verify_gc'
@@ -4814,8 +4815,8 @@ static void __attribute__((unused)) gcbarrier_patch_code_range(uword_t start, vo
     extern void gcbarrier_patch_code(void*, int);
     struct varint_unpacker unpacker;
     struct code* code;
-    lispobj *where = (lispobj*)start;
-    while (where < (lispobj*)limit) {
+    lispobj *where = next_object((lispobj*)start, 0, (lispobj*)limit);
+    while (where) {
         if (widetag_of(where) == CODE_HEADER_WIDETAG && ((struct code*)where)->fixups) {
             code = (struct code*)where;
             varint_unpacker_init(&unpacker, code->fixups);
@@ -4831,7 +4832,7 @@ static void __attribute__((unused)) gcbarrier_patch_code_range(uword_t start, vo
                 gcbarrier_patch_code(patch_where, gc_card_table_nbits);
             }
         }
-        where += object_size(where);
+        where = next_object((lispobj*)where, object_size(where), (lispobj*)limit);
     }
 }
 void gc_allocate_ptes()

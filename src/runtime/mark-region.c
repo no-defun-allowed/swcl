@@ -275,7 +275,7 @@ static struct Qblock *grab_qblock() {
     block = recycle_list;
     recycle_list = recycle_list->next;
   } else {
-    block = os_allocate(QBLOCK_BYTES);
+    block = (struct Qblock*)os_allocate(QBLOCK_BYTES);
     if (!block) lose("Failed to allocate new mark-queue block");
   }
   block->count = 0;
@@ -290,7 +290,7 @@ static void free_mark_list() {
   while (recycle_list) {
     struct Qblock *old = recycle_list;
     recycle_list = recycle_list->next;
-    os_deallocate(old, QBLOCK_BYTES);
+    os_deallocate((char*)old, QBLOCK_BYTES);
   }
 }
 
@@ -416,13 +416,16 @@ static lispobj *last_address_in(uword_t bitword, uword_t word_index) {
 
 static lispobj fix_pointer(lispobj *p, uword_t original) {
   if (embedded_obj_p(widetag_of(p))) {
-      lispobj *base = fun_code_header(p);
-      return make_lispobj(base, OTHER_POINTER_LOWTAG);
+      p = fun_code_header(p);
+  }
+  /* It's perfectly fine for a conservative root to be just after some
+   * object, but it's so unlikely that it's likely to indicate something
+   * else went wrong. */
+  if (native_pointer(original) >= p + object_size(p)) {
+    fprintf(stderr, "%lx is not within %p\n", original, p);
+    return 0;
   }
   lispobj l = compute_lispobj(p);
-  if (listp(l))
-    lose("CONS on non-cons page, %p on page %lu, header %lx, derived from %lx",
-         p, find_page_index(p), *p, original);
   return l;
 }
 
@@ -520,9 +523,6 @@ static void sweep() {
   local_smash_weak_pointers();
   gc_dispose_private_pages();
   cull_weak_hash_tables(mr_alivep_funs);
-  /* Culling hash tables may allocate, so make sure we don't
-   * lose those allocations. */
-  gc_close_collector_regions(0);
 
   /* Calculate byte counts */
   bytes_allocated = 0;

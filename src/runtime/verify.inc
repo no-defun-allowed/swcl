@@ -1,7 +1,5 @@
 /* -*- Mode: C -*- */
 
-#include "walk-heap.h"
-
 static int
 is_in_stack_space(lispobj ptr)
 {
