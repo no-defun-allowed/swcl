@@ -329,6 +329,8 @@ static void mark(lispobj object) {
       lispobj *base = fun_code_header(np);
       object = make_lispobj(base, OTHER_POINTER_LOWTAG);
     }
+    if (!allocation_bit_marked(object) && !listp(object))
+      lose("No allocation bit for 0x%lx", object);
     if (!pointer_survived_gc_yet(object)) {
       set_mark_bit(object);
       if (!output_block || output_block->count == QBLOCK_CAPACITY) {
@@ -422,7 +424,7 @@ static lispobj fix_pointer(lispobj *p, uword_t original) {
    * object, but it's so unlikely that it's likely to indicate something
    * else went wrong. */
   if (native_pointer(original) >= p + object_size(p)) {
-    fprintf(stderr, "%lx is not within %p\n", original, p);
+    fprintf(stderr, "0x%lx (0x%lx?) is not within %p\n", original, compute_lispobj(native_pointer(original)), p);
     return 0;
   }
   lispobj l = compute_lispobj(p);
@@ -445,7 +447,7 @@ void set_allocation_bit_mark(void *address) {
 static lispobj find_object(uword_t address) {
   page_index_t p = find_page_index((void*)address);
   if (page_free_p(p)) return 0;
-  if (page_table[p].type == PAGE_TYPE_CONS) {
+  if (page_table[p].type == PAGE_TYPE_CONS && allocation_bit_marked((void*)address)) {
     /* CONS cells are always aligned, and the mutator is allowed to be lazy
      * w.r.t putting down allocation bits, so just use alignment. */
     return ALIGN_DOWN(address, 1 << N_LOWTAG_BITS) + LIST_POINTER_LOWTAG;
@@ -471,8 +473,13 @@ static lispobj find_object(uword_t address) {
       if (allocation_bitmap[i])
         /* Return the last location. */
         return fix_pointer(last_address_in(allocation_bitmap[i], i), address);
-    lose("find_object fell through on 0x%lx?", address);
+    return 0;
   }
+}
+
+lispobj *search_dynamic_space(void *pointer) {
+  lispobj o = find_object((uword_t)pointer);
+  return o ? native_pointer(o) : NULL;
 }
 
 /* Sweeping ("regioning"?) */
@@ -563,18 +570,22 @@ void trace_static_roots() {
   if (alloc_profile_data) mark(alloc_profile_data);
 }
 
+static unsigned int collection = 0;
+
 /* Entry points */
 
 void mr_preserve_pointer(uword_t address) {
-  if (is_lisp_pointer(address) && find_page_index((void*)address) > -1) {
+  if (find_page_index((void*)address) > -1) {
+    lispobj *n = native_pointer(address);
     lispobj obj = find_object(address);
     if (obj) mark(obj);
   }
 }
 
 void mr_preserve_range(lispobj *from, sword_t nwords) {
-  for (sword_t n = 0; n < nwords; n++)
+  for (sword_t n = 0; n < nwords; n++) {
     mark(from[n]);
+  }
 }
 
 void mr_preserve_object(lispobj obj) {
@@ -584,27 +595,24 @@ void mr_preserve_object(lispobj obj) {
   mark_lines(n);
 }
 
-static unsigned int collection = 0;
+void zero_all_free_ranges() {
+  for (line_index_t l = 0; l < line_count; l++)
+    if (!line_bytemap[l])
+      memset(line_address(l), 0, LINE_SIZE);
+}
+
 void mr_collect_garbage() {
   uword_t prior_bytes = bytes_allocated;
-  // printf("[GC #%d", ++collection);
+  printf("[GC #%d", ++collection);
   reset_statistics();
   trace_static_roots();
   trace_everything();
   sweep();
   free_mark_list();
-  /*
   printf(" %luM -> %luM, %lu traced, fragmentation = %.4f, page hwm = %ld]\n",
          prior_bytes >> 20, bytes_allocated >> 20, traced,
          (double)(lines_used() * LINE_SIZE) / (double)(bytes_allocated),
          next_free_page);
-  */
-}
-
-void zero_all_free_ranges() {
-  for (line_index_t l = 0; l < line_count; l++)
-    if (!line_bytemap[l])
-      memset(line_address(l), 0, LINE_SIZE);
 }
 
 /* Useful hacky stuff */

@@ -125,7 +125,7 @@ boolean gencgc_verbose = 1;
 /* We hunt for pointers to old-space, when GCing generations >= verify_gen.
  * Set verify_gens to HIGHEST_NORMAL_GENERATION + 2 to disable this kind of
  * check. */
-generation_index_t verify_gens = 0 // HIGHEST_NORMAL_GENERATION + 2;
+generation_index_t verify_gens = 0; // HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
 boolean pre_verify_gen_0 = 0; // FIXME: should be named 'pre_verify_gc'
@@ -1854,6 +1854,7 @@ copy_unboxed_object(lispobj object, sword_t nwords)
 /* This will NOT reliably work for objects in a currently open allocation region,
  * because page_words_used() is not sync'ed to the free pointer until closing */
 #include "brothertree.h"
+#ifndef LISP_FEATURE_MARK_REGION_GC
 lispobj *search_dynamic_space(void *pointer)
 {
     page_index_t page_index = find_page_index(pointer);
@@ -1892,6 +1893,7 @@ lispobj *search_dynamic_space(void *pointer)
     }
     return gc_search_space(start, pointer);
 }
+#endif
 
 /* Return true if and only if everything on the specified page is NOT subject
  * to evacuation, i.e. either the page is not in 'from_space', or is entirely
@@ -2680,7 +2682,7 @@ static void sticky_preserve_pointer(os_context_register_t register_word)
 #endif // not mark-region
 
 #ifdef LISP_FEATURE_MARK_REGION_GC
-#define pin_exact_root(r) (void)(r)
+#define pin_exact_root(r) mr_preserve_object(r)
 #else
 /* Pin an unambiguous descriptor object which may or may not be a pointer.
  * Ignore immediate objects, and heuristically skip some objects that are
@@ -4127,7 +4129,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
     if (compacting_p())
         move_pinned_pages_to_newspace();
 #endif
-    
+
     /* Scavenge all the rest of the roots. */
 
 #if GENCGC_IS_PRECISE

@@ -182,8 +182,8 @@
 ;;; 1. what to allocate: type, size, lowtag describe the object
 ;;; 2. where to put the result
 ;;; 3. node (for determining immobile-space-p) and a scratch register or two
-(defun allocation (type size lowtag alloc-tn node temp thread-temp &key overflow)
-  (declare (ignorable thread-temp))
+(defun allocation (type size lowtag alloc-tn node temp thread-temp &key overflow (cells 1))
+  (declare (ignorable thread-temp cells))
   (flet ((fallback (size)
            ;; Call an allocator trampoline and get the result in the proper register.
            ;; There are 2 choices of trampoline to invoke alloc() or alloc_list()
@@ -280,7 +280,11 @@
           (thread-slot-ea thread-allocation-bitmap-base-slot
                           #+gs-seg thread-temp))
     (inst shr :qword alloc-tn n-lowtag-bits)
-    (inst bts :qword (ea another-temp) alloc-tn)
+    ;; Mark all the cons cells, if the caller wants that.
+    (dotimes (n cells)
+      (inst bts :qword (ea another-temp) alloc-tn)
+      (unless (= n (1- cells))
+        (inst inc alloc-tn)))
     (unless (eq another-temp temp)
       (inst pop another-temp))
     (inst pop alloc-tn))
@@ -370,7 +374,7 @@
     (let ((nbytes (* cons-size 2 n-word-bytes)))
       (instrument-alloc +cons-primtype+ nbytes node (list temp alloc) thread-tn)
       (pseudo-atomic (:thread-tn thread-tn)
-        (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn)
+        (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn :cells 2)
         (store-slot tail alloc cons-cdr-slot 0)
         (inst lea temp (ea (+ 16 list-pointer-lowtag) alloc))
         (store-slot temp alloc cons-car-slot 0)
@@ -402,7 +406,7 @@
       (pseudo-atomic (:elide-if stack-allocate-p :thread-tn thread-tn)
         (if stack-allocate-p
             (stack-allocation nbytes 0 alloc)
-            (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn))
+            (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn :cells 2))
         (store-slot car alloc cons-car-slot 0)
         (store-slot cadr alloc (+ 2 cons-car-slot) 0)
         (store-slot cddr alloc (+ 2 cons-cdr-slot) 0)
@@ -429,7 +433,7 @@
       (pseudo-atomic (:elide-if stack-allocate-p :thread-tn thread-tn)
         (if stack-allocate-p
             (stack-allocation size list-pointer-lowtag res)
-            (allocation +cons-primtype+ size list-pointer-lowtag res node temp thread-tn))
+            (allocation +cons-primtype+ size list-pointer-lowtag res node temp thread-tn :cells cons-cells))
         (move ptr res)
         (dotimes (i (1- cons-cells))
           (store-slot (tn-ref-tn things) ptr)
@@ -776,6 +780,7 @@
     (:node-var node)
     (:temporary (:sc descriptor-reg) tail next limit)
     #+gs-seg (:temporary (:sc unsigned-reg :offset 15) thread-tn)
+    #+mark-region-gc (:temporary (:sc descriptor-reg) bitmap-base bitmap-index)
     (:generator 20
       (let ((size (calc-size-in-bytes length tail))
             (entry (gen-label))
@@ -790,9 +795,18 @@
                                  (inst push (if (sc-is element immediate) (tn-value element) element))
                                  (invoke-asm-routine 'call 'make-list node)
                                  (inst pop result)
-                                 (inst jmp leave-pa)))
+                                 (inst jmp leave-pa))
+                     ;; We'll fill bits in the rest of this pseudo-atomic section.
+                     :cells 0)
          (compute-end)
          (inst mov next result)
+         #+mark-region-gc
+         (progn
+           (inst mov bitmap-base
+                 (thread-slot-ea thread-allocation-bitmap-base-slot
+                                 #+gs-seg thread-tn))
+           (inst mov bitmap-index result)
+           (inst shr :qword bitmap-index n-lowtag-bits))
          (inst jmp entry)
          (emit-label LOOP)
          (storew next tail cons-cdr-slot list-pointer-lowtag)
@@ -800,6 +814,10 @@
          (inst mov tail next)
          (inst add next (* 2 n-word-bytes))
          (storew element tail cons-car-slot list-pointer-lowtag)
+         #+mark-region-gc
+         (progn
+           (inst bts :qword (ea bitmap-base) bitmap-index)
+           (inst inc bitmap-index))
          (inst cmp next limit)
          (inst jmp :ne loop)
          ;; still pseudo-atomic
