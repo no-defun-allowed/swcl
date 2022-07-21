@@ -424,7 +424,6 @@ static lispobj fix_pointer(lispobj *p, uword_t original) {
    * object, but it's so unlikely that it's likely to indicate something
    * else went wrong. */
   if (native_pointer(original) >= p + object_size(p)) {
-    fprintf(stderr, "0x%lx (0x%lx?) is not within %p\n", original, compute_lispobj(native_pointer(original)), p);
     return 0;
   }
   lispobj l = compute_lispobj(p);
@@ -603,16 +602,17 @@ void zero_all_free_ranges() {
 
 void mr_collect_garbage() {
   uword_t prior_bytes = bytes_allocated;
-  printf("[GC #%d", ++collection);
+  fprintf(stderr, "[GC #%d", ++collection);
   reset_statistics();
   trace_static_roots();
   trace_everything();
   sweep();
   free_mark_list();
-  printf(" %luM -> %luM, %lu traced, fragmentation = %.4f, page hwm = %ld]\n",
-         prior_bytes >> 20, bytes_allocated >> 20, traced,
-         (double)(lines_used() * LINE_SIZE) / (double)(bytes_allocated),
-         next_free_page);
+  fprintf(stderr,
+          " %luM -> %luM, %lu traced, fragmentation = %.4f, page hwm = %ld]\n",
+          prior_bytes >> 20, bytes_allocated >> 20, traced,
+          (double)(lines_used() * LINE_SIZE) / (double)(bytes_allocated),
+          next_free_page);
 }
 
 /* Useful hacky stuff */
@@ -628,12 +628,13 @@ void find_references_to(lispobj something) {
 void draw_page_table() {
   for (int i = 0; i < 4000; i++) {
     if (i % 50 == 0) printf("\n%4d ", i);
-    printf("\033[%c;9%cm%c%c\033[0m",
-           (page_table[i].type & SINGLE_OBJECT_FLAG) ? '1' : '0',
-           '0' + (page_table[i].type & 7),
-           64 + page_table[i].type,
-           // '0' + page_table[i].gen
-           '0' + (unsigned char)(10.0 * (double)page_bytes_used(i) / (double)GENCGC_PAGE_BYTES)
-           );
+    fprintf(stderr,
+            "\033[%c;9%cm%c%c\033[0m",
+            (page_table[i].type & SINGLE_OBJECT_FLAG) ? '1' : '0',
+            '0' + (page_table[i].type & 7),
+            64 + page_table[i].type,
+            // '0' + page_table[i].gen
+            '0' + (unsigned char)(10.0 * (double)page_bytes_used(i) / (double)GENCGC_PAGE_BYTES)
+            );
   }
 }
