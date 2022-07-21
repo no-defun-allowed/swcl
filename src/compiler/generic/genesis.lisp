@@ -434,18 +434,20 @@
                      do (if (null (page-type pte))
                             (setf (page-type pte) page-type)
                             (assert (eq (page-type pte) page-type))))))
+           (mark-allocation (start-word-index)
+             ;; Mark the start of the object for mark-region GC.
+             (let* ((start-page (page-index start-word-index))
+                    (pte (pte start-page))
+                    (word-in-page (mod start-word-index words-per-page)))
+               (multiple-value-bind (word-index bit-index)
+                   (floor (floor word-in-page 2) sb-vm:n-word-bits)
+                 (setf (ldb (byte 1 bit-index)
+                            (aref (page-allocation-bitmap pte) word-index))
+                       1))))
            (note-words-used (start-word-index)
              (let* ((start-page (page-index start-word-index))
                     (end-word-index (+ start-word-index n-words))
                     (end-page (page-index (1- end-word-index))))
-               ;; Mark the start of the object for mark-region GC.
-               (let ((pte (pte start-page))
-                     (word-in-page (mod start-word-index words-per-page)))
-                 (multiple-value-bind (word-index bit-index)
-                     (floor (floor word-in-page 2) sb-vm:n-word-bits)
-                   (setf (ldb (byte 1 bit-index)
-                              (aref (page-allocation-bitmap pte) word-index))
-                         1)))
                ;; pages from start to end (exclusive) must be full
                (loop for index from start-page below end-page
                      do (setf (page-words-used (pte index)) words-per-page))
@@ -493,6 +495,7 @@
                                                    sb-vm:cons-size))))))))
              (result (car region)))
         (incf (page-words-used (pte (page-index result))) sb-vm:cons-size)
+        (mark-allocation result)
         (when (= (incf (car region) sb-vm:cons-size) (cdr region))
           (setf (gspace-cons-region gspace) nil))
         (return-from dynamic-space-claim-n-words result)))
@@ -506,6 +509,7 @@
           (if (< (decf (cdr found) n-words) min-usable-hole-size) ; discard this hole now?
               (rplacd holder (delete found (cdr holder) :count 1)) ; yup
               (incf (car found) n-words))
+          (mark-allocation word-index)
           (return-from dynamic-space-claim-n-words (note-words-used word-index))))
       ;; Avoid switching between :CODE and :MIXED on a page
       (unless (or (alignedp (gspace-free-word-index gspace))
@@ -521,6 +525,7 @@
         (realign-frontier))
       (let ((word-index (gspace-claim-n-words gspace n-words)))
         (assign-page-type page-type word-index n-words)
+        (mark-allocation word-index)
         (note-words-used word-index)))))
 
 (defun gspace-claim-n-bytes (gspace specified-n-bytes &optional (page-type :mixed))

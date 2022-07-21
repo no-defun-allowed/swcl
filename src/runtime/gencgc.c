@@ -5216,6 +5216,9 @@ NO_SANITIZE_MEMORY lispobj AMD64_SYSV_ABI make_list(lispobj element, sword_t nby
         struct cons* limit = c + ncells;
         while (c < limit) {
             c->car = element; c->cdr = make_lispobj(c+1, LIST_POINTER_LOWTAG);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+            set_allocation_bit_mark(c);
+#endif
             ++c;
         }
         tail = &((c-1)->cdr);
@@ -5250,6 +5253,12 @@ NO_SANITIZE_MEMORY lispobj AMD64_SYSV_ABI listify_rest_arg(lispobj* context, swo
             c[1].car = context[-1]; c[1].cdr = make_lispobj(c+2, LIST_POINTER_LOWTAG);
             c[2].car = context[-2]; c[2].cdr = make_lispobj(c+3, LIST_POINTER_LOWTAG);
             c[3].car = context[-3]; c[3].cdr = make_lispobj(c+4, LIST_POINTER_LOWTAG);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+            set_allocation_bit_mark(c);
+            set_allocation_bit_mark(c+1);
+            set_allocation_bit_mark(c+2);
+            set_allocation_bit_mark(c+3);
+#endif
             c += 4;
             context -= 4;
         }
@@ -5257,6 +5266,9 @@ NO_SANITIZE_MEMORY lispobj AMD64_SYSV_ABI listify_rest_arg(lispobj* context, swo
         while (ncells--) {
             c->car = *context--;
             c->cdr = make_lispobj(c+1, LIST_POINTER_LOWTAG);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+            set_allocation_bit_mark(c);
+#endif
             c++;
         }
         tail = &((c-1)->cdr);
@@ -5291,6 +5303,12 @@ NO_SANITIZE_MEMORY lispobj listify_rest_arg(lispobj* context, sword_t context_by
             c[1].car = context[ 1]; c[1].cdr = make_lispobj(c+2, LIST_POINTER_LOWTAG);
             c[2].car = context[ 2]; c[2].cdr = make_lispobj(c+3, LIST_POINTER_LOWTAG);
             c[3].car = context[ 3]; c[3].cdr = make_lispobj(c+4, LIST_POINTER_LOWTAG);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+            set_allocation_bit_mark(c);
+            set_allocation_bit_mark(c+1);
+            set_allocation_bit_mark(c+2);
+            set_allocation_bit_mark(c+3);
+#endif
             c += 4;
             context += 4;
         }
@@ -5298,6 +5316,9 @@ NO_SANITIZE_MEMORY lispobj listify_rest_arg(lispobj* context, sword_t context_by
         while (ncells--) {
             c->car = *context++;
             c->cdr = make_lispobj(c+1, LIST_POINTER_LOWTAG);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+            set_allocation_bit_mark(c);
+#endif
             c++;
         }
         tail = &((c-1)->cdr);

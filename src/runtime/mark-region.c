@@ -237,6 +237,8 @@ void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
   if (read(fd, allocation_bitmap, allocation_bitmap_size) != allocation_bitmap_size)
     lose("failed to read allocation bitmap from core");
   printf("now at %016lx\n", lseek(fd, 0, SEEK_CUR));
+  for (int i = 0; i < 10; i++)
+    printf("%016lx\n", allocation_bitmap[i]);
 }
 
 /* Marking */
@@ -323,12 +325,15 @@ static void mark_lines(lispobj *p) {
 
 static void mark(lispobj object) {
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
+    if (page_free_p(find_page_index(native_pointer(object))))
+      lose("%lx is on a free page (#%ld)", object, find_page_index(native_pointer(object)));
+
     lispobj *np = native_pointer(object);
     if (functionp(object) && embedded_obj_p(widetag_of(np))) {
       lispobj *base = fun_code_header(np);
       object = make_lispobj(base, OTHER_POINTER_LOWTAG);
     }
-    if (!allocation_bit_marked(object) && !listp(object))
+    if (!allocation_bit_marked(native_pointer(object)))
       lose("No allocation bit for 0x%lx", object);
     if (!pointer_survived_gc_yet(object)) {
       set_mark_bit(object);
@@ -573,7 +578,6 @@ static unsigned int collection = 0;
 
 void mr_preserve_pointer(uword_t address) {
   if (find_page_index((void*)address) > -1) {
-    lispobj *n = native_pointer(address);
     lispobj obj = find_object(address);
     if (obj) mark(obj);
   }
@@ -623,9 +627,9 @@ void find_references_to(lispobj something) {
   }
 }
 
-void draw_page_table() {
-  for (int i = 0; i < 4000; i++) {
-    if (i % 50 == 0) printf("\n%4d ", i);
+void draw_page_table(int from, int to) {
+  for (int i = from; i < to; i++) {
+    if (i % 50 == 0) fprintf(stderr, "\n%4d ", i);
     fprintf(stderr,
             "\033[%c;9%cm%c%c\033[0m",
             (page_table[i].type & SINGLE_OBJECT_FLAG) ? '1' : '0',
