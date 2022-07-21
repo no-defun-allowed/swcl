@@ -325,7 +325,6 @@ static void mark(lispobj object) {
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
     lispobj *np = native_pointer(object);
     if (functionp(object) && embedded_obj_p(widetag_of(np))) {
-      set_mark_bit(object);     /* This makes verify happy. */
       lispobj *base = fun_code_header(np);
       object = make_lispobj(base, OTHER_POINTER_LOWTAG);
     }

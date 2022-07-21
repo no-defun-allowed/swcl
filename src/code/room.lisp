@@ -183,9 +183,6 @@
 (defun map-objects-in-range (fun start end &optional (strict-bound t))
   (declare (type function fun))
   (declare (dynamic-extent fun))
-  #+mark-region-gc
-  (declare (ignore fun start end strict-bound)) ; Have to work it out first.
-  #-mark-region-gc
   (let ((start (descriptor-sap start))
         (end (descriptor-sap end)))
     (loop
@@ -225,6 +222,37 @@
        (alien-funcall (extern-alien "ldb_monitor" (function void))))
      #-sb-devel
      (aver (sap= start end)))))
+
+#+mark-region-gc
+(define-alien-variable "allocation_bitmap" (* unsigned-char))
+
+#+mark-region-gc
+(defun map-objects-in-non-contiguous-range (fun start end &optional strict-bound)
+  (declare (type function fun)
+           (type fixnum start end))
+  (declare (ignore strict-bound)) ; Meaningless for MR heap.
+  (declare (dynamic-extent fun))
+  (let* ((start (* start 2)) (end (* end 2)) ; Utter garbage conversion
+         (first-byte (floor (- start dynamic-space-start)
+                           (ash 8 n-lowtag-bits)))
+        (last-byte (ceiling (- end dynamic-space-start n-lowtag-bits)
+                            (ash 8 n-lowtag-bits))))
+    (loop for byte from first-byte to last-byte
+          do (dotimes (bit 8)
+               (when (logbitp bit (deref allocation-bitmap byte))
+                 (let ((position (+ dynamic-space-start
+                                    (ash (+ (* byte 8) bit) n-lowtag-bits))))
+                   (when (and (<= start position) (< position end))
+                     ;; As in MAP-OBJECTS-IN-RANGE.
+                     (binding*
+                         ((widetag (widetag@baseptr (int-sap position)))
+                          (obj (lispobj@baseptr (int-sap position) widetag))
+                          ((typecode size)
+                           (if (listp obj)
+                               (values list-pointer-lowtag (* 2 n-word-bytes))
+                               (values widetag (primitive-object-size obj)))))
+                       (aver (not (logtest (the fixnum size) lowtag-mask)))
+                       (funcall fun obj typecode size)))))))))
 
 ;;; Access to the GENCGC page table for better precision in
 ;;; MAP-ALLOCATED-OBJECTS
@@ -418,10 +446,12 @@ We could try a few things to mitigate this:
                      (= (logand flags page-type-mask) page-type-constraint))
             ;; FIXME: should exclude (0 . 0) conses on PAGE_TYPE_{BOXED,UNBOXED}
             ;; resulting from zeroing the tail of a bignum or vector etc.
-            (map-objects-in-range fun
-                                  (%make-lisp-obj (sap-int start))
-                                  (%make-lisp-obj (sap-int end))
-                                  (< start-page initial-next-free-page))))))
+            (#-mark-region-gc map-objects-in-range
+             #+mark-region-gc map-objects-in-non-contiguous-range
+             fun
+             (%make-lisp-obj (sap-int start))
+             (%make-lisp-obj (sap-int end))
+             (< start-page initial-next-free-page))))))
     (setq start-page (1+ end-page))))
 
 ;; Users are often surprised to learn that a just-consed object can't
