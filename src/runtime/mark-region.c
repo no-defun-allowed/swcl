@@ -540,7 +540,6 @@ static void sweep() {
       reset_page_flags(p);
     } else {
       bytes_allocated += page_bytes_used(p);
-      page_table[p].gen = 1;
       generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
       /* next_free_page is only maintained for page walking - we
        * reuse partially filled pages, so it's not useful for allocation */
