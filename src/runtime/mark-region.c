@@ -590,7 +590,7 @@ void mr_preserve_range(lispobj *from, sword_t nwords) {
 }
 
 void mr_preserve_object(lispobj obj) {
-  if (is_lisp_pointer(obj)) {
+  if (is_lisp_pointer(obj) && in_dynamic_space(obj)) {
     set_mark_bit(obj);
     lispobj *n = native_pointer(obj);
     add_words_used(n, object_size(n));
