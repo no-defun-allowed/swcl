@@ -590,10 +590,12 @@ void mr_preserve_range(lispobj *from, sword_t nwords) {
 }
 
 void mr_preserve_object(lispobj obj) {
-  set_mark_bit(obj);
-  lispobj *n = native_pointer(obj);
-  add_words_used(n, object_size(n));
-  mark_lines(n);
+  if (is_lisp_pointer(obj)) {
+    set_mark_bit(obj);
+    lispobj *n = native_pointer(obj);
+    add_words_used(n, object_size(n));
+    mark_lines(n);
+  }
 }
 
 void zero_all_free_ranges() {

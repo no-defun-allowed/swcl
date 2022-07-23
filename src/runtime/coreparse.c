@@ -41,6 +41,7 @@
 #include "gc-internal.h"
 #include "gc-private.h"
 #include "code.h"
+#include "walk-heap.h"
 
 #include <errno.h>
 
@@ -378,7 +379,8 @@ static void relocate_space(uword_t start, lispobj* end, struct heap_adjust* adj)
     int i;
 
     adj->n_relocs_abs = adj->n_relocs_rel = 0;
-    for ( ; where < end ; where += nwords ) {
+    where = next_object(where, 0, end);
+    for ( ; where ; where = next_object(where, nwords, end) ) {
         lispobj word = *where;
         if (!is_header(word)) {
             adjust_pointers(where, 2, adj);

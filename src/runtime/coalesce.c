@@ -26,6 +26,7 @@
 #include "immobile-space.h"
 #include "hopscotch.h"
 #include "code.h"
+#include "walk-heap.h"
 
 static boolean gcable_pointer_p(lispobj pointer)
 {
@@ -156,17 +157,19 @@ static uword_t coalesce_range(lispobj* where, lispobj* limit, uword_t arg)
     lispobj *next;
     sword_t nwords, i;
 
-    for ( ; where < limit ; where = next ) {
+    where = next_object(where, 0, limit);
+    while (where) {
         lispobj word = *where;
         if (is_header(word)) {
             int widetag = header_widetag(word);
             nwords = sizetab[widetag](where);
-            next = where + nwords;
+            next = next_object(where, nwords, limit);
             if (instanceoid_widetag_p(widetag)) {
                 lispobj layout = layout_of(where);
                 struct bitmap bitmap = get_layout_bitmap(LAYOUT(layout));
                 for (i=0; i<(nwords-1); ++i)
                     if (bitmap_logbitp(i, bitmap)) coalesce_obj(where+1+i, ht);
+                where = next;
                 continue;
             }
             switch (widetag) {
@@ -177,6 +180,7 @@ static uword_t coalesce_range(lispobj* where, lispobj* limit, uword_t arg)
                 lispobj name = decode_symbol_name(symbol->name);
                 coalesce_obj(&name, ht);
                 set_symbol_name(symbol, name);
+                where = next;
                 continue;
             }
 #endif
@@ -184,15 +188,18 @@ static uword_t coalesce_range(lispobj* where, lispobj* limit, uword_t arg)
                 nwords = code_header_words((struct code*)where);
                 break;
             default:
-                if (leaf_obj_widetag_p(widetag))
+                if (leaf_obj_widetag_p(widetag)) {
+                    where = next;
                     continue; // Ignore this object.
+                }
             }
-            for(i=1; i<nwords; ++i)
+            for (i=1; i<nwords; ++i)
                 coalesce_obj(where+i, ht);
+            where = next;
         } else {
             coalesce_obj(where+0, ht);
             coalesce_obj(where+1, ht);
-            next = where + 2;
+            where = next_object(where, 2, limit);
         }
     }
     return 0;
@@ -203,7 +210,6 @@ static uword_t coalesce_range(lispobj* where, lispobj* limit, uword_t arg)
  * It's not wrong to fail to coalesce things that could have been */
 void coalesce_similar_objects()
 {
-#ifndef LISP_FEATURE_MARK_REGION_GC // no hope this works on MR yet
     struct hopscotch_table ht;
     uword_t arg = (uword_t)&ht;
 
@@ -225,5 +231,4 @@ void coalesce_similar_objects()
     coalesce_range(current_dynamic_space, get_alloc_pointer(), arg);
 #endif
     hopscotch_destroy(&ht);
-#endif
 }
