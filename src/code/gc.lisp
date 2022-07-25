@@ -29,7 +29,11 @@
 
 (declaim (inline dynamic-usage))
 (defun dynamic-usage ()
-  #+gencgc
+  #+mark-region-gc
+  (let ((bytes (extern-alien "bytes_allocated" os-vm-size-t)))
+    (values bytes
+            (- (* (pages-allocated) sb-vm:gencgc-page-bytes) bytes)))
+  #+(and gencgc (not mark-region-gc))
   (extern-alien "bytes_allocated" os-vm-size-t)
   #-gencgc
   (truly-the word
@@ -486,6 +490,10 @@ statistics are appended to it."
 (define-alien-variable ("page_table" sb-vm:page-table) (* (struct sb-vm::page)))
 (declaim (inline sb-vm:find-page-index))
 (define-alien-routine ("ext_find_page_index" sb-vm:find-page-index) page-index-t (address unsigned))
+
+(defun pages-allocated ()
+  (loop for n below (extern-alien "next_free_page" signed)
+        count (not (zerop (slot (deref sb-vm:page-table n) 'sb-vm::flags)))))
 
 (defun generation-of (object)
   (with-pinned-objects (object)

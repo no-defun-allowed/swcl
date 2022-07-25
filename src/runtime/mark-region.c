@@ -131,15 +131,23 @@ boolean try_allocate_small_after_region(sword_t nbytes, struct alloc_region *reg
   return try_allocate_small(nbytes, region, address_line(region->end_addr), end);
 }
 
+/* We try not to allocate small objects from free pages, to reduce
+ * fragmentation. Something like "wilderness preservation". */
+boolean allow_free_pages[16] = {0};
+
 /* try_allocate_small_from_pages updates the start pointer to after the
  * claimed page. */
 boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
                                       int page_type, generation_index_t gen,
                                       page_index_t *start, page_index_t end) {
   // printf("try_allocate_small_f_p(%lu, %d, %d, %ld, %ld)\n", nbytes, page_type, gen, *start, end);
-  for (page_index_t where = *start; where < end; where++)
+ again:
+  for (page_index_t where = *start; where < end; where++) {
     if (page_bytes_used(where) <= GENCGC_PAGE_BYTES - nbytes &&
-        (page_free_p(where) || page_extensible_p(where, gen, page_type)) &&
+        ((allow_free_pages[page_type & PAGE_TYPE_MASK] && page_free_p(where)) ||
+         /* We really should use page_extensible_p but that checks card marks,
+          * and we never clear card marks currently, leading to wasted space. */
+         (page_table[where].gen == gen && page_table[where].type == page_type)) &&
         try_allocate_small(nbytes, region,
                            address_line(page_address(where)),
                            address_line(page_address(where + 1)))) {
@@ -150,6 +158,12 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
       // printf(" => %ld\n", where);
       return 1;
     }
+  }
+  if (!allow_free_pages[page_type & PAGE_TYPE_MASK]) {
+    allow_free_pages[page_type & PAGE_TYPE_MASK] = 1;
+    *start = 0;
+    goto again;
+  }
   return 0;
 }
 
@@ -544,6 +558,7 @@ static void sweep() {
       reset_page_flags(p);
     } else {
       bytes_allocated += page_bytes_used(p);
+      page_table[p].gen = 0; // Kludge to reuse pseudo-static pages for now.
       generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
       /* next_free_page is only maintained for page walking - we
        * reuse partially filled pages, so it's not useful for allocation */
@@ -617,6 +632,7 @@ void mr_collect_garbage() {
           prior_bytes >> 20, bytes_allocated >> 20, traced,
           (double)(lines_used() * LINE_SIZE) / (double)(bytes_allocated),
           next_free_page);
+  memset(allow_free_pages, 0, sizeof(allow_free_pages));
 }
 
 /* Useful hacky stuff */
@@ -641,4 +657,22 @@ void draw_page_table(int from, int to) {
             '0' + (unsigned char)(10.0 * (double)page_bytes_used(i) / (double)GENCGC_PAGE_BYTES)
             );
   }
+}
+
+int drawing_count = 0;
+void draw_line_bytemap(int type) {
+  char name[30];
+  snprintf(name, 30, "/tmp/bytemap%d.pbm", drawing_count++);
+  FILE *f = fopen(name, "w");
+  fprintf(f, "P2 512 %ld 3\n", dynamic_space_size / GENCGC_PAGE_BYTES);
+  for (line_index_t i = 0; i < line_count; i++) {
+    page_index_t p = find_page_index(line_address(i));
+    int n = line_bytemap[i] * 3;
+    if (page_table[p].type != type || page_bytes_used(p) == GENCGC_PAGE_BYTES)
+      n = 1;
+    if (page_table[p].gen != 0)
+      n = 2;
+    fprintf(f, "%d ", n);
+  }
+  fclose(f);
 }
