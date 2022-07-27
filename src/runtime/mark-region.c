@@ -334,11 +334,11 @@ static void mark_cons_line(struct cons *c) {
   add_words_used(c, 2);
 }
 static void mark_lines(lispobj *p) {
-  /* TODO: Don't really need to mark lines if the object is large, as
-   * we don't try to reuse single object pages. */
   uword_t word_count = object_size(p);
-  line_index_t first = address_line(p), last = address_line(p + word_count - 1);
-  for (line_index_t line = first; line <= last; line++) line_bytemap[line] = 1;
+  if (!page_single_obj_p(find_page_index(p))) {
+    line_index_t first = address_line(p), last = address_line(p + word_count - 1);
+    for (line_index_t line = first; line <= last; line++) line_bytemap[line] = 1;
+  }
   add_words_used(p, word_count);
 }
 

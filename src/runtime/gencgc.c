@@ -4516,7 +4516,7 @@ remap_free_pages (page_index_t from, page_index_t to)
     }
 }
 
-generation_index_t small_generation_limit = 1;
+generation_index_t small_generation_limit = -1;
 
 // one pair of counters per widetag, though we're only tracking code as yet
 int n_scav_calls[64], n_scav_skipped[64];
