@@ -651,13 +651,14 @@ static void mr_scavenge_root_gens() {
   int checked = 0;
   while (i < page_table_pages) {
     generation_index_t gen = page_table[i].gen;
-    if ((page_table[i].type & PAGE_TYPE_MASK) != PAGE_TYPE_UNBOXED ||
+    if ((page_table[i].type & PAGE_TYPE_MASK) == PAGE_TYPE_UNBOXED ||
         !page_words_used(i) ||
         !cardseq_any_marked(page_to_card_index(i)) ||
         gen <= from) {
       i++; continue;
     }
     checked++;
+    // fprintf(stderr, "Scavenging page %ld\n", i);
     if (page_single_obj_p(i)) {
       /* The only time that page_address + page_words_used actually
        * demarcates the end of a (sole) object on the page, with this
@@ -677,33 +678,36 @@ static void mr_scavenge_root_gens() {
         }
       }
     } else {
-      boolean non_spanning = page_table[i].type == PAGE_TYPE_CONS;
+      boolean cons_page = page_table[i].type == PAGE_TYPE_CONS;
       /* Scavenge every object in every card and try to re-protect. */
       lispobj *page_start = (lispobj*)page_address(i), *start = page_start;
       for (int j = 0, card = addr_to_card_index(start);
            j < CARDS_PER_PAGE;
            j++, card++, start += WORDS_PER_CARD) {
-        /* Check if an object overlaps the start of the card. */
-        lispobj *first_object = non_spanning ? start :
-          native_pointer(find_object((lispobj)start, (lispobj)page_start) || start);
-        lispobj *end = start + WORDS_PER_CARD;
-        dirty_generation_source = gen, dirty = 0;
-        lispobj *where = next_object(first_object, 0, end);
-        while (where) {
-          trace_object(compute_lispobj(where));
-          next_object(where, object_size(where), end);
+        if (card_dirtyp(card)) {
+          /* Check if an object overlaps the start of the card. */
+          lispobj *first_object = cons_page ? 0 : native_pointer(find_object((lispobj)start, (lispobj)page_start));
+          if (!first_object) first_object = start;
+          lispobj *end = start + WORDS_PER_CARD;
+          dirty_generation_source = gen, dirty = 0;
+          // fprintf(stderr, "  from %p to %p\n", first_object, end);
+          lispobj *where = next_object(first_object, 0, end);
+          while (where) {
+            trace_object(compute_lispobj(where));
+            where = next_object(where, cons_page ? 2 : object_size(where), end);
+          }
+          update_card_mark(card, dirty);
         }
-        update_card_mark(card, dirty);
       }
     }
+    i++;
   }
-  fprintf(stderr, "Scavenged %d pages\n", checked);
+  // fprintf(stderr, "Scavenged %d pages\n", checked);
 }
 
 void mr_collect_garbage(generation_index_t generation) {
   uword_t prior_bytes = bytes_allocated;
   generation_to_collect = generation;
-  draw_page_table(0,4000);
   fprintf(stderr, "[GC #%d", ++collection);
   reset_statistics();
   mr_scavenge_root_gens();
@@ -716,7 +720,6 @@ void mr_collect_garbage(generation_index_t generation) {
           prior_bytes >> 20, bytes_allocated >> 20, traced,
           (double)(lines_used() * LINE_SIZE) / (double)(bytes_allocated),
           next_free_page);
-  draw_page_table(0,4000);
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
 }
 
