@@ -17,12 +17,15 @@
 #include "globals.h"
 #include "lispobj.h"
 #include "queue.h"
+#include "walk-heap.h"
 
 #include "genesis/cons.h"
 #include "genesis/gc-tables.h"
 #include "genesis/hash-table.h"
 #include "genesis/closure.h"
 #include "gc-private.h"
+
+#define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -32,7 +35,7 @@
  * Blackburn and McKinley, mostly in being able to reclaim both smaller
  * lines and larger pages. But we plan to have a separate compaction
  * phase, rather than copying and marking in one pass, to make parallel
- * compacting easier. */
+ * compacting easier, and to enable concurrent marking. */
 
 /* Initialisation */
 uword_t *allocation_bitmap, *mark_bitmap;
@@ -313,6 +316,8 @@ static void free_mark_list() {
 static void add_words_used(void *where, uword_t count) {
   page_index_t p = find_page_index(where);
   uword_t byte_count = count * N_WORD_BYTES;
+  /* Increment bytes used on every page this object intersects.
+   * n.b. large objects start on their own pages */
   while (byte_count >= GENCGC_PAGE_BYTES) {
     set_page_bytes_used(p, GENCGC_PAGE_BYTES);
     byte_count -= GENCGC_PAGE_BYTES;
@@ -337,18 +342,26 @@ static void mark_lines(lispobj *p) {
   add_words_used(p, word_count);
 }
 
+/* Old generation for finding old->young pointers */
+static generation_index_t dirty_generation_source = 0;
+static boolean dirty = 0;
+
 static void mark(lispobj object) {
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
     if (page_free_p(find_page_index(native_pointer(object))))
       lose("%lx is on a free page (#%ld)", object, find_page_index(native_pointer(object)));
 
     lispobj *np = native_pointer(object);
+    if (gc_gen_of(object, 0) < dirty_generation_source)
+      dirty = 1;
     if (functionp(object) && embedded_obj_p(widetag_of(np))) {
       lispobj *base = fun_code_header(np);
       object = make_lispobj(base, OTHER_POINTER_LOWTAG);
     }
     if (!allocation_bit_marked(native_pointer(object)))
       lose("No allocation bit for 0x%lx", object);
+
+    /* Enqueue onto mark queue */
     if (!pointer_survived_gc_yet(object)) {
       set_mark_bit(object);
       if (!output_block || output_block->count == QBLOCK_CAPACITY) {
@@ -461,7 +474,7 @@ void set_allocation_bit_mark(void *address) {
   allocation_bitmap[first_word_index] |= ((uword_t)(1) << (first_bit_index % N_WORD_BITS));
 }
 
-static lispobj find_object(uword_t address) {
+static lispobj find_object(uword_t address, uword_t start) {
   page_index_t p = find_page_index((void*)address);
   if (page_free_p(p)) return 0;
   if (page_table[p].type == PAGE_TYPE_CONS && allocation_bit_marked((void*)address)) {
@@ -472,6 +485,7 @@ static lispobj find_object(uword_t address) {
     /* Go scanning for the object. */
     uword_t first_bit_index = (address - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
     uword_t first_word_index = first_bit_index / N_WORD_BITS;
+    uword_t start_word_index = (start - DYNAMIC_SPACE_START) / (N_WORD_BITS << N_LOWTAG_BITS);
     /* Return the last location not after the address provided. */
     /* Supposing first_bit_index = 5, we compute
      * all_not_after = (1 << 6) - 1 = ...000111111
@@ -486,7 +500,7 @@ static lispobj find_object(uword_t address) {
     if (allocation_bitmap[first_word_index] & all_not_after)
       return fix_pointer(last_address_in(allocation_bitmap[first_word_index] & all_not_after, first_word_index),
                          address);
-    for (uword_t i = first_word_index - 1; i > 0; i--)
+    for (uword_t i = first_word_index - 1; i > start_word_index; i--)
       if (allocation_bitmap[i])
         /* Return the last location. */
         return fix_pointer(last_address_in(allocation_bitmap[i], i), address);
@@ -495,7 +509,7 @@ static lispobj find_object(uword_t address) {
 }
 
 lispobj *search_dynamic_space(void *pointer) {
-  lispobj o = find_object((uword_t)pointer);
+  lispobj o = find_object((uword_t)pointer, DYNAMIC_SPACE_START);
   return o ? native_pointer(o) : NULL;
 }
 
@@ -572,7 +586,7 @@ static void sweep() {
 }
 
 extern lispobj lisp_init_function, gc_object_watcher;
-void trace_static_roots() {
+static void trace_static_roots() {
   trace_other_object((lispobj*)NIL_SYMBOL_SLOTS_START);
   lispobj *where = (lispobj*)STATIC_SPACE_OBJECTS_START;
   lispobj *end = static_space_free_pointer;
@@ -593,7 +607,7 @@ static unsigned int collection = 0;
 
 void mr_preserve_pointer(uword_t address) {
   if (find_page_index((void*)address) > -1) {
-    lispobj obj = find_object(address);
+    lispobj obj = find_object(address, DYNAMIC_SPACE_START);
     if (obj) mark(obj);
   }
 }
@@ -613,10 +627,58 @@ void mr_preserve_object(lispobj obj) {
   }
 }
 
-void zero_all_free_ranges() {
-  for (line_index_t l = 0; l < line_count; l++)
-    if (!line_bytemap[l])
-      memset(line_address(l), 0, LINE_SIZE);
+static void update_card_mark(int card, boolean dirty) {
+  if (gc_card_mark[card] != STICKY_MARK)
+    gc_card_mark[card] = dirty ? CARD_MARKED : CARD_UNMARKED;
+}
+
+static void scavenge_root_gens(generation_index_t from) {
+  page_index_t i = 0;
+  while (i < page_table_pages) {
+    generation_index_t gen = page_table[i].gen;
+    if ((page_table[i].type & PAGE_TYPE_MASK) != PAGE_TYPE_UNBOXED ||
+        !page_words_used(i) ||
+        !cardseq_any_marked(page_to_card_index(i)) ||
+        gen <= from) {
+      i++; continue;
+    }
+    if (page_single_obj_p(i)) {
+      /* The only time that page_address + page_words_used actually
+       * demarcates the end of a (sole) object on the page, with this
+       * heap layout. */
+      lispobj *limit = (lispobj*)page_address(i) + page_words_used(i);
+      lispobj *start = (lispobj*)page_address(i);
+      for (int j = 0, card = addr_to_card_index(start);
+           j < CARDS_PER_PAGE;
+           j++, card++, start += WORDS_PER_CARD) {
+        if (card_dirtyp(card)) {
+          lispobj *card_end = start + WORDS_PER_CARD;
+          lispobj *end = (limit < card_end) ? limit : card_end;
+          dirty_generation_source = gen, dirty = 0;
+          for (lispobj *p = start; p < end; p++)
+            if (is_lisp_pointer(*p)) mark(*p);
+          update_card_mark(card, dirty);
+        }
+      }
+    } else {
+      boolean non_spanning = page_table[i].type == PAGE_TYPE_CONS;
+      /* Scavenge every object in every card and try to re-protect. */
+      lispobj *page_start = (lispobj*)page_address(i), *start = page_start;
+      for (int j = 0, card = addr_to_card_index(start);
+           j < CARDS_PER_PAGE;
+           j++, card++, start += WORDS_PER_CARD) {
+        lispobj *first_object = non_spanning ? start : native_pointer(find_object((lispobj)start, (lispobj)page_start) || start);
+        lispobj *end = start + WORDS_PER_CARD;
+        dirty_generation_source = gen, dirty = 0;
+        lispobj *where = next_object(first_object, 0, end);
+        while (where) {
+          trace_object(compute_lispobj(where));
+          next_object(where, object_size(where), end);
+        }
+        update_card_mark(card, dirty);
+      }
+    }
+  }
 }
 
 void mr_collect_garbage() {
@@ -633,6 +695,12 @@ void mr_collect_garbage() {
           (double)(lines_used() * LINE_SIZE) / (double)(bytes_allocated),
           next_free_page);
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
+}
+
+void zero_all_free_ranges() {
+  for (line_index_t l = 0; l < line_count; l++)
+    if (!line_bytemap[l])
+      memset(line_address(l), 0, LINE_SIZE);
 }
 
 /* Useful hacky stuff */
