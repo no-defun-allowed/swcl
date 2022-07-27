@@ -34,7 +34,7 @@ extern lispobj *search_dynamic_space(void *pointer);
 extern void mr_preserve_pointer(uword_t address);
 extern void mr_preserve_range(lispobj *from, sword_t nwords);
 extern void mr_preserve_object(lispobj obj);
-extern void mr_collect_garbage();
+extern void mr_collect_garbage(generation_index_t generation);
 extern void zero_all_free_ranges();
 #endif
 #endif

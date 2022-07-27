@@ -4203,7 +4203,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
     }
 
 #ifdef LISP_FEATURE_MARK_REGION_GC
-    mr_collect_garbage();
+    mr_collect_garbage(0);
     RESET_ALLOC_START_PAGES();
     goto maybe_verify;
 #else

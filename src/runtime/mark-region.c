@@ -345,6 +345,7 @@ static void mark_lines(lispobj *p) {
 /* Old generation for finding old->young pointers */
 static generation_index_t dirty_generation_source = 0;
 static boolean dirty = 0;
+static generation_index_t generation_to_collect = 0;
 
 static void mark(lispobj object) {
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
@@ -353,7 +354,12 @@ static void mark(lispobj object) {
 
     lispobj *np = native_pointer(object);
     if (gc_gen_of(object, 0) < dirty_generation_source)
+      /* Used to find dirty pages in mr_scavenge_root_gens. */
       dirty = 1;
+    if (gc_gen_of(object, 0) != generation_to_collect)
+      return;
+
+    /* Fix up embedded simple-fun objects. */
     if (functionp(object) && embedded_obj_p(widetag_of(np))) {
       lispobj *base = fun_code_header(np);
       object = make_lispobj(base, OTHER_POINTER_LOWTAG);
@@ -389,13 +395,9 @@ static boolean interesting_pointer_p(lispobj object) {
 static void trace_object(lispobj object) {
   if (listp(object)) {
     struct cons *c = CONS(object);
-    if (in_dynamic_space(object))
-      mark_cons_line(c);
     mark(c->car); mark(c->cdr);
   } else {
     lispobj *p = native_pointer(object);
-    if (in_dynamic_space(object))
-      mark_lines(p);
     trace_other_object(p);
   }
 }
@@ -434,7 +436,12 @@ static void trace_everything() {
   while (work_to_do() ||
          (test_weak_triggers(pointer_survived_gc_yet, mark) && work_to_do())) {
     traced++;
-    trace_object(dequeue());
+    lispobj obj = dequeue();
+    trace_object(obj);
+    if (listp(obj))
+      mark_cons_line(CONS(obj));
+    else
+      mark_lines(native_pointer(obj));
   }
 }
 
@@ -451,9 +458,6 @@ static lispobj fix_pointer(lispobj *p, uword_t original) {
   if (embedded_obj_p(widetag_of(p))) {
       p = fun_code_header(p);
   }
-  /* It's perfectly fine for a conservative root to be just after some
-   * object, but it's so unlikely that it's likely to indicate something
-   * else went wrong. */
   if (native_pointer(original) >= p + object_size(p)) {
     return 0;
   }
@@ -547,13 +551,16 @@ static void local_smash_weak_pointers()
 }
 
 static void reset_statistics() {
-  bytes_allocated = 0;
+  os_vm_size_t allocated = generations[generation_to_collect].bytes_allocated;
+  bytes_allocated -= allocated;
   traced = 0;
-  for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
-    generations[g].bytes_allocated = 0;
+  generations[generation_to_collect].bytes_allocated = 0;
   for (page_index_t p = 0; p <= page_table_pages; p++)
-    set_page_bytes_used(p, 0);
-  memset(line_bytemap, 0, line_count);
+    if (page_table[p].gen == generation_to_collect && !page_free_p(p)) {
+      set_page_bytes_used(p, 0);
+      line_index_t start = address_line(page_address(p)), end = address_line(page_address(p + 1));
+      memset(line_bytemap + start, 0, end - start);
+    }
 }
 
 extern void gc_close_collector_regions(int flag);
@@ -572,7 +579,6 @@ static void sweep() {
       reset_page_flags(p);
     } else {
       bytes_allocated += page_bytes_used(p);
-      page_table[p].gen = 0; // Kludge to reuse pseudo-static pages for now.
       generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
       /* next_free_page is only maintained for page walking - we
        * reuse partially filled pages, so it's not useful for allocation */
@@ -632,8 +638,10 @@ static void update_card_mark(int card, boolean dirty) {
     gc_card_mark[card] = dirty ? CARD_MARKED : CARD_UNMARKED;
 }
 
-static void scavenge_root_gens(generation_index_t from) {
+static void mr_scavenge_root_gens() {
   page_index_t i = 0;
+  generation_index_t from = generation_to_collect;
+  int checked = 0;
   while (i < page_table_pages) {
     generation_index_t gen = page_table[i].gen;
     if ((page_table[i].type & PAGE_TYPE_MASK) != PAGE_TYPE_UNBOXED ||
@@ -642,6 +650,7 @@ static void scavenge_root_gens(generation_index_t from) {
         gen <= from) {
       i++; continue;
     }
+    checked++;
     if (page_single_obj_p(i)) {
       /* The only time that page_address + page_words_used actually
        * demarcates the end of a (sole) object on the page, with this
@@ -667,7 +676,9 @@ static void scavenge_root_gens(generation_index_t from) {
       for (int j = 0, card = addr_to_card_index(start);
            j < CARDS_PER_PAGE;
            j++, card++, start += WORDS_PER_CARD) {
-        lispobj *first_object = non_spanning ? start : native_pointer(find_object((lispobj)start, (lispobj)page_start) || start);
+        /* Check if an object overlaps the start of the card. */
+        lispobj *first_object = non_spanning ? start :
+          native_pointer(find_object((lispobj)start, (lispobj)page_start) || start);
         lispobj *end = start + WORDS_PER_CARD;
         dirty_generation_source = gen, dirty = 0;
         lispobj *where = next_object(first_object, 0, end);
@@ -679,12 +690,16 @@ static void scavenge_root_gens(generation_index_t from) {
       }
     }
   }
+  fprintf(stderr, "Scavenged %d pages\n", checked);
 }
 
-void mr_collect_garbage() {
+void mr_collect_garbage(generation_index_t generation) {
   uword_t prior_bytes = bytes_allocated;
+  generation_to_collect = generation;
+  draw_page_table(0,4000);
   fprintf(stderr, "[GC #%d", ++collection);
   reset_statistics();
+  mr_scavenge_root_gens();
   trace_static_roots();
   trace_everything();
   sweep();
@@ -694,6 +709,7 @@ void mr_collect_garbage() {
           prior_bytes >> 20, bytes_allocated >> 20, traced,
           (double)(lines_used() * LINE_SIZE) / (double)(bytes_allocated),
           next_free_page);
+  draw_page_table(0,4000);
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
 }
 
@@ -717,11 +733,11 @@ void draw_page_table(int from, int to) {
   for (int i = from; i < to; i++) {
     if (i % 50 == 0) fprintf(stderr, "\n%4d ", i);
     fprintf(stderr,
-            "\033[%c;9%cm%c%c\033[0m",
+            "\033[%c;9%cm%c%c%c\033[0m",
             (page_table[i].type & SINGLE_OBJECT_FLAG) ? '1' : '0',
             '0' + (page_table[i].type & 7),
             64 + page_table[i].type,
-            // '0' + page_table[i].gen
+            '0' + page_table[i].gen,
             '0' + (unsigned char)(10.0 * (double)page_bytes_used(i) / (double)GENCGC_PAGE_BYTES)
             );
   }
