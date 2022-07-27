@@ -478,6 +478,10 @@ void set_allocation_bit_mark(void *address) {
   allocation_bitmap[first_word_index] |= ((uword_t)(1) << (first_bit_index % N_WORD_BITS));
 }
 
+static uword_t mark_bitmap_word_index(void *where) {
+  return ((uword_t)where - DYNAMIC_SPACE_START) / (N_WORD_BITS << N_LOWTAG_BITS);
+}
+
 static lispobj find_object(uword_t address, uword_t start) {
   page_index_t p = find_page_index((void*)address);
   if (page_free_p(p)) return 0;
@@ -489,7 +493,7 @@ static lispobj find_object(uword_t address, uword_t start) {
     /* Go scanning for the object. */
     uword_t first_bit_index = (address - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
     uword_t first_word_index = first_bit_index / N_WORD_BITS;
-    uword_t start_word_index = (start - DYNAMIC_SPACE_START) / (N_WORD_BITS << N_LOWTAG_BITS);
+    uword_t start_word_index = mark_bitmap_word_index((void*)start);
     /* Return the last location not after the address provided. */
     /* Supposing first_bit_index = 5, we compute
      * all_not_after = (1 << 6) - 1 = ...000111111
@@ -584,11 +588,14 @@ static void sweep() {
        * reuse partially filled pages, so it's not useful for allocation */
       next_free_page = p + 1;
     }
+    /* Prune allocation bitmaps */
+    if (page_table[p].gen == generation_to_collect) {
+      uword_t start = mark_bitmap_word_index(page_address(p)),
+              end = mark_bitmap_word_index(page_address(p + 1));
+      memcpy(allocation_bitmap + start, mark_bitmap + start, (end - start) * N_WORD_BYTES);
+      memset(mark_bitmap + start, 0, (end - start) * N_WORD_BYTES);
+    }
   }
-
-  /* Prune allocation bitmap */
-  memcpy(allocation_bitmap, mark_bitmap, mark_bitmap_size);
-  memset(mark_bitmap, 0, mark_bitmap_size);
 }
 
 extern lispobj lisp_init_function, gc_object_watcher;
