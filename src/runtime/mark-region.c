@@ -748,8 +748,7 @@ void draw_page_table(int from, int to) {
             '0' + (page_table[i].type & 7),
             64 + page_table[i].type,
             '0' + page_table[i].gen,
-            '0' + (unsigned char)(10.0 * (double)page_bytes_used(i) / (double)GENCGC_PAGE_BYTES)
-            );
+            '0' + (unsigned char)(10.0 * (double)page_bytes_used(i) / (double)GENCGC_PAGE_BYTES));
   }
 }
 

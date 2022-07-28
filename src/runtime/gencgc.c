@@ -2507,7 +2507,9 @@ int sb_introspect_pinnedp(lispobj obj) {
  * the number of keys in the hashtable.
  */
 #define PAGE_PINNED 0xFF
-#ifndef LISP_FEATURE_MARK_REGION_GC
+#ifdef LISP_FEATURE_MARK_REGION_GC
+static void preserve_pointer(lispobj object) { mr_preserve_pointer(object); }
+#else
 static void pin_object(lispobj object)
 {
     if (!compacting_p()) {
@@ -2618,6 +2620,8 @@ static boolean NO_SANITIZE_MEMORY preserve_pointer(uword_t word)
     if (found) gc_mark_obj(compute_lispobj(found));
     return found != 0;
 }
+#endif
+#endif
 /* Additional logic for soft marks: any word that is potentially a
  * tagged pointer to a page being written must preserve the mark regardless
  * of what update_writeprotection() thinks. That's because the mark is set
@@ -2678,8 +2682,6 @@ static void sticky_preserve_pointer(os_context_register_t register_word)
     preserve_pointer(word);
 }
 #endif
-#endif // imprecise
-#endif // not mark-region
 
 #ifdef LISP_FEATURE_MARK_REGION_GC
 #define pin_exact_root(r) mr_preserve_object(r)
@@ -3795,14 +3797,10 @@ conservative_stack_scan(struct thread* th,
      * GC while handling an interruption */
 
     __attribute__((unused)) void (*context_method)(os_context_register_t) =
-#ifdef LISP_FEATURE_MARK_REGION_GC
-        (void (*)(os_context_register_t))mr_preserve_pointer;
-#else
 #ifdef LISP_FEATURE_SOFT_CARD_MARKS
         gen == 0 ? sticky_preserve_pointer : (void (*)(os_context_register_t))preserve_pointer;
 #else
         (void (*)(os_context_register_t))preserve_pointer;
-#endif
 #endif
 
     void* esp = (void*)-1;
@@ -4093,11 +4091,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
                 // is pseudo-static, but let's use the right pinning function.
                 // (This line of code is so rarely executed that it doesn't
                 // impact performance to search for the object)
-#ifdef LISP_FEATURE_MARK_REGION_GC
-                mr_preserve_pointer(fun);
-#else
                 preserve_pointer(fun);
-#endif
 #else
                 pin_exact_root(fun);
 #endif
