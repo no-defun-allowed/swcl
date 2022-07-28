@@ -143,6 +143,7 @@ boolean allow_free_pages[16] = {0};
 boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
                                       int page_type, generation_index_t gen,
                                       page_index_t *start, page_index_t end) {
+  gc_assert(gen != SCRATCH_GENERATION);
   // printf("try_allocate_small_f_p(%lu, %d, %d, %ld, %ld)\n", nbytes, page_type, gen, *start, end);
  again:
   for (page_index_t where = *start; where < end; where++) {
@@ -178,6 +179,7 @@ DEF_FINDER(find_used_page, page_index_t, !page_free_p(where), end);
 page_index_t try_allocate_large(sword_t nbytes,
                                 int page_type, generation_index_t gen,
                                 page_index_t *start, page_index_t end) {
+  gc_assert(gen != SCRATCH_GENERATION);
   // printf("try_allocate_large(%lu, %d, %d, %ld, %ld)\n", nbytes, page_type, gen, *start, end);
   int pages_needed = ALIGN_UP(nbytes, GENCGC_PAGE_BYTES) / GENCGC_PAGE_BYTES;
   uword_t remainder = nbytes % GENCGC_PAGE_BYTES;

@@ -3983,11 +3983,16 @@ garbage_collect_generation(generation_index_t generation, int raise,
 
     if (generation < PSEUDO_STATIC_GENERATION) {
 
+#ifdef LISP_FEATURE_MARK_REGION_GC
+        from_space = -1;
+        new_space = generation;
+#else
         from_space = generation;
         if (raise)
             new_space = generation+1;
         else
             new_space = SCRATCH_GENERATION;
+#endif
 
     /* Change to a new space for allocation, resetting the alloc_start_page */
         gc_alloc_generation = new_space;
@@ -4602,7 +4607,7 @@ collect_garbage(generation_index_t last_gen)
 
     page_index_t initial_nfp = next_free_page;
 #ifdef LISP_FEATURE_MARK_REGION_GC
-    garbage_collect_generation(PSEUDO_STATIC_GENERATION, 0,
+    garbage_collect_generation(0, 0,
                                cur_thread_approx_stackptr);
     goto mr_finish;
 #else
