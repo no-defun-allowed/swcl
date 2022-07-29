@@ -703,14 +703,14 @@ static void mr_scavenge_root_gens() {
           lispobj *first_object = cons_page ? 0 : native_pointer(find_object((lispobj)start, DYNAMIC_SPACE_START));
           if (!first_object) first_object = start;
           lispobj *end = start + WORDS_PER_CARD;
-          fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, first_object, end);
+          // fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, first_object, end);
           dirty_generation_source = gen, dirty = 0;
           lispobj *where = next_object(first_object, 0, end);
           while (where) {
             trace_object(compute_lispobj(where));
             where = next_object(where, cons_page ? 2 : object_size(where), end);
           }
-          fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
+          // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
           update_card_mark(card, dirty);
         }
       }
@@ -742,9 +742,15 @@ void mr_collect_garbage(generation_index_t generation) {
 }
 
 void zero_all_free_ranges() {
-  for (line_index_t l = 0; l < line_count; l++)
-    if (!line_bytemap[l])
-      memset(line_address(l), 0, LINE_SIZE);
+#if 0
+  for (page_index_t p = 0; p < page_table_pages; p++)
+    if (!page_single_obj_p(p))
+      for (line_index_t l = address_line(page_address(p));
+           l < address_line(page_address(p + 1));
+           l++)
+        if (!line_bytemap[l])
+          memset(line_address(l), 0, LINE_SIZE);
+#endif
 }
 
 /* Useful hacky stuff */
