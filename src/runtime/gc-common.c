@@ -1354,7 +1354,7 @@ static inline void add_trigger(lispobj triggering_object, lispobj* plivened_obje
                                                      triggering_object, 0)));
 }
 
-int debug_weak_ht = 0;
+int debug_weak_ht = 1;
 static inline void add_kv_triggers(lispobj* pair, int weakness)
 {
     if (debug_weak_ht) {

@@ -138,15 +138,16 @@ verify_pointer(lispobj thing, lispobj *where, struct verify_state *state)
             if (!embedded)
                 FAIL_IF(!allocation_bit_marked(native), "no allocation mark");
         /* Line marks are often out of date before GC */
-        if (state->flags & VERIFY_POST_GC) {
-            FAIL_IF(!line_marked(native), "no line mark");
+        if ((state->flags & VERIFY_POST_GC) &&
+            to_gen != PSEUDO_STATIC_GENERATION &&
+            !page_single_obj_p(target_page_index)) {
             /* Don't try to call object_size on embedded objects */
             if (!embedded) {
                 uword_t size = object_size(native);
                 for (uword_t word = 0; word < size; word++) {
                   if (!line_marked(native + word)) {
                     char why[50];
-                    snprintf(why, sizeof(why), "no allocation mark on word %lx", word);
+                    snprintf(why, sizeof(why), "no line mark on word %lx", word);
                     FAIL_IF(!line_marked(native + word), why);
                   }
                 }
