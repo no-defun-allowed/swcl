@@ -390,7 +390,7 @@ static void mark(lispobj object) {
 }
 
 static boolean interesting_pointer_p(lispobj object) {
-  return in_dynamic_space(object) && gc_gen_of(object, 0) > generation_to_collect;
+  return in_dynamic_space(object) && gc_gen_of(object, 0) == generation_to_collect;
 }
 
 #define ACTION mark
