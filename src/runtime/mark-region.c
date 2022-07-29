@@ -663,6 +663,9 @@ static void mr_scavenge_root_gens() {
   page_index_t i = 0;
   generation_index_t from = generation_to_collect;
   int checked = 0;
+  /* Keep this around, to avoid scanning objects which overlap cards
+   * more than once. */
+  lispobj *last_scavenged = 0;
   while (i < page_table_pages) {
     generation_index_t gen = page_table[i].gen;
     if ((page_table[i].type & PAGE_TYPE_MASK) == PAGE_TYPE_UNBOXED ||
@@ -701,13 +704,14 @@ static void mr_scavenge_root_gens() {
         if (card_dirtyp(card)) {
           /* Check if an object overlaps the start of the card. */
           lispobj *first_object = cons_page ? 0 : native_pointer(find_object((lispobj)start, DYNAMIC_SPACE_START));
-          if (!first_object) first_object = start;
+          if (!first_object || first_object == last_scavenged) first_object = start;
           lispobj *end = start + WORDS_PER_CARD;
           // fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, first_object, end);
           dirty_generation_source = gen, dirty = 0;
           lispobj *where = next_object(first_object, 0, end);
           while (where) {
             trace_object(compute_lispobj(where));
+            last_scavenged = where;
             where = next_object(where, cons_page ? 2 : object_size(where), end);
           }
           // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
@@ -724,7 +728,7 @@ static void mr_scavenge_root_gens() {
 void mr_collect_garbage(generation_index_t generation) {
   uword_t prior_bytes = bytes_allocated;
   generation_to_collect = generation;
-  fprintf(stderr, "[GC #%d", ++collection);
+  //fprintf(stderr, "[GC #%d", ++collection);
   lines_consistent = 0;
   reset_statistics();
   mr_scavenge_root_gens();
@@ -733,11 +737,13 @@ void mr_collect_garbage(generation_index_t generation) {
   sweep();
   lines_consistent = 1;
   free_mark_list();
+#if 0
   fprintf(stderr,
           " %luM -> %luM, %lu traced, fragmentation = %.4f, page hwm = %ld]\n",
           prior_bytes >> 20, bytes_allocated >> 20, traced,
           (double)(lines_used() * LINE_SIZE) / (double)(bytes_allocated),
           next_free_page);
+#endif
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
 }
 

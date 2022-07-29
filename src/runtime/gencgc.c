@@ -117,7 +117,7 @@ int n_gcs;
 
 /* the verbosity level. All non-error messages are disabled at level 0;
  * and only a few rare messages are printed at level 1. */
-boolean gencgc_verbose = 1;
+boolean gencgc_verbose = 0;
 
 /* FIXME: At some point enable the various error-checking things below
  * and see what they say. */
@@ -4515,7 +4515,7 @@ remap_free_pages (page_index_t from, page_index_t to)
     }
 }
 
-generation_index_t small_generation_limit = -1;
+generation_index_t small_generation_limit = 0;
 
 // one pair of counters per widetag, though we're only tracking code as yet
 int n_scav_calls[64], n_scav_skipped[64];
