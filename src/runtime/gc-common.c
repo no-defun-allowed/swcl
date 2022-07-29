@@ -1354,7 +1354,7 @@ static inline void add_trigger(lispobj triggering_object, lispobj* plivened_obje
                                                      triggering_object, 0)));
 }
 
-int debug_weak_ht = 1;
+int debug_weak_ht = 0;
 static inline void add_kv_triggers(lispobj* pair, int weakness)
 {
     if (debug_weak_ht) {
@@ -1756,6 +1756,8 @@ cull_weak_hash_table_bucket(struct hash_table *hash_table,
         gc_assert(key != empty_symbol);
         gc_assert(value != empty_symbol);
         if (!alivep_test(key, value)) {
+            if (debug_weak_ht)
+                fprintf(stderr, "<%"OBJ_FMTX",%"OBJ_FMTX"> is dead\n", key, value);
             gc_assert(hash_table->_count > 0);
             if (save_culled_values) {
                 lispobj val = kv_vector[2 * index + 1];
@@ -1817,6 +1819,8 @@ cull_weak_hash_table_bucket(struct hash_table *hash_table,
 #endif
 
         } else {
+            if (debug_weak_ht)
+                fprintf(stderr, "<%"OBJ_FMTX",%"OBJ_FMTX"> is alive\n", key, value);
             if (fix_pointers) { // Follow FPs as necessary
                 lispobj key = kv_vector[2 * index];
                 fix_pointers(&kv_vector[2 * index]);
@@ -1903,6 +1907,8 @@ void cull_weak_hash_tables(int (*alivep[4])(lispobj,lispobj))
                            &table->next_weak_hash_table);
         int weakness = hashtable_weakness(table);
         gc_assert((weakness & ~3) == 0);
+        if (debug_weak_ht)
+            fprintf(stderr, "Culling %p with weakness %d\n", table, weakness);
         cull_weak_hash_table(table, alivep[weakness], compacting_p() ? pair_follow_fps : 0);
     }
     weak_hash_tables = NULL;

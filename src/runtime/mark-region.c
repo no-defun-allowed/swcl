@@ -95,7 +95,7 @@ DEF_FINDER(find_free_line, line_index_t, !line_bytemap[where], -1);
 DEF_FINDER(find_used_line, line_index_t, line_bytemap[where], end);
 
 /* We currently zero out lines and re-enliven them while marking.
- * This means we can't allocate small objects during marking. */
+ * This means we can't reuse small pages during marking. */
 boolean lines_consistent = 1;
 
 /* Try to find space to fit a new object in the lines between `start`
@@ -148,7 +148,6 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
                                       int page_type, generation_index_t gen,
                                       page_index_t *start, page_index_t end) {
   gc_assert(gen != SCRATCH_GENERATION);
-  gc_assert(lines_consistent);
   // printf("try_allocate_small_f_p(%lu, %d, %d, %ld, %ld)\n", nbytes, page_type, gen, *start, end);
  again:
   for (page_index_t where = *start; where < end; where++) {
@@ -156,7 +155,7 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
         ((allow_free_pages[page_type & PAGE_TYPE_MASK] && page_free_p(where)) ||
          /* We really should use page_extensible_p but that checks card marks,
           * and we never clear card marks currently, leading to wasted space. */
-         (page_table[where].gen == gen && page_table[where].type == page_type)) &&
+         (lines_consistent && page_table[where].gen == gen && page_table[where].type == page_type)) &&
         try_allocate_small(nbytes, region,
                            address_line(page_address(where)),
                            address_line(page_address(where + 1)))) {
@@ -355,7 +354,6 @@ static void mark_lines(lispobj *p) {
 }
 
 static void mark(lispobj object) {
-  if (dirty_generation_source) fprintf(stderr, "mark:%lx ", object);
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
     if (page_free_p(find_page_index(native_pointer(object))))
       lose("%lx is on a free page (#%ld)", object, find_page_index(native_pointer(object)));
@@ -392,7 +390,7 @@ static void mark(lispobj object) {
 }
 
 static boolean interesting_pointer_p(lispobj object) {
-  return in_dynamic_space(object);
+  return in_dynamic_space(object) && gc_gen_of(object, 0) > generation_to_collect;
 }
 
 #define ACTION mark
@@ -709,7 +707,6 @@ static void mr_scavenge_root_gens() {
           dirty_generation_source = gen, dirty = 0;
           lispobj *where = next_object(first_object, 0, end);
           while (where) {
-            fprintf(stderr, "\n%p -> ", where);
             trace_object(compute_lispobj(where));
             where = next_object(where, cons_page ? 2 : object_size(where), end);
           }
@@ -733,8 +730,8 @@ void mr_collect_garbage(generation_index_t generation) {
   mr_scavenge_root_gens();
   trace_static_roots();
   trace_everything();
-  lines_consistent = 1;
   sweep();
+  lines_consistent = 1;
   free_mark_list();
   fprintf(stderr,
           " %luM -> %luM, %lu traced, fragmentation = %.4f, page hwm = %ld]\n",
