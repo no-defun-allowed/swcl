@@ -4,7 +4,9 @@
 #include "lispobj.h"
 #include "core.h"
 
-#define LINE_SIZE 64
+/* Set line size so that every line byte corresponds to one mark
+ * bitmap byte. */
+#define LINE_SIZE 8 << N_LOWTAG_BITS
 
 extern uword_t *allocation_bitmap, *mark_bitmap;
 extern char *line_bytemap;
