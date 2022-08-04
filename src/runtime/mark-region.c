@@ -645,6 +645,8 @@ static void sweep() {
       gc_assert(!((char*)(mark_bitmap))[l]);
       line_bytemap[l] = 0;
     }
+    if (line_bytemap[l])
+      generations[DECODE_GEN(line_bytemap[l])].bytes_allocated += LINE_SIZE;
   }
   memset(mark_bitmap, 0, mark_bitmap_size);
 }
