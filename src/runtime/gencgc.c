@@ -5016,7 +5016,8 @@ lisp_alloc(int largep, struct alloc_region *region, sword_t nbytes,
     }
 
 #ifdef LISP_FEATURE_MARK_REGION_GC
-    if (try_allocate_small_after_region(nbytes, region)) return region->start_addr;
+    if (try_allocate_small_after_region(nbytes, region, gc_alloc_generation))
+      return region->start_addr;
 #endif
 
     /* We don't want to count nbytes against auto_gc_trigger unless we
@@ -5859,6 +5860,9 @@ void gc_store_corefile_ptes(struct corefile_pte *ptes)
 }
 
 #define ARTIFICIALLY_HIGH_GEN 8
+#ifdef LISP_FEATURE_MARK_REGION_GC
+extern generation_index_t gc_gen_of(lispobj obj, int defaultval);
+#else
 generation_index_t gc_gen_of(lispobj obj, int defaultval) {
     int page = find_page_index((void*)obj);
     if (page >= 0) return page_table[page].gen;
@@ -5868,6 +5872,7 @@ generation_index_t gc_gen_of(lispobj obj, int defaultval) {
 #endif
     return defaultval;
 }
+#endif
 
 /* Return 1 if 'a' is strictly younger than 'b'.
  * This asserts that 'a' is pinned if in 'from_space' because it is

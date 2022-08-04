@@ -82,6 +82,25 @@ boolean line_marked(void *pointer) {
 
 /* Allocation slow-path */
 
+/* Lines have generations in small pages, rather than pages. This is
+ * necessary in order to allow reclaimed memory to be reused,
+ * without having to compact old pages. */
+#define MARK_GEN(l) ((l) | 16)
+#define UNMARK_GEN(l) ((l) & 15)
+#define ENCODE_GEN(g) ((g) + 1)
+#define DECODE_GEN(l) ((l) - 1)
+
+generation_index_t gc_gen_of(lispobj obj, int defaultval) {
+  page_index_t p = find_page_index((void*)obj);
+  if (p < 0) return defaultval;
+  if (page_single_obj_p(p))
+    return page_table[p].gen;
+  /* We still try not to touch pseudo-static pages. */
+  if (page_table[p].gen == PSEUDO_STATIC_GENERATION)
+    return PSEUDO_STATIC_GENERATION;
+  return UNMARK_GEN(line_bytemap[address_line((void*)obj)]);
+}
+
 /* Allocation of small objects is done by finding contiguous lines
  * that can fit the object to allocate. Small objects can span lines
  * but cannot pages, so we examine lines in each page separately. */
@@ -94,15 +113,12 @@ boolean line_marked(void *pointer) {
 DEF_FINDER(find_free_line, line_index_t, !line_bytemap[where], -1);
 DEF_FINDER(find_used_line, line_index_t, line_bytemap[where], end);
 
-/* We currently zero out lines and re-enliven them while marking.
- * This means we can't reuse small pages during marking. */
-boolean lines_consistent = 1;
-
 /* Try to find space to fit a new object in the lines between `start`
  * and `end`. Updates `region` and returns true if we succeed, keeps
  * `region` untouched and returns false if we fail. */
 boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
-                           line_index_t start, line_index_t end) {
+                           line_index_t start, line_index_t end,
+                           generation_index_t gen) {
   sword_t nlines = ALIGN_UP(nbytes, LINE_SIZE) / LINE_SIZE;
   line_index_t where = start;
   while (1) {
@@ -120,6 +136,7 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
        * zero after reusing memory, which is the stable state of the
        * system. */
       memset(region->start_addr, 0, addr_diff(region->end_addr, region->start_addr));
+      memset(line_bytemap + chunk_start, ENCODE_GEN(gen), chunk_end - chunk_start);
       return 1;
     }
     if (chunk_end == end) return 0;
@@ -129,13 +146,14 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
 
 /* Medium path for allocation, wherein we use another chunk that the
  * thread already claimed. */
-boolean try_allocate_small_after_region(sword_t nbytes, struct alloc_region *region) {
+boolean try_allocate_small_after_region(sword_t nbytes, struct alloc_region *region,
+                                        generation_index_t gen) {
   /* Can't do this if we have no page. */
   if (!region->start_addr) return 0;
   gc_assert(!page_free_p(find_page_index(region->start_addr)));
   /* We search to the end of this page. */
   line_index_t end = address_line(PTR_ALIGN_UP(region->end_addr, GENCGC_PAGE_BYTES));
-  return try_allocate_small(nbytes, region, address_line(region->end_addr), end);
+  return try_allocate_small(nbytes, region, address_line(region->end_addr), end, gen);
 }
 
 /* We try not to allocate small objects from free pages, to reduce
@@ -153,14 +171,12 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
   for (page_index_t where = *start; where < end; where++) {
     if (page_bytes_used(where) <= GENCGC_PAGE_BYTES - nbytes &&
         ((allow_free_pages[page_type & PAGE_TYPE_MASK] && page_free_p(where)) ||
-         /* We really should use page_extensible_p but that checks card marks,
-          * and we never clear card marks currently, leading to wasted space. */
-         (lines_consistent && page_table[where].gen == gen && page_table[where].type == page_type)) &&
+         (page_table[where].type == page_type && page_table[where].gen != PSEUDO_STATIC_GENERATION)) &&
         try_allocate_small(nbytes, region,
                            address_line(page_address(where)),
-                           address_line(page_address(where + 1)))) {
+                           address_line(page_address(where + 1)),
+                           gen)) {
       page_table[where].type = page_type | OPEN_REGION_PAGE_FLAG;
-      page_table[where].gen = gen;
       set_page_scan_start_offset(where, 0);
       *start = where + 1;
       // printf(" => %ld\n", where);
@@ -341,14 +357,15 @@ static void add_words_used(void *where, uword_t count) {
 static void mark_cons_line(struct cons *c) {
   /* CONS cells never span lines, because they are aligned on
    * cons pages. */
-  line_bytemap[address_line(c)] = 1;
+  line_bytemap[address_line(c)] = MARK_GEN(line_bytemap[address_line(c)]);
   add_words_used(c, 2);
 }
 static void mark_lines(lispobj *p) {
   uword_t word_count = object_size(p);
   if (!page_single_obj_p(find_page_index(p))) {
     line_index_t first = address_line(p), last = address_line(p + word_count - 1);
-    for (line_index_t line = first; line <= last; line++) line_bytemap[line] = 1;
+    for (line_index_t line = first; line <= last; line++)
+      line_bytemap[line] = MARK_GEN(line_bytemap[line]);
   }
   add_words_used(p, word_count);
 }
@@ -597,17 +614,18 @@ static void sweep() {
       reset_page_flags(p);
     } else {
       bytes_allocated += page_bytes_used(p);
-      generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
+      if (page_single_obj_p(p))
+        generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
       /* next_free_page is only maintained for page walking - we
        * reuse partially filled pages, so it's not useful for allocation */
       next_free_page = p + 1;
     }
-    /* Prune allocation bitmaps */
-    if (page_table[p].gen == generation_to_collect) {
-      uword_t start = mark_bitmap_word_index(page_address(p)),
-              end = mark_bitmap_word_index(page_address(p + 1));
-      memcpy(allocation_bitmap + start, mark_bitmap + start, (end - start) * N_WORD_BYTES);
-      memset(mark_bitmap + start, 0, (end - start) * N_WORD_BYTES);
+  }
+  for (line_index_t l = 0; l < line_count; l++) {
+    /* Prune allocation bitmaps, for unmarked lines in this gen */
+    if (line_bytemap[l] == ENCODE_GEN(generation_to_collect)) {
+      ((char*)(allocation_bitmap))[l] = ((char*)(mark_bitmap))[l];
+      line_bytemap[l] = generation_to_collect;
     }
   }
 }
@@ -729,13 +747,11 @@ void mr_collect_garbage(generation_index_t generation) {
   uword_t prior_bytes = bytes_allocated;
   generation_to_collect = generation;
   //fprintf(stderr, "[GC #%d", ++collection);
-  lines_consistent = 0;
   reset_statistics();
   mr_scavenge_root_gens();
   trace_static_roots();
   trace_everything();
   sweep();
-  lines_consistent = 1;
   free_mark_list();
 #if 0
   fprintf(stderr,
