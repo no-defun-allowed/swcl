@@ -171,7 +171,8 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
   for (page_index_t where = *start; where < end; where++) {
     if (page_bytes_used(where) <= GENCGC_PAGE_BYTES - nbytes &&
         ((allow_free_pages[page_type & PAGE_TYPE_MASK] && page_free_p(where)) ||
-         (page_table[where].type == page_type && page_table[where].gen != PSEUDO_STATIC_GENERATION)) &&
+         (page_table[where].type == page_type &&
+          page_table[where].gen != PSEUDO_STATIC_GENERATION)) &&
         try_allocate_small(nbytes, region,
                            address_line(page_address(where)),
                            address_line(page_address(where + 1)),
@@ -590,12 +591,20 @@ static void reset_statistics() {
   bytes_allocated -= allocated;
   traced = 0;
   generations[generation_to_collect].bytes_allocated = 0;
-  for (page_index_t p = 0; p <= page_table_pages; p++)
-    if (page_table[p].gen == generation_to_collect && !page_free_p(p)) {
+  for (page_index_t p = 0; p <= page_table_pages; p++) {
+    if (page_table[p].gen == generation_to_collect &&
+        page_single_obj_p(p)) {
       set_page_bytes_used(p, 0);
-      line_index_t start = address_line(page_address(p)), end = address_line(page_address(p + 1));
-      memset(line_bytemap + start, 0, end - start);
+    } else if (!page_free_p(p)) {
+      set_page_bytes_used(p, 0);
+      for (line_index_t l = address_line(page_address(p));
+           l < address_line(page_address(p + 1));
+           l++) {
+        if (line_bytemap[l] != ENCODE_GEN(generation_to_collect))
+          set_page_bytes_used(p, page_bytes_used(p) + LINE_SIZE);
+      }
     }
+  }
 }
 
 extern void gc_close_collector_regions(int flag);
@@ -612,6 +621,7 @@ static void sweep() {
   for (page_index_t p = 0; p < page_table_pages; p++) {
     if (page_words_used(p) == 0) {
       reset_page_flags(p);
+      page_table[p].gen = 0;
     } else {
       bytes_allocated += page_bytes_used(p);
       if (page_single_obj_p(p))
@@ -624,10 +634,13 @@ static void sweep() {
   for (line_index_t l = 0; l < line_count; l++) {
     /* Prune allocation bitmaps, for unmarked lines in this gen */
     if (line_bytemap[l] == ENCODE_GEN(generation_to_collect)) {
+      fprintf(stderr, "pruning from %p to %p\n",
+              line_address(l), line_address(l + 1));
       ((char*)(allocation_bitmap))[l] = ((char*)(mark_bitmap))[l];
       line_bytemap[l] = generation_to_collect;
     }
   }
+  memset(mark_bitmap, 0, mark_bitmap_size);
 }
 
 extern lispobj lisp_init_function, gc_object_watcher;
@@ -679,17 +692,14 @@ static void update_card_mark(int card, boolean dirty) {
 
 static void mr_scavenge_root_gens() {
   page_index_t i = 0;
-  generation_index_t from = generation_to_collect;
   int checked = 0;
   /* Keep this around, to avoid scanning objects which overlap cards
    * more than once. */
   lispobj *last_scavenged = 0;
   while (i < page_table_pages) {
-    generation_index_t gen = page_table[i].gen;
     if ((page_table[i].type & PAGE_TYPE_MASK) == PAGE_TYPE_UNBOXED ||
         !page_words_used(i) ||
-        !cardseq_any_marked(page_to_card_index(i)) ||
-        gen <= from) {
+        !cardseq_any_marked(page_to_card_index(i))) {
       i++; continue;
     }
     checked++;
@@ -698,6 +708,7 @@ static void mr_scavenge_root_gens() {
       /* The only time that page_address + page_words_used actually
        * demarcates the end of a (sole) object on the page, with this
        * heap layout. */
+      generation_index_t gen = page_table[i].gen;
       lispobj *limit = (lispobj*)page_address(i) + page_words_used(i);
       lispobj *start = (lispobj*)page_address(i);
       for (int j = 0, card = addr_to_card_index(start);
@@ -725,9 +736,10 @@ static void mr_scavenge_root_gens() {
           if (!first_object || first_object == last_scavenged) first_object = start;
           lispobj *end = start + WORDS_PER_CARD;
           // fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, first_object, end);
-          dirty_generation_source = gen, dirty = 0;
+          dirty = 0;
           lispobj *where = next_object(first_object, 0, end);
           while (where) {
+            dirty_generation_source = gc_gen_of((lispobj)where, 0);
             trace_object(compute_lispobj(where));
             last_scavenged = where;
             where = next_object(where, cons_page ? 2 : object_size(where), end);
@@ -743,17 +755,20 @@ static void mr_scavenge_root_gens() {
   // fprintf(stderr, "Scavenged %d pages\n", checked);
 }
 
+void mr_pre_gc(generation_index_t generation) {
+  generation_to_collect = generation;
+  reset_statistics();
+}
+
 void mr_collect_garbage(generation_index_t generation) {
   uword_t prior_bytes = bytes_allocated;
-  generation_to_collect = generation;
-  //fprintf(stderr, "[GC #%d", ++collection);
-  reset_statistics();
+  fprintf(stderr, "[GC #%d", ++collection);
   mr_scavenge_root_gens();
   trace_static_roots();
   trace_everything();
   sweep();
   free_mark_list();
-#if 0
+#if 1
   fprintf(stderr,
           " %luM -> %luM, %lu traced, fragmentation = %.4f, page hwm = %ld]\n",
           prior_bytes >> 20, bytes_allocated >> 20, traced,

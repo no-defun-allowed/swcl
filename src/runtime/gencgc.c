@@ -125,7 +125,7 @@ boolean gencgc_verbose = 0;
 /* We hunt for pointers to old-space, when GCing generations >= verify_gen.
  * Set verify_gens to HIGHEST_NORMAL_GENERATION + 2 to disable this kind of
  * check. */
-generation_index_t verify_gens = HIGHEST_NORMAL_GENERATION + 2;
+generation_index_t verify_gens = 0; // HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
 boolean pre_verify_gen_0 = 0; // FIXME: should be named 'pre_verify_gc'
@@ -3997,6 +3997,10 @@ garbage_collect_generation(generation_index_t generation, int raise,
     /* Change to a new space for allocation, resetting the alloc_start_page */
         gc_alloc_generation = new_space;
         RESET_ALLOC_START_PAGES();
+
+#ifdef LISP_FEATURE_MARK_REGION_GC
+        mr_pre_gc(generation);
+#endif
 
         if (pin_all_dynamic_space_code) {
           /* This needs to happen before ambiguous root pinning, as the mechanisms
