@@ -98,7 +98,10 @@ generation_index_t gc_gen_of(lispobj obj, int defaultval) {
   /* We still try not to touch pseudo-static pages. */
   if (page_table[p].gen == PSEUDO_STATIC_GENERATION)
     return PSEUDO_STATIC_GENERATION;
-  return UNMARK_GEN(line_bytemap[address_line((void*)obj)]);
+  char c = UNMARK_GEN(line_bytemap[address_line((void*)obj)]);
+  if (c == 0)
+    return defaultval;
+  return DECODE_GEN(c);
 }
 
 /* Allocation of small objects is done by finding contiguous lines
@@ -178,6 +181,7 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
                            address_line(page_address(where + 1)),
                            gen)) {
       page_table[where].type = page_type | OPEN_REGION_PAGE_FLAG;
+      page_table[where].gen = 0;
       set_page_scan_start_offset(where, 0);
       *start = where + 1;
       // printf(" => %ld\n", where);
@@ -358,7 +362,7 @@ static void add_words_used(void *where, uword_t count) {
 static void mark_cons_line(struct cons *c) {
   /* CONS cells never span lines, because they are aligned on
    * cons pages. */
-  line_bytemap[address_line(c)] = MARK_GEN(line_bytemap[address_line(c)]);
+  line_bytemap[address_line(c)] = MARK_GEN(ENCODE_GEN(generation_to_collect));
   add_words_used(c, 2);
 }
 static void mark_lines(lispobj *p) {
@@ -366,7 +370,7 @@ static void mark_lines(lispobj *p) {
   if (!page_single_obj_p(find_page_index(p))) {
     line_index_t first = address_line(p), last = address_line(p + word_count - 1);
     for (line_index_t line = first; line <= last; line++)
-      line_bytemap[line] = MARK_GEN(line_bytemap[line]);
+      line_bytemap[line] = MARK_GEN(ENCODE_GEN(generation_to_collect));
   }
   add_words_used(p, word_count);
 }
@@ -632,12 +636,14 @@ static void sweep() {
     }
   }
   for (line_index_t l = 0; l < line_count; l++) {
-    /* Prune allocation bitmaps, for unmarked lines in this gen */
-    if (line_bytemap[l] == ENCODE_GEN(generation_to_collect)) {
-      fprintf(stderr, "pruning from %p to %p\n",
-              line_address(l), line_address(l + 1));
+    if (line_bytemap[l] == MARK_GEN(ENCODE_GEN(generation_to_collect))) {
+      /* Prune allocation bitmaps for marked lines in this gen */
       ((char*)(allocation_bitmap))[l] = ((char*)(mark_bitmap))[l];
-      line_bytemap[l] = generation_to_collect;
+      line_bytemap[l] = ENCODE_GEN(generation_to_collect);
+    } else if (line_bytemap[l] == ENCODE_GEN(generation_to_collect)) {
+      /* Free unmarked lines in this gen */
+      gc_assert(!((char*)(mark_bitmap))[l]);
+      line_bytemap[l] = 0;
     }
   }
   memset(mark_bitmap, 0, mark_bitmap_size);
