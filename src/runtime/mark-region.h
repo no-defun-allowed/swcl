@@ -9,7 +9,7 @@
 #define LINE_SIZE (8 << N_LOWTAG_BITS)
 
 extern uword_t *allocation_bitmap, *mark_bitmap;
-extern char *line_bytemap;
+extern unsigned char *line_bytemap;
 extern void mrgc_init();
 
 typedef intptr_t line_index_t;
@@ -38,7 +38,7 @@ extern void mr_preserve_pointer(uword_t address);
 extern void mr_preserve_range(lispobj *from, sword_t nwords);
 extern void mr_preserve_object(lispobj obj);
 extern void mr_pre_gc(generation_index_t generation);
-extern void mr_collect_garbage(generation_index_t generation);
+extern void mr_collect_garbage(boolean raise);
 extern void zero_all_free_ranges();
 #endif
 #endif

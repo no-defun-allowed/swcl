@@ -4206,7 +4206,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
     }
 
 #ifdef LISP_FEATURE_MARK_REGION_GC
-    mr_collect_garbage(0);
+    mr_collect_garbage(raise);
     RESET_ALLOC_START_PAGES();
     goto maybe_verify;
 #else
@@ -4610,17 +4610,11 @@ collect_garbage(generation_index_t last_gen)
     }
 
     page_index_t initial_nfp = next_free_page;
-#ifdef LISP_FEATURE_MARK_REGION_GC
-    garbage_collect_generation(0, 0,
-                               cur_thread_approx_stackptr);
-    goto mr_finish;
-#else
     if (gc_mark_only) {
         garbage_collect_generation(PSEUDO_STATIC_GENERATION, 0,
                                    cur_thread_approx_stackptr);
         goto finish;
     }
-#endif
 
     do {
         /* Collect the generation. */
@@ -4721,7 +4715,6 @@ collect_garbage(generation_index_t last_gen)
         high_water_mark = next_free_page;
 
     next_free_page = find_next_free_page();
-mr_finish:
     /* Update auto_gc_trigger. Make sure we trigger the next GC before
      * running out of heap! */
     if (bytes_consed_between_gcs <= (dynamic_space_size - bytes_allocated))

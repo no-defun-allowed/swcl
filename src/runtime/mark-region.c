@@ -39,7 +39,7 @@
 
 /* Initialisation */
 uword_t *allocation_bitmap, *mark_bitmap;
-char *line_bytemap;             /* 1 if line used, 0 if not used */
+unsigned char *line_bytemap;             /* 1 if line used, 0 if not used */
 line_index_t line_count;
 uword_t mark_bitmap_size;
 
@@ -668,8 +668,6 @@ static void trace_static_roots() {
   if (alloc_profile_data) mark(alloc_profile_data);
 }
 
-static unsigned int collection = 0;
-
 /* Entry points */
 
 void mr_preserve_pointer(uword_t address) {
@@ -768,19 +766,33 @@ static void mr_scavenge_root_gens() {
   // fprintf(stderr, "Scavenged %d pages\n", checked);
 }
 
+static void raise_survivors() {
+  for (line_index_t l = 0; l < line_count; l++)
+    if (line_bytemap[l] == ENCODE_GEN(generation_to_collect))
+      line_bytemap[l]++;
+  for (page_index_t p = 0; p < page_table_pages; p++)
+    if (page_table[p].gen == generation_to_collect)
+      page_table[p].gen++;
+  generations[generation_to_collect + 1].bytes_allocated += generations[generation_to_collect].bytes_allocated;
+  generations[generation_to_collect].bytes_allocated = 0;
+}
+
+// static unsigned int collection = 0;
 void mr_pre_gc(generation_index_t generation) {
-  uword_t prior_bytes = bytes_allocated;
+  // uword_t prior_bytes = bytes_allocated;
   // fprintf(stderr, "[GC #%d %luM ", ++collection, prior_bytes >> 20);
   generation_to_collect = generation;
   reset_statistics();
 }
 
-void mr_collect_garbage(generation_index_t generation) {
+void mr_collect_garbage(boolean raise) {
   mr_scavenge_root_gens();
   trace_static_roots();
   trace_everything();
   sweep();
   free_mark_list();
+  if (raise)
+    raise_survivors();
 #if 0
   fprintf(stderr,
           "-> %luM, %lu traced, fragmentation = %.4f, page hwm = %ld]\n",
