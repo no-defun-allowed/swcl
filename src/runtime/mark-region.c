@@ -591,20 +591,17 @@ static void local_smash_weak_pointers()
 }
 
 static void reset_statistics() {
-  os_vm_size_t allocated = generations[generation_to_collect].bytes_allocated;
-  bytes_allocated -= allocated;
   traced = 0;
-  generations[generation_to_collect].bytes_allocated = 0;
   for (page_index_t p = 0; p <= page_table_pages; p++) {
     if (page_table[p].gen == generation_to_collect &&
         page_single_obj_p(p)) {
       set_page_bytes_used(p, 0);
-    } else if (!page_free_p(p)) {
+    } else if (!page_free_p(p) && page_table[p].gen != PSEUDO_STATIC_GENERATION) {
       set_page_bytes_used(p, 0);
       for (line_index_t l = address_line(page_address(p));
            l < address_line(page_address(p + 1));
            l++) {
-        if (line_bytemap[l] != ENCODE_GEN(generation_to_collect))
+        if (line_bytemap[l])
           set_page_bytes_used(p, page_bytes_used(p) + LINE_SIZE);
       }
     }
@@ -618,11 +615,6 @@ static void sweep() {
 
   /* Reset values we're about to recompute */
   bytes_allocated = 0;
-  for (generation_index_t g = 0; g < PSEUDO_STATIC_GENERATION; g++)
-    generations[g].bytes_allocated = 0;
-  for (page_index_t p = 0; p < page_table_pages; p++)
-    if (!page_single_obj_p(p) && page_table[p].gen != PSEUDO_STATIC_GENERATION)
-      set_page_bytes_used(p, 0);
 
   /* Free this gen, and work out how much space is used on each small
    * page. */
@@ -640,16 +632,10 @@ static void sweep() {
           /* Free unmarked lines in this gen */
           ((char*)allocation_bitmap)[l] = 0;
           line_bytemap[l] = 0;
-        }
-        /* Note that single-object and pseudo-static pages don't get line
-         * marks. */
-        if (line_bytemap[l]) {
-          generations[DECODE_GEN(line_bytemap[l])].bytes_allocated += LINE_SIZE;
-          page_index_t page = find_page_index(line_address(l));
-          set_page_bytes_used(page, page_bytes_used(page) + LINE_SIZE);
+          set_page_bytes_used(p, page_bytes_used(p) - LINE_SIZE);
+          generations[generation_to_collect].bytes_allocated -= LINE_SIZE;
         }
       }
-
   for (page_index_t p = 0; p < page_table_pages; p++) {
     if (page_words_used(p) == 0) {
       reset_page_flags(p);
@@ -784,7 +770,7 @@ static void mr_scavenge_root_gens() {
 
 void mr_pre_gc(generation_index_t generation) {
   uword_t prior_bytes = bytes_allocated;
-  fprintf(stderr, "[GC #%d %luM ", ++collection, prior_bytes >> 20);
+  // fprintf(stderr, "[GC #%d %luM ", ++collection, prior_bytes >> 20);
   generation_to_collect = generation;
   reset_statistics();
 }
@@ -795,7 +781,7 @@ void mr_collect_garbage(generation_index_t generation) {
   trace_everything();
   sweep();
   free_mark_list();
-#if 1
+#if 0
   fprintf(stderr,
           "-> %luM, %lu traced, fragmentation = %.4f, page hwm = %ld]\n",
           bytes_allocated >> 20, traced,

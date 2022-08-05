@@ -117,7 +117,7 @@ int n_gcs;
 
 /* the verbosity level. All non-error messages are disabled at level 0;
  * and only a few rare messages are printed at level 1. */
-boolean gencgc_verbose = 1;
+boolean gencgc_verbose = 0;
 
 /* FIXME: At some point enable the various error-checking things below
  * and see what they say. */
