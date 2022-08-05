@@ -617,10 +617,32 @@ static void sweep() {
   gc_dispose_private_pages();
   cull_weak_hash_tables(mr_alivep_funs);
 
-  /* Calculate byte counts */
   bytes_allocated = 0;
   for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
     generations[g].bytes_allocated = 0;
+  for (page_index_t p = 0; p < page_table_pages; p++)
+    if (!page_single_obj_p(p) && page_table[p].gen != PSEUDO_STATIC_GENERATION)
+      set_page_bytes_used(p, 0);
+
+  /* Free this gen, and work out how much space is used on each small
+   * page. */
+  for (line_index_t l = 0; l < line_count; l++) {
+    if (line_bytemap[l] == MARK_GEN(ENCODE_GEN(generation_to_collect))) {
+      /* Prune allocation bitmaps for marked lines in this gen */
+      ((char*)allocation_bitmap)[l] = ((char*)mark_bitmap)[l];
+      line_bytemap[l] = ENCODE_GEN(generation_to_collect);
+    } else if (line_bytemap[l] == ENCODE_GEN(generation_to_collect)) {
+      /* Free unmarked lines in this gen */
+      ((char*)allocation_bitmap)[l] = 0;
+      line_bytemap[l] = 0;
+    }
+    /* Note that single-object pages don't get line marks. */
+    if (line_bytemap[l]) {
+      generations[DECODE_GEN(line_bytemap[l])].bytes_allocated += LINE_SIZE;
+      page_index_t page = find_page_index(line_address(l));
+      set_page_bytes_used(page, page_bytes_used(page) + LINE_SIZE);
+    }
+  }
 
   for (page_index_t p = 0; p < page_table_pages; p++) {
     if (page_words_used(p) == 0) {
@@ -634,19 +656,6 @@ static void sweep() {
        * reuse partially filled pages, so it's not useful for allocation */
       next_free_page = p + 1;
     }
-  }
-  for (line_index_t l = 0; l < line_count; l++) {
-    if (line_bytemap[l] == MARK_GEN(ENCODE_GEN(generation_to_collect))) {
-      /* Prune allocation bitmaps for marked lines in this gen */
-      ((char*)allocation_bitmap)[l] = ((char*)mark_bitmap)[l];
-      line_bytemap[l] = ENCODE_GEN(generation_to_collect);
-    } else if (line_bytemap[l] == ENCODE_GEN(generation_to_collect)) {
-      /* Free unmarked lines in this gen */
-      ((char*)allocation_bitmap)[l] = 0;
-      line_bytemap[l] = 0;
-    }
-    if (line_bytemap[l])
-      generations[DECODE_GEN(line_bytemap[l])].bytes_allocated += LINE_SIZE;
   }
   memset(mark_bitmap, 0, mark_bitmap_size);
 }
@@ -841,4 +850,15 @@ void draw_line_bytemap(int type) {
     fprintf(f, "%d ", n);
   }
   fclose(f);
+}
+
+void count_line_values(char *why) {
+  fprintf(stderr, "\033[1m%s:\033[0m\n", why);
+  int counts[256];
+  memset(counts, 0, sizeof(counts));
+  for (line_index_t i = 0; i < line_count; i++)
+    counts[line_bytemap[i]]++;
+  for (int n = 0; n < 256; n++)
+    if (counts[n])
+      fprintf(stderr, "%x: %d\n", n, counts[n]);
 }
