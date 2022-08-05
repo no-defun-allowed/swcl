@@ -638,11 +638,11 @@ static void sweep() {
   for (line_index_t l = 0; l < line_count; l++) {
     if (line_bytemap[l] == MARK_GEN(ENCODE_GEN(generation_to_collect))) {
       /* Prune allocation bitmaps for marked lines in this gen */
-      ((char*)(allocation_bitmap))[l] = ((char*)(mark_bitmap))[l];
+      ((char*)allocation_bitmap)[l] = ((char*)mark_bitmap)[l];
       line_bytemap[l] = ENCODE_GEN(generation_to_collect);
     } else if (line_bytemap[l] == ENCODE_GEN(generation_to_collect)) {
       /* Free unmarked lines in this gen */
-      gc_assert(!((char*)(mark_bitmap))[l]);
+      ((char*)allocation_bitmap)[l] = 0;
       line_bytemap[l] = 0;
     }
     if (line_bytemap[l])
@@ -745,11 +745,15 @@ static void mr_scavenge_root_gens() {
           lispobj *end = start + WORDS_PER_CARD;
           // fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, first_object, end);
           dirty = 0;
+          /* TODO: navigate between lines with the right generations. */
           lispobj *where = next_object(first_object, 0, end);
           while (where) {
-            dirty_generation_source = gc_gen_of((lispobj)where, 0);
-            trace_object(compute_lispobj(where));
-            last_scavenged = where;
+            generation_index_t gen = gc_gen_of((lispobj)where, 0);
+            if (gen > generation_to_collect) {
+              dirty_generation_source = gen;
+              trace_object(compute_lispobj(where));
+              last_scavenged = where;
+            }
             where = next_object(where, cons_page ? 2 : object_size(where), end);
           }
           // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
@@ -764,13 +768,13 @@ static void mr_scavenge_root_gens() {
 }
 
 void mr_pre_gc(generation_index_t generation) {
+  uword_t prior_bytes = bytes_allocated;
+  fprintf(stderr, "[GC #%d %luM ", ++collection, prior_bytes >> 20);
   generation_to_collect = generation;
   reset_statistics();
 }
 
 void mr_collect_garbage(generation_index_t generation) {
-  uword_t prior_bytes = bytes_allocated;
-  fprintf(stderr, "[GC #%d", ++collection);
   mr_scavenge_root_gens();
   trace_static_roots();
   trace_everything();
@@ -778,8 +782,8 @@ void mr_collect_garbage(generation_index_t generation) {
   free_mark_list();
 #if 1
   fprintf(stderr,
-          " %luM -> %luM, %lu traced, fragmentation = %.4f, page hwm = %ld]\n",
-          prior_bytes >> 20, bytes_allocated >> 20, traced,
+          "-> %luM, %lu traced, fragmentation = %.4f, page hwm = %ld]\n",
+          bytes_allocated >> 20, traced,
           (double)(lines_used() * LINE_SIZE) / (double)(bytes_allocated),
           next_free_page);
 #endif
