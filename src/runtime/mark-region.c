@@ -593,31 +593,45 @@ static void reset_statistics() {
   }
 }
 
+#define for_lines_in_page(l, p) \
+  for (line_index_t l = address_line(page_address(p)); \
+       l < address_line(page_address(p + 1)); \
+       l++)
+
+/* Pulled out these functions to clue auto-vectorisation. */
+static page_bytes_t count_dead_bytes(page_index_t p) {
+  unsigned char dead = ENCODE_GEN(generation_to_collect);
+  page_bytes_t n = 0;
+  unsigned char *lines = line_bytemap;
+  for_lines_in_page(l, p)
+    if (lines[l] == dead) n++;
+  return n * LINE_SIZE;
+}
+
+static void sweep_small_page(page_index_t p) {
+  unsigned char unmarked = ENCODE_GEN(generation_to_collect),
+                marked = MARK_GEN(unmarked);
+  /* Some of the other algorithms make sense with words, this one
+   * makes sense with bytes. Go figure. */
+  unsigned char *marks = (unsigned char*)mark_bitmap,
+                *allocs = (unsigned char*)allocation_bitmap,
+                *lines = line_bytemap;
+  for_lines_in_page(l, p)
+    allocs[l] = (UNMARK_GEN(lines[l]) == unmarked) ? marks[l] : allocs[l];
+  for_lines_in_page(l, p)
+    lines[l] = (lines[l] == unmarked) ? 0 : (lines[l] == marked) ? unmarked : lines[l];
+}
+
 static void sweep_lines() {
   /* Free this gen, and work out how much space is used on each small
    * page. */
   for (page_index_t p = 0; p <= page_table_pages; p++)
     if (!page_free_p(p) && !page_single_obj_p(p) &&
         page_table[p].gen != PSEUDO_STATIC_GENERATION) {
-      page_bytes_t used = page_bytes_used(p);
-      for (line_index_t l = address_line(page_address(p));
-           l < address_line(page_address(p + 1));
-           l++) {
-        unsigned char line = line_bytemap[l];
-        if (line == ENCODE_GEN(generation_to_collect)) {
-          /* Free unmarked lines in this gen */
-          ((char*)allocation_bitmap)[l] = 0;
-          used -= LINE_SIZE;
-          generations[generation_to_collect].bytes_allocated -= LINE_SIZE;
-          line_bytemap[l] = 0;
-        }
-        else if (line == MARK_GEN(ENCODE_GEN(generation_to_collect))) {
-          /* Prune allocation bitmaps for marked lines in this gen, and unmark */
-          ((char*)allocation_bitmap)[l] = ((char*)mark_bitmap)[l];
-          line_bytemap[l] = ENCODE_GEN(generation_to_collect);
-        }
-      }
-      set_page_bytes_used(p, used);
+      page_bytes_t decrement = count_dead_bytes(p);
+      generations[generation_to_collect].bytes_allocated -= decrement;
+      set_page_bytes_used(p, page_bytes_used(p) - decrement);
+      sweep_small_page(p);
     }
 }
 
@@ -791,7 +805,7 @@ static void __attribute__((noinline)) raise_survivors(unsigned char *bytemap, li
 static unsigned int collection = 0;
 void mr_pre_gc(generation_index_t generation) {
   uword_t prior_bytes = bytes_allocated;
-  fprintf(stderr, "[GC #%d gen %d %luM ", ++collection, generation, prior_bytes >> 20);
+  //fprintf(stderr, "[GC #%d gen %d %luM ", ++collection, generation, prior_bytes >> 20);
   generation_to_collect = generation;
   reset_statistics();
 }
@@ -805,14 +819,14 @@ void mr_collect_garbage(boolean raise) {
   if (raise)
     raise_survivors(line_bytemap, line_count, generation_to_collect);
 
-#if 1
+#if 0
   fprintf(stderr,
           "-> %luM, %lu traced, page hwm = %ld%s]\n",
           bytes_allocated >> 20, traced,
           next_free_page, raise ? ", raised" : "");
-#endif
   for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
     fprintf(stderr, "%d: %ld\n", g, generations[g].bytes_allocated);
+#endif
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
 }
 
