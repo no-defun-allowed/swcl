@@ -774,10 +774,13 @@ static void mr_scavenge_root_gens() {
   // fprintf(stderr, "Scavenged %d pages\n", checked);
 }
 
-static void raise_survivors() {
-  for (line_index_t l = 0; l < line_count; l++)
-    if (line_bytemap[l] == ENCODE_GEN(generation_to_collect))
-      line_bytemap[l]++;
+/* Everything has to be an argument here, in order to convince
+ * auto-vectorisation to do its thing. */
+static void __attribute__((noinline)) raise_survivors(unsigned char *bytemap, line_index_t count, generation_index_t gen) {
+  unsigned char line = ENCODE_GEN((unsigned char)gen);
+  unsigned char target = ENCODE_GEN((unsigned char)gen + 1);
+  for (line_index_t l = 0; l < count; l++)
+    bytemap[l] = (bytemap[l] == line) ? target : bytemap[l];
   for (page_index_t p = 0; p < page_table_pages; p++)
     if (page_table[p].gen == generation_to_collect && page_single_obj_p(p))
       page_table[p].gen++;
@@ -800,7 +803,7 @@ void mr_collect_garbage(boolean raise) {
   sweep();
   free_mark_list();
   if (raise)
-    raise_survivors();
+    raise_survivors(line_bytemap, line_count, generation_to_collect);
 
 #if 1
   fprintf(stderr,
