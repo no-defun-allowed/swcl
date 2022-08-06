@@ -26,6 +26,7 @@
 #include "gc-private.h"
 
 #define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
+#define ATOMIC_INC(where, amount) __atomic_add_fetch(&(where), (amount), __ATOMIC_SEQ_CST)
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -117,6 +118,7 @@ DEF_FINDER(find_used_line, line_index_t, line_bytemap[where], end);
  * and `end`. Updates `region` and returns true if we succeed, keeps
  * `region` untouched and returns false if we fail. */
 boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
+                           page_index_t page,
                            line_index_t start, line_index_t end,
                            generation_index_t gen) {
   sword_t nlines = ALIGN_UP(nbytes, LINE_SIZE) / LINE_SIZE;
@@ -135,8 +137,12 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
        * pages. Always zeroing is perhaps not that bad, as we have to
        * zero after reusing memory, which is the stable state of the
        * system. */
-      memset(region->start_addr, 0, addr_diff(region->end_addr, region->start_addr));
+      os_vm_size_t claimed = addr_diff(region->end_addr, region->start_addr);
+      memset(region->start_addr, 0, claimed);
       memset(line_bytemap + chunk_start, ENCODE_GEN(gen), chunk_end - chunk_start);
+      ATOMIC_INC(bytes_allocated, claimed);
+      ATOMIC_INC(generations[gen].bytes_allocated, claimed);
+      set_page_bytes_used(page, page_bytes_used(page) + claimed);
       return 1;
     }
     if (chunk_end == end) return 0;
@@ -150,10 +156,11 @@ boolean try_allocate_small_after_region(sword_t nbytes, struct alloc_region *reg
                                         generation_index_t gen) {
   /* Can't do this if we have no page. */
   if (!region->start_addr) return 0;
-  gc_assert(!page_free_p(find_page_index(region->start_addr)));
+  page_index_t index = find_page_index(region->start_addr);
+  gc_assert(!page_free_p(index));
   /* We search to the end of this page. */
   line_index_t end = address_line(PTR_ALIGN_UP(region->end_addr, GENCGC_PAGE_BYTES));
-  return try_allocate_small(nbytes, region, address_line(region->end_addr), end, gen);
+  return try_allocate_small(nbytes, region, index, address_line(region->end_addr), end, gen);
 }
 
 /* We try not to allocate small objects from free pages, to reduce
@@ -173,7 +180,7 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
         ((allow_free_pages[page_type & PAGE_TYPE_MASK] && page_free_p(where)) ||
          (page_table[where].type == page_type &&
           page_table[where].gen != PSEUDO_STATIC_GENERATION)) &&
-        try_allocate_small(nbytes, region,
+        try_allocate_small(nbytes, region, where,
                            address_line(page_address(where)),
                            address_line(page_address(where + 1)),
                            gen)) {
@@ -224,8 +231,8 @@ page_index_t try_allocate_large(sword_t nbytes,
       *start = chunk_start + pages_needed;
       memset(page_address(chunk_start), 0, pages_needed * GENCGC_PAGE_BYTES);
       // printf(" => %ld\n", chunk_start);
-      bytes_allocated += nbytes;
-      generations[gen].bytes_allocated += nbytes;
+      ATOMIC_INC(bytes_allocated, nbytes);
+      ATOMIC_INC(generations[gen].bytes_allocated, nbytes);
       return chunk_start;
     }
     if (chunk_end == end) return -1;
@@ -240,24 +247,7 @@ void mr_update_closed_region(struct alloc_region *region) {
   if (!(page_table[the_page].type & OPEN_REGION_PAGE_FLAG))
     lose("Page %lu wasn't open", the_page);
   //printf("closing %lu\n", the_page);
-  if (region->free_pointer > region->start_addr) {
-    /* Did allocate something. We just say we used the whole page;
-     * in terms of pressure on the GC, we basically did, as we can't reuse
-     * the page before a collection to provide accurate line marks
-     * (currently). This could be alleviated if we track which lines
-     * were actually used by the mutator. */
-    page_table[the_page].type &= ~(OPEN_REGION_PAGE_FLAG);
-    page_bytes_t page_bytes_used = page_bytes_used(the_page);
-    set_page_bytes_used(the_page, GENCGC_PAGE_BYTES);
-    generation_index_t gen = page_table[the_page].gen;
-    /* Report that we used the rest of the page. */
-    os_vm_size_t just_used = GENCGC_PAGE_BYTES - page_bytes_used;
-    generations[gen].bytes_allocated += just_used;
-    bytes_allocated += just_used;
-  } else {
-    /* Didn't actually allocate anything. */
-    reset_page_flags(the_page);
-  }
+  page_table[the_page].type &= ~(OPEN_REGION_PAGE_FLAG);
   gc_set_region_empty(region);
 }
 
@@ -627,16 +617,17 @@ static void sweep() {
       for (line_index_t l = address_line(page_address(p));
            l < address_line(page_address(p + 1));
            l++) {
+        if (line_bytemap[l] == ENCODE_GEN(generation_to_collect)) {
+          /* Free unmarked lines in this gen */
+          ((char*)allocation_bitmap)[l] = 0;
+          set_page_bytes_used(p, page_bytes_used(p) - LINE_SIZE);
+          generations[generation_to_collect].bytes_allocated -= LINE_SIZE;
+          line_bytemap[l] = 0;
+        }
         if (line_bytemap[l] == MARK_GEN(ENCODE_GEN(generation_to_collect))) {
           /* Prune allocation bitmaps for marked lines in this gen, and unmark */
           ((char*)allocation_bitmap)[l] = ((char*)mark_bitmap)[l];
           line_bytemap[l] = ENCODE_GEN(generation_to_collect);
-        } else if (line_bytemap[l] == ENCODE_GEN(generation_to_collect)) {
-          /* Free unmarked lines in this gen */
-          ((char*)allocation_bitmap)[l] = 0;
-          line_bytemap[l] = 0;
-          set_page_bytes_used(p, page_bytes_used(p) - LINE_SIZE);
-          generations[generation_to_collect].bytes_allocated -= LINE_SIZE;
         }
       }
   for (page_index_t p = 0; p < page_table_pages; p++) {
@@ -741,7 +732,8 @@ static void mr_scavenge_root_gens() {
            j < CARDS_PER_PAGE;
            j++, card++, start += WORDS_PER_CARD) {
         if (card_dirtyp(card)) {
-          /* Check if an object overlaps the start of the card. */
+          /* Check if an object overlaps the start of the card. Due to
+           * alignment this cannot happen with cons pages. */
           lispobj *first_object = cons_page ? 0 : native_pointer(find_object((lispobj)start, DYNAMIC_SPACE_START));
           lispobj *end = start + WORDS_PER_CARD;
           if (first_object && first_object < start && first_object != last_scavenged) {
@@ -766,8 +758,8 @@ static void mr_scavenge_root_gens() {
             if (gen > generation_to_collect) {
               dirty_generation_source = gen;
               trace_object(compute_lispobj(where));
-              last_scavenged = where;
             }
+            last_scavenged = where;
             where = next_object(where, cons_page ? 2 : object_size(where), end);
           }
           // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
