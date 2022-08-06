@@ -589,16 +589,36 @@ static void reset_statistics() {
     if (page_single_obj_p(p)) {
       if (page_table[p].gen == generation_to_collect)
         set_page_bytes_used(p, 0);
-    } else if (!page_free_p(p)) {
-      set_page_bytes_used(p, 0);
+    }
+  }
+}
+
+static void sweep_lines() {
+  /* Free this gen, and work out how much space is used on each small
+   * page. */
+  for (page_index_t p = 0; p <= page_table_pages; p++)
+    if (!page_free_p(p) && !page_single_obj_p(p) &&
+        page_table[p].gen != PSEUDO_STATIC_GENERATION) {
+      page_bytes_t used = page_bytes_used(p);
       for (line_index_t l = address_line(page_address(p));
            l < address_line(page_address(p + 1));
            l++) {
-        if (line_bytemap[l])
-          set_page_bytes_used(p, page_bytes_used(p) + LINE_SIZE);
+        unsigned char line = line_bytemap[l];
+        if (line == ENCODE_GEN(generation_to_collect)) {
+          /* Free unmarked lines in this gen */
+          ((char*)allocation_bitmap)[l] = 0;
+          used -= LINE_SIZE;
+          generations[generation_to_collect].bytes_allocated -= LINE_SIZE;
+          line_bytemap[l] = 0;
+        }
+        else if (line == MARK_GEN(ENCODE_GEN(generation_to_collect))) {
+          /* Prune allocation bitmaps for marked lines in this gen, and unmark */
+          ((char*)allocation_bitmap)[l] = ((char*)mark_bitmap)[l];
+          line_bytemap[l] = ENCODE_GEN(generation_to_collect);
+        }
       }
+      set_page_bytes_used(p, used);
     }
-  }
 }
 
 static void sweep() {
@@ -608,28 +628,8 @@ static void sweep() {
 
   /* Reset values we're about to recompute */
   bytes_allocated = 0;
+  sweep_lines();
 
-  /* Free this gen, and work out how much space is used on each small
-   * page. */
-  for (page_index_t p = 0; p <= page_table_pages; p++)
-    if (!page_free_p(p) && !page_single_obj_p(p) &&
-        page_table[p].gen != PSEUDO_STATIC_GENERATION)
-      for (line_index_t l = address_line(page_address(p));
-           l < address_line(page_address(p + 1));
-           l++) {
-        if (line_bytemap[l] == ENCODE_GEN(generation_to_collect)) {
-          /* Free unmarked lines in this gen */
-          ((char*)allocation_bitmap)[l] = 0;
-          set_page_bytes_used(p, page_bytes_used(p) - LINE_SIZE);
-          generations[generation_to_collect].bytes_allocated -= LINE_SIZE;
-          line_bytemap[l] = 0;
-        }
-        if (line_bytemap[l] == MARK_GEN(ENCODE_GEN(generation_to_collect))) {
-          /* Prune allocation bitmaps for marked lines in this gen, and unmark */
-          ((char*)allocation_bitmap)[l] = ((char*)mark_bitmap)[l];
-          line_bytemap[l] = ENCODE_GEN(generation_to_collect);
-        }
-      }
   for (page_index_t p = 0; p < page_table_pages; p++) {
     if (page_words_used(p) == 0) {
       reset_page_flags(p);
