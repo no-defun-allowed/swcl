@@ -340,16 +340,16 @@ static void free_mark_list() {
 
 static void add_words_used(void *where, uword_t count) {
   page_index_t p = find_page_index(where);
-  uword_t byte_count = count * N_WORD_BYTES;
-  /* Increment bytes used on every page this object intersects.
-   * n.b. large objects start on their own pages */
-  while (byte_count >= GENCGC_PAGE_BYTES) {
-    set_page_bytes_used(p, GENCGC_PAGE_BYTES);
-    byte_count -= GENCGC_PAGE_BYTES;
-    p++;
+  if (page_single_obj_p(p)) {
+    uword_t byte_count = count * N_WORD_BYTES;
+    while (byte_count >= GENCGC_PAGE_BYTES) {
+      set_page_bytes_used(p, GENCGC_PAGE_BYTES);
+      byte_count -= GENCGC_PAGE_BYTES;
+      p++;
+    }
+    if (byte_count)
+      set_page_bytes_used(p, byte_count);
   }
-  if (byte_count)
-    set_page_bytes_used(p, page_bytes_used(p) + byte_count);
 }
 
 static void mark_cons_line(struct cons *c) {
@@ -586,9 +586,9 @@ static void local_smash_weak_pointers()
 static void reset_statistics() {
   traced = 0;
   for (page_index_t p = 0; p <= page_table_pages; p++) {
-    if (page_table[p].gen == generation_to_collect &&
-        page_single_obj_p(p)) {
-      set_page_bytes_used(p, 0);
+    if (page_single_obj_p(p)) {
+      if (page_table[p].gen == generation_to_collect)
+        set_page_bytes_used(p, 0);
     } else if (!page_free_p(p)) {
       set_page_bytes_used(p, 0);
       for (line_index_t l = address_line(page_address(p));
@@ -746,6 +746,7 @@ static void mr_scavenge_root_gens() {
               trace_object(compute_lispobj(first_object));
               if (dirty)
                 update_card_mark(addr_to_card_index(first_object), dirty);
+              last_scavenged = first_object;
             }
           }
           first_object = start;

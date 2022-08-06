@@ -4687,6 +4687,7 @@ collect_garbage(generation_index_t last_gen)
     else
         gen_to_wp = gen - 1;
 
+#ifndef LISP_FEATURE_MARK_REGION_GC
     /* There's not much point in WPing pages in generation 0 as it is
      * never scavenged (except promoted pages). */
     if ((gen_to_wp > 0) && ENABLE_PAGE_PROTECTION) {
@@ -4698,6 +4699,7 @@ collect_garbage(generation_index_t last_gen)
         }
         write_protect_generation_pages(gen_to_wp);
     }
+#endif
     
 #ifdef LISP_FEATURE_SOFT_CARD_MARKS
     {

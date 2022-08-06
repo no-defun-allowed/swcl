@@ -132,11 +132,9 @@ verify_pointer(lispobj thing, lispobj *where, struct verify_state *state)
 #ifdef LISP_FEATURE_MARK_REGION_GC
         lispobj *native = native_pointer(thing);
         boolean embedded = embedded_obj_p(widetag_of(native));
-        /* CONS cells can miss marks before GC */
-        if (page_table[target_page_index].type != PAGE_TYPE_CONS || (state->flags & VERIFY_POST_GC))
-            /* Embedded objects also don't get marked */
-            if (!embedded)
-                FAIL_IF(!allocation_bit_marked(native), "no allocation mark");
+        /* Embedded objects don't get marked */
+        if ((state->flags & VERIFY_POST_GC) && !embedded)
+          FAIL_IF(!allocation_bit_marked(native), "no allocation mark");
         /* Line marks are often out of date before GC */
         if ((state->flags & VERIFY_POST_GC) &&
             to_gen != PSEUDO_STATIC_GENERATION &&
