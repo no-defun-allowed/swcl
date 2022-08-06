@@ -125,7 +125,7 @@ boolean gencgc_verbose = 0;
 /* We hunt for pointers to old-space, when GCing generations >= verify_gen.
  * Set verify_gens to HIGHEST_NORMAL_GENERATION + 2 to disable this kind of
  * check. */
-generation_index_t verify_gens = HIGHEST_NORMAL_GENERATION + 2;
+generation_index_t verify_gens = 0; // HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
 boolean pre_verify_gen_0 = 0; // FIXME: should be named 'pre_verify_gc'
@@ -4208,7 +4208,6 @@ garbage_collect_generation(generation_index_t generation, int raise,
 #ifdef LISP_FEATURE_MARK_REGION_GC
     mr_collect_garbage(raise);
     RESET_ALLOC_START_PAGES();
-    goto maybe_verify;
 #else
     if (!compacting_p()) {
         extern void execute_full_mark_phase();
@@ -4217,7 +4216,6 @@ garbage_collect_generation(generation_index_t generation, int raise,
         execute_full_sweep_phase();
         goto maybe_verify;
     }
-#endif
 
     if (GC_LOGGING) fprintf(gc_activitylog(), "begin scavenge static roots\n");
     heap_scavenge((lispobj*)NIL_SYMBOL_SLOTS_START, (lispobj*)NIL_SYMBOL_SLOTS_END);
@@ -4417,7 +4415,10 @@ garbage_collect_generation(generation_index_t generation, int raise,
 
     /* Reset the alloc_start_page for generation. */
     RESET_ALLOC_START_PAGES();
-
+#endif
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    struct generation* g = &generations[generation];
+#endif
     /* Set the new gc trigger for the GCed generation. */
     g->gc_trigger = g->bytes_allocated + g->bytes_consed_between_gc;
     g->num_gc = raise ? 0 : (1 + g->num_gc);
@@ -4697,6 +4698,7 @@ collect_garbage(generation_index_t last_gen)
         }
         write_protect_generation_pages(gen_to_wp);
     }
+    
 #ifdef LISP_FEATURE_SOFT_CARD_MARKS
     {
     // Turn sticky cards marks to the regular mark.

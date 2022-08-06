@@ -95,9 +95,6 @@ generation_index_t gc_gen_of(lispobj obj, int defaultval) {
   if (p < 0) return defaultval;
   if (page_single_obj_p(p))
     return page_table[p].gen;
-  /* We still try not to touch pseudo-static pages. */
-  if (page_table[p].gen == PSEUDO_STATIC_GENERATION)
-    return PSEUDO_STATIC_GENERATION;
   char c = UNMARK_GEN(line_bytemap[address_line((void*)obj)]);
   if (c == 0)
     return defaultval;
@@ -283,6 +280,12 @@ void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
   printf("now at %016lx\n", lseek(fd, 0, SEEK_CUR));
   for (int i = 0; i < 10; i++)
     printf("%016lx\n", allocation_bitmap[i]);
+
+  for (page_index_t p = 0; p < page_table_pages; p++)
+    if (page_table[p].gen == PSEUDO_STATIC_GENERATION)
+      memset(line_bytemap + address_line(page_address(p)),
+             ENCODE_GEN(PSEUDO_STATIC_GENERATION),
+             GENCGC_PAGE_BYTES / LINE_SIZE);
 }
 
 /* Marking */
@@ -596,7 +599,7 @@ static void reset_statistics() {
     if (page_table[p].gen == generation_to_collect &&
         page_single_obj_p(p)) {
       set_page_bytes_used(p, 0);
-    } else if (!page_free_p(p) && page_table[p].gen != PSEUDO_STATIC_GENERATION) {
+    } else if (!page_free_p(p)) {
       set_page_bytes_used(p, 0);
       for (line_index_t l = address_line(page_address(p));
            l < address_line(page_address(p + 1));
@@ -740,8 +743,20 @@ static void mr_scavenge_root_gens() {
         if (card_dirtyp(card)) {
           /* Check if an object overlaps the start of the card. */
           lispobj *first_object = cons_page ? 0 : native_pointer(find_object((lispobj)start, DYNAMIC_SPACE_START));
-          if (!first_object || first_object == last_scavenged) first_object = start;
           lispobj *end = start + WORDS_PER_CARD;
+          if (first_object && first_object < start && first_object != last_scavenged) {
+            /* In principle, we can mark any card that intersects the
+             * object, but we try to normalise and mark the first card. */
+            dirty = 0;
+            generation_index_t gen = gc_gen_of((lispobj)first_object, 0);
+            if (gen > generation_to_collect) {
+              dirty_generation_source = gen;
+              trace_object(compute_lispobj(first_object));
+              if (dirty)
+                update_card_mark(addr_to_card_index(first_object), dirty);
+            }
+          }
+          first_object = start;
           // fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, first_object, end);
           dirty = 0;
           /* TODO: navigate between lines with the right generations. */
@@ -771,16 +786,16 @@ static void raise_survivors() {
     if (line_bytemap[l] == ENCODE_GEN(generation_to_collect))
       line_bytemap[l]++;
   for (page_index_t p = 0; p < page_table_pages; p++)
-    if (page_table[p].gen == generation_to_collect)
+    if (page_table[p].gen == generation_to_collect && page_single_obj_p(p))
       page_table[p].gen++;
   generations[generation_to_collect + 1].bytes_allocated += generations[generation_to_collect].bytes_allocated;
   generations[generation_to_collect].bytes_allocated = 0;
 }
 
-// static unsigned int collection = 0;
+static unsigned int collection = 0;
 void mr_pre_gc(generation_index_t generation) {
-  // uword_t prior_bytes = bytes_allocated;
-  // fprintf(stderr, "[GC #%d %luM ", ++collection, prior_bytes >> 20);
+  uword_t prior_bytes = bytes_allocated;
+  fprintf(stderr, "[GC #%d gen %d %luM ", ++collection, generation, prior_bytes >> 20);
   generation_to_collect = generation;
   reset_statistics();
 }
@@ -793,13 +808,15 @@ void mr_collect_garbage(boolean raise) {
   free_mark_list();
   if (raise)
     raise_survivors();
-#if 0
+
+#if 1
   fprintf(stderr,
-          "-> %luM, %lu traced, fragmentation = %.4f, page hwm = %ld]\n",
+          "-> %luM, %lu traced, page hwm = %ld%s]\n",
           bytes_allocated >> 20, traced,
-          (double)(lines_used() * LINE_SIZE) / (double)(bytes_allocated),
-          next_free_page);
+          next_free_page, raise ? ", raised" : "");
 #endif
+  for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
+    fprintf(stderr, "%d: %ld\n", g, generations[g].bytes_allocated);
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
 }
 
