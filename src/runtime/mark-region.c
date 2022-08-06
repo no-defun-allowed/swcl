@@ -616,8 +616,10 @@ static void sweep_small_page(page_index_t p) {
   unsigned char *marks = (unsigned char*)mark_bitmap,
                 *allocs = (unsigned char*)allocation_bitmap,
                 *lines = line_bytemap;
-  for_lines_in_page(l, p)
-    allocs[l] = (UNMARK_GEN(lines[l]) == unmarked) ? marks[l] : allocs[l];
+  for_lines_in_page(l, p) {
+    unsigned char new = marks[l], old = allocs[l];
+    allocs[l] = (UNMARK_GEN(lines[l]) == unmarked) ? new : old;
+  }
   for_lines_in_page(l, p)
     lines[l] = (lines[l] == unmarked) ? 0 : (lines[l] == marked) ? unmarked : lines[l];
 }
@@ -790,7 +792,7 @@ static void mr_scavenge_root_gens() {
 
 /* Everything has to be an argument here, in order to convince
  * auto-vectorisation to do its thing. */
-static void __attribute__((noinline)) raise_survivors(unsigned char *bytemap, line_index_t count, generation_index_t gen) {
+static void raise_survivors(unsigned char *bytemap, line_index_t count, generation_index_t gen) {
   unsigned char line = ENCODE_GEN((unsigned char)gen);
   unsigned char target = ENCODE_GEN((unsigned char)gen + 1);
   for (line_index_t l = 0; l < count; l++)
