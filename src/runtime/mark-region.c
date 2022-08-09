@@ -715,6 +715,36 @@ static void update_card_mark(int card, boolean dirty) {
     gc_card_mark[card] = dirty ? CARD_MARKED : CARD_UNMARKED;
 }
 
+/* Check if an object is dirty in some way that tracing wouldn't uncover.
+ * This happens specifically with weak vectors and weak values, as we
+ * don't actually trace those when "tracing" them. We only record dirtyness
+ * without tracing, however, in order to allow weak values to be culled
+ * without a (more) major GC. */
+
+static void check_otherwise_dirty(lispobj *where) {
+  uword_t header = *where;
+  int widetag = header_widetag(header);
+  generation_index_t gen = gc_gen_of((lispobj)where, 0);
+  switch (widetag) {
+  case SIMPLE_VECTOR_WIDETAG:
+    if (vector_flagp(header, VectorWeak)) {
+      for (sword_t i = 1; i < headerobj_size2(where, header); i++)
+        if (is_lisp_pointer(where[i]) && gc_gen_of(where[i], 0) < gen) {
+          dirty = 1;
+          return;
+        }
+    }
+    break;
+  case WEAK_POINTER_WIDETAG:
+    struct weak_pointer *weakptr = (struct weak_pointer*)where;
+    if (is_lisp_pointer(weakptr->value) && gc_gen_of(weakptr->value, 0) < gen) {
+      dirty = 1;
+      return;
+    }
+    break;
+  }
+}
+
 static void mr_scavenge_root_gens() {
   page_index_t i = 0;
   int checked = 0;
@@ -730,22 +760,26 @@ static void mr_scavenge_root_gens() {
     checked++;
     // fprintf(stderr, "Scavenging page %ld\n", i);
     if (page_single_obj_p(i)) {
-      /* The only time that page_address + page_words_used actually
-       * demarcates the end of a (sole) object on the page, with this
-       * heap layout. */
-      generation_index_t gen = page_table[i].gen;
-      lispobj *limit = (lispobj*)page_address(i) + page_words_used(i);
-      lispobj *start = (lispobj*)page_address(i);
-      for (int j = 0, card = addr_to_card_index(start);
-           j < CARDS_PER_PAGE;
-           j++, card++, start += WORDS_PER_CARD) {
-        if (card_dirtyp(card)) {
-          lispobj *card_end = start + WORDS_PER_CARD;
-          lispobj *end = (limit < card_end) ? limit : card_end;
-          dirty_generation_source = gen, dirty = 0;
-          for (lispobj *p = start; p < end; p++)
-            if (is_lisp_pointer(*p)) mark(*p);
-          update_card_mark(card, dirty);
+      if (page_table[i].gen > generation_to_collect) {
+        /* The only time that page_address + page_words_used actually
+         * demarcates the end of a (sole) object on the page, with this
+         * heap layout. */
+        generation_index_t gen = page_table[i].gen;
+        lispobj *limit = (lispobj*)page_address(i) + page_words_used(i);
+        lispobj *start = (lispobj*)page_address(i);
+        for (int j = 0, card = addr_to_card_index(start);
+             j < CARDS_PER_PAGE;
+             j++, card++, start += WORDS_PER_CARD) {
+          if (card_dirtyp(card)) {
+            lispobj *card_end = start + WORDS_PER_CARD;
+            lispobj *end = (limit < card_end) ? limit : card_end;
+            // fprintf(stderr, "Scavenging large page %ld from %p to %p: ", i, start, end);
+            dirty_generation_source = gen, dirty = 0;
+            for (lispobj *p = start; p < end; p++)
+              mark(*p);
+            // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
+            update_card_mark(card, dirty);
+          }
         }
       }
     } else {
@@ -768,21 +802,22 @@ static void mr_scavenge_root_gens() {
             if (gen > generation_to_collect) {
               dirty_generation_source = gen;
               trace_object(compute_lispobj(first_object));
+              check_otherwise_dirty(first_object);
               if (dirty)
                 update_card_mark(addr_to_card_index(first_object), dirty);
               last_scavenged = first_object;
             }
           }
-          first_object = start;
-          // fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, first_object, end);
+          // fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, start, end);
           dirty = 0;
           /* TODO: navigate between lines with the right generations. */
-          lispobj *where = next_object(first_object, 0, end);
+          lispobj *where = next_object(start, 0, end);
           while (where) {
             generation_index_t gen = gc_gen_of((lispobj)where, 0);
             if (gen > generation_to_collect) {
               dirty_generation_source = gen;
               trace_object(compute_lispobj(where));
+              check_otherwise_dirty(where);
             }
             last_scavenged = where;
             where = next_object(where, cons_page ? 2 : object_size(where), end);
