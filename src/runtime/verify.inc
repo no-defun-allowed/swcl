@@ -340,8 +340,7 @@ static int verify_range(lispobj* start, lispobj* end, struct verify_state* state
         state->object_header = is_cons_half(*where) ? 0 : *where;
         if (state->flags & VERIFYING_GENERATIONAL) {
             page_index_t pg = find_page_index(where);
-            state->object_gen = pg >= 0 ? page_table[pg].gen :
-              gc_gen_of((lispobj)where, ARTIFICIALLY_HIGH_GEN);
+            state->object_gen = gc_gen_of((lispobj)where, ARTIFICIALLY_HIGH_GEN);
 #ifdef LISP_FEATURE_PPC64
             // Cons fillers (two words of all 1s) cause failure of
             // the default verification logic, so brute-force skip them

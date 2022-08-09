@@ -597,8 +597,12 @@ static void reset_statistics() {
   for (line_index_t l = address_line(page_address(p)); \
        l < address_line(page_address(p + 1)); \
        l++)
+/* Use AVX2 versions of code when we can, since blasting bytes faster
+ * is always nice */
+#define CPU_SPLIT __attribute__((target_clones("default,avx2")))
 
 /* Pulled out these functions to clue auto-vectorisation. */
+CPU_SPLIT
 static page_bytes_t count_dead_bytes(page_index_t p) {
   unsigned char dead = ENCODE_GEN(generation_to_collect);
   page_bytes_t n = 0;
@@ -608,6 +612,7 @@ static page_bytes_t count_dead_bytes(page_index_t p) {
   return n * LINE_SIZE;
 }
 
+CPU_SPLIT
 static void sweep_small_page(page_index_t p) {
   unsigned char unmarked = ENCODE_GEN(generation_to_collect),
                 marked = MARK_GEN(unmarked);
@@ -648,6 +653,9 @@ static void sweep() {
 
   for (page_index_t p = 0; p < page_table_pages; p++) {
     if (page_words_used(p) == 0) {
+      /* Remove allocation bit for the large object here. */
+      if (page_single_obj_p(p))
+        allocation_bitmap[mark_bitmap_word_index(page_address(p))] = 0;
       reset_page_flags(p);
       page_table[p].gen = 0;
     } else {
@@ -792,6 +800,7 @@ static void mr_scavenge_root_gens() {
 
 /* Everything has to be an argument here, in order to convince
  * auto-vectorisation to do its thing. */
+CPU_SPLIT
 static void raise_survivors(unsigned char *bytemap, line_index_t count, generation_index_t gen) {
   unsigned char line = ENCODE_GEN((unsigned char)gen);
   unsigned char target = ENCODE_GEN((unsigned char)gen + 1);
@@ -887,8 +896,7 @@ void draw_line_bytemap(int type) {
 
 void count_line_values(char *why) {
   fprintf(stderr, "\033[1m%s:\033[0m\n", why);
-  int counts[256];
-  memset(counts, 0, sizeof(counts));
+  int counts[256] = { 0 };
   for (line_index_t i = 0; i < line_count; i++)
     counts[line_bytemap[i]]++;
   for (int n = 0; n < 256; n++)

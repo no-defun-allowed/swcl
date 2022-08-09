@@ -4637,6 +4637,10 @@ collect_garbage(generation_index_t last_gen)
                 more = (2*large_allocation) >= (dynamic_space_size - bytes_allocated);
                 raise = more;
             }
+            if (!raise && (double)bytes_allocated / (double)dynamic_space_size > 0.8) {
+                raise = 1;
+                more = 1;
+            }
         }
 
         /* If an older generation is being filled, then update its
