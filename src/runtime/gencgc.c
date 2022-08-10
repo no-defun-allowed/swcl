@@ -117,7 +117,7 @@ int n_gcs;
 
 /* the verbosity level. All non-error messages are disabled at level 0;
  * and only a few rare messages are printed at level 1. */
-boolean gencgc_verbose = 2;
+boolean gencgc_verbose = 0;
 
 /* FIXME: At some point enable the various error-checking things below
  * and see what they say. */
@@ -125,10 +125,10 @@ boolean gencgc_verbose = 2;
 /* We hunt for pointers to old-space, when GCing generations >= verify_gen.
  * Set verify_gens to HIGHEST_NORMAL_GENERATION + 2 to disable this kind of
  * check. */
-generation_index_t verify_gens = 0; // HIGHEST_NORMAL_GENERATION + 2;
+generation_index_t verify_gens = HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
-boolean pre_verify_gen_0 = 1; // FIXME: should be named 'pre_verify_gc'
+boolean pre_verify_gen_0 = 0; // FIXME: should be named 'pre_verify_gc'
 
 
 /*
@@ -5541,6 +5541,8 @@ prepare_for_final_gc ()
     page_index_t i;
 
     prepare_immobile_space_for_final_gc ();
+    /* TODO: external full compactor thingy for MR */
+#ifndef LISP_FEATURE_MARK_REGION_GC
     for (i = 0; i < next_free_page; i++) {
         // Compaction requires that we permit large objects to be copied henceforth.
         // Object of size >= LARGE_OBJECT_SIZE get re-allocated to single-object pages.
@@ -5556,6 +5558,7 @@ prepare_for_final_gc ()
             generations[HIGHEST_NORMAL_GENERATION].bytes_allocated += used;
         }
     }
+#endif
 
 #ifdef LISP_FEATURE_SB_THREAD
     // Avoid tenuring of otherwise-dead objects referenced by

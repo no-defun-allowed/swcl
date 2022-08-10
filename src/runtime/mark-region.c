@@ -752,13 +752,14 @@ static void check_otherwise_dirty(lispobj *where) {
         }
     }
     break;
-  case WEAK_POINTER_WIDETAG:
+  case WEAK_POINTER_WIDETAG: {
     struct weak_pointer *weakptr = (struct weak_pointer*)where;
     if (is_lisp_pointer(weakptr->value) && gc_gen_of(weakptr->value, 0) < gen) {
       dirty = 1;
       return;
     }
     break;
+  }
   }
 }
 
@@ -888,10 +889,10 @@ void mr_collect_garbage(boolean raise) {
           "-> %luM, %lu traced, page hwm = %ld%s]\n",
           bytes_allocated >> 20, traced,
           next_free_page, raise ? ", raised" : "");
-  for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
-    fprintf(stderr, "%d: %ld\n", g, generations[g].bytes_allocated);
+  // for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
+  // fprintf(stderr, "%d: %ld\n", g, generations[g].bytes_allocated);
 #endif
-  count_line_values("Post GC");
+  // count_line_values("Post GC");
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
 }
 
