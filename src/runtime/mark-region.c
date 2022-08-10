@@ -90,6 +90,7 @@ boolean line_marked(void *pointer) {
 #define UNMARK_GEN(l) ((l) & 15)
 #define ENCODE_GEN(g) ((g) + 1)
 #define DECODE_GEN(l) ((l) - 1)
+#define IS_MARKED(l) ((l) & 16)
 
 generation_index_t gc_gen_of(lispobj obj, int defaultval) {
   page_index_t p = find_page_index((void*)obj);
@@ -355,7 +356,7 @@ static void add_words_used(void *where, uword_t count) {
 static void mark_cons_line(struct cons *c) {
   /* CONS cells never span lines, because they are aligned on
    * cons pages. */
-  line_bytemap[address_line(c)] = MARK_GEN(ENCODE_GEN(generation_to_collect));
+  line_bytemap[address_line(c)] = MARK_GEN(line_bytemap[address_line(c)]);
   add_words_used(c, 2);
 }
 static void mark_lines(lispobj *p) {
@@ -363,7 +364,7 @@ static void mark_lines(lispobj *p) {
   if (!page_single_obj_p(find_page_index(p))) {
     line_index_t first = address_line(p), last = address_line(p + word_count - 1);
     for (line_index_t line = first; line <= last; line++)
-      line_bytemap[line] = MARK_GEN(ENCODE_GEN(generation_to_collect));
+      line_bytemap[line] = MARK_GEN(line_bytemap[line]);
   }
   add_words_used(p, word_count);
 }
@@ -377,7 +378,7 @@ static void mark(lispobj object) {
     if (gc_gen_of(object, 0) < dirty_generation_source)
       /* Used to find dirty pages in mr_scavenge_root_gens. */
       dirty = 1;
-    if (gc_gen_of(object, 0) != generation_to_collect)
+    if (gc_gen_of(object, 0) > generation_to_collect)
       return;
 
     /* Fix up embedded simple-fun objects. */
@@ -633,12 +634,22 @@ static void sweep_lines() {
   /* Free this gen, and work out how much space is used on each small
    * page. */
   for (page_index_t p = 0; p <= page_table_pages; p++)
-    if (!page_free_p(p) && !page_single_obj_p(p) &&
-        page_table[p].gen != PSEUDO_STATIC_GENERATION) {
-      page_bytes_t decrement = count_dead_bytes(p);
-      generations[generation_to_collect].bytes_allocated -= decrement;
-      set_page_bytes_used(p, page_bytes_used(p) - decrement);
-      sweep_small_page(p);
+    if (!page_free_p(p) && !page_single_obj_p(p)) {
+      if (generation_to_collect == PSEUDO_STATIC_GENERATION) {
+        unsigned char *marks = (unsigned char*)mark_bitmap,
+                      *allocs = (unsigned char*)allocation_bitmap,
+                      *lines = line_bytemap;
+        for_lines_in_page(l, p) {
+          allocs[l] = marks[l];
+          lines[l] = IS_MARKED(lines[l]) ? UNMARK_GEN(lines[l]) : 0;
+          if (lines[l]) generations[DECODE_GEN(lines[l])].bytes_allocated += LINE_SIZE;
+        }
+      } else {
+        page_bytes_t decrement = count_dead_bytes(p);
+        generations[generation_to_collect].bytes_allocated -= decrement;
+        set_page_bytes_used(p, page_bytes_used(p) - decrement);
+        sweep_small_page(p);
+      }
     }
 }
 
@@ -649,8 +660,13 @@ static void sweep() {
 
   /* Reset values we're about to recompute */
   bytes_allocated = 0;
+  /* We recompute bytes allocated from scratch when doing full GC */
+  if (generation_to_collect == PSEUDO_STATIC_GENERATION)
+    for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
+      generations[g].bytes_allocated = 0;
   sweep_lines();
 
+  next_free_page = page_table_pages;
   for (page_index_t p = 0; p < page_table_pages; p++) {
     if (page_words_used(p) == 0) {
       /* Remove allocation bit for the large object here. */
@@ -858,7 +874,8 @@ void mr_pre_gc(generation_index_t generation) {
 }
 
 void mr_collect_garbage(boolean raise) {
-  mr_scavenge_root_gens();
+  if (generation_to_collect != PSEUDO_STATIC_GENERATION)
+    mr_scavenge_root_gens();
   trace_static_roots();
   trace_everything();
   sweep();

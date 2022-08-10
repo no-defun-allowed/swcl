@@ -4006,6 +4006,9 @@ garbage_collect_generation(generation_index_t generation, int raise,
         RESET_ALLOC_START_PAGES();
 
 #ifdef LISP_FEATURE_MARK_REGION_GC
+        /* Don't try to allocate into pseudo-static, when we collect it */
+        if (generation == PSEUDO_STATIC_GENERATION)
+          gc_alloc_generation = 0;
         mr_pre_gc(generation);
 #endif
 
