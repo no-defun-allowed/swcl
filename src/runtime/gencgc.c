@@ -4652,7 +4652,7 @@ collect_garbage(generation_index_t last_gen)
         }
         /* Collect more aggressively if we're running low on space. */
         if (!raise &&
-            (bytes_allocated + 3 * bytes_consed_between_gcs) > dynamic_space_size &&
+            (float)bytes_allocated / (float)dynamic_space_size > 0.7 &&
             gen < gencgc_oldest_gen_to_gc) {
           raise = 1;
           more = 1;
@@ -4665,9 +4665,19 @@ collect_garbage(generation_index_t last_gen)
                 generations[gen+1].bytes_allocated;
         }
 
+        os_vm_size_t before_size = generations[gen].bytes_allocated;
         memset(n_scav_calls, 0, sizeof n_scav_calls);
         memset(n_scav_skipped, 0, sizeof n_scav_skipped);
         garbage_collect_generation(gen, raise, cur_thread_approx_stackptr);
+        os_vm_size_t after_size = generations[gen].bytes_allocated;
+        if (gen == 0 && !raise) {
+          float survivors = (float)after_size / (float)before_size;
+          if (survivors > 0.8 && bytes_consed_between_gcs < dynamic_space_size / 4) {
+            bytes_consed_between_gcs += bytes_consed_between_gcs / 4;
+          } else if (survivors < 0.2 && bytes_consed_between_gcs > 1000000) {
+            bytes_consed_between_gcs -= bytes_consed_between_gcs / 4;
+          }
+        }
 
         if (gencgc_verbose)
             fprintf(stderr,
@@ -4964,7 +4974,7 @@ void gc_allocate_ptes()
         /* the tune-able parameters */
         gen->bytes_consed_between_gc
             = bytes_consed_between_gcs/(os_vm_size_t)HIGHEST_NORMAL_GENERATION;
-        gen->number_of_gcs_before_promotion = 1;
+        gen->number_of_gcs_before_promotion = 3;
         gen->minimum_age_before_gc = 0.75;
     }
 

@@ -868,8 +868,10 @@ static void raise_survivors(unsigned char *bytemap, line_index_t count, generati
 
 static unsigned int collection = 0;
 void mr_pre_gc(generation_index_t generation) {
-  uword_t prior_bytes = bytes_allocated;
-  fprintf(stderr, "[GC #%d gen %d %luM ", ++collection, generation, prior_bytes >> 20);
+  // count_line_values("Pre GC");
+  fprintf(stderr, "[GC #%d gen %d %luM / %luM ", ++collection, generation,
+          generations[generation].bytes_allocated >> 20,
+          bytes_allocated >> 20);
   generation_to_collect = generation;
   reset_statistics();
 }
@@ -883,10 +885,10 @@ void mr_collect_garbage(boolean raise) {
   free_mark_list();
   if (raise)
     raise_survivors(line_bytemap, line_count, generation_to_collect);
-
 #if 1
   fprintf(stderr,
-          "-> %luM, %lu traced, page hwm = %ld%s]\n",
+          "-> %luM / %luM, %lu traced, page hwm = %ld%s]\n",
+          generations[generation_to_collect].bytes_allocated >> 20,
           bytes_allocated >> 20, traced,
           next_free_page, raise ? ", raised" : "");
   // for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
