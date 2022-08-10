@@ -4652,8 +4652,8 @@ collect_garbage(generation_index_t last_gen)
         }
         /* Collect more aggressively if we're running low on space. */
         if (!raise &&
-            (double)bytes_allocated / (double)dynamic_space_size > 0.8 &&
-            (gen <= gencgc_oldest_gen_to_gc)) {
+            (bytes_allocated + 3 * bytes_consed_between_gcs) > dynamic_space_size &&
+            gen < gencgc_oldest_gen_to_gc) {
           raise = 1;
           more = 1;
         }
