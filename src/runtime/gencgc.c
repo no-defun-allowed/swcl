@@ -4674,7 +4674,7 @@ collect_garbage(generation_index_t last_gen)
           float survivors = (float)after_size / (float)before_size;
           if (survivors > 0.8 && bytes_consed_between_gcs < dynamic_space_size / 4) {
             bytes_consed_between_gcs += bytes_consed_between_gcs / 4;
-          } else if (survivors < 0.2 && bytes_consed_between_gcs > 1000000) {
+          } else if (survivors < 0.1 && bytes_consed_between_gcs > 10000000) {
             bytes_consed_between_gcs -= bytes_consed_between_gcs / 4;
           }
         }
