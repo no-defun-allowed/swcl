@@ -4672,9 +4672,10 @@ collect_garbage(generation_index_t last_gen)
         os_vm_size_t after_size = generations[gen].bytes_allocated;
         if (gen == 0 && !raise) {
           float survivors = (float)after_size / (float)before_size;
-          if (survivors > 0.8 && bytes_consed_between_gcs < dynamic_space_size / 4) {
+          if (survivors > 0.5 && bytes_consed_between_gcs < dynamic_space_size / 4) {
             bytes_consed_between_gcs += bytes_consed_between_gcs / 4;
-          } else if (survivors < 0.1 && bytes_consed_between_gcs > 10000000) {
+          } else if (survivors < 0.01 && bytes_consed_between_gcs > 20000000) {
+            /* Highly unlikely, but handle the silly case. */
             bytes_consed_between_gcs -= bytes_consed_between_gcs / 4;
           }
         }
@@ -4729,7 +4730,7 @@ collect_garbage(generation_index_t last_gen)
         write_protect_generation_pages(gen_to_wp);
     }
 #endif
-    
+
 #ifdef LISP_FEATURE_SOFT_CARD_MARKS
     {
     // Turn sticky cards marks to the regular mark.
