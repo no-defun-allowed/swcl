@@ -535,7 +535,9 @@ void gc_gen_report_to_file(int filedes, FILE *file)
         struct generation* gen = &generations[gen_num];
         /* This wouldn't appear to hold for how mark-region GC treats pages.
          * TODO: Write what should hold. */
-#ifndef LISP_FEATURE_MARK_REGION_GC
+#ifdef LISP_FEATURE_MARK_REGION_GC
+        words_allocated = generations[gen_num].bytes_allocated >> WORD_SHIFT;
+#else
         if (gen_num == 0)
             gc_assert(gen->bytes_allocated ==
                       (words_allocated+eden_words_allocated) << WORD_SHIFT);
@@ -4647,10 +4649,13 @@ collect_garbage(generation_index_t last_gen)
                 more = (2*large_allocation) >= (dynamic_space_size - bytes_allocated);
                 raise = more;
             }
-            if (!raise && (double)bytes_allocated / (double)dynamic_space_size > 0.8) {
-                raise = 1;
-                more = 1;
-            }
+        }
+        /* Collect more aggressively if we're running low on space. */
+        if (!raise &&
+            (double)bytes_allocated / (double)dynamic_space_size > 0.8 &&
+            (gen <= gencgc_oldest_gen_to_gc)) {
+          raise = 1;
+          more = 1;
         }
 
         /* If an older generation is being filled, then update its
