@@ -3981,7 +3981,14 @@ garbage_collect_generation(generation_index_t generation, int raise,
     /* Set the global src and dest. generations */
     generation_index_t original_alloc_generation = gc_alloc_generation;
 
-    if (generation < PSEUDO_STATIC_GENERATION) {
+    if (
+#ifdef LISP_FEATURE_MARK_REGION_GC
+        /* Look ma, no fullcgc! */
+        1
+#else
+        generation < PSEUDO_STATIC_GENERATION
+#endif
+        ) {
 
 #ifdef LISP_FEATURE_MARK_REGION_GC
         from_space = -1;

@@ -719,7 +719,8 @@ static void update_card_mark(int card, boolean dirty) {
  * This happens specifically with weak vectors and weak values, as we
  * don't actually trace those when "tracing" them. We only record dirtyness
  * without tracing, however, in order to allow weak values to be culled
- * without a (more) major GC. */
+ * without a (more) major GC. We still treat large weak vectors as non-weak
+ * though - I'm not sure if that's for the better. */
 
 static void check_otherwise_dirty(lispobj *where) {
   uword_t header = *where;
@@ -851,7 +852,7 @@ static void raise_survivors(unsigned char *bytemap, line_index_t count, generati
 static unsigned int collection = 0;
 void mr_pre_gc(generation_index_t generation) {
   uword_t prior_bytes = bytes_allocated;
-  //fprintf(stderr, "[GC #%d gen %d %luM ", ++collection, generation, prior_bytes >> 20);
+  fprintf(stderr, "[GC #%d gen %d %luM ", ++collection, generation, prior_bytes >> 20);
   generation_to_collect = generation;
   reset_statistics();
 }
@@ -865,7 +866,7 @@ void mr_collect_garbage(boolean raise) {
   if (raise)
     raise_survivors(line_bytemap, line_count, generation_to_collect);
 
-#if 0
+#if 1
   fprintf(stderr,
           "-> %luM, %lu traced, page hwm = %ld%s]\n",
           bytes_allocated >> 20, traced,
@@ -873,6 +874,7 @@ void mr_collect_garbage(boolean raise) {
   for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
     fprintf(stderr, "%d: %ld\n", g, generations[g].bytes_allocated);
 #endif
+  count_line_values("Post GC");
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
 }
 
