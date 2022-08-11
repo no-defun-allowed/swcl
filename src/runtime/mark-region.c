@@ -272,13 +272,9 @@ void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
   sword_t sizes[2];
   bitmap_sizes(n_ptes, sizes);
   lseek(fd, ALIGN_UP(lseek(fd, 0, SEEK_CUR), N_WORD_BYTES), SEEK_SET);
-  printf("loading allocations for %lu pages from %016lx\n", n_ptes, lseek(fd, 0, SEEK_CUR));
   sword_t allocation_bitmap_size = sizes[0];
   if (read(fd, allocation_bitmap, allocation_bitmap_size) != allocation_bitmap_size)
     lose("failed to read allocation bitmap from core");
-  printf("now at %016lx\n", lseek(fd, 0, SEEK_CUR));
-  for (int i = 0; i < 10; i++)
-    printf("%016lx\n", allocation_bitmap[i]);
 
   for (page_index_t p = 0; p < page_table_pages; p++)
     if (page_table[p].gen == PSEUDO_STATIC_GENERATION)
