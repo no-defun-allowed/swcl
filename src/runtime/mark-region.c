@@ -869,7 +869,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
                   relevant_marks128 = mark_pack & relevant;
           uword_t relevant_marks = _mm_cvtsi128_si64(relevant_marks128);
           while (relevant_marks) {
-            int first_bit = __builtin_ctzl(relevant_marks);
+            uword_t first_bit = __builtin_ctzl(relevant_marks);
             lispobj *where = start + 2 * first_bit;
             scavenge_root_object(DECODE_GEN(line_bytemap[address_line(where)]), where);
             last_scavenged = where;
