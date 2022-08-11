@@ -861,7 +861,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
            * we have 1 bit per 16 bytes of heap, and
            * 64 bits x 16 heap bytes/bit = 1024 heap bytes. */
           line_index_t start_line = address_line(start);
-          __m128i line_pack = _mm_loadu_si128((__m128i*)((unsigned char*)line_bytemap + start_line)),
+          __m128i line_pack = _mm_loadu_si128((__m128i*)(line_bytemap + start_line)),
                   mark_pack = _mm_loadu_si128((__m128i*)((unsigned char*)(allocation_bitmap) + start_line)),
                   unmark_mask = _mm_set1_epi8(15),
                   generations = _mm_set1_epi8(ENCODE_GEN(generation_to_collect)),
@@ -871,10 +871,8 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
           while (relevant_marks) {
             int first_bit = __builtin_ctzl(relevant_marks);
             lispobj *where = start + 2 * first_bit;
-            if (where != last_scavenged) {
-              scavenge_root_object(DECODE_GEN(line_bytemap[address_line(where)]), where);
-              last_scavenged = where;
-            }
+            scavenge_root_object(DECODE_GEN(line_bytemap[address_line(where)]), where);
+            last_scavenged = where;
             relevant_marks &= ~(1UL << first_bit);
           }
 #else
@@ -885,7 +883,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
             if (UNMARK_GEN(line_bytemap[line]) > minimum && marks[line])
               for (char offset = 0; offset < 8; offset++) {
                 lispobj *where = (lispobj*)(line_address(line)) + 2 * offset;
-                if ((marks[line] & (1 << offset)) && where != last_scavenged) {
+                if (marks[line] & (1 << offset)) {
                   scavenge_root_object(DECODE_GEN(line_bytemap[line]), where);
                   last_scavenged = where;
                 }
