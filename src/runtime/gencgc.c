@@ -614,6 +614,10 @@ write_heap_exhaustion_report(FILE *file, long available, long requested,
     fprintf(file, "   *STOP-FOR-GC-PENDING* = %s\n",
             read_TLS(STOP_FOR_GC_PENDING,thread)==NIL ? "false" : "true");
 #endif
+    fprintf(file, "Collection trigger variables:\n");
+    fprintf(file, "   auto_gc_trigger = %ld\n   bytes_consed_between_gcs = %ld\n",
+            auto_gc_trigger,
+            bytes_consed_between_gcs);
 }
 
 extern void
@@ -4755,6 +4759,8 @@ collect_garbage(generation_index_t last_gen)
         auto_gc_trigger = bytes_allocated + bytes_consed_between_gcs;
     else
         auto_gc_trigger = bytes_allocated + (dynamic_space_size - bytes_allocated)/2;
+    if (bytes_consed_between_gcs + bytes_allocated >= dynamic_space_size * 0.9)
+        auto_gc_trigger = (os_vm_size_t)(dynamic_space_size * 0.9);
 
     if(gencgc_verbose) {
 #define MESSAGE ("Next gc when %"OS_VM_SIZE_FMT" bytes have been consed\n")

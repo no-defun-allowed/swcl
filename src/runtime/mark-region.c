@@ -833,9 +833,9 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
            * alignment this cannot happen with cons pages. Also irrelevant if we scanned
            * the card just before this card. */
           lispobj *end = start + WORDS_PER_CARD;
-          if (card != last_card) {
+          if (card != last_card && !cons_page) {
             uword_t search_start = last_scavenged ? (uword_t)last_scavenged : DYNAMIC_SPACE_START;
-            lispobj *first_object = cons_page ? 0 : find_object((lispobj)start, search_start, 0);
+            lispobj *first_object = find_object((lispobj)start, search_start, 0);
             if (first_object && first_object < start && first_object != last_scavenged) {
               /* In principle, we can mark any card that intersects the
                * object, but we try to normalise and mark the first card. */
@@ -861,11 +861,12 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
            * we have 1 bit per 16 bytes of heap, and
            * 64 bits x 16 heap bytes/bit = 1024 heap bytes. */
           line_index_t start_line = address_line(start);
-          __m128i line_pack = _mm_loadu_si128((__m128i*)(line_bytemap + start_line)),
+          unsigned char *line_where = line_bytemap + start_line;
+          __m128i line_pack = _mm_loadu_si128((__m128i*)line_where),
                   mark_pack = _mm_loadu_si128((__m128i*)((unsigned char*)(allocation_bitmap) + start_line)),
                   unmark_mask = _mm_set1_epi8(15),
                   generations = _mm_set1_epi8(ENCODE_GEN(generation_to_collect)),
-                  relevant = (line_pack & unmark_mask) > generations,
+                  relevant = _mm_cmpgt_epi8((line_pack & unmark_mask), generations),
                   relevant_marks128 = mark_pack & relevant;
           uword_t relevant_marks = _mm_cvtsi128_si64(relevant_marks128);
           while (relevant_marks) {
@@ -917,11 +918,14 @@ static void raise_survivors(unsigned char *bytemap, line_index_t count, generati
 }
 
 static unsigned int collection = 0;
+
 void mr_pre_gc(generation_index_t generation) {
   // count_line_values("Pre GC");
+#if 0
   fprintf(stderr, "[GC #%d gen %d %luM / %luM ", ++collection, generation,
           generations[generation].bytes_allocated >> 20,
           bytes_allocated >> 20);
+#endif
   generation_to_collect = generation;
   reset_statistics();
 }
@@ -935,7 +939,7 @@ void mr_collect_garbage(boolean raise) {
   free_mark_list();
   if (raise)
     raise_survivors(line_bytemap, line_count, generation_to_collect);
-#if 1
+#if 0
   fprintf(stderr,
           "-> %luM / %luM, %lu traced, page hwm = %ld%s]\n",
           generations[generation_to_collect].bytes_allocated >> 20,
