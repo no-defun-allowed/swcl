@@ -17,7 +17,6 @@
 #include "globals.h"
 #include "lispobj.h"
 #include "queue.h"
-#include "walk-heap.h"
 
 #include "genesis/cons.h"
 #include "genesis/gc-tables.h"
@@ -476,15 +475,18 @@ static lispobj *last_address_in(uword_t bitword, uword_t word_index) {
   return (lispobj*)x;
 }
 
-static lispobj fix_pointer(lispobj *p, uword_t original) {
-  if (embedded_obj_p(widetag_of(p))) {
+/* precise is true for stack scanning, but false for card crossing
+ * detection, since the latter produces pretty nasty cache misses. When
+ * "imprecise" we don't bother to check if the object actually intersects
+ * the pointer. */
+static lispobj *fix_pointer(lispobj *p, uword_t original, boolean precise) {
+  if (precise) {
+    if (embedded_obj_p(widetag_of(p)))
       p = fun_code_header(p);
+    if (native_pointer(original) >= p + object_size(p))
+      return 0;
   }
-  if (native_pointer(original) >= p + object_size(p)) {
-    return 0;
-  }
-  lispobj l = compute_lispobj(p);
-  return l;
+  return p;
 }
 
 boolean allocation_bit_marked(void *address) {
@@ -504,14 +506,14 @@ static uword_t mark_bitmap_word_index(void *where) {
   return ((uword_t)where - DYNAMIC_SPACE_START) / (N_WORD_BITS << N_LOWTAG_BITS);
 }
 
-static lispobj find_object(uword_t address, uword_t start) {
+static lispobj *find_object(uword_t address, uword_t start, boolean precise) {
   page_index_t p = find_page_index((void*)address);
   if (page_free_p(p)) return 0;
   if (page_table[p].type == PAGE_TYPE_CONS) {
     /* CONS cells are always aligned, and the mutator is allowed to be lazy
      * w.r.t putting down allocation bits, so just use alignment. */
     if (allocation_bit_marked(native_pointer(address)))
-      return ALIGN_DOWN(address, 1 << N_LOWTAG_BITS) + LIST_POINTER_LOWTAG;
+      return (lispobj*)(address & ~LOWTAG_MASK);
     else
       return 0;
   } else {
@@ -531,13 +533,15 @@ static lispobj find_object(uword_t address, uword_t start) {
     else
       all_not_after = ((uword_t)(1) << ((first_bit_index % N_WORD_BITS) + 1)) - 1;
     if (allocation_bitmap[first_word_index] & all_not_after)
-      return fix_pointer(last_address_in(allocation_bitmap[first_word_index] & all_not_after, first_word_index),
-                         address);
+      return fix_pointer(last_address_in(allocation_bitmap[first_word_index] & all_not_after,
+                                         first_word_index),
+                         address,
+                         precise);
     uword_t i = first_word_index - 1;
     while (i >= start_word_index) {
       if (allocation_bitmap[i])
         /* Return the last location. */
-        return fix_pointer(last_address_in(allocation_bitmap[i], i), address);
+        return fix_pointer(last_address_in(allocation_bitmap[i], i), address, precise);
       /* Don't underflow */
       if (i == 0) break;
       i--;
@@ -547,8 +551,7 @@ static lispobj find_object(uword_t address, uword_t start) {
 }
 
 lispobj *search_dynamic_space(void *pointer) {
-  lispobj o = find_object((uword_t)pointer, DYNAMIC_SPACE_START);
-  return o ? native_pointer(o) : NULL;
+  return find_object((uword_t)pointer, DYNAMIC_SPACE_START, 1);
 }
 
 /* Sweeping ("regioning"?) */
@@ -706,8 +709,8 @@ static void trace_static_roots() {
 
 void mr_preserve_pointer(uword_t address) {
   if (find_page_index((void*)address) > -1) {
-    lispobj obj = find_object(address, DYNAMIC_SPACE_START);
-    if (obj) mark(obj);
+    lispobj *obj = find_object(address, DYNAMIC_SPACE_START, 1);
+    if (obj) mark(compute_lispobj(obj));
   }
 }
 
@@ -763,6 +766,12 @@ static void check_otherwise_dirty(lispobj *where) {
   }
 }
 
+static void scavenge_root_object(generation_index_t gen, lispobj *where) {
+  dirty_generation_source = gen;
+  trace_object(compute_lispobj(where));
+  check_otherwise_dirty(where);
+}
+
 static void mr_scavenge_root_gens() {
   page_index_t i = 0;
   int checked = 0;
@@ -801,47 +810,53 @@ static void mr_scavenge_root_gens() {
         }
       }
     } else {
-      boolean cons_page = page_table[i].type == PAGE_TYPE_CONS;
       /* Scavenge every object in every card and try to re-protect. */
+      boolean cons_page = page_table[i].type == PAGE_TYPE_CONS;
       lispobj *page_start = (lispobj*)page_address(i), *start = page_start;
       for (int j = 0, card = addr_to_card_index(start);
            j < CARDS_PER_PAGE;
            j++, card++, start += WORDS_PER_CARD) {
+        int last_card = -1;
         if (card_dirtyp(card)) {
           /* Check if an object overlaps the start of the card. Due to
-           * alignment this cannot happen with cons pages. */
-          lispobj *first_object = cons_page ? 0 : native_pointer(find_object((lispobj)start, DYNAMIC_SPACE_START));
+           * alignment this cannot happen with cons pages. Also irrelevant if we scanned
+           * the card just before this card. */
           lispobj *end = start + WORDS_PER_CARD;
-          if (first_object && first_object < start && first_object != last_scavenged) {
-            /* In principle, we can mark any card that intersects the
-             * object, but we try to normalise and mark the first card. */
-            dirty = 0;
-            generation_index_t gen = gc_gen_of((lispobj)first_object, 0);
-            if (gen > generation_to_collect) {
-              dirty_generation_source = gen;
-              trace_object(compute_lispobj(first_object));
-              check_otherwise_dirty(first_object);
-              if (dirty)
-                update_card_mark(addr_to_card_index(first_object), dirty);
-              last_scavenged = first_object;
+          if (card != last_card) {
+            uword_t search_start = last_scavenged ? (uword_t)last_scavenged : DYNAMIC_SPACE_START;
+            lispobj *first_object = cons_page ? 0 : find_object((lispobj)start, search_start, 0);
+            if (first_object && first_object < start && first_object != last_scavenged) {
+              /* In principle, we can mark any card that intersects the
+               * object, but we try to normalise and mark the first card. */
+              dirty = 0;
+              generation_index_t gen = gc_gen_of((lispobj)first_object, 0);
+              if (gen > generation_to_collect) {
+                dirty_generation_source = gen;
+                trace_object(compute_lispobj(first_object));
+                check_otherwise_dirty(first_object);
+                if (dirty)
+                  update_card_mark(addr_to_card_index(first_object), dirty);
+                last_scavenged = first_object;
+              }
             }
           }
           // fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, start, end);
           dirty = 0;
+          unsigned char minimum = ENCODE_GEN(generation_to_collect);
+          unsigned char *marks = (unsigned char*)allocation_bitmap;
           /* TODO: navigate between lines with the right generations. */
-          lispobj *where = next_object(start, 0, end);
-          while (where) {
-            generation_index_t gen = gc_gen_of((lispobj)where, 0);
-            if (gen > generation_to_collect) {
-              dirty_generation_source = gen;
-              trace_object(compute_lispobj(where));
-              check_otherwise_dirty(where);
-            }
-            last_scavenged = where;
-            where = next_object(where, cons_page ? 2 : object_size(where), end);
-          }
+          for (line_index_t line = address_line(start); line < address_line(end); line++)
+            if (UNMARK_GEN(line_bytemap[line]) > minimum && marks[line])
+              for (char offset = 0; offset < 8; offset++) {
+                lispobj *where = (lispobj*)(line_address(line)) + 2 * offset;
+                if ((marks[line] & (1 << offset)) && where != last_scavenged) {
+                  scavenge_root_object(DECODE_GEN(line_bytemap[line]), where);
+                  last_scavenged = where;
+                }
+              }
           // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
           update_card_mark(card, dirty);
+          last_card = card;
         }
       }
     }
@@ -892,7 +907,7 @@ void mr_collect_garbage(boolean raise) {
           bytes_allocated >> 20, traced,
           next_free_page, raise ? ", raised" : "");
   // for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
-  // fprintf(stderr, "%d: %ld\n", g, generations[g].bytes_allocated);
+  //   fprintf(stderr, "%d: %ld\n", g, generations[g].bytes_allocated);
 #endif
   // count_line_values("Post GC");
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
