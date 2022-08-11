@@ -24,6 +24,15 @@
 #include "genesis/closure.h"
 #include "gc-private.h"
 
+#ifdef LISP_FEATURE_X86_64
+#include <emmintrin.h>
+/* Some extra bytes at the end of every bitmap, so that we don't read
+ * out of bounds when SIMD scanning. */
+#define BITMAP_PADDING 8
+#else
+#define BITMAP_PADDING 0
+#endif
+
 #define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
 #define ATOMIC_INC(where, amount) __atomic_add_fetch(&(where), (amount), __ATOMIC_SEQ_CST)
 
@@ -45,7 +54,7 @@ uword_t mark_bitmap_size;
 
 static void allocate_bitmap(uword_t **bitmap, uword_t size,
                             const char *description) {
-  *bitmap = calloc(size, 1);
+  *bitmap = calloc(size + BITMAP_PADDING, 1);
   if (!*bitmap)
     lose("Failed to allocate %s (of %lu bytes)", description, size);
 }
@@ -767,12 +776,14 @@ static void check_otherwise_dirty(lispobj *where) {
 }
 
 static void scavenge_root_object(generation_index_t gen, lispobj *where) {
+  if (embedded_obj_p(widetag_of(where)))
+    where = fun_code_header(where);
   dirty_generation_source = gen;
   trace_object(compute_lispobj(where));
   check_otherwise_dirty(where);
 }
 
-static void mr_scavenge_root_gens() {
+static void __attribute__((noinline)) mr_scavenge_root_gens() {
   page_index_t i = 0;
   int checked = 0;
   /* Keep this around, to avoid scanning objects which overlap cards
@@ -812,7 +823,7 @@ static void mr_scavenge_root_gens() {
     } else {
       /* Scavenge every object in every card and try to re-protect. */
       boolean cons_page = page_table[i].type == PAGE_TYPE_CONS;
-      lispobj *page_start = (lispobj*)page_address(i), *start = page_start;
+      lispobj *start = (lispobj*)page_address(i);
       for (int j = 0, card = addr_to_card_index(start);
            j < CARDS_PER_PAGE;
            j++, card++, start += WORDS_PER_CARD) {
@@ -842,10 +853,35 @@ static void mr_scavenge_root_gens() {
           }
           // fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, start, end);
           dirty = 0;
+#if defined(LISP_FEATURE_X86_64) && (GENCGC_CARD_BYTES != 1024)
+#warning "There's a fast path for 1024-byte cards on x86-64, that you might want to adapt to your card size."
+#endif
+#if defined(LISP_FEATURE_X86_64) && (GENCGC_CARD_BYTES == 1024)
+          /* We only use the low 64-bits of all this computation, as
+           * we have 1 bit per 16 bytes of heap, and
+           * 64 bits x 16 heap bytes/bit = 1024 heap bytes. */
+          line_index_t start_line = address_line(start);
+          __m128i line_pack = _mm_loadu_si128((__m128i*)((unsigned char*)line_bytemap + start_line)),
+                  mark_pack = _mm_loadu_si128((__m128i*)((unsigned char*)(allocation_bitmap) + start_line)),
+                  unmark_mask = _mm_set1_epi8(15),
+                  generations = _mm_set1_epi8(ENCODE_GEN(generation_to_collect)),
+                  relevant = (line_pack & unmark_mask) > generations,
+                  relevant_marks128 = mark_pack & relevant;
+          uword_t relevant_marks = _mm_cvtsi128_si64(relevant_marks128);
+          while (relevant_marks) {
+            int first_bit = __builtin_ctzl(relevant_marks);
+            lispobj *where = start + 2 * first_bit;
+            if (where != last_scavenged) {
+              scavenge_root_object(DECODE_GEN(line_bytemap[address_line(where)]), where);
+              last_scavenged = where;
+            }
+            relevant_marks &= ~(1UL << first_bit);
+          }
+#else
           unsigned char minimum = ENCODE_GEN(generation_to_collect);
           unsigned char *marks = (unsigned char*)allocation_bitmap;
-          /* TODO: navigate between lines with the right generations. */
-          for (line_index_t line = address_line(start); line < address_line(end); line++)
+          line_index_t last_line = address_line(end);
+          for (line_index_t line = address_line(start); line < last_line; line++)
             if (UNMARK_GEN(line_bytemap[line]) > minimum && marks[line])
               for (char offset = 0; offset < 8; offset++) {
                 lispobj *where = (lispobj*)(line_address(line)) + 2 * offset;
@@ -854,6 +890,7 @@ static void mr_scavenge_root_gens() {
                   last_scavenged = where;
                 }
               }
+#endif
           // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
           update_card_mark(card, dirty);
           last_card = card;
