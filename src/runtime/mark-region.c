@@ -462,7 +462,7 @@ static lispobj dequeue() {
 }
 
 uword_t traced;
-static void trace_everything() {
+static void __attribute__((noinline)) trace_everything() {
   while (work_to_do() ||
          (test_weak_triggers(pointer_survived_gc_yet, mark) && work_to_do())) {
     traced++;
@@ -665,7 +665,7 @@ static void sweep_lines() {
     }
 }
 
-static void sweep() {
+static void __attribute__((noinline)) sweep() {
   local_smash_weak_pointers();
   gc_dispose_private_pages();
   cull_weak_hash_tables(mr_alivep_funs);

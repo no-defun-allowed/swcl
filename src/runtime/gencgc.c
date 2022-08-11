@@ -4536,7 +4536,7 @@ remap_free_pages (page_index_t from, page_index_t to)
     }
 }
 
-generation_index_t small_generation_limit = 0;
+generation_index_t small_generation_limit = 1;
 
 // one pair of counters per widetag, though we're only tracking code as yet
 int n_scav_calls[64], n_scav_skipped[64];
@@ -4739,11 +4739,12 @@ collect_garbage(generation_index_t last_gen)
     {
     // Turn sticky cards marks to the regular mark.
     page_index_t page;
+    unsigned char *gcm = gc_card_mark;
     for (page=0; page<next_free_page; ++page) {
         long card = page_to_card_index(page);
         int j;
         for (j=0; j<CARDS_PER_PAGE; ++j, ++card)
-            if (gc_card_mark[card] == STICKY_MARK) gc_card_mark[card] = CARD_MARKED;
+            gcm[card] = (gcm[card] == STICKY_MARK) ? CARD_MARKED : gcm[card];
     }
     }
 #endif
