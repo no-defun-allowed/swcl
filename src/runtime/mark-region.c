@@ -820,7 +820,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
       /* Scavenge every object in every card and try to re-protect. */
       boolean cons_page = page_table[i].type == PAGE_TYPE_CONS;
       lispobj *start = (lispobj*)page_address(i);
-      for (int j = 0, card = addr_to_card_index(start);
+      for (int j = 0, card = page_to_card_index(i);
            j < CARDS_PER_PAGE;
            j++, card++, start += WORDS_PER_CARD) {
         int last_card = -1;
@@ -829,7 +829,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
            * alignment this cannot happen with cons pages. Also irrelevant if we scanned
            * the card just before this card. */
           lispobj *end = start + WORDS_PER_CARD;
-          if (card != last_card && !cons_page) {
+          if (card - 1 != last_card && !cons_page) {
             uword_t search_start = last_scavenged ? (uword_t)last_scavenged : DYNAMIC_SPACE_START;
             lispobj *first_object = find_object((lispobj)start, search_start, 0);
             if (first_object && first_object < start && first_object != last_scavenged) {
@@ -847,7 +847,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
               }
             }
           }
-          // fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, start, end);
+          if (i >= 32768) fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, start, end);
           dirty = 0;
 #if defined(LISP_FEATURE_X86_64) && (GENCGC_CARD_BYTES != 1024)
 #warning "There's a fast path for 1024-byte cards on x86-64, that you might want to adapt to your card size."
@@ -886,7 +886,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
                 }
               }
 #endif
-          // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
+          if (i >= 32768) fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
           update_card_mark(card, dirty);
           last_card = card;
         }
@@ -917,7 +917,7 @@ static unsigned int collection = 0;
 
 void mr_pre_gc(generation_index_t generation) {
   // count_line_values("Pre GC");
-#if 0
+#if 1
   fprintf(stderr, "[GC #%d gen %d %luM / %luM ", ++collection, generation,
           generations[generation].bytes_allocated >> 20,
           bytes_allocated >> 20);
@@ -935,7 +935,7 @@ void mr_collect_garbage(boolean raise) {
   free_mark_list();
   if (raise)
     raise_survivors(line_bytemap, line_count, generation_to_collect);
-#if 0
+#if 1
   fprintf(stderr,
           "-> %luM / %luM, %lu traced, page hwm = %ld%s]\n",
           generations[generation_to_collect].bytes_allocated >> 20,

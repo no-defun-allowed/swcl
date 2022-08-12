@@ -125,10 +125,10 @@ boolean gencgc_verbose = 0;
 /* We hunt for pointers to old-space, when GCing generations >= verify_gen.
  * Set verify_gens to HIGHEST_NORMAL_GENERATION + 2 to disable this kind of
  * check. */
-generation_index_t verify_gens = HIGHEST_NORMAL_GENERATION + 2;
+generation_index_t verify_gens = 0; // HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
-boolean pre_verify_gen_0 = 0; // FIXME: should be named 'pre_verify_gc'
+boolean pre_verify_gen_0 = 1; // FIXME: should be named 'pre_verify_gc'
 
 
 /*
@@ -2658,8 +2658,10 @@ static void sticky_preserve_pointer(os_context_register_t register_word)
     if (is_lisp_pointer(word)) {
         page_index_t page = find_page_index((void*)word);
         if (page >= 0 && page_boxed_p(page) // stores to raw bytes are uninteresting
+#ifndef LISP_FEATURE_MARK_REGION_GC
             && (word & (GENCGC_PAGE_BYTES - 1)) < page_bytes_used(page)
             && page_table[page].gen != 0
+#endif
             && lowtag_ok_for_page_type(word, page_table[page].type)
             && plausible_tag_p(word)) { // "plausible" is good enough
             if (page_single_obj_p(page)) {
