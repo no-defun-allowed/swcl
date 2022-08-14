@@ -4857,11 +4857,8 @@ static void __attribute__((unused)) gcbarrier_patch_code_range(uword_t start, vo
     struct varint_unpacker unpacker;
     struct code* code;
     lispobj *where = next_object((lispobj*)start, 0, (lispobj*)limit);
-    if (start == DYNAMIC_SPACE_START)
-        fprintf(stderr, "%p to %p\n", where, limit);
     while (where) {
         if (widetag_of(where) == CODE_HEADER_WIDETAG && ((struct code*)where)->fixups) {
-            fprintf(stderr, "patching %p\n", where);
             code = (struct code*)where;
             varint_unpacker_init(&unpacker, code->fixups);
             // There are two other data streams preceding the one we want
