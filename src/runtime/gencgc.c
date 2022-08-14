@@ -4785,7 +4785,7 @@ collect_garbage(generation_index_t last_gen)
         remap_free_pages(0, high_water_mark);
         high_water_mark = 0;
     }
-
+ 
     large_allocation = 0;
  finish:
     write_protect_immobile_space();
@@ -4857,8 +4857,11 @@ static void __attribute__((unused)) gcbarrier_patch_code_range(uword_t start, vo
     struct varint_unpacker unpacker;
     struct code* code;
     lispobj *where = next_object((lispobj*)start, 0, (lispobj*)limit);
+    if (start == DYNAMIC_SPACE_START)
+        fprintf(stderr, "%p to %p\n", where, limit);
     while (where) {
         if (widetag_of(where) == CODE_HEADER_WIDETAG && ((struct code*)where)->fixups) {
+            fprintf(stderr, "patching %p\n", where);
             code = (struct code*)where;
             varint_unpacker_init(&unpacker, code->fixups);
             // There are two other data streams preceding the one we want
@@ -4876,6 +4879,8 @@ static void __attribute__((unused)) gcbarrier_patch_code_range(uword_t start, vo
         where = next_object((lispobj*)where, object_size(where), (lispobj*)limit);
     }
 }
+
+static boolean should_patch_code = 0;
 void gc_allocate_ptes()
 {
     page_index_t i;
@@ -4943,17 +4948,7 @@ void gc_allocate_ptes()
     // 'nbits' is what we need, 'gc_card_table_nbits' is what the core was compiled for.
     if (nbits > gc_card_table_nbits) {
         gc_card_table_nbits = nbits;
-#if defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 \
-  || defined LISP_FEATURE_X86 || defined LISP_FEATURE_X86_64
-        // The value needed based on dynamic space size exceeds the value that the
-        // core was compiled for, so we need to patch all code blobs.
-        gcbarrier_patch_code_range(READ_ONLY_SPACE_START, read_only_space_free_pointer);
-        gcbarrier_patch_code_range(STATIC_SPACE_START, static_space_free_pointer);
-        gcbarrier_patch_code_range(DYNAMIC_SPACE_START, (lispobj*)dynamic_space_highwatermark());
-#ifdef LISP_FEATURE_IMMOBILE_SPACE
-        gcbarrier_patch_code_range(VARYOBJ_SPACE_START, varyobj_free_pointer);
-#endif
-#endif
+        should_patch_code = 1;
     }
     // Regardless of the mask implied by space size, it has to be gc_card_table_nbits wide
     // even if that is excessive - when the core is restarted using a _smaller_ dynamic space
@@ -4995,6 +4990,24 @@ void gc_allocate_ptes()
     gc_init_region(unboxed_region);
     gc_init_region(code_region);
     gc_init_region(cons_region);
+}
+
+/* This is pulled out of gc_allocate_ptes, since mark-region requires
+ * loading in the allocation bitmap before we can walk the heap. */
+static void maybe_patch_code() {
+    if (should_patch_code) {
+#if defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64     \
+  || defined LISP_FEATURE_X86 || defined LISP_FEATURE_X86_64
+        // The value needed based on dynamic space size exceeds the value that the
+        // core was compiled for, so we need to patch all code blobs.
+        gcbarrier_patch_code_range(READ_ONLY_SPACE_START, read_only_space_free_pointer);
+        gcbarrier_patch_code_range(STATIC_SPACE_START, static_space_free_pointer);
+        gcbarrier_patch_code_range(DYNAMIC_SPACE_START, (lispobj*)dynamic_space_highwatermark());
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+        gcbarrier_patch_code_range(VARYOBJ_SPACE_START, varyobj_free_pointer);
+#endif
+#endif
+    }
 }
 
 
@@ -5874,6 +5887,7 @@ void gc_load_corefile_ptes(int card_table_nbits,
 #ifdef LISP_FEATURE_MARK_REGION_GC
     load_corefile_bitmaps(fd, n_ptes);
 #endif
+    maybe_patch_code();
 
 #ifdef LISP_FEATURE_DARWIN_JIT
     darwin_jit_code_pages_kludge();
