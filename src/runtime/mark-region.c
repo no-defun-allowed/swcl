@@ -795,6 +795,16 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
     // fprintf(stderr, "Scavenging page %ld\n", i);
     if (page_single_obj_p(i)) {
       if (page_table[i].gen > generation_to_collect) {
+        /* Check the widetag, to make sure we aren't going to
+         * scavenge complete junk. */
+        lispobj widetag = widetag_of((lispobj*)(page_address(i) - page_scan_start_offset(i)));
+        if (widetag != SIMPLE_VECTOR_WIDETAG) {
+          /* How odd. Just remove the card marks. */
+          for (int j = 0, card = page_to_card_index(i);
+               j < CARDS_PER_PAGE; j++, card++)
+            gc_card_mark[card] = CARD_UNMARKED;
+          continue;
+        }
         /* The only time that page_address + page_words_used actually
          * demarcates the end of a (sole) object on the page, with this
          * heap layout. */
@@ -828,7 +838,6 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
           /* Check if an object overlaps the start of the card. Due to
            * alignment this cannot happen with cons pages. Also irrelevant if we scanned
            * the card just before this card. */
-          lispobj *end = start + WORDS_PER_CARD;
           if (card - 1 != last_card && !cons_page) {
             uword_t search_start = last_scavenged ? (uword_t)last_scavenged : DYNAMIC_SPACE_START;
             lispobj *first_object = find_object((lispobj)start, search_start, 0);
@@ -847,7 +856,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
               }
             }
           }
-          if (i >= 32768) fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, start, end);
+          // fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, start, end);
           dirty = 0;
 #if defined(LISP_FEATURE_X86_64) && (GENCGC_CARD_BYTES != 1024)
 #warning "There's a fast path for 1024-byte cards on x86-64, that you might want to adapt to your card size."
@@ -873,6 +882,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
             relevant_marks &= ~(1UL << first_bit);
           }
 #else
+          lispobj *end = start + WORDS_PER_CARD;
           unsigned char minimum = ENCODE_GEN(generation_to_collect);
           unsigned char *marks = (unsigned char*)allocation_bitmap;
           line_index_t last_line = address_line(end);
@@ -886,7 +896,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
                 }
               }
 #endif
-          if (i >= 32768) fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
+          // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
           update_card_mark(card, dirty);
           last_card = card;
         }

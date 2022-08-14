@@ -125,10 +125,10 @@ boolean gencgc_verbose = 0;
 /* We hunt for pointers to old-space, when GCing generations >= verify_gen.
  * Set verify_gens to HIGHEST_NORMAL_GENERATION + 2 to disable this kind of
  * check. */
-generation_index_t verify_gens = 0; // HIGHEST_NORMAL_GENERATION + 2;
+generation_index_t verify_gens = HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
-boolean pre_verify_gen_0 = 1; // FIXME: should be named 'pre_verify_gc'
+boolean pre_verify_gen_0 = 0; // FIXME: should be named 'pre_verify_gc'
 
 
 /*
@@ -4678,7 +4678,10 @@ collect_garbage(generation_index_t last_gen)
         os_vm_size_t after_size = generations[gen].bytes_allocated;
         if (gen == 0 && !raise) {
           float survivors = (float)after_size / (float)before_size;
-          if (survivors > 0.5 && bytes_consed_between_gcs < dynamic_space_size / 4) {
+          /* Honestly rather bogus values to guide nursery sizing. */
+          if (survivors > 0.5 &&
+              bytes_consed_between_gcs < dynamic_space_size / 4 &&
+              bytes_consed_between_gcs < 1000000000) {
             bytes_consed_between_gcs += bytes_consed_between_gcs / 4;
           } else if (survivors < 0.01 && bytes_consed_between_gcs > 20000000) {
             /* Highly unlikely, but handle the silly case. */
