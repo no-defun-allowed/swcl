@@ -786,14 +786,15 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
    * more than once. */
   lispobj *last_scavenged = 0;
   while (i < page_table_pages) {
-    if ((page_table[i].type & PAGE_TYPE_MASK) == PAGE_TYPE_UNBOXED ||
+    unsigned char page_type = page_table[i].type & PAGE_TYPE_MASK;
+    if (page_type == PAGE_TYPE_UNBOXED ||
         !page_words_used(i) ||
         !cardseq_any_marked(page_to_card_index(i))) {
       i++; continue;
     }
     checked++;
     // fprintf(stderr, "Scavenging page %ld\n", i);
-    if (page_single_obj_p(i)) {
+    if (page_single_obj_p(i) && page_type == PAGE_TYPE_MIXED) {
       if (page_table[i].gen > generation_to_collect) {
         /* Check the widetag, to make sure we aren't going to
          * scavenge complete junk. */
