@@ -14,6 +14,11 @@
 
 /* The minimum heap occupancy to force more aggressive collections above. */
 #define PANIC_THRESHOLD 0.85
+#ifdef LISP_FEATURE_MARK_REGION_GC
+#define FRAGMENTATION_COMPENSATION 0.8
+#else
+#define FRAGMENTATION_COMPENSATION 1.0
+#endif
 
 void zeroize_pages_if_needed(page_index_t start, page_index_t end, int page_type);
 
