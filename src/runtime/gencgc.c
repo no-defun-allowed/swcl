@@ -4683,6 +4683,7 @@ collect_garbage(generation_index_t last_gen)
           /* Honestly rather bogus values to guide nursery sizing. */
           if (survivors > 0.5 &&
               bytes_consed_between_gcs < dynamic_space_size / 4 &&
+              generations[gen].bytes_allocated < dynamic_space_size / 3 &&
               bytes_consed_between_gcs < 1000000000) {
             bytes_consed_between_gcs += bytes_consed_between_gcs / 4;
           } else if (survivors < 0.01 && bytes_consed_between_gcs > 20000000) {
@@ -4772,8 +4773,8 @@ collect_garbage(generation_index_t last_gen)
         auto_gc_trigger = bytes_allocated + bytes_consed_between_gcs;
     else
         auto_gc_trigger = bytes_allocated + (dynamic_space_size - bytes_allocated)/2;
-    if (bytes_consed_between_gcs + bytes_allocated >= dynamic_space_size * 0.9)
-        auto_gc_trigger = (os_vm_size_t)(dynamic_space_size * 0.9);
+    if (bytes_consed_between_gcs + bytes_allocated >= dynamic_space_size * PANIC_THRESHOLD)
+        auto_gc_trigger = (os_vm_size_t)(dynamic_space_size * PANIC_THRESHOLD);
 
     if(gencgc_verbose) {
 #define MESSAGE ("Next gc when %"OS_VM_SIZE_FMT" bytes have been consed\n")
