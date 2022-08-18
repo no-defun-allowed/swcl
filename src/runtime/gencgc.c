@@ -4657,11 +4657,13 @@ collect_garbage(generation_index_t last_gen)
             }
         }
         /* Collect more aggressively if we're running low on space. */
+        boolean panic = 0;
         if (!raise &&
-            (float)bytes_allocated / (float)dynamic_space_size > 0.7 &&
+            (float)bytes_allocated / (float)dynamic_space_size > PANIC_THRESHOLD &&
             gen < gencgc_oldest_gen_to_gc) {
           raise = 1;
           more = 1;
+          panic = 1;
         }
 
         /* If an older generation is being filled, then update its
@@ -4687,6 +4689,11 @@ collect_garbage(generation_index_t last_gen)
             /* Highly unlikely, but handle the silly case. */
             bytes_consed_between_gcs -= bytes_consed_between_gcs / 4;
           }
+        }
+
+        /* Don't keep panicking if we freed enough now. */
+        if (panic && (float)bytes_allocated / (float)dynamic_space_size < PANIC_THRESHOLD) {
+          more = 0;
         }
 
         if (gencgc_verbose)

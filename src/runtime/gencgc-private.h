@@ -12,6 +12,9 @@
 #ifndef _GENCGC_PRIVATE_H_
 #define _GENCGC_PRIVATE_H_
 
+/* The minimum heap occupancy to force more aggressive collections above. */
+#define PANIC_THRESHOLD 0.85
+
 void zeroize_pages_if_needed(page_index_t start, page_index_t end, int page_type);
 
 typedef unsigned int page_bytes_t;
