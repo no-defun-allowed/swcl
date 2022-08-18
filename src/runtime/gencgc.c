@@ -4563,6 +4563,7 @@ extern int finalizer_thread_runflag;
  *
  * We stop collecting at gencgc_oldest_gen_to_gc, even if this is less than
  * last_gen (oh, and note that by default it is NUM_GENERATIONS-1) */
+float last_survival = 0.0;
 long tot_gc_nsec;
 void NO_SANITIZE_ADDRESS NO_SANITIZE_MEMORY
 collect_garbage(generation_index_t last_gen)
@@ -4648,7 +4649,8 @@ collect_garbage(generation_index_t last_gen)
         } else {
             raise =
                 (gen < last_gen)
-                || (generations[gen].num_gc >= generations[gen].number_of_gcs_before_promotion);
+                || (generations[gen].num_gc >= generations[gen].number_of_gcs_before_promotion
+                    && (gen != 0 || last_survival < 0.5));
             /* If we would not normally raise this one, but we're
              * running low on space in comparison to the object-sizes
              * we've been seeing, raise it and collect the next one
@@ -4681,14 +4683,14 @@ collect_garbage(generation_index_t last_gen)
         garbage_collect_generation(gen, raise, cur_thread_approx_stackptr);
         os_vm_size_t after_size = generations[gen].bytes_allocated;
         if (gen == 0 && !raise) {
-          float survivors = (float)after_size / (float)before_size;
+          last_survival = last_survival * 0.5 + (float)after_size / (float)before_size * 0.5;
           /* Honestly rather bogus values to guide nursery sizing. */
-          if (survivors > 0.5 &&
+          if (last_survival > 0.5 &&
               bytes_consed_between_gcs < dynamic_space_size / 4 &&
               generations[gen].bytes_allocated < dynamic_space_size / 3 &&
               bytes_consed_between_gcs < 1000000000) {
             bytes_consed_between_gcs += bytes_consed_between_gcs / 4;
-          } else if (survivors < 0.01 && bytes_consed_between_gcs > 20000000) {
+          } else if (last_survival < 0.01 && bytes_consed_between_gcs > 20000000) {
             /* Highly unlikely, but handle the silly case. */
             bytes_consed_between_gcs -= bytes_consed_between_gcs / 4;
           }
