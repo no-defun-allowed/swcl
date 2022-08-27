@@ -594,8 +594,9 @@ static void local_smash_weak_pointers()
 static void reset_statistics() {
   traced = 0;
   for (page_index_t p = 0; p <= page_table_pages; p++) {
-    if (page_single_obj_p(p) && page_table[p].gen == generation_to_collect) {
-      generations[generation_to_collect].bytes_allocated -= page_bytes_used(p);
+    if (page_single_obj_p(p) &&
+        (page_table[p].gen == generation_to_collect || generation_to_collect == PSEUDO_STATIC_GENERATION)) {
+      generations[page_table[p].gen].bytes_allocated -= page_bytes_used(p);
       set_page_bytes_used(p, 0);
     }
   }
@@ -683,7 +684,8 @@ static void __attribute__((noinline)) sweep() {
       page_table[p].gen = 0;
     } else {
       bytes_allocated += page_bytes_used(p);
-      if (page_single_obj_p(p))
+      if (page_single_obj_p(p) &&
+          (page_table[p].gen == generation_to_collect || generation_to_collect == PSEUDO_STATIC_GENERATION))
         generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
       /* next_free_page is only maintained for page walking - we
        * reuse partially filled pages, so it's not useful for allocation */
