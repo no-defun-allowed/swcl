@@ -361,7 +361,6 @@ static void mark_cons_line(struct cons *c) {
   /* CONS cells never span lines, because they are aligned on
    * cons pages. */
   line_bytemap[address_line(c)] = MARK_GEN(line_bytemap[address_line(c)]);
-  add_words_used(c, 2);
 }
 static void mark_lines(lispobj *p) {
   uword_t word_count = object_size(p);
@@ -595,9 +594,9 @@ static void local_smash_weak_pointers()
 static void reset_statistics() {
   traced = 0;
   for (page_index_t p = 0; p <= page_table_pages; p++) {
-    if (page_single_obj_p(p)) {
-      if (page_table[p].gen == generation_to_collect)
-        set_page_bytes_used(p, 0);
+    if (page_single_obj_p(p) && page_table[p].gen == generation_to_collect) {
+      generations[generation_to_collect].bytes_allocated -= page_bytes_used(p);
+      set_page_bytes_used(p, 0);
     }
   }
 }
