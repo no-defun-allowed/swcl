@@ -641,7 +641,7 @@ static void sweep_small_page(page_index_t p) {
 static void sweep_lines() {
   /* Free this gen, and work out how much space is used on each small
    * page. */
-  for (page_index_t p = 0; p <= page_table_pages; p++)
+  for (page_index_t p = 0; p < page_table_pages; p++)
     if (!page_free_p(p) && !page_single_obj_p(p)) {
       if (generation_to_collect == PSEUDO_STATIC_GENERATION) {
         unsigned char *marks = (unsigned char*)mark_bitmap,
