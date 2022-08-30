@@ -996,19 +996,18 @@ void draw_page_table(int from, int to) {
 }
 
 int drawing_count = 0;
-void draw_line_bytemap(int type) {
+#define BYTEMAP_WIDTH 4096
+void draw_line_bytemap() {
   char name[30];
   snprintf(name, 30, "/tmp/bytemap%d.pbm", drawing_count++);
   FILE *f = fopen(name, "w");
-  fprintf(f, "P2 512 %ld 3\n", dynamic_space_size / GENCGC_PAGE_BYTES);
+  fprintf(f, "P3 %ld %ld 8\n", BYTEMAP_WIDTH, line_count / BYTEMAP_WIDTH);
   for (line_index_t i = 0; i < line_count; i++) {
     page_index_t p = find_page_index(line_address(i));
-    int n = line_bytemap[i] * 3;
-    if (page_table[p].type != type || page_bytes_used(p) == GENCGC_PAGE_BYTES)
-      n = 1;
-    if (page_table[p].gen != 0)
-      n = 2;
-    fprintf(f, "%d ", n);
+    int m = line_bytemap[i] > 0, r = page_table[p].type & 7,
+        g = (page_table[p].type >> 3) * 2,
+        b = gc_gen_of((lispobj)line_address(i), 0);
+    fprintf(f, "%d %d %d ", r * m, g * m, b * m);
   }
   fclose(f);
 }
