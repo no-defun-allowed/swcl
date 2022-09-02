@@ -794,9 +794,10 @@ static void scavenge_root_object(generation_index_t gen, lispobj *where) {
   check_otherwise_dirty(where);
 }
 
+static uword_t root_objects_checked = 0;
 static void __attribute__((noinline)) mr_scavenge_root_gens() {
   page_index_t i = 0;
-  int checked = 0;
+  root_objects_checked = 0;
   /* Keep this around, to avoid scanning objects which overlap cards
    * more than once. */
   lispobj *last_scavenged = 0;
@@ -807,7 +808,6 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
         !cardseq_any_marked(page_to_card_index(i))) {
       i++; continue;
     }
-    checked++;
     // fprintf(stderr, "Scavenging page %ld\n", i);
     if (page_single_obj_p(i) && page_type == PAGE_TYPE_MIXED) {
       if (page_table[i].gen > generation_to_collect) {
@@ -891,6 +891,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
                   relevant_marks128 = mark_pack & relevant;
           uword_t relevant_marks = _mm_cvtsi128_si64(relevant_marks128);
           while (relevant_marks) {
+            root_objects_checked++;
             uword_t first_bit = __builtin_ctzl(relevant_marks);
             lispobj *where = start + 2 * first_bit;
             scavenge_root_object(DECODE_GEN(line_bytemap[address_line(where)]), where);
@@ -907,6 +908,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
               for (char offset = 0; offset < 8; offset++) {
                 lispobj *where = (lispobj*)(line_address(line)) + 2 * offset;
                 if (marks[line] & (1 << offset)) {
+                  root_objects_checked++;
                   scavenge_root_object(DECODE_GEN(line_bytemap[line]), where);
                   last_scavenged = where;
                 }
@@ -921,7 +923,6 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
     i++;
   }
   dirty_generation_source = 0;
-  // fprintf(stderr, "Scavenged %d pages\n", checked);
 }
 
 /* Everything has to be an argument here, in order to convince
@@ -963,9 +964,9 @@ void mr_collect_garbage(boolean raise) {
     raise_survivors(line_bytemap, line_count, generation_to_collect);
 #if 1
   fprintf(stderr,
-          "-> %luM / %luM, %lu traced, page hwm = %ld%s]\n",
+          "-> %luM / %luM, %lu traced %lu scavenged, page hwm = %ld%s]\n",
           generations[generation_to_collect].bytes_allocated >> 20,
-          bytes_allocated >> 20, traced,
+          bytes_allocated >> 20, traced, root_objects_checked,
           next_free_page, raise ? ", raised" : "");
   // for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
   //   fprintf(stderr, "%d: %ld\n", g, generations[g].bytes_allocated);
@@ -1020,7 +1021,7 @@ void draw_line_bytemap() {
   char name[30];
   snprintf(name, 30, "/tmp/bytemap%d.pbm", drawing_count++);
   FILE *f = fopen(name, "w");
-  fprintf(f, "P3 %ld %ld 8\n", BYTEMAP_WIDTH, line_count / BYTEMAP_WIDTH);
+  fprintf(f, "P3 %d %ld 8\n", BYTEMAP_WIDTH, line_count / BYTEMAP_WIDTH);
   for (line_index_t i = 0; i < line_count; i++) {
     page_index_t p = find_page_index(line_address(i));
     int m = line_bytemap[i] > 0, r = page_table[p].type & 7,

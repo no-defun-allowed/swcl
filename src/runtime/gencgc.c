@@ -4706,14 +4706,14 @@ collect_garbage(generation_index_t last_gen)
         if (gen == 0 && !raise) {
           last_survival = last_survival * 0.5 + (float)after_size / (float)before_size * 0.5;
           /* Honestly rather bogus values to guide nursery sizing. */
-          if (last_survival > 0.5 &&
+          if (last_survival > 0.7 &&
               bytes_consed_between_gcs < dynamic_space_size / 4 &&
               generations[gen].bytes_allocated < dynamic_space_size / 3 &&
               bytes_consed_between_gcs < 1000000000) {
             bytes_consed_between_gcs += bytes_consed_between_gcs / 4;
           } else if (last_survival < 0.01 && bytes_consed_between_gcs > 50000000) {
             /* Highly unlikely, but handle the silly case. */
-            bytes_consed_between_gcs -= bytes_consed_between_gcs / 4;
+            //bytes_consed_between_gcs -= bytes_consed_between_gcs / 4;
           }
         }
 
