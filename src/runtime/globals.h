@@ -45,16 +45,19 @@ extern int foreign_function_call_active;
 extern os_vm_size_t dynamic_space_size;
 extern os_vm_size_t thread_control_stack_size;
 
+#ifndef LISP_FEATURE_DARWIN_JIT
+extern uword_t READ_ONLY_SPACE_START, READ_ONLY_SPACE_END;
+#endif
 #ifdef LISP_FEATURE_CHENEYGC
 extern uword_t DYNAMIC_0_SPACE_START, DYNAMIC_1_SPACE_START;
 #else
 extern uword_t DYNAMIC_SPACE_START;
 #endif
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
-extern uword_t FIXEDOBJ_SPACE_START, VARYOBJ_SPACE_START;
+extern uword_t FIXEDOBJ_SPACE_START, TEXT_SPACE_START;
 extern uword_t immobile_space_lower_bound, immobile_space_max_offset;
 extern uword_t immobile_range_1_max_offset, immobile_range_2_min_offset;
-extern unsigned int varyobj_space_size;
+extern unsigned int text_space_size;
 #endif
 extern uword_t asm_routines_start, asm_routines_end;
 extern int gc_card_table_nbits;
@@ -87,15 +90,20 @@ extern lispobj *current_binding_stack_pointer;
 extern lispobj *read_only_space_free_pointer;
 extern lispobj *static_space_free_pointer;
 
+static inline boolean readonly_space_p(lispobj ptr) {
+    return ptr >= READ_ONLY_SPACE_START && (lispobj*)ptr < read_only_space_free_pointer;
+}
+
 #ifdef LISP_FEATURE_DARWIN_JIT
 lispobj *static_code_space_free_pointer;
 #endif
 
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
-extern lispobj *varyobj_free_pointer;
+extern lispobj *text_space_highwatermark;
 extern lispobj *fixedobj_free_pointer;
 #endif
 extern os_vm_address_t anon_dynamic_space_start;
+extern lispobj* tlsf_mem_start; // meaningful only if immobile space
 
 # ifndef LISP_FEATURE_GENCGC
 extern lispobj *current_auto_gc_trigger;

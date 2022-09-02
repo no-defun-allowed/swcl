@@ -948,11 +948,11 @@
           (member :darwin *features*)
           label-prefix label-prefix label-prefix label-prefix))
 
-;;; Convert immobile varyobj space to an assembly file in OUTPUT.
+;;; Convert immobile text space to an assembly file in OUTPUT.
 (defun write-assembler-text
     (spaces output
      &optional enable-pie (emit-cfi t)
-     &aux (code-bounds (space-bounds immobile-varyobj-core-space-id spaces))
+     &aux (code-bounds (space-bounds immobile-text-core-space-id spaces))
           (fixedobj-bounds (space-bounds immobile-fixedobj-core-space-id spaces))
           (core (make-core spaces code-bounds fixedobj-bounds enable-pie))
           (code-addr (bounds-low code-bounds))
@@ -960,9 +960,6 @@
           (pp-state (cons (make-hash-table :test 'equal) nil))
           (prev-namestring "")
           (n-linker-relocs 0)
-          (seen-fdefns nil)
-          (seen-trampolines nil)
-          (seen-gfs nil)
           (temp-output (make-string-output-stream :element-type 'base-char))
           end-loc)
   (labels ((dumpwords (sap count stream &optional (exceptions #()) logical-addr)
@@ -1068,13 +1065,6 @@
                 (objsize (code-object-size code)))
            (incf total-code-size objsize)
            (cond
-             ((< (code-header-words code) 3) ; filler object
-              (let ((sap (int-sap (- (get-lisp-obj-address code) other-pointer-lowtag))))
-                (format output " .quad 0x~x, 0x~x~% .fill 0x~x~%# ~x:~%"
-                        (sap-ref-word sap 0)
-                        (sap-ref-word sap n-word-bytes)
-                        (- objsize (* 2 n-word-bytes))
-                        (+ code-addr objsize))))
              ((%instancep (%code-debug-info code)) ; assume it's a COMPILED-DEBUG-INFO
               (aver (plusp (code-n-entries code)))
               (let* ((source
@@ -1122,68 +1112,17 @@
                   (dumpwords (int-sap code-physaddr)
                              (code-header-words code) output header-exceptions code-addr)
                   (write-string (get-output-stream-string temp-output) output))))
-             ((functionp (%code-debug-info code))
-              (unless seen-trampolines
-                (setq seen-trampolines t)
-                (format output "lisp_trampolines:~%"))
-              (let* ((sap (int-sap (translate-ptr code-addr spaces)))
-                     (tramp-fun (sap-ref-word sap (ash 2 word-shift))))
-                (aver (not (in-bounds-p tramp-fun code-bounds)))
-                (format output " .quad ~{0x~x~^,~}~%"
-                        (loop for i from 0 by n-word-bytes repeat 6
-                              collect (sap-ref-word sap i)))))
              (t
               (error "Strange code component: ~S" code)))
            (incf code-addr objsize)))
-        (#.fdefn-widetag
-         (unless seen-fdefns
-           (format output "~%# FDEFNs~%")
-           (setq seen-fdefns t))
-         (let* ((ptr (translate-ptr code-addr spaces))
-                (fdefn (%make-lisp-obj (logior ptr other-pointer-lowtag)))
-                (name (fun-name-from-core (fdefn-name fdefn) core))
-                (c-name (c-name name core pp-state "F")))
-           (format output "~a: # ~x~% .size ~0@*~a, 32~%"
-                     (c-symbol-quote c-name)
-                     (logior code-addr other-pointer-lowtag))
-           (flet ((relativize (slot &aux (x (sap-ref-word (int-sap ptr) (ash slot word-shift))))
-                    (if (in-bounds-p x code-bounds)
-                        (format nil "CS+0x~x" (- x (bounds-low code-bounds)))
-                        (format nil "0x~x" x))))
-             (format output " .quad 0x~x, 0x~x, ~a, ~a~%"
-                     (sap-ref-word (int-sap ptr) 0)
-                     (sap-ref-word (int-sap ptr) 8)
-                     (relativize fdefn-fun-slot)
-                     (relativize fdefn-raw-addr-slot)))
-           (incf code-addr (* 4 n-word-bytes))))
-        (#.funcallable-instance-widetag
-         (unless seen-gfs
-           (setq seen-gfs t)
-           (when seen-trampolines
-             (format output " .size lisp_trampolines, .-lisp_trampolines~%")))
-         (let* ((sap (int-sap (translate-ptr code-addr spaces)))
-                (fin-fun (sap-ref-word sap (ash 2 word-shift)))
-                (code-space-p (in-bounds-p fin-fun code-bounds))
-                (slots (translate (sap-ref-lispobj sap (ash 3 word-shift)) spaces))
-                (name (and (> (length (the simple-vector slots)) +gf-name-slot+)
-                           (svref slots +gf-name-slot+)))
-                (c-name
-                 (c-name
-                  (if (or (not name)
-                          (eql (get-lisp-obj-address name) unbound-marker-widetag))
-                      "unnamed"
-                      (fun-name-from-core name core))
-                  core pp-state "G")))
-           (format output "~a:~% .size ~0@*~a, 48~%" (c-symbol-quote c-name))
-           (format output " .quad 0x~x, .+24, ~:[~;CS+~]0x~x~{, 0x~x~}~%"
-                   (sap-ref-word sap 0)
-                   code-space-p
-                   (if code-space-p (- fin-fun (bounds-low code-bounds)) fin-fun)
-                   (loop for i from (ash 3 word-shift) by n-word-bytes repeat 3
-                         collect (sap-ref-word sap i))))
-         (incf code-addr (* 6 n-word-bytes))))))
+        (#.filler-widetag
+         (let* ((word (sap-ref-word (int-sap (translate-ptr code-addr spaces)) 0))
+                (nwords (ash word -32))
+                (nbytes (* nwords sb-vm:n-word-bytes)))
+           (format output " .quad 0x~x~% .fill ~d~%" word (- nbytes n-word-bytes))
+           (incf code-addr nbytes))))))
 
-  ;; coreparse uses the 'lisp_jit_code' symbol to set varyobj_free_pointer
+  ;; coreparse uses the 'lisp_jit_code' symbol to set text_space_highwatermark
   ;; The intent is that compilation to memory can use this reserved area
   ;; (if space remains) so that profilers can associate a C symbol with the
   ;; program counter range. It's better than nothing.
@@ -1367,7 +1306,7 @@
                   `("lisp.rel"        ,+sht-progbits+ 0 0 0 8 8)
                   `(".relalisp.core"  ,+sht-rela+     0 2 1 8 ,reloc-entry-size)))
                                       ; symbol table -- ^ ^ -- for which section
-             (:note ".note.GNU-stack" ,+sht-null+     0 0 0 1  0)))
+             (:note ".note.GNU-stack" ,+sht-progbits+ 0 0 0 1  0)))
          (string-table
           (string-table (append '("lisp_code_start") (map 'list #'second sections))))
          (strings (cdr string-table))
@@ -1463,7 +1402,7 @@
 ;;; that need to be applied on startup of a position-independent executable.
 ;;;
 (defun collect-relocations (spaces fixups pie &key (verbose nil) (print nil))
-  (let* ((code-bounds (space-bounds immobile-varyobj-core-space-id spaces))
+  (let* ((code-bounds (space-bounds immobile-text-core-space-id spaces))
          (code-start (bounds-low code-bounds))
          (n-abs 0)
          (n-rel 0)
@@ -1511,7 +1450,7 @@
                     (id (space-id space))
                     (npages (ceiling nwords (/ +backend-page-bytes+ n-word-bytes))))
                (when (and (<= page0 page (+ page0 (1- npages)))
-                          (/= id immobile-varyobj-core-space-id))
+                          (/= id immobile-text-core-space-id))
                  (return (+ (space-addr space)
                             (* (- page page0) +backend-page-bytes+)
                             (logand core-offs (1- +backend-page-bytes+))))))))
@@ -1604,7 +1543,7 @@
               (return-from scan-obj)))
            (scanptrs vaddr obj 1 (1- nwords))))
       (dolist (space (cdr spaces))
-        (unless (= (space-id space) immobile-varyobj-core-space-id)
+        (unless (= (space-id space) immobile-text-core-space-id)
           (let* ((logical-addr (space-addr space))
                  (size (space-size space))
                  (physical-addr (space-physaddr space spaces))
@@ -1680,12 +1619,12 @@
                              (alien-funcall
                               (extern-alien "load_core_bytes"
                                             (function system-area-pointer
-                                                      int int unsigned unsigned))
+                                                      int int unsigned unsigned int))
                               (sb-sys:fd-stream-fd ,stream)
-                              ;; Skip the core header
-                              (+ ,start +backend-page-bytes+)
+                              (+ ,start +backend-page-bytes+) ; Skip the core header
                               0 ; place it anywhere
-                              (* ,npages +backend-page-bytes+)))
+                              (* ,npages +backend-page-bytes+) ; len
+                              0))
                        ,@body)
                   (when ,sap-var
                     (alien-funcall
@@ -1744,8 +1683,8 @@
                (when verbose
                  (format t "id=~d page=~5x + ~5x addr=~10x words=~8x~:[~; (drop)~]~%"
                          id data-page npages addr nwords
-                         (= id immobile-varyobj-core-space-id)))
-               (cond ((= id immobile-varyobj-core-space-id)
+                         (= id immobile-text-core-space-id)))
+               (cond ((= id immobile-text-core-space-id)
                       (setq code-start-fixup-ofs (+ index 3))
                       ;; Keep this entry but delete the page count. We need to know
                       ;; where the space was supposed to be mapped and at what size.
@@ -1821,7 +1760,7 @@
       ;; Map the original core file to memory
       (with-mapped-core (sap core-offset original-total-npages input)
         (let* ((data-spaces
-                (delete immobile-varyobj-core-space-id (reverse spaces)
+                (delete immobile-text-core-space-id (reverse spaces)
                         :key #'space-id))
                (map (cons sap (sort (copy-list spaces) #'> :key #'space-addr)))
                (pte-nbytes (cdar copy-actions)))
@@ -1922,7 +1861,7 @@
         (with-mapped-core (sap core-offset total-npages input)
           (let* ((spaces (cons sap (sort (copy-list spaces) #'> :key #'space-addr)))
                  (core (make-core spaces
-                                  (space-bounds immobile-varyobj-core-space-id spaces)
+                                  (space-bounds immobile-text-core-space-id spaces)
                                   (space-bounds immobile-fixedobj-core-space-id spaces)))
                  (c-symbols (map 'list (lambda (x) (if (consp x) (car x) x))
                                  (core-linkage-symbols core)))
@@ -1930,7 +1869,7 @@
                               (:sym  ".symtab"         ,+sht-symtab+   0 1 1 8 ,sym-entry-size)
                               ;;             section with the strings -- ^ ^ -- 1+ highest local symbol
                               (:core "lisp.core"       ,+sht-progbits+ 0 0 0 ,core-align 0)
-                              (:note ".note.GNU-stack" ,+sht-null+     0 0 0 1  0)))
+                              (:note ".note.GNU-stack" ,+sht-progbits+ 0 0 0 1  0)))
                  (string-table (string-table (append (map 'list #'second sections)
                                                      c-symbols)))
                  (packed-strings (cdr string-table))

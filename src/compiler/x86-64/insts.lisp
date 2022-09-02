@@ -863,14 +863,14 @@
 ;;;; fixup emitters
 
 (defun emit-absolute-fixup (segment fixup &optional quad-p)
-  (note-fixup segment (if quad-p :absolute64 :absolute) fixup)
+  (note-fixup segment (if quad-p :absolute :abs32) fixup)
   (let ((offset (fixup-offset fixup)))
     (if quad-p
         (emit-qword segment offset)
         (emit-signed-dword segment offset))))
 
 (defun emit-relative-fixup (segment fixup)
-  (note-fixup segment :relative fixup)
+  (note-fixup segment :rel32 fixup)
   (emit-signed-dword segment (fixup-offset fixup)))
 
 
@@ -3326,23 +3326,23 @@
 ;;; The code object we're fixing up is pinned whenever this is called.
 (defun fixup-code-object (code offset value kind flavor)
   (declare (type index offset))
-  (sb-vm::with-code-instructions (sap code)
+  (let ((sap (code-instructions code)))
     (when (eq flavor :gc-barrier)
       ;; the VALUE is nbits, so convert it to an AND mask
       (setf (sap-ref-32 sap offset) (1- (ash 1 value)))
-      (return-from fixup-code-object :immediate))
+      (return-from fixup-code-object))
     ;; All x86-64 fixup locations contain an implicit addend at the location
     ;; to be fixed up. The addend is always zero for certain <KIND,FLAVOR> pairs,
     ;; but we don't need to assert that.
-    (incf value (if (eq kind :absolute64)
+    (incf value (if (eq kind :absolute)
                     (signed-sap-ref-64 sap offset)
                     (signed-sap-ref-32 sap offset)))
     (ecase kind
-     (:absolute ; 32 bits. most are unsigned, except :layout-id which is signed
+     (:abs32 ; 32 bits. most are unsigned, except :layout-id which is signed
       (if (eq flavor :layout-id)
           (setf (signed-sap-ref-32 sap offset) value)
           (setf (sap-ref-32 sap offset) value)))
-     (:relative
+     (:rel32
       ;; Replace word with the difference between VALUE and current pc.
       ;; JMP/CALL are relative to the next instruction,
       ;; so add 4 bytes for the size of the displacement itself.
@@ -3352,36 +3352,40 @@
       (unless (immobile-space-obj-p code)
         (error "Can't compute fixup relative to movable object ~S" code))
       (setf (signed-sap-ref-32 sap offset) (- value (+ (sap-int sap) offset 4))))
-     (:absolute64
-      ;; These are used for jump tables and are not recorded in code fixups.
+     (:absolute
+      ;; These are used for jump tables and are not recorded in %code-fixups.
       ;; GC knows to adjust the values if code is moved.
       (setf (sap-ref-64 sap offset) value))))
-  #-immobile-code
-  ;; Change asm routine indirect calls to not store the fixup,
-  ;; because the indirect address is in static space.
-  (when (and (eq flavor :assembly-routine*) (eq kind :absolute)) (setq kind :static))
+  nil)
+
+(defun sb-c::pack-retained-fixups (fixup-notes)
+  (let (abs32-fixups rel32-fixups imm-fixups)
   ;; An absolute fixup is stored in the code header's %FIXUPS slot if it
   ;; references an immobile-space (but not static-space) object.
   ;; Note that:
-  ;;  (1) Call fixups occur in both :RELATIVE and :ABSOLUTE kinds.
-  ;;      We can ignore the :RELATIVE kind, except for foreign call,
+  ;;  (1) Call fixups occur in both :REL32 and :ABS32 kinds.
+  ;;      We can ignore the :REL32 kind, except for foreign call,
   ;;      as those point to the linkage table which has an absolute address
   ;;      and therefore might change in displacement from the call site
   ;;      if the immobile code space is relocated on startup.
   ;;  (2) :STATIC-CALL fixups point to immobile space, not static space.
-  #+immobile-space
-  (return-from fixup-code-object
-    (case flavor
-      ((:named-call :layout :immobile-symbol :symbol-value ; -> fixedobj subspace
-        :assembly-routine :assembly-routine* :static-call) ; -> varyobj subspace
-       (if (eq kind :absolute) :absolute))
-      (:foreign
+    (dolist (note fixup-notes (sb-c:pack-code-fixup-locs abs32-fixups rel32-fixups imm-fixups))
+      (let* ((fixup (fixup-note-fixup note))
+             (offset (fixup-note-position note))
+             (kind (fixup-note-kind note))
+             (flavor (fixup-flavor fixup)))
+        (cond ((eq flavor :gc-barrier) (push offset imm-fixups))
+              ((and (memq flavor
+                          '(:named-call :layout :immobile-symbol :symbol-value ; -> fixedobj subspace
+                            :assembly-routine :assembly-routine* :static-call)) ; -> text subspace
+                    (eq kind :abs32))
+               #+immobile-space (push offset abs32-fixups))
+              ((and (eq flavor :foreign) (eq kind :rel32))
        ;; linkage-table calls using the "CALL rel32" format need to be saved,
        ;; because the linkage table resides at a fixed address.
        ;; Space defragmentation can handle the fixup automatically,
        ;; but core relocation can't - it can't find all the call sites.
-       (if (eq kind :relative) :relative))))
-  nil) ; non-immobile-space builds never record code fixups
+               #+immobile-space (push offset rel32-fixups)))))))
 
 ;;; Coverage support
 

@@ -27,8 +27,9 @@
                     (default-structure-print lexenv stream depth))))
              (:copier nil)
              (:constructor make-null-lexenv ())
-             (:constructor make-almost-null-lexenv (%policy handled-conditions
-                                                    flushable lambda parent))
+             (:constructor make-almost-null-lexenv
+                           (%policy handled-conditions flushable lambda parent
+                            &optional user-data))
              (:constructor make-package-lock-lexenv
                            (disabled-package-locks %policy
                             &aux (handled-conditions nil)))
@@ -245,6 +246,10 @@
   (arg-specs nil :type list)
   (result-specs nil :type list)
   type)
+
+(defstruct (lvar-sequence-bounds-annotation
+            (:include lvar-dependent-annotation)
+            (:copier nil)))
 
 (defstruct (lvar-type-annotation
             (:include lvar-annotation)
@@ -1558,7 +1563,8 @@
 ;;; an MV-COMBINATION isn't COMBINATION-P.
 (defstruct (combination (:include basic-combination)
                         (:constructor make-combination (fun))
-                        (:copier nil)))
+                        (:copier nil))
+  (pass-nargs t :type boolean))
 (defprinter (combination :identity t)
   (fun :prin1 (lvar-uses fun))
   (args :prin1 (mapcar (lambda (x)

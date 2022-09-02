@@ -342,7 +342,9 @@
     (initialize-ir2-blocks-flow-info component)
     (flet ((start-vop (block)
              (do ((block block (ir2-block-next block)))
-                 ((null block) nil)
+                 ((or
+                   (null block)
+                   (not (singleton-p (ir2block-predecessors block)))) nil)
                (let ((vop (ir2-block-start-vop block)))
                  (when vop
                    (if (eq (vop-name vop) 'sb-c:note-environment-start)
@@ -580,17 +582,28 @@
                  (delete-vop next))))))))
 
 (defun next-start-vop (block)
-  (loop for 2block = block then (ir2-block-next 2block)
-        while (and 2block
-                   (= (length (ir2block-predecessors 2block)) 1))
-        when (ir2-block-start-vop 2block) return it))
+  (loop thereis (ir2-block-start-vop block)
+        while (and (= (length (ir2block-predecessors block)) 1)
+                   (setf block (ir2-block-next block)))))
 
 (defun branch-destination (branch &optional (true t))
-  (destructuring-bind (label not-p flags) (vop-codegen-info branch)
-    (declare (ignore flags))
+  (unless (vop-codegen-info branch)
+    (let ((next (vop-next branch)))
+      (if (and next
+               (eq (vop-name next) 'branch-if))
+          (setf branch next)
+          (return-from branch-destination))))
+  (destructuring-bind (label not-p &rest rest) (vop-codegen-info branch)
+    (declare (ignore rest))
     (if (eq not-p true)
-        (next-start-vop (ir2-block-next (vop-block branch)))
-        (next-start-vop (gethash label *2block-info*)))))
+        (if (eq branch (ir2-block-last-vop (vop-block branch)))
+            (next-start-vop (ir2-block-next (vop-block branch)))
+            (let ((next (next-vop branch)))
+              (and (eq (vop-name next) 'branch)
+                   (next-start-vop (gethash (car (vop-codegen-info next)) *2block-info*)))))
+        (let ((dest (gethash label *2block-info*)))
+          (when dest
+            (next-start-vop dest))))))
 
 ;;; Replace (BOUNDP X) + (BRANCH-IF) + {(SYMBOL-VALUE X) | anything}
 ;;; by (FAST-SYMBOL-VALUE X) + (UNBOUND-MARKER-P) + BRANCH-IF
@@ -672,7 +685,8 @@
            (when (constant-p y)
              (let ((move (branch-destination branch-if)))
                (when (and move
-                          (eq (vop-name move) 'move))
+                          (eq (vop-name move) 'move)
+                          (singleton-p (ir2block-predecessors (vop-block move))))
                  (let* ((args (vop-args move))
                         (from (tn-ref-tn args)))
                    (when (and (constant-p from)
@@ -1020,7 +1034,7 @@
               (delete-vop vop)
               (delete-vop next))))))))
 
-(when (vop-existsp :named sb-vm::<-integer-fixnum)
+(when-vop-existsp (:named sb-vm::<-integer-fixnum)
   ;; The <-integer-fixnum VOPs already perform dispatch for fixnum/bignum,
   ;; and load the header byte.
   ;; Replace the preceding INTEGERP VOP with an appropriate
@@ -1123,6 +1137,146 @@
   (let ((tn (tn-ref-tn (vop-results vop))))
     (when (not (tn-reads tn))
       (delete-vop vop))))
+
+;;; Load the WIDETAG once for a series of type tests.
+(when-vop-existsp (:named sb-vm::load-other-pointer-widetag)
+  (defoptimizer (vop-optimize %other-pointer-subtype-p) (vop)
+    (when (boundp '*2block-info*)
+      (let (vops
+            stop
+            null
+            (value (tn-ref-tn (vop-args vop))))
+        (labels ((good-vop-p (vop)
+                   (and (singleton-p (ir2block-predecessors (vop-block vop)))
+                        (or (getf sb-vm::*other-pointer-type-vops* (vop-name vop))
+                            (eq (vop-name vop) '%other-pointer-subtype-p))
+                        (eq (tn-ref-tn (vop-args vop)) value)))
+                 (chain (vop &optional (collect t))
+                   (let ((next (branch-destination vop nil)))
+                     (cond ((and next
+                                 (or (neq (vop-name vop) 'symbolp)
+                                     (and (not null)
+                                          (setf null (branch-destination vop)))))
+                            (when collect
+                              (push vop vops))
+                            (cond ((good-vop-p next)
+                                   (chain next))
+                                  ((not stop)
+                                   (setf stop (vop-block next)))))
+                           ((not stop)
+                            (setf stop (vop-block vop)))))
+                   (let ((true (branch-destination vop)))
+                     (when (and true
+                                (good-vop-p true))
+                       (push true vops)
+                       (chain true nil))))
+                 (ir2-block-label (block)
+                   (or (ir2-block-%label block)
+                       (setf (ir2-block-%label block) (gen-label)))))
+          (chain vop)
+          (when (> (length vops) 1)
+            (let ((widetag (make-normal-tn (primitive-type-or-lose 'sb-vm::unsigned-byte-64)))
+                  (block (vop-block vop)))
+              (setf (tn-type value)
+                    (tn-ref-type (vop-args vop)))
+              (emit-and-insert-vop (vop-node vop)
+                                   block
+                                   (template-or-lose 'sb-vm::load-other-pointer-widetag)
+                                   (reference-tn value nil)
+                                   (reference-tn widetag t)
+                                   vop
+                                   (list (ir2-block-label stop)
+                                         (and null
+                                              (ir2-block-label (vop-block null)))))
+              (update-block-succ block
+                                 (cons stop
+                                       (ir2block-successors block)))
+
+              (let ((test-vop (template-or-lose 'sb-vm::test-widetag)))
+                (loop for vop in vops
+                      for info = (vop-codegen-info vop)
+                      for tags = (if (eq (vop-name vop) '%other-pointer-subtype-p)
+                                     (third info)
+                                     (getf sb-vm::*other-pointer-type-vops* (vop-name vop)))
+                      do
+                      (let ((next (vop-next vop)))
+                        (when (and next
+                                   (eq (vop-name next) 'branch-if))
+                          (setf info (vop-codegen-info next))
+                          (delete-vop next))
+                        (emit-and-insert-vop (vop-node vop)
+                                             (vop-block vop)
+                                             test-vop
+                                             (reference-tn widetag nil)
+                                             nil
+                                             vop
+                                             (list (first info) (second info) tags)))
+                      (delete-vop vop))))))))
+    nil)
+
+  (loop for (vop) on sb-vm::*other-pointer-type-vops* by #'cddr
+        do
+        (set-vop-optimizer (template-or-lose vop)
+                           #'vop-optimize-%other-pointer-subtype-p-optimizer)))
+
+(when-vop-existsp (:named sb-vm::load-instance-layout)
+  (defoptimizer (vop-optimize structure-typep) (vop)
+    (when (boundp '*2block-info*)
+      (let (vops
+            stop
+            (value (tn-ref-tn (vop-args vop))))
+        (labels ((good-vop-p (vop)
+                   (and (singleton-p (ir2block-predecessors (vop-block vop)))
+                        (eq (vop-name vop) 'structure-typep)
+                        (eq (tn-ref-tn (vop-args vop)) value)))
+                 (chain (vop &optional (collect t))
+                   (let ((next (branch-destination vop nil)))
+                     (cond (next
+                            (when collect
+                              (push vop vops))
+                            (cond ((good-vop-p next)
+                                   (chain next))
+                                  ((not stop)
+                                   (setf stop (vop-block next)))))
+                           ((not stop)
+                            (setf stop (vop-block vop)))))
+                   (let ((true (branch-destination vop)))
+                     (when (and true
+                                (good-vop-p true))
+                       (push true vops)
+                       (chain true nil))))
+                 (ir2-block-label (block)
+                   (or (ir2-block-%label block)
+                       (setf (ir2-block-%label block) (gen-label)))))
+          (chain vop)
+          (when (> (length vops) 1)
+            (let ((layout (make-normal-tn *backend-t-primitive-type*))
+                  (block (vop-block vop)))
+              (setf (tn-type value)
+                    (tn-ref-type (vop-args vop)))
+              (emit-and-insert-vop (vop-node vop)
+                                   block
+                                   (template-or-lose 'sb-vm::load-instance-layout)
+                                   (reference-tn value nil)
+                                   (reference-tn layout t)
+                                   vop
+                                   (list (ir2-block-label stop)))
+              (update-block-succ block
+                                 (cons stop
+                                       (ir2block-successors block)))
+              (let ((test-vop (template-or-lose 'sb-vm::structure-typep*)))
+                (loop for vop in vops
+                      for info = (vop-codegen-info vop)
+                      do
+                      (emit-and-insert-vop (vop-node vop)
+                                           (vop-block vop)
+                                           test-vop
+                                           (reference-tn layout nil)
+                                           nil
+                                           vop
+                                           info)
+                      (delete-vop vop))))))))
+    nil))
 
 (defun very-temporary-p (tn)
   (let ((writes (tn-writes tn))

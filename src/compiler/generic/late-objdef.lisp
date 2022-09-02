@@ -14,13 +14,7 @@
 #-c-headers-only
 (macrolet ((frob ()
              `(progn ,@*!late-primitive-object-forms*)))
-  (frob)
-  (defknown symbol-extra (t) t (flushable))
-  (def-reffer 'symbol-extra symbol-size other-pointer-lowtag)
-  (defknown (setf symbol-extra) (t t) t ())
-  (def-setter '(setf symbol-extra) symbol-size other-pointer-lowtag))
-
-(defconstant augmented-symbol-size (1+ symbol-size))
+  (frob))
 
 #+sb-thread
 (dovector (slot (primitive-object-slots (primitive-object 'thread)))
@@ -128,7 +122,7 @@
 
 #+sb-xc-host
 (defun write-gc-tables (stream)
-  (format stream "#include \"lispobj.h\"~%")
+  (format stream "#include ~S~%" (sb-fasl::lispobj-dot-h))
   ;; Compute a bitmask of all specialized vector types,
   ;; not including array headers, for maybe_adjust_large_object().
   (let ((min #xff) (bits 0))

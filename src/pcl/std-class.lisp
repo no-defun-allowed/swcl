@@ -688,8 +688,8 @@
     (error "Structure slots must have :INSTANCE allocation.")))
 
 (defun make-structure-class-defstruct-form (name direct-slots include)
-  (let* ((conc-name (format-symbol *package* "~S structure class " name))
-         (constructor (format-symbol *package* "~Aconstructor" conc-name))
+  (let* ((conc-name (pkg-format-symbol *package* "~S structure class " name))
+         (constructor (pkg-format-symbol *package* "~Aconstructor" conc-name))
          (included-name (class-name include))
          (included-slots
           (when include
@@ -804,7 +804,7 @@
                               (when defstruct-p
                                 (let* ((slot-name (getf pl :name))
                                        (accessor
-                                        (format-symbol *package*
+                                        (pkg-format-symbol *package*
                                                        "~S structure class ~A"
                                                        name slot-name)))
                                   (setq pl (list* :defstruct-accessor-symbol
@@ -1619,9 +1619,7 @@
                            ((fixnump location)
                             (clos-slots-ref oslots location))
                            ((not location)
-                            (let ((location (slot-info-location (cdr cell))))
-                              (aver (integerp location))
-                              (clos-slots-ref oslots (slot-info-location (cdr cell)))))
+                            (clos-slots-ref oslots (slot-info-location (cdr cell))))
                            (t (bug "non-FIXNUM non-NULL location in cell: ~S" cell)))))
              (unless (unbound-marker-p value)
                (let ((new (assq name layout)))

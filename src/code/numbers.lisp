@@ -316,10 +316,18 @@
   (declare (explicit-check))
   (macrolet ((truncate-float (rtype)
                `(let* ((float-div (coerce divisor ',rtype))
-                       (res (%unary-truncate (/ number float-div))))
+                       (divided (/ number float-div))
+                       (res (%unary-truncate divided)))
                   (values res
                           (- number
-                             (* (coerce res ',rtype) float-div)))))
+                             (* #-round-float
+                                (coerce res ',rtype)
+                                #+round-float
+                                (,(ecase rtype
+                                    (double-float 'round-double)
+                                    (single-float 'round-single))
+                                 divided :truncate)
+                                float-div)))))
              (single-digit-bignum-p (x)
                #+(or x86-64 x86 ppc64)
                `(or (typep ,x 'word)
@@ -1387,11 +1395,7 @@ and the number of 0 bits if INTEGER is negative."
 
 (sb-c::when-vop-existsp (:translate sb-vm::ash-modfx)
   (defun sb-vm::ash-mod64 (integer amount)
-    (etypecase integer
-      ((unsigned-byte 64) (ldb (byte 64 0) (ash integer amount)))
-      (fixnum (ldb (byte 64 0) (ash (logand integer #xffffffffffffffff) amount)))
-      (bignum (ldb (byte 64 0)
-                   (ash (logand integer #xffffffffffffffff) amount)))))
+    (ldb (byte 64 0) (ash integer amount)))
 
   (defun sb-vm::ash-modfx (integer amount)
     (if (minusp integer)

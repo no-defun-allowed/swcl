@@ -17,8 +17,7 @@
 (defconstant sb-assem:+inst-alignment-bytes+ 1)
 
 (defconstant +backend-fasl-file-implementation+ :x86-64)
-(defconstant-eqx +fixup-kinds+ #(:absolute :relative :absolute64)
-  #'equalp)
+(defconstant-eqx +fixup-kinds+ #(:abs32 :rel32 :absolute) #'equalp)
 
 ;;; This size is supposed to indicate something about the actual granularity
 ;;; at which you can map memory.  We just hardwire it, but that may or may not
@@ -97,7 +96,7 @@
                      :read-only-space-size #+metaspace #.(* 2 1024 1024)
                                            #-metaspace 0
                      :fixedobj-space-size #.(* 40 1024 1024)
-                     :varyobj-space-size #.(* 130 1024 1024)
+                     :text-space-size #.(* 130 1024 1024)
                      :dynamic-space-start #x1000000000)
 
 ;;; The default dynamic space size is lower on OpenBSD to allow SBCL to
@@ -105,7 +104,7 @@
 
 #-(or linux darwin)
 (!gencgc-space-setup #x20000000
-                     #-win32 :read-only-space-size #-win32 0
+                     :read-only-space-size 0
                      :dynamic-space-start #x1000000000
                      #+openbsd :dynamic-space-size #+openbsd #x1bcf0000)
 

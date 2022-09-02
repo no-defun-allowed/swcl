@@ -39,6 +39,7 @@
   (:results)
   (:vop-var vop)
   (:node-var node)
+  (:args-var args)
   (:temporary (:sc unsigned-reg) val-temp)
   (:generator 1
     (cond #+ubsan
@@ -50,10 +51,19 @@
            (inst mov :dword (vector-len-ea object)
                  (or (encode-value-if-immediate value) value)))
           (t
-           ;; gencgc does not need to emit the barrier for constructors
-           (unless (or (eq name :allocator)
-                       (sb-c::set-slot-old-p node))
-             (emit-gc-store-barrier object nil val-temp (vop-nth-arg 1 vop) value))
+           (let* ((value-tn (tn-ref-tn (tn-ref-across args)))
+                  (prim-type (sb-c::tn-primitive-type value-tn))
+                  (scs (and prim-type
+                            (sb-c::primitive-type-scs prim-type))))
+             (unless (and
+                      ;; Can this TN be boxed after the allocator?
+                      (or (singleton-p scs)
+                          (not (member descriptor-reg-sc-number scs)))
+                      (or
+                       ;; gencgc does not need to emit the barrier for constructors
+                       (eq name :allocator)
+                       (sb-c::set-slot-old-p node)))
+               (emit-gc-store-barrier object nil val-temp (vop-nth-arg 1 vop) value)))
            (gen-cell-set (object-slot-ea object offset lowtag) value val-temp)))))
 
 (define-vop (compare-and-swap-slot)
@@ -502,6 +512,8 @@
 
 ;;;; fdefinition (FDEFN) objects
 
+;;; IR2-CONVERT-GLOBAL-VAR makes direct use of this vop by name,
+;;; so even though it has a :ref-trans in objdef, we also need the vop.
 (define-vop (fdefn-fun cell-ref)        ; /pfw - alpha
   (:variant fdefn-fun-slot other-pointer-lowtag))
 
@@ -521,10 +533,9 @@
       (inst jmp :e err-lab))
     RETRY))
 
-#-immobile-code
 (define-vop (set-fdefn-fun)
   (:policy :fast-safe)
-  (:translate (setf fdefn-fun))
+  #-immobile-code (:translate (setf fdefn-fun))
   (:args (function :scs (descriptor-reg) :target result)
          (fdefn :scs (descriptor-reg)))
   (:temporary (:sc unsigned-reg) raw)
@@ -541,7 +552,7 @@
     (move result function)))
 #+immobile-code
 (progn
-(define-vop (set-fdefn-fun)
+(define-vop (set-direct-callable-fdefn-fun)
   (:args (fdefn :scs (descriptor-reg))
          (function :scs (descriptor-reg))
          (raw-word :scs (unsigned-reg)))
@@ -754,15 +765,23 @@
   (:args (object :scs (descriptor-reg))
          (value :scs (descriptor-reg any-reg)))
   (:info offset)
+  (:vop-var vop)
+  ;; temp is wasted if we don't need a barrier, which we almost never do
+  (:temporary (:sc unsigned-reg) temp)
   (:generator 4
-    ;; TODO: gencgc does not need EMIT-GC-STORE-BARRIER here, but other other GC strategies might.
+    (let* ((value-tn (tn-ref-tn (tn-ref-across (vop-args vop))))
+           (prim-type (sb-c::tn-primitive-type value-tn))
+           (scs (and prim-type (sb-c::primitive-type-scs prim-type))))
+      (when (and (not (singleton-p scs))
+                 (member descriptor-reg-sc-number scs))
+        (emit-gc-store-barrier object nil temp (vop-nth-arg 1 vop) value)))
     (storew value object (+ closure-info-offset offset) fun-pointer-lowtag)))
 
 (define-vop (closure-init-from-fp)
   (:args (object :scs (descriptor-reg)))
   (:info offset)
   (:generator 4
-    ;; TODO: gencgc does not need EMIT-GC-STORE-BARRIER here, but other other GC strategies might.
+    ;; RBP-TN looks like a fixnum (non-pointer) so no barrier
     (storew rbp-tn object (+ closure-info-offset offset) fun-pointer-lowtag)))
 
 ;;;; value cell hackery

@@ -23,6 +23,7 @@
 #include "code.h"
 #include "immobile-space.h"
 #include "queue.h"
+#include "os.h"
 
 #include <stdio.h>
 #ifndef LISP_FEATURE_WIN32
@@ -54,18 +55,6 @@
 
 extern lispobj lisp_init_function, gc_object_watcher;
 
-static inline uword_t boxedobj_widetag_to_markbit(int widetag) {
-    return (widetag == FDEFN_WIDETAG || widetag == WEAK_POINTER_WIDETAG)
-         ? FDEFN_MARK_BIT : MARK_BIT;
-}
-static inline uword_t general_widetag_to_markbit(int widetag) {
-    return (widetag == FDEFN_WIDETAG || widetag == WEAK_POINTER_WIDETAG)
-        ? FDEFN_MARK_BIT : ((widetag == BIGNUM_WIDETAG) ? BIGNUM_MARK_BIT : MARK_BIT);
-}
-
-#define interesting_pointer_p(x) \
-  (find_page_index((void*)x) >= 0 || immobile_space_p(x))
-
 #ifdef DEBUG
 #  define dprintf(arg) printf arg
 FILE * logfile;
@@ -96,6 +85,8 @@ static void* get_free_page(boolean prezero) {
     char* mem = page_address(free_page);
 #ifdef LISP_FEATURE_DARWIN_JIT
     prezero = 1; // Might need to alter MMU-based protection
+#elif defined LISP_FEATURE_WIN32
+    os_commit_memory(page_address(free_page), GENCGC_PAGE_BYTES);
 #endif
     if (prezero) zeroize_pages_if_needed(free_page, free_page, 0);
     return mem;
@@ -108,25 +99,10 @@ static void* get_free_page(boolean prezero) {
  * 128 blocks of 256 bytes fit on a 32K GC page. */
 static char *suballocator_free_ptr, *suballocator_end_ptr;
 
-#ifndef LISP_FEATURE_USE_CONS_REGION
-static inline uword_t compute_page_key(lispobj cons) {
-    return ALIGN_DOWN(cons, GENCGC_PAGE_BYTES);
-}
-static void* allocate_cons_mark_bits() {
-    int nbytes = GENCGC_PAGE_BYTES / (2 * N_WORD_BYTES) / 8;
-    if (suballocator_free_ptr + nbytes > suballocator_end_ptr) {
-        suballocator_free_ptr = get_free_page(1);
-        suballocator_end_ptr = suballocator_free_ptr + GENCGC_PAGE_BYTES;
-    }
-    char* mem = suballocator_free_ptr;
-    suballocator_free_ptr += nbytes;
-    return mem;
-}
-#endif
-
 static void gc_enqueue(lispobj object)
 {
     gc_dcheck(is_lisp_pointer(object));
+    gc_dcheck(widetag_of(native_pointer(object)) != SIMPLE_FUN_WIDETAG);
     struct Qblock* block = scav_queue.tail_block;
     if (block->count == QBLOCK_CAPACITY) {
         struct Qblock* next;
@@ -168,47 +144,49 @@ static lispobj gc_dequeue()
     return object;
 }
 
-/* The 'mark_bits' hashtable maps a page address to a block of mark bits
- * for headerless objects (conses) */
-struct hopscotch_table mark_bits;
-
-static inline int compute_dword_number(lispobj cons) {
-    return (cons & (GENCGC_PAGE_BYTES - 1)) >> (1+WORD_SHIFT);
+static inline sword_t dword_index(uword_t ptr, uword_t base) {
+    return (ptr - base) >> (1+WORD_SHIFT);
 }
 
-static inline int cons_markedp(lispobj pointer) {
-    unsigned int index = compute_dword_number(pointer);
-#ifdef LISP_FEATURE_USE_CONS_REGION /* all conses must be on cons pages */
-    unsigned char* bits = (unsigned char*)ALIGN_DOWN(pointer, GENCGC_PAGE_BYTES)
-                          + CONS_PAGE_USABLE_BYTES;
-#else
-    unsigned char* bits = (unsigned char*)
-        hopscotch_get(&mark_bits, compute_page_key(pointer), 0);
-    if (!bits) return 0;
+static inline lispobj canonical_ptr(lispobj pointer)
+{
+#ifdef RETURN_PC_WIDETAG
+  /* NO_TLS_VALUE is all 1s, and so it might look like it has OTHER_POINTER_LOWTAG
+   * depending on the architecture (the word size, etc), but there is no memory
+   * at 0xff...ff so definitely don't call widetag_of - that won't fly! */
+    if (lowtag_of(pointer)==OTHER_POINTER_LOWTAG
+        && pointer != NO_TLS_VALUE_MARKER
+        && widetag_of(native_pointer(pointer)) == RETURN_PC_WIDETAG)
+        return fun_code_tagged(native_pointer(pointer));
 #endif
-    return (bits[index / 8] >> (index % 8)) & 1;
+    return pointer;
 }
+
+sword_t fixedobj_index_bit_bias, text_index_bit_bias;
+uword_t *fullcgcmarks;
+static size_t markbits_size;
+static inline sword_t ptr_to_bit_index(lispobj pointer) {
+    if (pointer == NIL) return -1;
+    page_index_t p = find_page_index((void*)pointer);
+    if (p >= 0) return dword_index(pointer, DYNAMIC_SPACE_START);
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+    p = find_fixedobj_page_index((void*)pointer);
+    if (p >= 0) return dword_index(pointer, FIXEDOBJ_SPACE_START) + fixedobj_index_bit_bias;
+    p = find_text_page_index((void*)pointer);
+    if (p >= 0) return dword_index(pointer, TEXT_SPACE_START) + text_index_bit_bias;
+#endif
+    return -1;
+}
+#define interesting_pointer_p(x) ptr_to_bit_index(x)>=0
 
 /* Return true if OBJ has already survived the current GC. */
 static inline int pointer_survived_gc_yet(lispobj pointer)
 {
-    if (!interesting_pointer_p(pointer))
-        return 1;
-    if (listp(pointer))
-        return cons_markedp(pointer);
-    lispobj header = *native_pointer(pointer);
-    int widetag = header_widetag(header);
-    switch (widetag) {
-    case BIGNUM_WIDETAG: return (header & BIGNUM_MARK_BIT) != 0;
-    case WEAK_POINTER_WIDETAG:
-    case FDEFN_WIDETAG: return (header & FDEFN_MARK_BIT) != 0;
-    }
-    if (embedded_obj_p(widetag))
-        header = *fun_code_header(native_pointer(pointer));
-    return (header & MARK_BIT) != 0;
+    sword_t mark_index = ptr_to_bit_index(canonical_ptr(pointer));
+    if (mark_index < 0) return 1; // "uninteresting" objects always survive GC
+    return (fullcgcmarks[mark_index / N_WORD_BITS] >> (mark_index % N_WORD_BITS)) & 1;
 }
 
-extern page_index_t contiguous_block_final_page(page_index_t);
 void dump_marked_objects() {
     fprintf(stderr, "Marked objects:\n");
     page_index_t first = 0;
@@ -230,61 +208,41 @@ void dump_marked_objects() {
     fprintf(stderr, "Total: %d\n", n);
 }
 
-void __mark_obj(lispobj pointer)
+static void __mark_obj(lispobj pointer)
 {
-    gc_dcheck(is_lisp_pointer(pointer));
-    if (!interesting_pointer_p(pointer))
-        return;
-    if (!listp(pointer)) {
-        lispobj* base = native_pointer(pointer);
-        lispobj header = *base;
-        int widetag = header_widetag(header);
-        if (widetag == BIGNUM_WIDETAG) {
-            *base |= BIGNUM_MARK_BIT;
-            return; // don't enqueue - no pointers
-        } else {
-            if (embedded_obj_p(widetag)) {
-                base = fun_code_header(base);
-                pointer = make_lispobj(base, OTHER_POINTER_LOWTAG);
-                header = *base;
-            }
-            uword_t markbit = boxedobj_widetag_to_markbit(widetag);
-            if (header & markbit) return; // already marked
-            *base |= markbit;
-        }
-#ifdef LISP_FEATURE_UBSAN
-        if (specialized_vector_widetag_p(widetag) && is_lisp_pointer(base[1]))
-            gc_mark_obj(base[1]);
-        else if (widetag == SIMPLE_VECTOR_WIDETAG && fixnump(base[1])) {
-            char *origin_pc = (char*)(base[1]>>4);
-            lispobj* code = component_ptr_from_pc(origin_pc);
-            if (code) gc_mark_obj(make_lispobj(code, OTHER_POINTER_LOWTAG));
-            /* else lose("can't find code containing %p (vector=%p)", origin_pc, base); */
-        }
-#endif
-        if (leaf_obj_widetag_p(widetag)) return;
-    } else {
-        unsigned int index = compute_dword_number(pointer);
-#ifdef LISP_FEATURE_USE_CONS_REGION /* all conses must be on cons pages */
-        unsigned char* bits = (unsigned char*)ALIGN_DOWN(pointer, GENCGC_PAGE_BYTES)
-                              + CONS_PAGE_USABLE_BYTES;
-#else
-        /* Only _some_ conses are on cons pages depending if they got moved there.
-         * We could use a hybrid of storing mark bits on the page if possible,
-         * or the hash-table if not. However, I'd rather not complicate things.
-         * All architectures should be made to allocate directly on cons pages! */
-        uword_t key = compute_page_key(pointer);
-        unsigned char* bits = (unsigned char*)hopscotch_get(&mark_bits, key, 0);
-        if (!bits) {
-            bits = allocate_cons_mark_bits();
-            hopscotch_insert(&mark_bits, key, (sword_t)bits);
-        }
-#endif
-        if (bits[index / 8] & (1 << (index % 8))) return;
-        // Mark the cons
-        bits[index / 8] |= 1 << (index % 8);
+    lispobj* base;
+
+    pointer = canonical_ptr(pointer);
+    sword_t mark_index = ptr_to_bit_index(pointer);
+    if (mark_index < 0) return; // uninteresting pointer
+    uword_t wordindex = mark_index / N_WORD_BITS;
+    uword_t bit = (uword_t)1 << (mark_index % N_WORD_BITS);
+    if (fullcgcmarks[wordindex] & bit) return; // already marked
+    if (lowtag_of(pointer) == FUN_POINTER_LOWTAG
+        && embedded_obj_p(widetag_of(FUNCTION(pointer)))) {
+        lispobj* code = fun_code_header(FUNCTION(pointer));
+        mark_index -= ((char*)FUNCTION(pointer) - (char*)code) >> (1+WORD_SHIFT);
+        pointer = make_lispobj(code, OTHER_POINTER_LOWTAG);
+        base = code;
+        wordindex = mark_index / N_WORD_BITS;
+        bit = (uword_t)1 << (mark_index % N_WORD_BITS);
+        if (fullcgcmarks[wordindex] & bit) return; // already marked
+    } else
+        base = native_pointer(pointer);
+    fullcgcmarks[wordindex] |= bit;
+    // FIXME: restore the code for #ifdef LISP_FEATURE_UBSAN
+    if (widetag_of(base) == CODE_HEADER_WIDETAG) {
+        struct code* code = (void*)base;
+        /* mark all simple-funs which speeds up pointer_survived_gc_yet.
+         * Just add the offset in dwords from base to each fun to compute
+         * the mark bit index (rather than calling ptr_to_bit_index) */
+        for_each_simple_fun(i, fun, code, 0, {
+            unsigned int offset = ((char*)fun - (char*)base) >> (1+WORD_SHIFT);
+            uword_t funmark = mark_index + offset;
+            fullcgcmarks[funmark / N_WORD_BITS] |= (uword_t)1 << (funmark % N_WORD_BITS);
+        })
     }
-    gc_enqueue(pointer);
+    if (listp(pointer) || !leaf_obj_widetag_p(widetag_of(base))) gc_enqueue(pointer);
 }
 
 inline void gc_mark_obj(lispobj thing) {
@@ -311,13 +269,6 @@ void gc_mark_range(lispobj* where, long count) {
 
 void prepare_for_full_mark_phase()
 {
-#ifndef LISP_FEATURE_USE_CONS_REGION
-    hopscotch_create(&mark_bits, HOPSCOTCH_HASH_FUN_DEFAULT,
-                     N_WORD_BYTES, /* table values are machine words */
-                     65536, /* initial size */
-                     0);
-#endif
-
     free_page = page_table_pages;
     suballocator_free_ptr = suballocator_end_ptr = 0;
     struct Qblock* block = (struct Qblock*)get_free_page(0);
@@ -327,6 +278,28 @@ void prepare_for_full_mark_phase()
     scav_queue.recycler   = 0;
     block->next = 0;
     block->tail = block->count = 0;
+    /* Consume as many bits as cover the entire dynamic space regardless
+     * of its current usage.  Same for the other spaces.
+     * This previously tried to be clever about using only as many bits for
+     * dynamic space as correspond to the current high water mark, which was
+     * an ill-conceived idea, because cull_weak_hash_tables() can consume
+     * dynamic space when processing finalizers. So it marks an object live,
+     * but that object's mark bit could be past the reserved range of dynamic
+     * space mark bits, thus accidentally marking some _other_ thing live.
+     * And heaven forbid that other object isn't supposed to be live,
+     * you're in for a heap of trouble (pun intended) */
+    sword_t nbits_dynamic = dynamic_space_size / (2*N_WORD_BYTES);
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+    sword_t nbits_fixedobj = FIXEDOBJ_SPACE_SIZE / (2*N_WORD_BYTES);
+    sword_t nbits_text = TEXT_SPACE_SIZE / (2*N_WORD_BYTES);
+    fixedobj_index_bit_bias = nbits_dynamic;
+    text_index_bit_bias = fixedobj_index_bit_bias + nbits_fixedobj;
+    sword_t nbytes = (nbits_dynamic + nbits_fixedobj + nbits_text) / 8;
+#else
+    sword_t nbytes = nbits_dynamic / 8;
+#endif
+    markbits_size = ALIGN_UP(nbytes, GETPAGESIZE);
+    fullcgcmarks = (void*)os_allocate(markbits_size);
 }
 
 void execute_full_mark_phase()
@@ -374,8 +347,8 @@ void execute_full_mark_phase()
              (a.field.tv_usec-b.field.tv_usec)) / 1000000.0
     if (gencgc_verbose)
         fprintf(stderr,
-                "[Mark phase: %d pages used, HT-count=%d, ET=%f+%f sys+usr]\n",
-                (int)(page_table_pages - free_page), mark_bits.count,
+                "[Mark phase: %d pages used, ET=%f+%f sys+usr]\n",
+                (int)(page_table_pages - free_page),
                 timediff(before, after, ru_stime), timediff(before, after, ru_utime));
 #endif
 }
@@ -424,22 +397,15 @@ __attribute__((unused)) static char *fillerp(lispobj* where)
 static FILE *sweeplog;
 static int sweep_mode = 1;
 
-# define NOTE_GARBAGE(gen,addr,nwords,tally,erase) \
-  { tally[gen] += nwords; \
-    if (sweep_mode & 2) /* print before erasing */ \
-     fprintf(sweeplog, "%5d %d #x%"OBJ_FMTX": %"OBJ_FMTX" %"OBJ_FMTX"\n", \
-             (int)nwords, gen, compute_lispobj(addr), \
-             addr[0], addr[1]); \
-    if (sweep_mode & 1) { erase; } }
-
 #ifndef LISP_FEATURE_IMMOBILE_SPACE
 #undef immobile_obj_gen_bits
 #define immobile_obj_gen_bits(x) (lose("No page index?"),0)
 #else
-static void sweep_fixedobj_pages(long *zeroed)
+static void sweep_fixedobj_pages()
 {
     low_page_index_t page;
-
+    uword_t space_base = FIXEDOBJ_SPACE_START;
+    sword_t bitmap_index_bias = fixedobj_index_bit_bias;
     for (page = FIXEDOBJ_RESERVED_PAGES ; ; ++page) {
         lispobj *obj = fixedobj_page_address(page);
         if (obj >= fixedobj_free_pointer)
@@ -451,24 +417,12 @@ static void sweep_fixedobj_pages(long *zeroed)
         lispobj *limit = (lispobj*)((char*)obj + IMMOBILE_CARD_BYTES - obj_spacing);
         for ( ; obj <= limit ; obj = (lispobj*)((char*)obj + obj_spacing) ) {
             lispobj header = *obj;
-            uword_t markbit = boxedobj_widetag_to_markbit(header_widetag(header));
-            if (fixnump(header)) { // is a hole
-            } else if (header & markbit) { // live object
-                *obj = header ^ markbit;
-            } else {
-                NOTE_GARBAGE(immobile_obj_gen_bits(obj), obj, nwords, zeroed,
-                             memset(obj, 0, nwords * N_WORD_BYTES));
-            }
+            if (fixnump(header)) continue; // is a hole
+            uword_t index = bitmap_index_bias + (((uword_t)obj - space_base) >> (1+WORD_SHIFT));
+            uword_t livep =
+                fullcgcmarks[index / N_WORD_BITS] & ((uword_t)1 << (index % N_WORD_BITS));
+            if (!livep) memset(obj, 0, nwords * N_WORD_BYTES);
         }
-    }
-    // The reserved fixedobj page has the vector of primitive object layouts.
-    lispobj* obj = fixedobj_page_address(0);
-    lispobj* limit = fixedobj_page_address(FIXEDOBJ_RESERVED_PAGES);
-    while (obj < limit) {
-        lispobj header = *obj;
-        uword_t markbit = boxedobj_widetag_to_markbit(header_widetag(header));
-        if (header & markbit) *obj = header ^ markbit;
-        obj += headerobj_size(obj);
     }
 }
 #endif
@@ -482,13 +436,21 @@ static void clobber_headered_object(lispobj* addr, sword_t nwords)
     // FIXME: clobbering an object on single-object pages should free entire pages
     page_index_t page = find_page_index(addr);
     if (page < 0) { // code space
-        struct code* code  = (struct code*)addr;
-        if (!filler_obj_p((lispobj*)code)) {
-            code->boxed_size = 0;
-            code->header = (nwords << CODE_HEADER_SIZE_SHIFT)
-                           | CODE_HEADER_WIDETAG;
-            memset(addr+2, 0, (nwords - 2) * N_WORD_BYTES);
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+        extern lispobj codeblob_freelist;
+        if (widetag_of(addr) == CODE_HEADER_WIDETAG) {
+            // OAOO violation - like sweep_immobile_text()
+            assign_widetag(addr, FILLER_WIDETAG);
+            ((char*)addr)[2] = 0; // clear the TRACED flag
+            ((char*)addr)[3] = 0; // clear the WRITTEN flag and the generation
+            // add to list only if it is above tlsf_mem_start
+            // (below it will never by utilized by the TLSF allocator)
+            if (addr >= tlsf_mem_start) {
+                addr[1] = codeblob_freelist; // push into to-be-freed list
+                codeblob_freelist = (lispobj)addr;
+            }
         }
+#endif
     } else if ((SINGLE_OBJECT_FLAG|page_table[page].type) == (SINGLE_OBJECT_FLAG|PAGE_TYPE_CODE)) {
         // Code pages don't want (0 . 0) fillers, otherwise heap checking
         // gets an error: "object @ 0x..... is non-code on code page"
@@ -503,21 +465,26 @@ static uword_t sweep(lispobj* where, lispobj* end,
                      __attribute__((unused)) uword_t arg)
 {
     sword_t nwords;
-
+    uword_t space_base = DYNAMIC_SPACE_START;
+    sword_t bitmap_index_bias = 0;
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+    if (find_page_index(where) < 0) {
+        gc_assert(find_text_page_index(where) >= 0);
+        space_base = TEXT_SPACE_START;
+        bitmap_index_bias = text_index_bit_bias;
+    }
+#endif
     for ( ; where < end ; where += nwords ) {
         lispobj word = *where;
-        int livep = 0;
+        uword_t index = bitmap_index_bias + (((uword_t)where - space_base) >> (1+WORD_SHIFT));
+        uword_t livep =
+            fullcgcmarks[index / N_WORD_BITS] & ((uword_t)1 << (index % N_WORD_BITS));
         if (is_header(word)) {
             nwords = headerobj_size2(where, word);
-            lispobj markbit = general_widetag_to_markbit(header_widetag(word));
-            if (word & markbit) livep = 1, *where = word ^ markbit;
-            if (!livep) clobber_headered_object(where, nwords);
+            if (!livep && header_widetag(word) != FILLER_WIDETAG)
+                clobber_headered_object(where, nwords);
         } else {
             nwords = 2;
-            livep = cons_markedp((lispobj)where);
-            /* This bit pattern indicates unambiguously that a cons cell
-             * has gotten clobbered. Using (0 . 0) leaves open to question
-             * whether the cons is actually live */
             if (!livep) where[0] = where[1] = (uword_t)-1;
         }
     }
@@ -553,10 +520,19 @@ void execute_full_sweep_phase()
     memset(words_zeroed, 0, sizeof words_zeroed);
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
     if (sweeplog) fprintf(sweeplog, "-- fixedobj space --\n");
-    sweep_fixedobj_pages(words_zeroed);
-    if (sweeplog) fprintf(sweeplog, "-- varyobj space --\n");
-    sweep((lispobj*)VARYOBJ_SPACE_START, varyobj_free_pointer,
+    sweep_fixedobj_pages();
+    if (sweeplog) fprintf(sweeplog, "-- text space --\n");
+    sweep((lispobj*)TEXT_SPACE_START, text_space_highwatermark,
           (uword_t)words_zeroed);
+    // Recompute generation masks for text space
+    int npages = (ALIGN_UP((uword_t)text_space_highwatermark, IMMOBILE_CARD_BYTES)
+                  - TEXT_SPACE_START) / IMMOBILE_CARD_BYTES;
+    memset(text_page_genmask, 0, npages);
+    lispobj* where = (lispobj*)TEXT_SPACE_START;
+    for ( ; where < text_space_highwatermark ; where += object_size(where) )
+        if (widetag_of(where) == CODE_HEADER_WIDETAG)
+            text_page_genmask[find_text_page_index(where)]
+                |= (1 << immobile_obj_gen_bits(where));
 #endif
     if (sweeplog) fprintf(sweeplog, "-- dynamic space --\n");
     walk_generation(sweep, -1, (uword_t)words_zeroed);
@@ -567,28 +543,19 @@ void execute_full_sweep_phase()
             fprintf(stderr, "%ld%s", words_zeroed[i], i?"+":"");
         fprintf(stderr, " words zeroed]\n");
     }
-    page_index_t page;
-#ifdef LISP_FEATURE_USE_CONS_REGION
-    // Clear all cons mark bits
-    for (page = 0; page < next_free_page; ++page)
-        if (page_table[page].type == PAGE_TYPE_CONS) {
-            char* base = page_address(page);
-            char* bits = base + CONS_PAGE_USABLE_BYTES;
-            char* end  = base + GENCGC_PAGE_BYTES;
-            memset(bits, 0, end-bits);
-        }
-#else
-    hopscotch_destroy(&mark_bits);
-#endif
+    // deallocate the mark bits
+    os_deallocate((void*)fullcgcmarks, markbits_size);
+    fullcgcmarks = 0; markbits_size = 0;
 
     if (sweeplog)
         fflush(sweeplog);
 
+    page_index_t page;
     // Give back all private-use pages and indicate need-to-zero
     for (page = free_page; page < page_table_pages; ++page) {
         gc_assert((page_table[page].type & PAGE_TYPE_MASK) == PAGE_TYPE_UNBOXED);
         gc_assert(!page_bytes_used(page));
-        set_page_needs_zerofill(page);
+        set_page_need_to_zero(page, 1);
         page_table[page].type = FREE_PAGE_FLAG;
       }
 }

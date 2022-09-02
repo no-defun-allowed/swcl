@@ -13,19 +13,10 @@
 
 ;;;; DYNAMIC-USAGE and friends
 
-#+gencgc
-(define-alien-variable ("DYNAMIC_SPACE_START" sb-vm:dynamic-space-start) os-vm-size-t)
-(declaim (inline current-dynamic-space-start))
-(defun current-dynamic-space-start ()
-  #+gencgc sb-vm:dynamic-space-start
-  #-gencgc (extern-alien "current_dynamic_space" unsigned-long))
-
-#+gencgc
-(progn
-  (declaim (inline dynamic-space-free-pointer))
-  (defun dynamic-space-free-pointer ()
-    (sap+ (int-sap (current-dynamic-space-start))
-          (* (extern-alien "next_free_page" signed) sb-vm:gencgc-page-bytes))))
+(defun dynamic-space-obj-p (x) ; X must not be an immediate object
+  (with-pinned-objects (x)
+    (let ((addr (get-lisp-obj-address x)))
+      (< sb-vm:dynamic-space-start addr (sap-int (dynamic-space-free-pointer))))))
 
 (declaim (inline dynamic-usage))
 (defun dynamic-usage ()
@@ -38,7 +29,7 @@
   #-gencgc
   (truly-the word
              (- (sap-int (sb-c::dynamic-space-free-pointer))
-                (current-dynamic-space-start))))
+                sb-vm:dynamic-space-start)))
 
 (defun static-space-usage ()
   (- (sap-int sb-vm:*static-space-free-pointer*) sb-vm:static-space-start))
@@ -425,10 +416,6 @@ Note: currently changes to this value are lost when saving core."
 
 ;;;; GENCGC specifics
 ;;;;
-(define-symbol-macro sb-vm:dynamic-space-end
-    ;; FIXME: what uses this? Nothing? If so, remove it.
-    (+ (dynamic-space-size) sb-vm:dynamic-space-start))
-
 (define-alien-variable ("gc_logfile" %gc-logfile) (* char))
 
 (defun (setf gc-logfile) (pathname)
@@ -478,14 +465,9 @@ statistics are appended to it."
             ;; but if 64-bit then we have to scale the value. Additionally
             ;; there is a fallback for when even the scaled value is too big.
             (sb-vm::start #+64-bit (unsigned 32) #-64-bit signed)
-            ;; On platforms with small enough GC pages, this field
-            ;; will be a short. On platforms with larger ones, it'll
-            ;; be an int. It should probably never be an int.
-            (sb-vm::words-used (unsigned
-                                #.(if (typep sb-vm::gencgc-page-words '(unsigned-byte 16))
-                                      16
-                                      32)))
-            (sb-vm::flags (unsigned 8)) ; in C this is {type, need_zerofill, pinned}
+            ;; Caution: The low bit of WORDS-USED* is a flag bit
+            (sb-vm::words-used* (unsigned 16)) ; (* in the name is a memory aid)
+            (sb-vm::flags (unsigned 8)) ; this named 'type' in C
             (sb-vm::gen (signed 8))))
 (define-alien-variable ("page_table" sb-vm:page-table) (* (struct sb-vm::page)))
 (declaim (inline sb-vm:find-page-index))
@@ -594,7 +576,7 @@ Experimental: interface subject to change."
                    generation)))
 
 (macrolet ((cases ()
-             `(cond ((< (current-dynamic-space-start) addr
+             `(cond ((< sb-vm:dynamic-space-start addr
                         (sap-int (dynamic-space-free-pointer)))
                      :dynamic)
                     ((immobile-space-addr-p addr) :immobile)
@@ -606,20 +588,27 @@ Experimental: interface subject to change."
                      :static))))
 ;;; Return true if X is in any non-stack GC-managed space.
 ;;; (Non-stack implies not TLS nor binding stack)
-;;; This assumes a single contiguous dynamic space, which is of course a
-;;; bad assumption, but nonetheless one that has been true for, say, ~20 years.
-;;; Also note, we don't have to pin X - an object can not move between spaces,
-;;; so a non-nil answer is the definite answer. As to whether the object could
-;;; have moved, or worse, died - by say reusing the same register as held X for
-;;; the value that is (get-lisp-obj-address X), with no surrounding pin or even
-;;; reference to X - then that's your problem.
-;;; If you wanted the object not to die or move, you should have held on tighter!
+;;; There's a microscopic window of time in which next_free_page for dynamic space
+;;; could _decrease_ after calculating the address of X, so we'll pin X
+;;; to ensure that can't happen.
 (defun heap-allocated-p (x)
-  (let ((addr (get-lisp-obj-address x)))
-    (and (sb-vm:is-lisp-pointer addr)
-         (cases))))
+  (with-pinned-objects (x)
+    (let ((addr (get-lisp-obj-address x)))
+      (and (sb-vm:is-lisp-pointer addr)
+           (cases)))))
 
 ;;; Internal use only. FIXME: I think this duplicates code that exists
 ;;; somewhere else which I could not find.
 (defun lisp-space-p (sap &aux (addr (sap-int sap))) (cases))
 ) ; end MACROLET
+
+(define-condition memory-fault-error (system-condition error) ()
+  (:report
+   (lambda (condition stream)
+     (let* ((faultaddr (system-condition-address condition))
+            (string (if (<= sb-vm:read-only-space-start
+                            faultaddr
+                            (sap-int (sap+ sb-vm:*read-only-space-free-pointer* -1)))
+                        "Attempt to modify a read-only object at #x~X."
+                        "Unhandled memory fault at #x~X.")))
+       (format stream string faultaddr)))))

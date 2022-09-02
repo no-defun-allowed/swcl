@@ -64,7 +64,7 @@ os_vm_size_t dynamic_space_size = DEFAULT_DYNAMIC_SPACE_SIZE;
 os_vm_size_t thread_control_stack_size = DEFAULT_CONTROL_STACK_SIZE;
 
 sword_t (*const scavtab[256])(lispobj *where, lispobj object);
-uword_t gc_copied_nwords;
+uword_t gc_copied_nwords, gc_in_situ_live_nwords;
 
 /* If sb_sprof_enabled was used and the data are not in the final form
  * (in the *SAMPLES* instance) then all code remains live.
@@ -448,9 +448,13 @@ scav_fun_pointer(lispobj *where, lispobj object)
             /* funcallable-instance might have all descriptor slots
              * except for the trampoline, which points to an asm routine.
              * This is not true for self-contained trampoline GFs though. */
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+            page_type = PAGE_TYPE_CODE, region = code_region;
+#else
             struct layout* layout = (void*)native_pointer(funinstance_layout(FUNCTION(object)));
             if (layout && (layout_flags(layout) & STRICTLY_BOXED_FLAG))
                 page_type = PAGE_TYPE_BOXED, region = boxed_region;
+#endif
         } else {
             /* Closures can always go on strictly boxed pages even though the
              * underlying function is (possibly) an untagged pointer.
@@ -464,6 +468,14 @@ scav_fun_pointer(lispobj *where, lispobj object)
         }
         copy = gc_copy_object(object, 1+SHORT_BOXED_NWORDS(*fun), region, page_type);
         gc_assert(copy != object);
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+        if (widetag == FUNCALLABLE_INSTANCE_WIDETAG) {
+            struct funcallable_instance* old = (void*)native_pointer(object);
+            struct funcallable_instance* new = (void*)native_pointer(copy);
+            if (old->trampoline == (lispobj)&old->instword1)
+                new->trampoline = (lispobj)&new->instword1;
+        }
+#endif
         set_forwarding_pointer(fun, copy);
     }
     if (copy != object) *where = copy;
@@ -816,20 +828,12 @@ static lispobj trans_tiny_mixed(lispobj object) {
 static sword_t scav_symbol(lispobj *where, lispobj header) {
 #ifdef LISP_FEATURE_COMPACT_SYMBOL
     struct symbol* s = (void*)where;
-    scavenge(&s->value, 2); // picks up the value and info slots
+    scavenge(&s->value, 3); // value, function, info
     lispobj name = decode_symbol_name(s->name);
     lispobj new = name;
     scavenge(&new, 1);
     if (new != name) set_symbol_name(s, new);
-    // The normal length indicated in the header would be (SYMBOL_SIZE-1) since
-    // SYMBOL_SIZE counts the header as 1 word. If the indicated size is SYMBOL_SIZE,
-    // then there's an extra slot.  (The extra slot provides quick access to
-    // the special-operator handler function in the fast evaluator.)
     int indicated_nwords = (header>>N_WIDETAG_BITS) & 0xFF;
-    // We've already processed the {hash, value, info, name}, so subtract 4 words.
-    // In truth, the hash was ignored, though it might be a good place to store
-    // some pointer data. 64 bits of hash is way more than enough.
-    scavenge(&s->fdefn, indicated_nwords - 4);
     return 1 + (indicated_nwords|1); // round to odd, then add 1 for the header
 #else
     return scav_tiny_boxed(where, header);
@@ -961,15 +965,14 @@ scav_funinstance(lispobj *where, lispobj header)
     scav1(&layoutptr, layoutptr);
     if (layoutptr != old) funinstance_layout(where) = layoutptr;
 #endif
-    // Do a similar thing as scav_instance but without any special cases.
-    struct bitmap bitmap = get_layout_bitmap(LAYOUT(layoutptr));
-    gc_assert(bitmap.nwords == 1);
-    sword_t mask = bitmap.bits[0];
-    ++where;
-    lispobj* limit = where + nslots;
-    lispobj obj;
-    for ( ; where < limit ; mask >>= 1, ++where )
-        if ((mask & 1) && is_lisp_pointer(obj = *where)) scav1(where, obj);
+    struct funcallable_instance* fin = (void*)where;
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+    // payload: entry addr, 2 raw words, implementation function
+    scavenge(&fin->function, nslots-3);
+#else
+    // payload: trampoline entry addr, layout, implementation function, ...
+    scavenge(&fin->function, nslots-2);
+#endif
     return 1 + (nslots | 1);
 }
 
@@ -1008,7 +1011,7 @@ static lispobj trans_bignum(lispobj object)
 }
 
 #ifndef LISP_FEATURE_X86_64
-lispobj fdefn_callee_lispobj(struct fdefn* fdefn) {
+lispobj decode_fdefn_rawfun(struct fdefn* fdefn) {
     lispobj raw_addr = (lispobj)fdefn->raw_addr;
     if (!raw_addr || points_to_asm_code_p(raw_addr))
         // technically this should return the address of the code object
@@ -1023,7 +1026,7 @@ scav_fdefn(lispobj *where, lispobj __attribute__((unused)) object)
 {
     struct fdefn *fdefn = (struct fdefn *)where;
     scavenge(where + 1, 2); // 'name' and 'fun'
-    lispobj obj = fdefn_callee_lispobj(fdefn);
+    lispobj obj = decode_fdefn_rawfun(fdefn);
     lispobj new = obj;
     scavenge(&new, 1);
     if (new != obj) fdefn->raw_addr += (sword_t)(new - obj);
@@ -1958,8 +1961,12 @@ sword_t scav_code_blob(lispobj *object, lispobj header);
 lispobj *
 component_ptr_from_pc(char *pc)
 {
-    /* FIXME: this is the wrong way to go about finding code,
-     * because it won't look in the codeblob tree for immobile space. */
+    /* This will safely look in one or both codeblob trees and/or the
+     * sorted array of immobile text pages. Failing those, it'll perform
+     * the usual linear scan of generation 1 and up pages. In any case
+     * it should be perfectly threadsafe because the trees are made of immutable
+     * nodes, and linear scan only operates on pages that can't be
+     * concurrently manipulated */
     lispobj *object = search_all_gc_spaces(pc);
 
     if (object != NULL && widetag_of(object) == CODE_HEADER_WIDETAG)

@@ -500,10 +500,17 @@ boolean allocation_bit_marked(void *address) {
   return ANY(masked_out);
 }
 
+/* TODO: make these two functions into set_allocation_bit_mark(address, value) */
 void set_allocation_bit_mark(void *address) {
   uword_t first_bit_index = ((uword_t)(address) - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
   uword_t first_word_index = first_bit_index / N_WORD_BITS;
   allocation_bitmap[first_word_index] |= ((uword_t)(1) << (first_bit_index % N_WORD_BITS));
+}
+
+void clear_allocation_bit_mark(void *address) {
+  uword_t first_bit_index = ((uword_t)(address) - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
+  uword_t first_word_index = first_bit_index / N_WORD_BITS;
+  allocation_bitmap[first_word_index] &= ~((uword_t)(1) << (first_bit_index % N_WORD_BITS));
 }
 
 static uword_t mark_bitmap_word_index(void *where) {
@@ -602,9 +609,16 @@ static void reset_statistics() {
   }
 }
 
+/* Eugh, shouldn't copy this but I need it inlined here, for
+ * vectorisation to work. */
+inline char *also_page_address(page_index_t page_num)
+{
+    return (void*)(DYNAMIC_SPACE_START + (page_num * GENCGC_PAGE_BYTES));
+}
+
 #define for_lines_in_page(l, p) \
-  for (line_index_t l = address_line(page_address(p)); \
-       l < address_line(page_address(p + 1)); \
+  for (line_index_t l = address_line(also_page_address(p)); \
+       l < address_line(also_page_address(p + 1)); \
        l++)
 /* Use AVX2 versions of code when we can, since blasting bytes faster
  * is always nice */
@@ -970,6 +984,11 @@ void zero_all_free_ranges() {
         if (!line_bytemap[l])
           memset(line_address(l), 0, LINE_SIZE);
 #endif
+}
+
+void prepare_lines_for_final_gc() {
+  for (line_index_t l = 0; l < line_count; l++)
+    line_bytemap[l] = line_bytemap[l] == 0 ? 0 : ENCODE_GEN(0);
 }
 
 /* Useful hacky stuff */

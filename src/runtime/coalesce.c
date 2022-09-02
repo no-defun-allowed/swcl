@@ -136,7 +136,7 @@ static void coalesce_obj(lispobj* where, struct hopscotch_table* ht)
  *
  * (1) gc-common's table-based mechanism
  * (2) gencgc's verify_range()
- * (3) immobile space {fixedobj,varyobj}_points_to_younger_p()
+ * (3) immobile space {fixedobj,text}_points_to_younger_p()
  *     and fixup_space() for defrag. [and the table-based thing is used too]
  * (4) fullcgc's trace_object()
  * (5) coreparse's relocate_space()
@@ -154,7 +154,6 @@ static void coalesce_obj(lispobj* where, struct hopscotch_table* ht)
 static uword_t coalesce_range(lispobj* where, lispobj* limit, uword_t arg)
 {
     struct hopscotch_table* ht = (struct hopscotch_table*)arg;
-    lispobj *next;
     sword_t nwords, i;
 
     where = next_object(where, 0, limit);
@@ -163,7 +162,13 @@ static uword_t coalesce_range(lispobj* where, lispobj* limit, uword_t arg)
         if (is_header(word)) {
             int widetag = header_widetag(word);
             nwords = sizetab[widetag](where);
-            next = next_object(where, nwords, limit);
+            lispobj *next = next_object(where, nwords, limit);
+            if (leaf_obj_widetag_p(widetag)) {
+              // Ignore this object.
+              where = next;
+              continue;
+            }
+            sword_t coalesce_nwords = nwords;
             if (instanceoid_widetag_p(widetag)) {
                 lispobj layout = layout_of(where);
                 struct bitmap bitmap = get_layout_bitmap(LAYOUT(layout));
@@ -185,18 +190,14 @@ static uword_t coalesce_range(lispobj* where, lispobj* limit, uword_t arg)
             }
 #endif
             case CODE_HEADER_WIDETAG:
-                nwords = code_header_words((struct code*)where);
+                coalesce_nwords = code_header_words((struct code*)where);
                 break;
-            default:
-                if (leaf_obj_widetag_p(widetag)) {
-                    where = next;
-                    continue; // Ignore this object.
-                }
             }
-            for (i=1; i<nwords; ++i)
+            for(i=1; i<coalesce_nwords; ++i)
                 coalesce_obj(where+i, ht);
             where = next;
         } else {
+            nwords = 2;
             coalesce_obj(where+0, ht);
             coalesce_obj(where+1, ht);
             where = next_object(where, 2, limit);
@@ -214,16 +215,14 @@ void coalesce_similar_objects()
     uword_t arg = (uword_t)&ht;
 
     hopscotch_create(&ht, HOPSCOTCH_VECTOR_HASH, 0, 1<<17, 0);
-    coalesce_range((lispobj*)READ_ONLY_SPACE_START,
-                   (lispobj*)READ_ONLY_SPACE_END,
-                   arg);
+    coalesce_range((lispobj*)READ_ONLY_SPACE_START, read_only_space_free_pointer, arg);
     lispobj* the_symbol_nil = (lispobj*)(NIL - LIST_POINTER_LOWTAG - N_WORD_BYTES);
     coalesce_range(the_symbol_nil, ALIGN_UP(SYMBOL_SIZE,2) + the_symbol_nil, arg);
     coalesce_range((lispobj*)(T - OTHER_POINTER_LOWTAG), static_space_free_pointer, arg);
 
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
     coalesce_range((lispobj*)FIXEDOBJ_SPACE_START, fixedobj_free_pointer, arg);
-    coalesce_range((lispobj*)VARYOBJ_SPACE_START, varyobj_free_pointer, arg);
+    coalesce_range((lispobj*)TEXT_SPACE_START, text_space_highwatermark, arg);
 #endif
 #ifdef LISP_FEATURE_GENCGC
     walk_generation(coalesce_range, -1, arg);

@@ -506,7 +506,7 @@
     (flet (;; Return the name of parameter number I of a constructor
            ;; function.
            (parameter-name (i)
-             (format-symbol *pcl-package* ".P~D." i))
+             (pcl-format-symbol ".P~D." i))
            ;; Check if CLASS-ARG is a constant symbol.  Give up if
            ;; not.
            (constant-class-p ()
@@ -592,7 +592,7 @@
           (constructor-function-form ctor)
         (setf (%funcallable-instance-fun ctor)
               (apply (let ((*compiling-optimized-constructor* t))
-                       (pcl-compile `(lambda ,names ,form) t))
+                       (pcl-compile `(lambda ,names ,form) :unsafe))
                      locations)
               (ctor-state ctor) (if optimizedp 'optimized 'fallback))))))
 
@@ -616,7 +616,8 @@
       (multiple-value-bind (form optimizedp)
           (allocator-function-form ctor)
         (setf (%funcallable-instance-fun ctor)
-              (let ((*compiling-optimized-constructor* t)) (pcl-compile form t))
+              (let ((*compiling-optimized-constructor* t))
+                (pcl-compile form :unsafe))
               (ctor-state ctor) (if optimizedp 'optimized 'fallback))))))
 
 (defun allocator-function-form (ctor)
@@ -814,13 +815,18 @@
 (defun wrap-in-allocate-forms (ctor body early-unbound-markers-p)
   (let* ((class (ctor-class ctor))
          (wrapper (class-wrapper class)))
+    ;; Prefer to allocate slots first so that potentially we can make this construct
+    ;; the primitive instance and assign its layout and slots while pseudo-atomic.
+    ;; Even if we can't do that, this order of operations can avoid a GC store barrier
+    ;; - it doesn't currently, but it should - because the pointer store is young->old.
+    ;; Best-case we'd allocate two things in one allocation request,
+    ;; but there aren't allocation vops that do that.
     (etypecase class
       (standard-class
-        `(let ((.instance. (%new-instance ,wrapper (1+ sb-vm:instance-data-start)))
-               (.slots. (make-array
-                         ,(wrapper-length wrapper)
-                         ,@(when early-unbound-markers-p
-                                 '(:initial-element +slot-unbound+)))))
+        `(let ((.slots. (make-array ,(wrapper-length wrapper)
+                                    ,@(when early-unbound-markers-p
+                                        '(:initial-element +slot-unbound+))))
+               (.instance. (%new-instance ,wrapper (1+ sb-vm:instance-data-start))))
            (%instance-set .instance. sb-vm:instance-data-start .slots.)
            ,body
            .instance.))
@@ -973,10 +979,8 @@
                (unless (initializedp location)
                  (setf (aref slot-vector location)
                        (list kind val type slotd))))
-             (default-init-var-name (i)
-               (format-symbol *pcl-package* ".D~D." i))
-             (location-var-name (i)
-               (format-symbol *pcl-package* ".L~D." i)))
+             (default-init-var-name (i) (pcl-format-symbol ".D~D." i))
+             (location-var-name (i) (pcl-format-symbol ".L~D." i)))
       ;; Loop over supplied initargs and values and record which
       ;; instance and class slots they initialize.
       (loop for (key value) on initargs by #'cddr

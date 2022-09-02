@@ -814,11 +814,6 @@
                          lines)
                1))))
 
-#+compact-instance-header
-(with-test (:name :gf-self-contained-trampoline)
-  (let ((l (sb-kernel:find-layout 'standard-generic-function)))
-    (assert (/= (sb-kernel:wrapper-bitmap l) sb-kernel:+layout-all-tagged+))))
-
 (with-test (:name :known-array-rank)
   (flet ((try (type)
            (let ((lines
@@ -871,12 +866,10 @@
   (check-arrayp-cmp-opcodes 1 'simple-base-string)
   #+sb-unicode
   (check-arrayp-cmp-opcodes 1 'sb-kernel::simple-character-string)
-  ;; FIXME: (AND STRING (NOT SIMPLE-STRING)) executs 4 tests
-  ;; but it denotes the same set of objects as (AND STRING (NOT SIMPLE-ARRAY)).
-  ;; The problem is with type algebra, not in the backend.
-
-  ;; FIXME: this should be 1 comparison: widetag >= start-of-complex-widetags
-  (check-arrayp-cmp-opcodes 2 '(and array (not simple-array)))
+  (check-arrayp-cmp-opcodes 1 '(and string (not simple-array)))
+  (check-arrayp-cmp-opcodes #+sb-unicode 1
+                            #-sb-unicode 2
+                            '(and array (not simple-array)))
 
   ;; some other interesting pairs
   ;; This was passing just by random coincidence.
@@ -1237,3 +1230,65 @@
 (with-test (:name :disassemble-symbol-global-value)
   (assert (loop for line in (disassembly-lines '(lambda () *myglobalvar*))
                 thereis (search "*MYGLOBALVAR*" line))))
+
+(defun compiler-trace-output-lines (lexpr)
+  (let ((string-stream (make-string-output-stream)))
+    (let ((sb-c::*compiler-trace-output* string-stream)
+          (sb-c::*compile-trace-targets* '(:vop))
+          (*print-pretty* nil))
+      (compile nil lexpr))
+    (split-string (get-output-stream-string string-stream)
+                  #\newline)))
+
+(defun assert-has-gc-barrier (match-string lines &optional (skip 0))
+
+  (let (found)
+;; Look for something like this in the trace output:
+;; "VOP CLOSURE-INIT t9[RBX(d)] :NORMAL t13[RSI(d)] :NORMAL {0} "
+;; "        MOV     0, #<TN t14[RAX(u)] :NORMAL>, #<TN t9[RBX(d)] :NORMAL>"
+;; "        SHR     0, #<TN t14[RAX(u)] :NORMAL>, 10"
+;; "        AND     6, #<TN t14[RAX(u)] :NORMAL>, #S(FIXUP :NAME NIL :FLAVOR GC-BARRIER :OFFSET 0)"
+;; "        MOV     4, PTR [R12+RAX+0], 0"
+;; "        MOV     7, PTR [RBX+5], #<TN t13[RSI(d)] :NORMAL>"
+    (loop while lines
+          do
+          (when (and (search match-string (car lines))
+                     (minusp (decf skip)))
+            (setq found t)
+            (let ((barrier-fixup-line (nth 3 lines)))
+              (assert (search ":FLAVOR GC-BARRIER" barrier-fixup-line))
+              (return)))
+          (pop lines))
+    ;; Fail if we didn't find the sentinel CLOSURE-INIT
+    (assert found)))
+
+(with-test (:name :closure-init-gc-barrier)
+  (let ((lines
+         (compiler-trace-output-lines
+           '(lambda (address)
+             (declare (sb-vm:word address))
+             (let ((sap (sb-sys:int-sap address)))
+               (lambda () sap))))))
+    (assert-has-gc-barrier "CLOSURE-INIT" lines)))
+
+(defstruct (point (:constructor make-point (x))) x (y 0) (z 0))
+(with-test (:name :structure-init-gc-barrier)
+  (let ((lines
+          (compiler-trace-output-lines
+           '(lambda (val)
+             (declare (double-float val) (inline make-point))
+             (let ((neg (- val))) (make-point neg))))))
+    (assert-has-gc-barrier "SET-SLOT" lines
+                           #-compact-instance-header 1)))
+
+(with-test (:name :system-tlabs)
+  (when (find-symbol "SYS-ALLOC-TRAMP" "SB-VM")
+    (assert (loop for line in (disassembly-lines 'sb-impl:test-make-packed-info)
+                  thereis (search "SYS-ALLOC-TRAMP" line)))
+    (assert (loop for line in (disassembly-lines 'sb-impl:test-copy-packed-info)
+                  thereis (search "SYS-ALLOC-TRAMP" line)))
+    (let ((f (compile nil '(lambda (x)
+                            (declare (sb-c::tlab :system))
+                            (sb-pcl::%copy-cache x)))))
+      (assert (loop for line in (disassembly-lines f)
+                    thereis (search "SYS-ALLOC-TRAMP" line))))))

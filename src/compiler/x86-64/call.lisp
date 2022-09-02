@@ -589,7 +589,7 @@
 ;;; In tail call with fixed arguments, the passing locations are
 ;;; passed as a more arg, but there is no new-FP, since the arguments
 ;;; have been set up in the current frame.
-(macrolet ((define-full-call (vop-name named return variable)
+(macrolet ((define-full-call (vop-name named return variable &optional args)
             (aver (not (and variable (eq return :tail))))
             #+immobile-code (when named (setq named :direct))
             `(define-vop (,vop-name ,@(when (eq return :unknown)
@@ -610,7 +610,9 @@
                    '((old-fp)
                      (return-pc)))
 
-               ,@(unless variable '((args :more t :scs (descriptor-reg)))))
+               ,@(unless variable
+                   `((args :more t ,@(unless (eq args :fixed)
+                                       '(:scs (descriptor-reg)))))))
 
                ,@(when (eq return :fixed)
                    '((:results (values :more t))))
@@ -618,7 +620,9 @@
                (:save-p ,(if (eq return :tail) :compute-only t))
 
                ,@(unless (or (eq return :tail) variable)
-               '((:move-args :full-call)))
+                   `((:move-args ,(if (eq args :fixed)
+                                      :fixed
+                                      :full-call))))
 
                (:vop-var vop)
                (:node-var node)
@@ -795,34 +799,14 @@
                DONE
                (note-this-location vop :call-site)
                ,(cond ((eq named :direct)
-                       #+immobile-code
-                       `(let* ((fixup (make-fixup
-                                       fun
-                                       (if (static-fdefn-offset fun)
-                                           :static-call
-                                           :named-call)))
-                               (target
-                                 (if (and (sb-c::code-immobile-p node)
-                                          (not step-instrumenting))
-                                     fixup
-                                     (progn
-                                       ;; RAX-TN was not declared as a temp var,
-                                       ;; however it's sole purpose at this point is
-                                       ;; for function call, so even if it was used
-                                       ;; to compute a stack argument, it's free now.
-                                       ;; If the call hits the undefined fun trap,
-                                       ;; RAX will get loaded regardless.
-                                       (inst mov rax-tn fixup)
-                                       rax-tn))))
-                          (inst ,(if (eq return :tail) 'jmp 'call) target))
-                       #-immobile-code
-                       `(inst ,(if (eq return :tail) 'jmp 'call)
-                              (ea (+ nil-value (static-fun-offset fun)))))
+                       #+immobile-code `(emit-direct-call fun ',(if (eq return :tail) 'jmp 'call)
+                                                          node step-instrumenting)
+                       #-immobile-code `(inst ,(if (eq return :tail) 'jmp 'call)
+                                              (ea (+ nil-value (static-fun-offset fun)))))
                       #-immobile-code
                       (named
                        `(inst ,(if (eq return :tail) 'jmp 'call)
-                              (ea (- (* fdefn-raw-addr-slot n-word-bytes)
-                                     other-pointer-lowtag) rax)))
+                              (object-slot-ea rax fdefn-raw-addr-slot other-pointer-lowtag)))
                       ((eq return :tail)
                        `(tail-call-unnamed rax fun-type vop))
                       (t
@@ -850,7 +834,32 @@
   (define-full-call static-tail-call-named :direct :tail nil)
 
   (define-full-call call-variable nil :fixed t)
-  (define-full-call multiple-call-variable nil :unknown t))
+  (define-full-call multiple-call-variable nil :unknown t)
+  (define-full-call fixed-call-named t :fixed nil :fixed)
+  (define-full-call fixed-tail-call-named t :tail nil :fixed))
+
+;;; Call NAME "directly" meaning in a single JMP or CALL instruction,
+;;; if possible (without loading RAX)
+(defun emit-direct-call (name instruction node step-instrumenting)
+      ;; a :STATIC-CALL fixup is the address of the entry point of
+      ;; the function itself, and a :NAMED-CALL fixup is the address
+      ;; of the JMP instruction embedded in the header for the named FDEFN.
+  (let* ((fixup (make-fixup name
+                 (if (static-fdefn-offset name) :static-call :named-call)))
+         (target
+              (if (and (sb-c::code-immobile-p node)
+                       (not step-instrumenting))
+                  fixup
+                  (progn
+                    ;; RAX-TN was not declared as a temp var,
+                    ;; however it's sole purpose at this point is
+                    ;; for function call, so even if it was used
+                    ;; to compute a stack argument, it's free now.
+                    ;; If the call hits the undefined fun trap,
+                    ;; RAX will get loaded regardless.
+                    (inst mov rax-tn fixup)
+                    rax-tn))))
+    (inst* instruction target)))
 
 ;;; Invoke the function-designator FUN.
 (defun tail-call-unnamed (fun type vop)
@@ -1299,12 +1308,15 @@
        (if stack-allocate-p
            (stack-allocation rcx 0 dst)
            (allocation +cons-primtype+ rcx 0 dst node value thread-tn
-                       :overflow (lambda ()
-                                   (inst push rcx)
-                                   (inst push context)
-                                   (invoke-asm-routine 'call 'listify-&rest node)
-                                   (inst pop result)
-                                   (inst jmp leave-pa))
+                       :overflow
+                       (lambda ()
+                         (inst push rcx)
+                         (inst push context)
+                         (invoke-asm-routine
+                          'call (if (system-tlab-p node) 'sys-listify-&rest 'listify-&rest)
+                          node)
+                         (inst pop result)
+                         (inst jmp leave-pa))
                        :cells 0))
        ;; Recalculate DST as a tagged pointer to the last cons
        (inst lea dst (ea (- list-pointer-lowtag (* cons-size n-word-bytes)) dst rcx))

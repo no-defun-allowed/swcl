@@ -184,7 +184,7 @@ static int find_ref(lispobj* source, lispobj target)
         scan_limit = code_header_words((struct code*)source);
         break;
     case FDEFN_WIDETAG:
-        check_ptr(3, fdefn_callee_lispobj((struct fdefn*)source));
+        check_ptr(3, decode_fdefn_rawfun((struct fdefn*)source));
         scan_limit = 3;
         break;
     }
@@ -400,12 +400,12 @@ static inline uint32_t encode_pointer(lispobj pointer)
         return (encoding<<1) | 1;
     } else
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
-    if (find_varyobj_page_index((void*)pointer) >= 0) {
-        // A varyobj space pointer is stored as a count in doublewords
+    if (find_text_page_index((void*)pointer) >= 0) {
+        // A text space pointer is stored as a count in doublewords
         // from the base address.
-        encoding = (pointer - VARYOBJ_SPACE_START) / (2*N_WORD_BYTES);
+        encoding = (pointer - TEXT_SPACE_START) / (2*N_WORD_BYTES);
         gc_assert(encoding <= 0x3FFFFFFF);
-        // bit pattern #b10 signifies varyobj space compressed ptr.
+        // bit pattern #b10 signifies text space compressed ptr.
         return (encoding<<2) | 2;
     } else
 #endif
@@ -421,8 +421,8 @@ static inline lispobj decode_pointer(uint32_t encoding)
     if (encoding & 1)  // Compressed ptr to dynamic space
         return (encoding>>1)*(2*N_WORD_BYTES) + DYNAMIC_SPACE_START;
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
-    else if ((encoding & 3) == 2) // Compressed ptr to varyobj space
-        return (encoding>>2)*(2*N_WORD_BYTES) + VARYOBJ_SPACE_START;
+    else if ((encoding & 3) == 2) // Compressed ptr to text space
+        return (encoding>>2)*(2*N_WORD_BYTES) + TEXT_SPACE_START;
 #endif
     else
         return encoding; // Literal pointer
@@ -645,7 +645,7 @@ static lispobj trace1(lispobj object,
         case 3:
             if (lowtag_of(ptr) == OTHER_POINTER_LOWTAG &&
                 widetag_of(&FDEFN(ptr)->header) == FDEFN_WIDETAG)
-                target = fdefn_callee_lispobj((struct fdefn*)native_pointer(ptr));
+                target = decode_fdefn_rawfun((struct fdefn*)native_pointer(ptr));
             break;
         }
         target = canonical_obj(target);
@@ -688,7 +688,8 @@ static boolean record_ptr(lispobj* source, lispobj target,
     return 1;
 }
 
-#define relevant_ptr_p(x) (find_page_index((void*)(x))>=0||immobile_space_p((lispobj)(x)))
+#define relevant_ptr_p(x) \
+ (find_page_index((void*)(x))>=0||immobile_space_p((lispobj)(x))||readonly_space_p(x))
 
 #define COUNT_POINTER(x) { ++n_scanned_words; \
       if (!is_lisp_pointer(x)) ++n_immediates; \
@@ -732,6 +733,7 @@ static uword_t build_refs(lispobj* where, lispobj* end,
         }
         nwords = scan_limit = headerobj_size2(where, word);
         int widetag = header_widetag(word);
+        if (leaf_obj_widetag_p(widetag)) continue;
         switch (widetag) {
         case INSTANCE_WIDETAG:
         case FUNCALLABLE_INSTANCE_WIDETAG:
@@ -755,7 +757,7 @@ static uword_t build_refs(lispobj* where, lispobj* end,
             scan_limit = code_header_words((struct code*)where);
             break;
         case FDEFN_WIDETAG:
-            check_ptr(fdefn_callee_lispobj((struct fdefn*)where));
+            check_ptr(decode_fdefn_rawfun((struct fdefn*)where));
             scan_limit = 3;
             break;
         case SIMPLE_VECTOR_WIDETAG:
@@ -789,8 +791,7 @@ static uword_t build_refs(lispobj* where, lispobj* end,
             if (!(other_immediate_lowtag_p(widetag) && LOWTAG_FOR_WIDETAG(widetag)))
               lose("Unknown widetag %x", widetag);
             // Skip irrelevant objects.
-            if (leaf_obj_widetag_p(widetag) ||
-                (widetag == WEAK_POINTER_WIDETAG) || /* do not follow! */
+            if ((widetag == WEAK_POINTER_WIDETAG) || /* do not follow! */
                 // These numeric types contain pointers, but are uninteresting.
                 (widetag == COMPLEX_WIDETAG) ||
                 (widetag == RATIO_WIDETAG))
@@ -840,7 +841,7 @@ static void scan_spaces(struct scan_state* ss)
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
     old = *ss; build_refs((lispobj*)FIXEDOBJ_SPACE_START, fixedobj_free_pointer, ss);
     show_tally(old, ss);
-    old = *ss; build_refs((lispobj*)VARYOBJ_SPACE_START, varyobj_free_pointer, ss);
+    old = *ss; build_refs((lispobj*)TEXT_SPACE_START, text_space_highwatermark, ss);
     show_tally(old, ss);
 #endif
     old = *ss;

@@ -75,7 +75,7 @@ os_zero(os_vm_address_t addr, os_vm_size_t length)
          * zero-filled. */
 
         os_invalidate(block_start, block_size);
-        addr = os_validate(NOT_MOVABLE, block_start, block_size, 0, 0);
+        addr = os_validate(NOT_MOVABLE, block_start, block_size, 0);
 
         if (addr == NULL || addr != block_start)
             lose("os_zero: block moved! %p ==> %p", block_start, addr);
@@ -97,7 +97,7 @@ void os_deallocate(os_vm_address_t addr, os_vm_size_t len) {
 os_vm_address_t
 os_allocate(os_vm_size_t len)
 {
-    return os_validate(MOVABLE, (os_vm_address_t)NULL, len, 0, 0);
+    return os_validate(MOVABLE, (os_vm_address_t)NULL, len, 0);
 }
 
 void
@@ -236,7 +236,7 @@ gc_managed_heap_space_p(lispobj addr)
 /* Remap a part of an already existing memory mapping from a file,
  * and/or create a new mapping as need be */
 void* load_core_bytes(int fd, os_vm_offset_t offset, os_vm_address_t addr, os_vm_size_t len,
-                      int __attribute__((unused)) execute)
+                      int is_readonly_space)
 {
 #if defined LISP_FEATURE_MIPS
     /* Of the few MIPS machines I have access to, one definitely exhibits a
@@ -266,32 +266,38 @@ void* load_core_bytes(int fd, os_vm_offset_t offset, os_vm_address_t addr, os_vm
 #endif
     int fail = 0;
     os_vm_address_t actual;
+    int protection = 0, sharing = MAP_PRIVATE;
+
+#ifdef LISP_FEATURE_DARWIN_JIT
+    protection = OS_VM_PROT_READ | (is_readonly_space ?  OS_VM_PROT_EXECUTE : OS_VM_PROT_WRITE);
+#else
+    /* If mapping to an OS-chosen address, then the assumption is that we're not going to
+     * execute nor write at the mapped address. (Because why would we ? The spaces from
+     * the core have a chosen address at this point) However, the addr=0 case is for
+     * 'editcore' which unfortunately _does_ write the memory. I'd prefer that it not,
+     * but that's not the concern here. */
+    protection = (addr ? (is_readonly_space ? OS_VM_PROT_READ : OS_VM_PROT_ALL)
+                  : OS_VM_PROT_READ | OS_VM_PROT_WRITE);
+    if (is_readonly_space) sharing = MAP_SHARED;
+#endif
+
 #ifdef LISP_FEATURE_64_BIT
-    actual = sbcl_mmap(addr, len,
+    actual = sbcl_mmap(
 #else
     /* FIXME: why does using sbcl_mmap cause failure here? I would guess that it can't
      * pass 'offset' correctly if LARGEFILE is mandatory, which it isn't on 64-bit.
      * Deadlock should be impossible this early in core loading, I suppose, hence
      * on one hand I don't care; but on the other, it would be nice to not to see
      * any use of a potentially hooked mmap() API within this file. */
-    actual = mmap(addr, len,
+     actual = mmap(
 #endif
-                  // If mapping to a random address, then the assumption is
-                  // that we're not going to execute the core; nor should we write to it.
-                  // However, the addr=0 case is for 'editcore' which unfortunately _does_
-                  // write the memory. I'd prefer that it not,
-                  // but that's not the concern here.
-#ifdef LISP_FEATURE_DARWIN_JIT
-                  OS_VM_PROT_READ | (execute ?  OS_VM_PROT_EXECUTE : OS_VM_PROT_WRITE),
-#else
-                  addr ? OS_VM_PROT_ALL : OS_VM_PROT_READ | OS_VM_PROT_WRITE,
-#endif
+                  addr, len, protection,
                   // Do not pass MAP_FIXED with addr of 0, because most OSes disallow that.
-                  MAP_PRIVATE | (addr ? MAP_FIXED : 0),
+                  sharing | (addr ? MAP_FIXED : 0),
                   fd, (off_t) offset);
     if (actual == MAP_FAILED) {
         if (errno == ENOMEM)
-            fprintf(stderr, "load_core_bytes: mmap(%p,%lx,...) failed with ENOMEM\n", addr, len);
+            fprintf(stderr, "load_core_bytes: mmap(%p,%zu,...) failed with ENOMEM\n", addr, len);
         else
             perror("mmap");
         fail = 1;
@@ -410,3 +416,44 @@ lispobj* duplicate_codeblob_offheap(lispobj code)
     memcpy(copy, (char*)code-OTHER_POINTER_LOWTAG, nwords<<WORD_SHIFT);
     return mem;
 }
+
+#if 0 // interceptors for debugging so I don't have to reinvent them every time
+static void decode_protbits(int prot, char result[4]) {
+    result[0] = (prot & PROT_READ) ? 'r' : '-';
+    result[1] = (prot & PROT_WRITE) ? 'w' : '-';
+    result[2] = (prot & PROT_EXEC) ? 'x' : '-';
+    result[3] = 0;
+}
+static void decode_flagbits(int flags, char result[40]) {
+    char *p = result;
+    char delim = '{';
+#define APPEND(str) { *p++ = delim; delim = '|'; strcpy(p, str); p += sizeof str-1; }
+    if (flags & MAP_PRIVATE) APPEND("Pvt");
+    if (flags & MAP_ANON) APPEND("Anon");
+    if (flags & MAP_NORESERVE) APPEND("NoRsv");
+    if (flags & MAP_JIT) APPEND("JIT");
+#undef APPEND
+    strcpy(p, "}");
+}
+void* sbcl_mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    char decoded_prot[4], decoded_flags[40];
+    decode_protbits(prot, decoded_prot);
+    decode_flagbits(flags, decoded_flags);
+    void* result = mmap(addr, length, prot, flags, fd, offset);
+    fprintf(stderr, "mmap(%p,%lx,%s,%s,%d,%llx)=%p\n", addr, length,
+            decoded_prot, decoded_flags, fd, offset, result);
+    return result;
+}
+int sbcl_munmap(void* addr, size_t length) {
+    int result = munmap(addr, length);
+    fprintf(stderr, "munmap(%p,%lx)=%d\n", addr, length, result);
+    return result;
+}
+int sbcl_mprotect(void* addr, size_t length, int prot) {
+    char decoded_prot[4];
+    decode_protbits(prot, decoded_prot);
+    int result = mprotect(addr, length, prot);
+    fprintf(stderr, "mprotect(%p,%lx,%s)=%d\n", addr, length, decoded_prot, result);
+    return result;
+}
+#endif

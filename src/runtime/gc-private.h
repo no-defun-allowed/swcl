@@ -65,7 +65,9 @@ lispobj copy_potential_large_object(lispobj object, sword_t nwords,
 //#define NOTE_TRANSPORTING(old, new, nwords) /* do nothing */
 //#endif
 
-extern uword_t gc_copied_nwords;
+// In-situ live objects are those which get logically "moved" from oldspace to newspace
+// by frobbing the generation byte in the page table, not copying.
+extern uword_t gc_copied_nwords, gc_in_situ_live_nwords;
 static inline lispobj
 gc_copy_object(lispobj object, size_t nwords, void* region, int page_type)
 {
@@ -149,10 +151,6 @@ extern void scrub_thread_control_stack(struct thread *);
 #endif
 static inline int header_rememberedp(lispobj header) {
   return (header & (OBJ_WRITTEN_FLAG << 24)) != 0;
-}
-
-static inline boolean filler_obj_p(lispobj* obj) {
-    return widetag_of(obj) == CODE_HEADER_WIDETAG && obj[1] == 0;
 }
 
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
@@ -249,7 +247,7 @@ static inline lispobj encode_weakptr_next(void* x) {
 
 static inline void add_to_weak_pointer_chain(struct weak_pointer *wp) {
     // Better already be fixed in position or we're in trouble
-    gc_assert(!from_space_p(make_lispobj(wp,OTHER_POINTER_LOWTAG)));
+    gc_dcheck(!compacting_p() || !from_space_p(make_lispobj(wp,OTHER_POINTER_LOWTAG)));
     /* Link 'wp' into weak_pointer_chain using its 'next' field.
      * We ensure that 'next' is always NULL when the weak pointer isn't
      * in the chain, and not NULL otherwise. The end of the chain
@@ -572,6 +570,12 @@ static inline boolean plausible_tag_p(lispobj addr)
 #else
 # define make_filler_header(n) (((n)<<N_WIDETAG_BITS)|FILLER_WIDETAG)
 # define filler_total_nwords(header) ((header)>>N_WIDETAG_BITS)
+#endif
+
+#ifdef LISP_FEATURE_BIG_ENDIAN
+# define assign_widetag(addr, byte) ((unsigned char*)addr)[N_WORD_BYTES-1] = byte
+#else
+# define assign_widetag(addr, byte) *(unsigned char*)addr = byte
 #endif
 
 #endif /* _GC_PRIVATE_H_ */

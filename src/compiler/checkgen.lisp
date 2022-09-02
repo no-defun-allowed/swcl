@@ -312,6 +312,9 @@
   (let* ((lvar (node-lvar cast))
          (dest (and lvar (lvar-dest lvar))))
     (and (combination-p dest)
+         (or (not (combination-fun-info dest))
+             ;; fixed-args functions do not check their arguments.
+             (not (ir1-attributep (fun-info-attributes (combination-fun-info dest)) fixed-args)))
          ;; The theory is that the type assertion is from a declaration on the
          ;; callee, so the callee should be able to do the check. We want to
          ;; let the callee do the check, because it is possible that by the
@@ -334,8 +337,19 @@
          ;; deemed unreachable?
          (and
           (almost-immediately-used-p lvar cast)
-          (values (values-subtypep (lvar-externally-checkable-type lvar)
-                                   (cast-type-to-check cast)))))))
+          (if (and (lvar-fun-is (combination-fun dest)
+                                '(hairy-data-vector-set/check-bounds
+                                  hairy-data-vector-ref/check-bounds
+                                  hairy-data-vector-ref
+                                  hairy-data-vector-set))
+                   (eql (car (combination-args dest))
+                        lvar))
+              ;; These functions work on all arrays, but the error
+              ;; message is about vectors, which is used more frequently.
+              (csubtypep (specifier-type 'vector)
+                         (single-value-type (cast-type-to-check cast)))
+              (values-subtypep (lvar-externally-checkable-type lvar)
+                               (cast-type-to-check cast)))))))
 
 ;; Type specifiers handled by the general-purpose MAKE-TYPE-CHECK-FORM are often
 ;; trivial enough to have an internal error number assigned to them that can be

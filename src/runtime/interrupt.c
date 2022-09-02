@@ -548,7 +548,9 @@ check_deferrables_blocked_or_lose(sigset_t *sigset)
         lose("deferrables unblocked");
 }
 
+#ifdef LISP_FEATURE_RISCV
 int sigaction_does_not_mask;
+#endif
 static void assert_blockables_blocked()
 {
 #ifdef LISP_FEATURE_RISCV
@@ -1029,13 +1031,11 @@ interrupt_internal_error(os_context_t *context, boolean continuable)
     }
 #endif
 
-    SHOW("in interrupt_internal_error");
-#if QSHOW == 2
     /* Display some rudimentary debugging information about the
      * error, so that even if the Lisp error handler gets badly
      * confused, we have a chance to determine what's going on. */
-    describe_internal_error(context);
-#endif
+    // describe_internal_error(context); // uncomment me for debugging
+
     funcall2(StaticSymbolFunction(INTERNAL_ERROR), context_sap,
              continuable ? T : NIL);
 
@@ -1326,6 +1326,25 @@ store_signal_data_for_later (struct interrupt_data *data, void *handler,
     sigaddset_deferrable(os_context_sigmask_addr(context));
 }
 
+/* What's going on ?
+ *
+ *  0: fp=0x7fa86423e7a0 pc=0x27608c Foreign function (null)
+ *  1: fp=0x7fa86423e7b0 pc=0x2767aa Foreign function (null)
+ *  2: fp=0x7fa86423e890 pc=0x2761af Foreign function (null)
+ *  3: fp=0x7fa86423e970 pc=0x27882f Foreign function (null)       ; maybe_now_maybe_later
+ *  4: fp=0x7fa86423f5c0 pc=0x7fa8646bc750 Foreign function (null) ; WHICH SIGNAL ?
+ *  5: fp=0x7fa86423f630 pc=0x2713ce Foreign function (null)       ; verify_range
+ *  6: fp=0x7fa86423f6c0 pc=0x2703d3 Foreign function (null)       ; verify_heap
+ *  7: fp=0x7fa86423f780 pc=0x26e168 Foreign function collect_garbage
+ *  8: fp=0x7fa86423f7f0 pc=0x270298 Foreign function gc_and_save
+ *  9: fp=0x7fa86423f848 pc=0x52f93bf2 <??? type 45>::GC-AND-SAVE
+ * 10: fp=0x7fa86423f950 pc=0x52d32a7b <??? type 45>::SAVE-LISP-AND-DIE
+ * 11: fp=0x7fa86423fa00 pc=0x52a34179 <??? type 45>::SAVE-LISP-AND-DIE
+ *
+ * fatal error encountered in SBCL pid 9436 tid 9436:
+ * interrupt already pending
+ */
+
 static boolean
 can_handle_now(void *handler, struct interrupt_data *data,
                int signal, siginfo_t *info, os_context_t *context)
@@ -1339,7 +1358,8 @@ can_handle_now(void *handler, struct interrupt_data *data,
     struct thread *thread = get_sb_vm_thread();
 
     if (read_TLS(INTERRUPT_PENDING,thread) != NIL)
-        lose("interrupt already pending");
+        lose("interrupt already pending when sig%d received, pc=%p", signal,
+             (void*)os_context_pc(context));
     if (thread_interrupt_data(thread).pending_handler)
         lose("there is a pending handler already (PA)");
     if (data->gc_blocked_deferrables)
@@ -2026,7 +2046,6 @@ interrupt_init(void)
     ll_install_handler(SIGINFO, sigdump_eventlog);
 #endif
     int __attribute__((unused)) i;
-    SHOW("entering interrupt_init()");
     sigemptyset(&deferrable_sigset);
     sigemptyset(&blockable_sigset);
     sigemptyset(&gc_sigset);
@@ -2066,6 +2085,10 @@ lisp_memory_fault_error(os_context_t *context, os_vm_address_t addr)
     /* If we lose on corruption, provide LDB with debugging information. */
     fake_foreign_function_call(context);
 
+    /* If it's a store to read-only space, it's not "corruption", so don't say that.
+     * Lisp will change its wording of the memory-fault-error string */
+
+    if (!readonly_space_p((uword_t)addr)) {
     /* To allow debugging memory faults in signal handlers and such. */
 #ifdef ARCH_HAS_STACK_POINTER
     char* pc = (char*)os_context_pc(context);
@@ -2086,6 +2109,7 @@ lisp_memory_fault_error(os_context_t *context, os_vm_address_t addr)
     corruption_warning_and_maybe_lose("Memory fault at %p (pc=%p)",
                                       addr, (void*)os_context_pc(context));
 #endif
+    }
 
 #ifdef LISP_FEATURE_C_STACK_IS_CONTROL_STACK
     /* Holy hell is this more obfuscated than necessary when using

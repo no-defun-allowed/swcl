@@ -31,11 +31,11 @@
                `(combine-directives
                  (%tokenize-control-string string 0 (length string) nil)
                  t)))
-    (if (logtest (get-header-data string)
-                 ;; shareable = readonly
-                 (ash (logior sb-vm:+vector-shareable+
-                              sb-vm:+vector-shareable-nonstd+)
-                      sb-vm:array-flags-data-position))
+    (if (test-header-data-bit string
+                              ;; shareable = readonly
+                              (ash (logior sb-vm:+vector-shareable+
+                                           sb-vm:+vector-shareable-nonstd+)
+                                   sb-vm:array-flags-data-position))
         (memoize (compute-it))
         (compute-it))))
 
@@ -327,9 +327,10 @@
   `#',(%formatter control-string))
 
 (defun %formatter (control-string &optional (arg-count 0) (need-retval t)
-                                  &aux (lambda-name
-                                        (possibly-base-stringize
-                                         (concatenate 'string "fmt$" control-string))))
+                   &aux (lambda-name
+                         (logically-readonlyize
+                          (possibly-base-stringize
+                           (concatenate 'string "fmt$" control-string)))))
   ;; ARG-COUNT is supplied only when the use of this formatter is in a literal
   ;; call to FORMAT, in which case we can possibly elide &optional parsing.
   ;; But we can't in general, because FORMATTER may be called by users
@@ -841,6 +842,7 @@
     `(handler-bind
          ((format-error
            (lambda (condition)
+             (declare (optimize (sb-c:store-source-form 0)))
              (error 'format-error
                     :complaint
                     "~A~%while processing indirect format string:"
@@ -1039,6 +1041,7 @@
                    `((handler-bind
                          ((format-error
                            (lambda (condition)
+                             (declare (optimize (sb-c:store-source-form 0)))
                              (format-error-at*
                               ,string ,(1- end)
                               "~A~%while processing indirect format string:"

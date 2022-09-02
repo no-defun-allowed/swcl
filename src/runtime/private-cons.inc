@@ -99,6 +99,8 @@ static struct cons* private_cons_impl()
         // UNBOXED pages do not generally required zero-fill.
         // arm64+Darwin might perform zeroing to alter MMU-based protection.
         zeroize_pages_if_needed(page, page, PAGE_TYPE_UNBOXED);
+#elif defined LISP_FEATURE_WIN32
+        os_commit_memory(page_address(page), GENCGC_PAGE_BYTES);
 #endif
         struct cons* page_header = (struct cons*)page_address(page);
         if (PRIVATE_CONS_DEBUG)
@@ -116,16 +118,16 @@ static struct cons* private_cons_impl()
 
 static void release_pages_impl()
 {
-    struct cons* list;
+    struct cons *list, *next;
     if (private_cons_page_chain >= 0) {
-        for (list = (struct cons*)page_address(private_cons_page_chain) ;
-             list ;
-             list = (struct cons*)list->cdr) {
+          for (list = (struct cons*)page_address(private_cons_page_chain) ;
+               list ; list = next) {
             page_index_t index = find_page_index(list);
+            next = (struct cons*)list->cdr; // read prior to decommitting (if we do that)
             if (PRIVATE_CONS_DEBUG)
                 fprintf(stderr, "Freeing GC-private page @ %p (index %ld)\n",
                         list, (long)index);
-            set_page_needs_zerofill(index);
+            set_page_need_to_zero(index, 1);
             set_page_bytes_used(index, 0);
             reset_page_flags(index);
         }

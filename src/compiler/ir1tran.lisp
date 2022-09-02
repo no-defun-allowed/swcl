@@ -274,16 +274,11 @@
 
 (declaim (end-block))
 
-(defun maybe-find-free-var (name)
-  (let ((found (gethash name (free-vars *ir1-namespace*))))
-    (unless (eq found :deprecated)
-      found)))
-
 ;;; Return the LEAF node for a global variable reference to NAME. If
 ;;; NAME is already entered in (FREE-VARS *IR1-NAMESPACE*), then we just return the
 ;;; corresponding value. Otherwise, we make a new leaf using
 ;;; information from the global environment and enter it in
-;;; FREE-VARS. If the variable is unknown, then we emit a warning.
+;;; FREE-VARS.
 (declaim (ftype (sfunction (t) (or leaf cons heap-alien-info)) find-free-var))
 (defun find-free-var (name &aux (free-vars (free-vars *ir1-namespace*))
                                 (existing (gethash name free-vars)))
@@ -708,12 +703,9 @@
            ;; processing our own code, though.
            #+sb-xc-host
            (warn "reading an ignored variable: ~S" name)))
-       (when (and (global-var-p var)
-                  (eq (global-var-kind var) :unknown)
-                  (not (deprecated-thing-p 'variable name)))
-         (note-undefined-reference name :variable))
+       (maybe-note-undefined-variable-reference var name)
        (reference-leaf start next result var name))
-      ((cons (eql macro)) ; symbol-macro
+      ((cons (eql macro))               ; symbol-macro
        ;; FIXME: the following comment is probably wrong now.
        ;; If we warn here on :early and :late deprecation
        ;; then we get an extra warning somehow.
@@ -977,12 +969,15 @@
 ;;; node. FUN-LVAR yields the function to call. ARGS is the list of
 ;;; arguments for the call, which defaults to the cdr of source. We
 ;;; return the COMBINATION node.
-(defun ir1-convert-combination-args (fun-lvar start next result args)
+(defun ir1-convert-combination-args (fun-lvar start next result args
+                                     &optional (pass-nargs t))
   (declare (type ctran start next)
            (type lvar fun-lvar)
            (type (or lvar null) result)
            (type list args))
   (let ((node (make-combination fun-lvar)))
+    (unless pass-nargs
+      (setf (combination-pass-nargs node) nil))
     (setf (lvar-dest fun-lvar) node)
     (collect ((arg-lvars))
       (let ((this-start start)
@@ -1160,6 +1155,7 @@
                    (var (or bound-var
                             (lexenv-find var-name vars)
                             (find-free-var var-name))))
+              (maybe-note-undefined-variable-reference var var-name)
               (etypecase var
                 (leaf
                  (flet
@@ -1475,22 +1471,21 @@ the stack without triggering overflow protection.")
              (let* ((bound-var (find-in-bindings vars name))
                     (var (or bound-var
                              (lexenv-find name vars)
-                             (maybe-find-free-var name))))
+                             (find-free-var name))))
+               (maybe-note-undefined-variable-reference var name)
                (etypecase var
                  (leaf
-                  (if bound-var
-                      (if (and (leaf-extent var) (neq extent (leaf-extent var)))
-                          (warn "Multiple incompatible extent declarations for ~S?" name)
-                          (setf (leaf-extent var) extent))
-                      (compiler-notify
-                       "Ignoring free ~S declaration: ~S" kind name)))
+                  (cond
+                    ((and (typep var 'global-var) (eq (global-var-kind var) :unknown)))
+                    (bound-var
+                     (if (and (leaf-extent var) (neq extent (leaf-extent var)))
+                         (warn "Multiple incompatible extent declarations for ~S?" name)
+                         (setf (leaf-extent var) extent)))
+                    (t (compiler-notify "Ignoring free ~S declaration: ~S" kind name))))
                  (cons
                   (compiler-error "~S on symbol-macro: ~S" kind name))
                  (heap-alien-info
-                  (compiler-error "~S on alien-variable: ~S" kind name))
-                 (null
-                  (compiler-style-warn
-                   "Unbound variable declared ~S: ~S" kind name)))))
+                  (compiler-error "~S on alien-variable: ~S" kind name)))))
             ((and (consp name)
                   (eq (car name) 'function)
                   (null (cddr name))

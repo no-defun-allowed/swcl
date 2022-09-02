@@ -52,6 +52,11 @@
   (and (hash-table-weak-p ht)
        (decode-hash-table-weakness (ht-flags-weakness (hash-table-flags ht)))))
 
+;;; Hash table hash functions can return any FIXNUM, because POINTER-HASH can.
+;;; This is less restrictive than SXHASH which says it has to be positive.
+(declaim (ftype (sfunction (t) (values fixnum boolean))
+                eq-hash eql-hash equal-hash equalp-hash))
+
 (declaim (inline eq-hash))
 (defun eq-hash (key)
   (declare (values fixnum (member t nil)))
@@ -109,9 +114,74 @@
   ;; is not n.
   (define-eql-hash eql-hash-no-memoize symbol-hash))
 
-(declaim (inline equal-hash))
+;;; Decide if WIDETAG (an OTHER-POINTER) should use SXHASH in EQUAL-HASH
+(defmacro equal-hash-sxhash-widetag-p (widetag)
+  (let ((list `(,sb-vm:simple-base-string-widetag
+                #+sb-unicode ,sb-vm:simple-character-string-widetag
+                ,sb-vm:complex-base-string-widetag
+                #+sb-unicode ,sb-vm:complex-character-string-widetag
+                ,sb-vm:bignum-widetag
+                ,sb-vm:ratio-widetag
+                ,sb-vm:double-float-widetag
+                ,sb-vm:complex-widetag
+                ,sb-vm:complex-single-float-widetag
+                ,sb-vm:complex-double-float-widetag
+                ,sb-vm:simple-bit-vector-widetag
+                ,sb-vm:complex-bit-vector-widetag)))
+    (let ((mask 0))
+      (dolist (i list mask)
+        (setf mask (logior mask (ash 1  (ash i -2)))))
+      #+64-bit `(logbitp (ash ,widetag -2) ,mask)
+      #-64-bit `(let ((bit (ash ,widetag -2)))
+                  (if (<= bit 31)
+                      (logbitp bit ,(ldb (byte 32 0) mask))
+                      (logbitp (- bit 32) ,(ash mask -32)))))))
+
+;;; this macro has not been tested on 32-bit
+;;; (quite obviously the OTHER-IMMEDIATE case is wrong) and
+;;; probably doesn't work on ppc64 due the alternate lowtag assignments.
+(defmacro lowtag-case (x &rest clauses)
+  `(case (lowtag-of ,x)
+     ,@(mapcar (lambda (clause)
+                 `(,(case (car clause)
+                      (instance sb-vm:instance-pointer-lowtag)
+                      (list sb-vm:list-pointer-lowtag)
+                      (function sb-vm:fun-pointer-lowtag)
+                      (other-immediate '(1 5 9 13))
+                      (fixnum sb-vm::fixnum-lowtags)
+                      (other-pointer sb-vm:other-pointer-lowtag))
+                    ,@(cdr clause)))
+               clauses)))
+
+;;; As a consequence of change 3bdd4d28ed, the compiler started to emit multiple
+;;; definitions of certain INLINE global functions.
+;;; Genesis is so fraught with other pitfalls and traps that I want no chance
+;;; of seeing duplicate definitions.  So no INLINE here. Tail wagging the dog?
+;;; Perhaps, but that was an dangerous thing to sneakily allow.
+;; (declaim (inline equal-hash))
 (defun equal-hash (key)
   (declare (values fixnum (member t nil)))
+  ;; Ultimately we just need to choose between SXHASH or EQ-HASH. As to using
+  ;; INSTANCE-SXHASH, it doesn't matter, and in fact it's quicker to use EQ-HASH.
+  ;; If the outermost object passed as a key is LIST, then it descends using SXASH,
+  ;; you will in fact get stable hashes for nested objects.
+  ;; Same for symbols- hash-tables don't care whether we use SYMBOL-HASH.
+  ;; It's mainly for users who call SXHASH directly that stable hashes are important.
+  ;; I have not benchmarked this for other than x86-64.
+  #+x86-64
+  (if (lowtag-case key
+        ;; pathnames require SXHASH, all other instances are indifferent.
+        (instance (pathnamep (truly-the instance key)))
+        (list t)
+        (other-pointer (equal-hash-sxhash-widetag-p (%other-pointer-widetag key)))
+        (function nil)
+        (fixnum nil)
+        ;; EQUAL on numbers is the same as EQL on numbers, so single-float
+        ;; does *not* need to be picked off here.
+        (other-immediate nil))
+      (values (sxhash key) nil)
+      (eq-hash key))
+  #-x86-64
   (typecase key
     ;; For some types the definition of EQUAL implies a special hash
     ((or string cons number bit-vector pathname)
@@ -121,27 +191,12 @@
     ;; And wow, typecase isn't enough to get use to use the transform
     ;; for (sxhash symbol) without an explicit THE form.
     (symbol (values (sxhash (the symbol key)) nil)) ; transformed
-    (instance (values (instance-sxhash key) nil))
     ;; Otherwise use an EQ hash, rather than SXHASH, since the values
     ;; of SXHASH will be extremely badly distributed due to the
     ;; requirements of the spec fitting badly with our implementation
     ;; strategy.
     (t
      (eq-hash key))))
-
-;;; Basically the same as EQUAL hash, but do not use the stable hash on instances
-;;; so that we do not cause all structures (in the worst case) to grow a new slot.
-;;; This is not for user consumption. I thought it might be needed for internals,
-;;; but EQUAL hashing of structures turned out to stem from a compiler bug in our dumping
-;;; of structure constants: we should never look in the similar constants table,
-;;; because either there is an EQ one or there isn't.
-;;; But maybe there are other use-cases where it is beneficial to store structures
-;;; in an EQUAL table without causing them to be extended by one slot.
-(defun equal-hash/unstable (key)
-  (declare (values fixnum (member t nil)))
-  (if (typep key '(or string cons number bit-vector pathname symbol))
-      (values (sxhash key) nil)
-      (eq-hash key)))
 
 (defun equalp-hash (key)
   (declare (values fixnum (member t nil)))
@@ -430,18 +485,7 @@ Examples:
             ((or (eq test #'eql) (eq test 'eql))
              (values 1 'eql #'eql #'eql-hash))
             ((or (eq test #'equal) (eq test 'equal))
-             ;; As an unadvertised feature, you can pick whether instances should receive
-             ;; stable or address-based hashes. A use-case for address-based would be for
-             ;; in system code so as not to incur memory growth by causing user structures
-             ;; to accrete a stable hash slot due to key movement by GC.
-             ;; USERFUNP must remain NIL in that case to permit address-based hashing.
-             (values 2 'equal #'equal
-                     (let ((instance-addr-hashing
-                            (or (eq hash-function #'equal-hash/unstable)
-                                (eq hash-function 'equal-hash/unstable))))
-                       (when instance-addr-hashing
-                         (setq user-hashfun-p nil))
-                       (if instance-addr-hashing #'equal-hash/unstable #'equal-hash))))
+             (values 2 'equal #'equal #'equal-hash))
             ((or (eq test #'equalp) (eq test 'equalp))
              (values 3 'equalp #'equalp #'equalp-hash))
             (t
@@ -930,8 +974,7 @@ multiple threads accessing the same hash-table without locking."
              (hwm (kv-vector-high-water-mark old-kv-vector)))
 
     (declare (type simple-vector new-kv-vector)
-             (type (simple-array hash-table-index (*)) new-next-vector new-index-vector)
-             (type (or null (simple-array hash-table-index (*))) new-hash-vector))
+             (type (simple-array hash-table-index (*)) new-next-vector new-index-vector))
 
     ;; Rehash + resize only occurs when:
     ;;  (1) every usable pair was at some point filled (so HWM = SIZE)
@@ -946,7 +989,8 @@ multiple threads accessing the same hash-table without locking."
     ;; This is done early because when GC scans the new vector, it needs to see
     ;; each hash to know which keys were hashed address-sensitively.
     (awhen (hash-table-hash-vector table)
-      (replace new-hash-vector it :start1 1 :start2 1)) ; 1st element not used
+      (replace (the (simple-array hash-table-index (*)) new-hash-vector)
+               it :start1 1 :start2 1)) ; 1st element not used
 
     ;; Preserve only the 'hashing' bit on the OLD-KV-VECTOR so that
     ;; its high-water-mark can meaningfully be reduced to 0 when done.
@@ -1538,9 +1582,7 @@ nnnn 1_    any       linear scan
 ;;; Three argument version of GETHASH
 (defun gethash3 (key hash-table default)
   (declare (type hash-table hash-table))
-  (funcall (truly-the (sfunction (t t t) (values t boolean))
-                      (hash-table-gethash-impl hash-table))
-           key hash-table default))
+  (funcall (hash-table-gethash-impl hash-table) key hash-table default))
 
 ;;; so people can call #'(SETF GETHASH)
 ;;; FIXME: this function is not mandated. Why do we have it?
@@ -1892,15 +1934,12 @@ there was such an entry, or NIL if not."
                      :test (hash-table-test-fun hash-table))))
     (when cell
       (setf (hash-table-%alist hash-table) (delq1 cell (hash-table-%alist hash-table)))))
-  (funcall (truly-the (sfunction (t t) (values boolean &optional))
-                      (hash-table-remhash-impl hash-table))
-           key hash-table))
+  (funcall (hash-table-remhash-impl hash-table) key hash-table))
 
 (defun clrhash (hash-table)
   "This removes all the entries from HASH-TABLE and returns the hash
 table itself."
-  (truly-the (values hash-table &optional)
-             (funcall (hash-table-clrhash-impl hash-table) hash-table)))
+  (funcall (hash-table-clrhash-impl hash-table) hash-table))
 
 (defun clrhash-impl (hash-table)
   ;; This used to do nothing at all for tables that has a COUNT of 0,
@@ -1970,10 +2009,23 @@ table itself."
 ;;; Stuff an association list, or a vector, into HASH-TABLE. Return the hash table,
 ;;; so that we can use this for the *PRINT-READABLY* case in PRINT-OBJECT (HASH-TABLE T)
 ;;; without having to worry about LET forms and readable gensyms and stuff.
-(defun %stuff-hash-table (hash-table data)
+(defun %stuff-hash-table (hash-table data &optional pure)
   (if (vectorp data)
       (dovector (x data) (setf (gethash (car x) hash-table) (cdr x)))
       (dolist (x data) (setf (gethash (car x) hash-table) (cdr x))))
+  (when pure
+    ;; Mark the index vector, next-vector, hash-vector (if present),
+    ;; and even the key vector, as shareable, provided that no key is hashed
+    ;; address-sensitively. As a first crack I'm just requiring keys to be
+    ;; fixnum or character, but some table types would stably hash more things.
+    (let ((stably-hashed
+           (loop for k being each hash-key of hash-table
+                 always (typep k '(or fixnum character)))))
+      (when stably-hashed
+        (logically-readonlyize (hash-table-pairs hash-table))
+        (logically-readonlyize (hash-table-index-vector hash-table))
+        (logically-readonlyize (hash-table-next-vector hash-table))
+        (awhen (hash-table-hash-vector hash-table) (logically-readonlyize it)))))
   hash-table)
 
 ;;; Return a list of keyword args and values to use for MAKE-HASH-TABLE

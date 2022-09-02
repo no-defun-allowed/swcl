@@ -740,7 +740,7 @@ of specialized arrays is supported."
                (tagbody ,@forms))))))))
 
 (macrolet ((%ref (accessor-getter extra-params)
-             `(funcall (,accessor-getter array) array index ,@extra-params))
+             `(sb-c::%funcall-no-nargs (,accessor-getter array) array index ,@extra-params))
            (define (accessor-name slow-accessor-name accessor-getter
                                   extra-params check-bounds)
              `(progn
@@ -756,7 +756,8 @@ of specialized arrays is supported."
                                      (safety 0)))
                   (%ref ,accessor-getter ,extra-params))
                 (defun ,slow-accessor-name (array index ,@extra-params)
-                  (declare (optimize speed (safety 0)))
+                  (declare (optimize speed (safety 0))
+                           (array array))
                   (if (not (%array-displaced-p array))
                       ;; The reasonably quick path of non-displaced complex
                       ;; arrays.
@@ -764,14 +765,14 @@ of specialized arrays is supported."
                         (%ref ,accessor-getter ,extra-params))
                       ;; The real slow path.
                       (with-array-data
-                          ((vector array)
+                          ((array array)
                            (index (locally
                                       (declare (optimize (speed 1) (safety 1)))
                                     (,@check-bounds index)))
                            (end)
                            :force-inline t)
                         (declare (ignore end))
-                        (,accessor-name vector index ,@extra-params)))))))
+                        (%ref ,accessor-getter ,extra-params)))))))
   (define hairy-data-vector-ref slow-hairy-data-vector-ref
     %find-data-vector-reffer
     nil (progn))
@@ -788,7 +789,8 @@ of specialized arrays is supported."
     (new-value) (check-bound array (%array-dimension array 0))))
 
 (defun hairy-ref-error (array index &optional new-value)
-  (declare (ignore index new-value))
+  (declare (ignore index new-value)
+           (optimize (sb-c:verify-arg-count 0)))
   (error 'type-error
          :datum array
          :expected-type 'vector))
@@ -1122,13 +1124,11 @@ of specialized arrays is supported."
          :format-control "~S is not an array with a fill pointer."
          :format-arguments (list vector)))
 
-(declaim (inline fill-pointer))
+
 (defun fill-pointer (vector)
   "Return the FILL-POINTER of the given VECTOR."
   (declare (explicit-check))
-  (if (array-has-fill-pointer-p vector)
-      (%array-fill-pointer vector)
-      (fill-pointer-error vector)))
+  (fill-pointer vector))
 
 (defun %set-fill-pointer (vector new)
   (declare (explicit-check))
@@ -1912,5 +1912,4 @@ function to be removed without further warning."
 
 (defun weak-vector-p (x)
   (and (simple-vector-p x)
-       #+(or x86 x86-64) (test-header-data-bit x (ash vector-weak-flag array-flags-data-position))
-       #-(or x86 x86-64) (logtest (get-header-data x) (ash vector-weak-flag array-flags-data-position))))
+       (test-header-data-bit x (ash vector-weak-flag array-flags-data-position))))

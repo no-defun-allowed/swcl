@@ -1070,3 +1070,50 @@
          (logand most-positive-fixnum
                  (- (the fixnum a) most-negative-fixnum)))
     ((10) 10)))
+
+(with-test (:name :unary-truncate-discard-second-value)
+  (checked-compile-and-assert
+   ()
+   `(lambda (a)
+      (truncate (expt (complex a 0) 0))
+      1)
+   ((1) 1)))
+
+(with-test (:name :unary-truncate-discard-second-value.2)
+  (checked-compile-and-assert
+   (:allow-style-warnings t)
+   `(lambda (a b)
+      (boole boole-nand
+             (dpb (* b (unwind-protect 0 b)) (byte 31 28) a)
+             (ignore-errors
+              (truncate
+               (eval
+                (values 1 2))))))
+   ((1 2) -2)))
+
+(with-test (:name :logtest-immediate)
+  (checked-compile-and-assert
+   ()
+   `(lambda (x)
+      (logtest (- (expt 2 63) 3) (the fixnum x)))
+    ((1) t)
+    ((2) nil)))
+
+(with-test (:name :logand-negative-derive)
+  (assert
+   (subtypep (second (third (sb-kernel:%simple-fun-type
+                             (checked-compile
+                              `(lambda (a b)
+                                 (declare ((not unsigned-byte) a b))
+                                 (logand a b))))))
+             '(integer * -1))))
+
+(with-test (:name :ash-mod64-constant-folding)
+  (checked-compile-and-assert
+      ()
+      `(lambda (a d)
+         (declare (fixnum a)
+                  ((unsigned-byte 64) d))
+         (setq a -64)
+         (logand d (ash -1 a)))
+    ((0 3) 3)))

@@ -58,6 +58,15 @@
        ((res complex-double-reg complex-double-float))
      (inst movi res value :16b)))
 
+;;; Basically like the x86 with-pinned-object,
+;;; but here only the boxed registers are pinned.
+;;; This doesn't prevent the var from going to the stack, but none of
+;;; the routines should do that.
+(defmacro with-pinned-objects-in-registers (vars &body body)
+  `(multiple-value-prog1 ,@body
+     ,@(loop for var in vars
+             collect `(touch-object ,var))))
+
 (defmacro simd-string-case (a source destination index fallback)
   `(let ((ascii-p (simd-mask-32 192))
          (a-mask (simd-mask-32 ,(char-code a)))
@@ -88,12 +97,10 @@
                      (inst s-and temp temp flip)
                      (inst s-eor res bits temp)))))))
 
-(defun simd-nreverse8 (vector start end)
-  (declare ((simple-array * (*)) vector)
-           (fixnum start end)
-           (optimize speed (safety 0)))
-  (let ((sap (vector-sap vector)))
-    (inline-vop (((left sap-reg t) sap)
+(defun simd-nreverse8 (result vector start end)
+  (declare (optimize speed (safety 0)))
+  (with-pinned-objects-in-registers (vector)
+    (inline-vop (((left sap-reg t) (vector-sap vector))
                  ((start any-reg tagged-num) start)
                  ((end) end)
                  ((right signed-reg signed-num))
@@ -124,13 +131,10 @@
       (inst b :lt loop)
 
       (inst add right right 16)
-      (inst sub tmp-tn right left)
-      (inst cmp tmp-tn 1)
-      (inst b :le DONE)
 
+      (inst sub gl right left)
       WORD
-      (inst sub tmp-tn right left)
-      (inst cmp tmp-tn 16)
+      (inst cmp gl 16)
       (inst b :lt BYTE)
 
       (inst ldr gl (@ left))
@@ -157,14 +161,12 @@
             (inst cmp left right)
             (inst b :ge DONE))
       DONE))
-  vector)
+  result)
 
-(defun simd-nreverse32 (vector start end)
-  (declare ((simple-array * (*)) vector)
-           (fixnum start end)
-           (optimize speed (safety 0)))
-  (let ((sap (vector-sap vector)))
-    (inline-vop (((left sap-reg t) sap)
+(defun simd-nreverse32 (result vector start end)
+  (declare (optimize speed (safety 0)))
+  (with-pinned-objects-in-registers (vector)
+    (inline-vop (((left sap-reg t) (vector-sap vector))
                  ((start any-reg tagged-num) start)
                  ((end) end)
                  ((right signed-reg signed-num))
@@ -195,9 +197,6 @@
       (inst b :lt loop)
 
       (inst add right right 16)
-      (inst sub tmp-tn right left)
-      (inst cmp tmp-tn 1)
-      (inst b :le DONE)
 
       SCALAR
       (inst sub right right 4)
@@ -215,16 +214,13 @@
             (inst cmp left right)
             (inst b :ge DONE))
       DONE))
-  vector)
+  result)
 
-(defun simd-reverse8 (source start length target)
-  (declare ((simple-array * (*)) vector target)
-           (fixnum start length)
-           (optimize speed (safety 0)))
-  (let ((source (vector-sap source))
-        (target (vector-sap target)))
-    (inline-vop (((source sap-reg t) source)
-                 ((target sap-reg t) target)
+(defun simd-reverse8 (target source start length)
+  (declare (optimize speed (safety 0)))
+  (with-pinned-objects-in-registers (target source)
+    (inline-vop (((source sap-reg t) (vector-sap source))
+                 ((target sap-reg t) (vector-sap target))
                  ((start any-reg tagged-num) start)
                  ((length) length)
                  ((s-i signed-reg signed-num))
@@ -274,14 +270,11 @@
       DONE))
   target)
 
-(defun simd-reverse32 (source start length target)
-  (declare ((simple-array * (*)) vector target)
-           (fixnum start length)
-           (optimize speed (safety 0)))
-  (let ((source (vector-sap source))
-        (target (vector-sap target)))
-    (inline-vop (((source sap-reg t) source)
-                 ((target sap-reg t) target)
+(defun simd-reverse32 (target source start length)
+  (declare (optimize speed (safety 0)))
+  (with-pinned-objects-in-registers (target source)
+    (inline-vop (((source sap-reg t) (vector-sap source))
+                 ((target sap-reg t) (vector-sap target))
                  ((start any-reg tagged-num) start)
                  ((length) length)
                  ((s-i signed-reg signed-num))
@@ -323,22 +316,12 @@
       DONE))
   target)
 
-;;; Basically like the x86 with-pinned-object,
-;;; but here only the boxed registers are pinned.
-;;; This doesn't prevent the var from going to the stack, but none of
-;;; the routines should do that.
-(defmacro with-pinned-objects-in-registers (vars &body body)
-  `(multiple-value-prog1 ,@body
-     ,@(loop for var in vars
-             collect `(touch-object ,var))))
-
-(defun simd-cmp-8-32 (byte-array 32-bit-array)
-  (declare ((simple-array * (*)) byte-array 32-bit-array)
-           (optimize speed (safety 0)))
+(defun simd-cmp-8-32 (byte-array 32-bit-array length)
+  (declare (optimize speed (safety 0)))
   (with-pinned-objects-in-registers (byte-array 32-bit-array)
     (inline-vop (((byte-array sap-reg t) (vector-sap byte-array))
                  ((32-bit-array sap-reg t) (vector-sap 32-bit-array))
-                 ((length any-reg) (length byte-array))
+                 ((length any-reg) length)
                  ((32-bits complex-double-reg))
                  ((bytes single-reg))
                  ((cmp unsigned-reg))
@@ -366,13 +349,12 @@
       (inst mov res null-tn)
       DONE)))
 
-(defun simd-cmp-8-8 (a b)
-  (declare ((simple-array * (*)) a b)
-           (optimize speed (safety 0)))
+(defun simd-cmp-8-8 (a b length)
+  (declare (optimize speed (safety 0)))
   (with-pinned-objects-in-registers (a b)
     (inline-vop (((a-array sap-reg t) (vector-sap a))
                  ((b-array sap-reg t) (vector-sap b))
-                 ((length any-reg) (length a))
+                 ((length any-reg) length)
                  ((a complex-double-reg))
                  ((b))
                  ((cmp unsigned-reg))
@@ -395,13 +377,12 @@
       (inst mov res null-tn)
       DONE)))
 
-(defun simd-cmp-32-32 (a b)
-  (declare ((simple-array * (*)) a b)
-           (optimize speed (safety 0)))
+(defun simd-cmp-32-32 (a b length)
+  (declare (optimize speed (safety 0)))
   (with-pinned-objects-in-registers (a b)
     (inline-vop (((a-array sap-reg t) (vector-sap a))
                  ((b-array sap-reg t) (vector-sap b))
-                 ((length any-reg) (length a))
+                 ((length any-reg) length)
                  ((a complex-double-reg))
                  ((b))
                  ((cmp unsigned-reg))
@@ -424,13 +405,13 @@
       (inst mov res null-tn)
       DONE)))
 
-(defun simd-base-string-equal (a b)
+(defun simd-base-string-equal (a b length)
   (declare (simple-base-string a b)
            (optimize speed (safety 0)))
   (with-pinned-objects-in-registers (a b)
     (inline-vop (((a-array sap-reg t) (vector-sap a))
                  ((b-array sap-reg t) (vector-sap b))
-                 ((length any-reg) (length a))
+                 ((length any-reg) length)
                  ((a complex-double-reg))
                  ((b))
                  ((cmp unsigned-reg))
@@ -476,13 +457,12 @@
       DONE)))
 
 #+sb-unicode
-(defun simd-base-character-string-equal (base-string character-string)
-  (declare ((simple-array * (*)) base-string character-string)
-           (optimize speed (safety 0)))
+(defun simd-base-character-string-equal (base-string character-string length)
+  (declare (optimize speed (safety 0)))
   (with-pinned-objects-in-registers (base-string character-string)
     (inline-vop (((base-string sap-reg t) (vector-sap base-string))
                  ((character-string sap-reg t) (vector-sap character-string))
-                 ((length any-reg) (length base-string))
+                 ((length any-reg) length)
                  ((characters complex-double-reg))
                  ((base-chars single-reg))
                  ((cmp unsigned-reg))

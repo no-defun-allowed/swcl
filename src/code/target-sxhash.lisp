@@ -119,13 +119,8 @@
                (instance-header-word (truly-the instance instance)))
       ;; easy case: 1 word beyond the apparent length is a word added
       ;; by GC (which may have resized the object, but we don't need to know).
-      (%instance-ref instance (%instance-length instance))
+      (truly-the hash-code (%instance-ref instance (%instance-length instance)))
       (%instance-sxhash instance)))
-
-;;; Object must be pinned to use this.
-(defmacro fsc-instance-trailer-hash (fin)
-  `(sap-ref-32 (int-sap (get-lisp-obj-address ,fin))
-               (- (+ (* 5 sb-vm:n-word-bytes) 4) sb-vm:fun-pointer-lowtag)))
 
 ;;; Return a pseudorandom number that was assigned on allocation.
 ;;; FIN is a STANDARD-FUNCALLABLE-INSTANCE but we don't care to type-check it.
@@ -135,15 +130,18 @@
 ;;; due to a change in the definition of a method-combination.
 (declaim (inline fsc-instance-hash))
 (defun fsc-instance-hash (fin)
-  (cond #+x86-64
-        ((= (logand (function-header-word (truly-the function fin)) #xFF00)
-            (ash 5 sb-vm:n-widetag-bits)) ; KLUDGE: 5 data words implies 2 raw words
-         ;; get the upper 4 bytes of wordindex 5
-         (with-pinned-objects (fin) (fsc-instance-trailer-hash fin)))
-        (t
-         (truly-the hash-code
-          (sb-pcl::standard-funcallable-instance-hash-code
-           (truly-the sb-pcl::standard-funcallable-instance fin))))))
+  (truly-the hash-code
+   #+compact-instance-header
+   (with-pinned-objects (fin)
+     (let ((hash (sb-vm::compact-fsc-instance-hash
+                  (truly-the sb-pcl::standard-funcallable-instance fin))))
+       ;; There is not more entropy imparted by doing a mix step on a value that had
+       ;; at most 32 bits of randomness, but this makes more of the bits vary.
+       ;; Some uses of the hash might expect the high bits to have randomness in them.
+       (logand (murmur-fmix-word hash) most-positive-fixnum)))
+   #-compact-instance-header
+   (sb-pcl::standard-funcallable-instance-hash-code
+    (truly-the sb-pcl::standard-funcallable-instance fin))))
 
 (declaim (inline integer-sxhash))
 (defun integer-sxhash (x)
@@ -275,6 +273,9 @@
              (%sxhash-simple-bit-vector (copy-seq bit-vector))))))))
 
 ;;; To avoid "note: Return type not fixed values ..."
+;;; PATHNAME-SXHASH can't easily be placed in pathname.lisp because that file
+;;; depends on LOGICAL-HOST but the definition of LOGICAL-HOST is complicated
+;;; and seems to belong where it is, in target-pathname.lisp, though maybe not.
 (declaim (ftype (sfunction (t) hash-code) pathname-sxhash))
 
 (defun sap-hash (x)
@@ -358,13 +359,15 @@
 ;;; like SXHASH, but for EQUALP hashing instead of EQUAL hashing
 (macrolet ((hash-float (type key)
              ;; Floats that represent integers must hash as the integer would.
-             (let ((lo (coerce most-negative-fixnum type))
-                   (hi (coerce most-positive-fixnum type)))
+             (let ((lo (symbol-value (package-symbolicate :sb-kernel 'most-negative-fixnum- type)))
+                   (hi (symbol-value (package-symbolicate :sb-kernel 'most-positive-fixnum- type)))
+                   (bignum-hash (symbolicate 'sxhash-bignum- type)))
                `(let ((key ,key))
-                  (cond ( ;; This clause allows FIXNUM-sized integer
+                  (declare (inline float-infinity-p))
+                  (cond (;; This clause allows FIXNUM-sized integer
                          ;; values to be handled without consing.
                          (<= ,lo key ,hi)
-                         (multiple-value-bind (q r) (floor (the (,type ,lo ,hi) key))
+                         (multiple-value-bind (q r) (truly-the fixnum (floor (the (,type ,lo ,hi) key)))
                            (if (zerop (the ,type r))
                                (sxhash q)
                                (sxhash (coerce key 'double-float)))))
@@ -373,11 +376,17 @@
                          (if (minusp key)
                              (sxhash sb-ext:single-float-negative-infinity)
                              (sxhash sb-ext:single-float-positive-infinity)))
+                        #+64-bit
                         (t
-                         (multiple-value-bind (q r) (floor key)
-                           (if (zerop (the ,type r))
-                               (sxhash q)
-                               (sxhash (coerce key 'double-float))))))))))
+                         (,bignum-hash key))
+                        #-64-bit
+                        (t
+                         ,(if (eq type 'double-float)
+                              `(multiple-value-bind (q r) (floor key)
+                                 (if (zerop (the ,type r))
+                                     (sxhash q)
+                                     (sxhash key)))
+                              `(,bignum-hash key))))))))
 (defun psxhash (key)
   (declare (optimize speed))
   (labels

@@ -15,7 +15,8 @@
            #:static-code-core-space-id
            #:dynamic-core-space-id
            #:immobile-fixedobj-core-space-id
-           #:immobile-varyobj-core-space-id
+           #:immobile-text-core-space-id
+           #:linkage-table-core-space-id
            #:deflated-core-space-id-flag))
 
 (in-package "SB-COREFILE")
@@ -49,6 +50,9 @@
 (defconstant static-core-space-id 2)
 (defconstant read-only-core-space-id 3)
 (defconstant immobile-fixedobj-core-space-id 4)
-(defconstant immobile-varyobj-core-space-id 5)
+(defconstant immobile-text-core-space-id 5)
 (defconstant static-code-core-space-id 4)
 (defconstant deflated-core-space-id-flag 8)
+;;; this space-id is not present in the core file
+;;; but we need a unique ID to pass to os_validate
+(defconstant linkage-table-core-space-id 101)

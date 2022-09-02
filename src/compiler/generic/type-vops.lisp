@@ -10,6 +10,11 @@
 ;;;; files for more information.
 (in-package "SB-VM")
 
+
+(defvar *other-pointer-type-vops*
+  ;; A special case due to NIL
+  `(symbolp (,symbol-widetag)))
+
 ;;; We use a default definition of the vop for PRED-NAME only if it was not
 ;;; already defined by the backend in {arch}/type-vops.  DEFINE-VOP has a compile-time
 ;;; effect of storing the vop name in *BACKEND-PARSED-VOPS*, so it's correct to
@@ -18,17 +23,26 @@
 ;;; from its default definition, so that's gotta be allowed, or else make-host-2
 ;;; would produce a null expansion for every type-vop.
 (defmacro define-type-vop (pred-name type-codes)
-  (awhen (gethash pred-name sb-c::*backend-parsed-vops*)
-    (unless (string= (sb-c::vop-parse-note it) "defaulted")
-      (return-from define-type-vop)))
+  ;; This EVAL is a bit sloppy but it (somewhat surprisingly) serves a real purpose
+  ;; in that you can gives the set of types code as symbols and/or integers.
   (let ((cost (if (> (reduce #'max type-codes :key #'eval) lowtag-limit)
                   7
                   4)))
-    `(define-vop (,pred-name type-predicate)
-       (:translate ,pred-name)
-       (:note "defaulted")
-       (:generator ,cost
-         (test-type value temp target not-p ,type-codes :value-tn-ref args)))))
+    `(progn
+       (let ((type-codes (list ,@type-codes)))
+         (when (loop for type in type-codes
+                     never (or (< type lowtag-limit)
+                               (memq type +immediate-types+)
+                               (memq type +function-widetags+)))
+           (setf (getf *other-pointer-type-vops* ',pred-name)
+                 (canonicalize-widetags type-codes))))
+       ,(unless (awhen (gethash pred-name sb-c::*backend-parsed-vops*)
+                  (string/= (sb-c::vop-parse-note it) "defaulted"))
+          `(define-vop (,pred-name type-predicate)
+             (:translate ,pred-name)
+             (:note "defaulted")
+             (:generator ,cost
+               (test-type value temp target not-p ,type-codes :value-tn-ref args)))))))
 
 (define-type-vop unbound-marker-p (unbound-marker-widetag))
 

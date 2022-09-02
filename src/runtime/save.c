@@ -154,27 +154,15 @@ write_bytes_to_file(FILE * file, char *addr, size_t bytes, int compression)
     }
 };
 
-#if defined(LISP_FEATURE_WIN32) && defined(LISP_FEATURE_64_BIT)
-#define FTELL _ftelli64
-#define FSEEK _fseeki64
-typedef __int64 ftell_type;
-#else
-#define FTELL ftell
-#define FSEEK fseek
-typedef long ftell_type;
-#endif
-
 static long write_bytes(FILE *file, char *addr, size_t bytes,
                         os_vm_offset_t file_offset, int compression, int align)
 {
     ftell_type here, data;
 
 #ifdef LISP_FEATURE_WIN32
-    size_t count;
-    /* touch every single page in the space to force it to be mapped. */
-    for (count = 0; count < bytes; count += 0x1000) {
-        volatile int temp = addr[count];
-    }
+    // I can't see how we'd ever attempt writing from uncommitted memory,
+    // but this is better than was was previously here (a "touch" loop over all pages)
+    os_commit_memory(addr, bytes);
 #endif
 
     fflush(file);
@@ -194,7 +182,7 @@ output_space(FILE *file, int id, lispobj *addr, lispobj *end,
 {
     size_t words, bytes, data, compressed_flag;
     static char *names[] = {NULL, "dynamic", "static", "read-only",
-                            "immobile", "immobile"};
+                            "fixedobj", "text"};
 
     compressed_flag
             = ((core_compression_level != COMPRESSION_LEVEL_NONE)
@@ -323,12 +311,6 @@ save_to_filehandle(FILE *file, char *filename, lispobj init_function,
           * entry type code, plus this count itself) */
          (5 * MAX_CORE_SPACE_ID) + 2, file);
     output_space(file,
-                 READ_ONLY_CORE_SPACE_ID,
-                 (lispobj *)READ_ONLY_SPACE_START,
-                 read_only_space_free_pointer,
-                 core_start_pos,
-                 core_compression_level);
-    output_space(file,
                  STATIC_CORE_SPACE_ID,
                  (lispobj *)STATIC_SPACE_START,
                  static_space_free_pointer,
@@ -348,6 +330,15 @@ save_to_filehandle(FILE *file, char *filename, lispobj init_function,
                  (void*)dynamic_space_highwatermark(),
                  core_start_pos,
                  core_compression_level);
+    /* FreeBSD really doesn't like to give you the address you asked for
+     * on dynamic space. We have a better chance at satisfying the request
+     * if we haven't already mapped R/O space below it. */
+    output_space(file,
+                 READ_ONLY_CORE_SPACE_ID,
+                 (lispobj *)READ_ONLY_SPACE_START,
+                 read_only_space_free_pointer,
+                 core_start_pos,
+                 core_compression_level);
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
     output_space(file,
                  IMMOBILE_FIXEDOBJ_CORE_SPACE_ID,
@@ -360,9 +351,9 @@ save_to_filehandle(FILE *file, char *filename, lispobj init_function,
     // i.e. if code resided between dynamic and fixedobj space, then dynamic
     // space would need to have it pages renumbered when code is pulled out.
     output_space(file,
-                 IMMOBILE_VARYOBJ_CORE_SPACE_ID,
-                 (lispobj *)VARYOBJ_SPACE_START,
-                 varyobj_free_pointer,
+                 IMMOBILE_TEXT_CORE_SPACE_ID,
+                 (lispobj *)TEXT_SPACE_START,
+                 text_space_highwatermark,
                  core_start_pos,
                  core_compression_level);
 #endif

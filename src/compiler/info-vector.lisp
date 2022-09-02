@@ -90,7 +90,7 @@
 ;;;;; Some stuff moved from 'globaldb.lisp':
 
 ;;; The structure constructor is never called
-(sb-xc:defstruct (packed-info (:predicate nil) (:constructor nil))
+(sb-xc:defstruct (packed-info (:copier %copy-packed-info) (:predicate nil) (:constructor nil))
   cells)
 (declaim (freeze-type packed-info))
 #-sb-xc-host
@@ -99,7 +99,11 @@
     (setf (dd-flags dd) (logior (dd-flags dd) +dd-varylen+))))
 (eval-when (#-sb-xc-host :compile-toplevel)
   (sb-xc:defmacro make-packed-info (n)
-    `(%new-instance ,(find-layout 'packed-info) (+ ,n ,sb-vm:instance-data-start))))
+    `(locally (declare (sb-c::tlab :system)) ; will be ignored if #-system-tlabs
+       (%new-instance ,(find-layout 'packed-info) (+ ,n ,sb-vm:instance-data-start))))
+  (sb-xc:defmacro copy-packed-info (x)
+    `(locally (declare (sb-c::tlab :system))
+       (%copy-packed-info ,x))))
 
 (defconstant info-num-mask (ldb (byte info-number-bits 0) -1)) ; #b111111
 
@@ -137,9 +141,12 @@
         (setf (get symbol :sb-xc-globaldb-info) newval))
       (values))))
 
-;; FDEFINITIONs have an info-number that admits slightly clever logic
-;; for PACKED-INFO-FDEFN. Do not change this constant without
-;; careful examination of that function.
+;;; :DEFINITION has an info-number that admits slightly clever logic.
+;;; * SB-INTERPRETER:SPECIAL-FORM-HANDLER only needs to decode the first
+;;;   info-number in a packed-info to test if :DEFINITION is present.
+;;; * FIND-FDEFN only needs to extract one info-number after finding
+;;;   the proper auxiliary key {SETF, CAS, etc} in the data portion.
+;;; Do not change this without careful examination of those functions.
 (defconstant +fdefn-info-num+ info-num-mask)
 
 ;; Extract a field from a packed info descriptor.
@@ -414,9 +421,7 @@
                                 aux-key new old-size)))
                ;; it had better be found - it was in the packed vector
                (aver data-start)
-               ;; fdefn must be the first piece of info for any name.
-               ;; This facilitates implementing SYMBOL-FUNCTION without
-               ;; without completely decoding the vector.
+               ;; :DEFINITION must be the first piece of info for any name.
                (insert-at (+ data-start (if (eql info-number +fdefn-info-num+)
                                             1 (svref new data-start)))
                           info-number value)
@@ -444,40 +449,26 @@
 ;; a unit test of this logic against the complete logic.
 ;;
 (defun quick-packed-info-insert (input info-number value)
+  (declare (type info-number info-number))
   ;; Because INPUT contains 1 descriptor and its corresponding values,
   ;; the current length is exactly NEW-N, the new number of fields.
   (let* ((descriptor (%info-ref input 0))
          (new-n (truly-the info-number (packed-info-len input)))
          (output (make-packed-info (1+ new-n))))
-    ;; Two cases: we're either inserting info for the fdefn, or not.
-    (cond ((eq info-number +fdefn-info-num+)
-           ;; fdefn, if present, must remain the first packed field.
-           ;; Replace the lowest field (the count) with +fdefn-info-num+,
-           ;; shift everything left 6 bits, then OR in the new count.
-           (setf (%info-ref output 0)
-                 (logior (make-info-descriptor
-                          (dpb +fdefn-info-num+ (byte info-number-bits 0)
-                               descriptor) info-number-bits) new-n)
-                 ;; Packed vectors are indexed "backwards". The first
-                 ;; field's info is in the highest numbered cell.
-                 (%info-ref output new-n) value)
-           (loop for i from 1 below new-n
-                 do (setf (%info-ref output i) (%info-ref input i))))
-          (t
-           ;; Add a field on the high end and increment the count.
-           (setf (%info-ref output 0)
-                 (logior (make-info-descriptor
-                          info-number (* info-number-bits new-n))
-                         (1+ descriptor))
-                 (%info-ref output 1) value)
-           ;; Slide the old data up 1 cell.
-           (loop for i from 2 to new-n
-                 do (setf (%info-ref output i) (%info-ref input (1- i))))))
+    ;; Add a field on the high end and increment the count.
+    (setf (%info-ref output 0)
+          (logior (make-info-descriptor info-number (* info-number-bits new-n))
+                  (1+ descriptor))
+          (%info-ref output 1) value)
+    ;; Slide the old data up 1 cell.
+    (loop for i from 2 to new-n
+          do (setf (%info-ref output i) (%info-ref input (1- i))))
     output))
 
 (declaim (maybe-inline packed-info-insert))
 (defun packed-info-insert (packed-info aux-key info-number newval)
   (if (and (eql aux-key +no-auxiliary-key+)
+           (not (eql info-number +fdefn-info-num+))
            (info-quickly-insertable-p packed-info))
       (quick-packed-info-insert packed-info info-number newval)
       (%packed-info-insert packed-info aux-key info-number newval)))
@@ -891,3 +882,8 @@ This is interpreted as
                         old-info)))
           (info-puthash *info-environment* name #'hairy-name))))
     result))
+
+;;; Disassembling these proves that SYS-ALLOC-TRAMP gets called
+(export '(test-make-packed-info test-copy-packed-info))
+(defun test-make-packed-info (x) (make-packed-info (the (mod 100) x)))
+(defun test-copy-packed-info (x) (copy-packed-info x))

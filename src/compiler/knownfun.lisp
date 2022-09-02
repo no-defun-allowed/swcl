@@ -171,8 +171,13 @@
     (setq attributes (union '(unwind) attributes)))
   (when (member 'flushable attributes)
     (pushnew 'unsafely-flushable attributes))
-  #-(or x86-64 arm64) ;; Needs to be supported by the call VOPs
+  #-(or arm64 x86-64) ;; Needs to be supported by the call VOPs
   (setf attributes (remove 'no-verify-arg-count attributes))
+  #-(or arm64 x86-64) ;; Needs to be supported by the call VOPs, sb-vm::fixed-call-arg-location
+  (setf attributes (remove 'fixed-args attributes))
+  (when (memq 'fixed-args attributes)
+    (pushnew 'no-verify-arg-count attributes))
+
   (multiple-value-bind (type annotation)
       (split-type-info arg-types result-type)
     `(%defknown ',(if (and (consp name)
@@ -273,6 +278,11 @@
   (or (info :function :info name) (error "~S is not a known function." name)))
 
 ;;;; generic type inference methods
+
+(defun maybe-find-free-var (name)
+  (let ((found (gethash name (free-vars *ir1-namespace*))))
+    (unless (eq found :deprecated)
+      found)))
 
 (defun symbol-value-derive-type (node &aux (args (basic-combination-args node))
                                       (lvar (pop args)))

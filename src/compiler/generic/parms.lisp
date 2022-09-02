@@ -63,10 +63,12 @@
                ;; And of course, don't use them if unsupported.
                ((:fixedobj-space-start fixedobj-space-start*))
                ((:fixedobj-space-size  fixedobj-space-size*) (* 24 1024 1024))
-               ((:varyobj-space-start  varyobj-space-start*))
-               ((:varyobj-space-size   varyobj-space-size*) (* 104 1024 1024))
+               ((:text-space-start text-space-start*))
+               ((:text-space-size  text-space-size*) (* 104 1024 1024))
                (small-space-size #x100000)
-               ((:read-only-space-size ro-space-size) small-space-size))
+               ((:read-only-space-size ro-space-size)
+                #+darwin-jit small-space-size
+                #-darwin-jit 0))
   (declare (ignorable dynamic-space-start*)) ; might be unused in make-host-2
   (flet ((defconstantish (relocatable symbol value)
            (if (not relocatable) ; easy case
@@ -90,16 +92,18 @@
                            (static-code ,small-space-size))
                          #+immobile-space
                          `((fixedobj ,fixedobj-space-size*)
-                           (varyobj ,varyobj-space-size*))))
+                           (text ,text-space-size*))))
          (ptr small-spaces-start)
          (small-space-forms
            (loop for (space size var-name) in spaces
                  appending
                  (let* ((relocatable
+                          ;; READONLY is usually movable now.
                           ;; TODO: linkage-table could move with code, if the CPU
                           ;; prefers PC-relative jumps, and we emit better code
                           ;; (which we don't- for x86 we jmp via RBX always)
-                          (member space '(fixedobj varyobj)))
+                          (member space '(fixedobj text
+                                          #-darwin-jit read-only)))
                         (start ptr)
                         (end (+ ptr size)))
                    (setf ptr end)
@@ -109,14 +113,14 @@
                          ;; Allow expressly given addresses / sizes for immobile space.
                          ;; The addresses are for testing only - you should not need them.
                          (case space
-                           (varyobj  (setq start (or varyobj-space-start* start)
-                                           end (+ start varyobj-space-size*)))
+                           (text (setq start (or text-space-start* start)
+                                       end (+ start text-space-size*)))
                            (fixedobj (setq start (or fixedobj-space-start* start)
                                            end (+ start fixedobj-space-size*))))
                          `(,(defconstantish relocatable start-sym start)
                            ,(cond ((not relocatable)
                                    `(defconstant ,(symbolicate space "-SPACE-END") ,end))
-                                  #-sb-xc-host ((eq space 'varyobj)) ; don't emit anything
+                                  #-sb-xc-host ((eq space 'text)) ; don't emit anything
                                   (t
                                    `(defconstant ,(symbolicate space "-SPACE-SIZE")
                                       ,(- end start)))))))))))
@@ -132,6 +136,9 @@
                (ecase n-word-bits
                  (32 (expt 2 29))
                  (64 (expt 2 30)))))
+         ;; an arbitrary value to avoid kludging genesis
+         #+(and sb-xc-host (not darwin-jit))
+         (defparameter read-only-space-end read-only-space-start)
          #-soft-card-marks (defconstant cards-per-page 1)
          (defconstant gencgc-card-bytes (/ gencgc-page-bytes cards-per-page))
          (defconstant gencgc-card-shift
@@ -208,8 +215,10 @@
     ,@'(*current-catch-block*
         *current-unwind-protect-block*)
 
-    #+immobile-space *immobile-freelist* ; not per-thread (yet...)
     #+metaspace *metaspace-tracts*
+    *immobile-codeblob-tree* ; for generations 0 through 5 inclusive
+    *immobile-codeblob-vector* ; for pseudo-static-generation
+    *dynspace-codeblob-tree*
 
     ;; stack pointers
     #-sb-thread *binding-stack-start* ; a thread slot if #+sb-thread
@@ -220,7 +229,6 @@
 
     ;; threading support
     #+sb-thread ,@'(sb-thread::*starting-threads* *free-tls-index*)
-    *codeblob-tree*
 
     ;; runtime linking of lisp->C calls (regardless of whether
     ;; the C function is in a dynamic shared object or not)

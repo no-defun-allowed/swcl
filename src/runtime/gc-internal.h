@@ -40,6 +40,9 @@ extern struct weak_pointer *weak_pointer_chain; /* in gc-common.c */
 
 #include "align.h"
 
+// Distinguish penultimate GC (iteration 1) from ultimate GC (iteration 2) in save-lisp
+extern int save_lisp_gc_iteration;
+
 // Offset from an fdefn raw address to the underlying simple-fun,
 // if and only if it points to a simple-fun.
 // For those of us who are too memory-impaired to know how to use the value:
@@ -158,8 +161,8 @@ instance_scan(void (*proc)(lispobj*, sword_t, uword_t),
 
 extern int simple_fun_index(struct code*, struct simple_fun*);
 
-extern lispobj fdefn_callee_lispobj(struct fdefn *fdefn);
-extern void gc_close_thread_regions(struct thread*);
+extern lispobj decode_fdefn_rawfun(struct fdefn *fdefn);
+extern void gc_close_thread_regions(struct thread*, int);
 extern void gc_close_collector_regions(int);
 
 #endif /* _GC_INTERNAL_H_ */

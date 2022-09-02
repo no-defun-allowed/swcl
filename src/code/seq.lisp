@@ -918,14 +918,14 @@ many elements are copied."
               ((typep vector '(or (simple-array base-char (*))
                                (simple-array (signed-byte 8) (*))
                                (simple-array (unsigned-byte 8) (*))))
-               (sb-vm::simd-reverse8 vector start length new-vector))
+               (sb-vm::simd-reverse8 new-vector vector start length))
               #+(or arm64 x86-64)
               ((typep vector '(or #+sb-unicode
                                (simple-array character (*))
                                (simple-array (signed-byte 32) (*))
                                (simple-array (unsigned-byte 32) (*))
                                (simple-array single-float (*))))
-               (sb-vm::simd-reverse32 vector start length new-vector))
+               (sb-vm::simd-reverse32 new-vector vector start length))
               (t
                (let ((getter (the function (svref %%data-vector-reffers%% tag)))
                      (setter (the function (svref %%data-vector-setters%% tag))))
@@ -941,7 +941,7 @@ many elements are copied."
 ;;;; NREVERSE
 
 (defun list-nreverse (list)
-  (do ((1st (cdr list) (if (endp 1st) 1st (cdr 1st)))
+  (do ((1st (cdr (truly-the list list)) (cdr 1st))
        (2nd list 1st)
        (3rd '() 2nd))
       ((atom 2nd) 3rd)
@@ -959,11 +959,12 @@ many elements are copied."
             (%vector-raw-bits vector right-index) left)))
   vector)
 
-(defun vector-nreverse (vector)
-  (declare (vector vector))
-  (when (> (length vector) 1)
-    (with-array-data ((vector vector) (start) (end)
-                      :check-fill-pointer t)
+(defun vector-nreverse (original-vector)
+  (declare (vector original-vector))
+  (when (> (length original-vector) 1)
+    (with-array-data ((vector original-vector) (start) (end)
+                      :check-fill-pointer t
+                      :force-inline t)
       (let ((tag (%other-pointer-widetag vector)))
         (cond ((= tag sb-vm:simple-vector-widetag)
                (do ((left-index start (1+ left-index))
@@ -978,16 +979,18 @@ many elements are copied."
                (nreverse-word-specialized-vector vector start end))
               #+(or arm64 x86-64)
               ((typep vector '(or (simple-array base-char (*))
-                                  (simple-array (signed-byte 8) (*))
-                                  (simple-array (unsigned-byte 8) (*))))
-               (sb-vm::simd-nreverse8 vector start end))
+                               (simple-array (signed-byte 8) (*))
+                               (simple-array (unsigned-byte 8) (*))))
+               (return-from vector-nreverse
+                 (sb-vm::simd-nreverse8 original-vector vector start end)))
               #+(or arm64 x86-64)
               ((typep vector '(or #+sb-unicode
                                (simple-array character (*))
                                (simple-array (signed-byte 32) (*))
                                (simple-array (unsigned-byte 32) (*))
                                (simple-array single-float (*))))
-               (sb-vm::simd-nreverse32 vector start end))
+               (return-from vector-nreverse
+                 (sb-vm::simd-nreverse32 original-vector vector start end)))
               (t
                (let* ((getter (the function (svref %%data-vector-reffers%% tag)))
                       (setter (the function (svref %%data-vector-setters%% tag))))
@@ -999,7 +1002,7 @@ many elements are copied."
                          (right (funcall getter vector right-index)))
                      (funcall setter vector left-index right)
                      (funcall setter vector right-index left)))))))))
-  vector)
+  original-vector)
 
 (defun nreverse (sequence)
   "Return a sequence of the same elements in reverse order; the argument

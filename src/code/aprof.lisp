@@ -158,7 +158,7 @@
          (cmp :qword ?end :tlab-limit)
          (jmp :nbe ?_)
          (mov :qword :tlab-freeptr ?end)
-         (add ?end ?bias)
+         (:or (add ?end ?bias) (dec ?end))
          (mov ?_ (ea ?_ ?end) ?header))
 
         (var-array
@@ -232,6 +232,12 @@
                (mov ?_ (ea 0 ?result) ?header)
                (mov ?_ (ea ?_ ?result) ?vector-len)
                (or ?result ?lowtag))
+        ;; not really "large" but same as preceding
+        (funinstance (push ?nbytes)
+                     (call . ignore)
+                     (pop ?result)
+                     (mov ?_ (ea 0 ?result) ?header)
+                     (or ?result ?lowtag))
         (list (push ?nbytes)
               (call . ignore)
               (pop ?result)

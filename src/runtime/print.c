@@ -27,24 +27,11 @@
 #include "gc-internal.h"
 #include "gc-private.h"
 #include "genesis/gc-tables.h"
-#include <stdarg.h>
 #include "thread.h"              /* genesis/primitive-objects.h needs this */
 #include <errno.h>
 #include <stdlib.h>
 #include <inttypes.h>
 #include <setjmp.h>
-
-/* FSHOW and odxprint provide debugging output for low-level information
- * (signal handling, exceptions, safepoints) which is hard to debug by
- * other means.
- *
- * If enabled at all, environment variables control whether calls of the
- * form odxprint(name, ...) are enabled at run-time, e.g. using
- * SBCL_DYNDEBUG="fshow safepoints".
- *
- * In the case of FSHOW, old-style code from runtime.h
- * can also be used to enable or disable these more aggressively.
- */
 
 struct dyndebug_config dyndebug_config = {
     QSHOW == 2,
@@ -128,81 +115,6 @@ dyndebug_init()
 
 #undef dyndebug_init1
 #undef DYNDEBUG_NFLAGS
-}
-
-/* Temporarily, odxprint merely performs the equivalent of a traditional
- * FSHOW call, i.e. it merely formats to stderr.  Ultimately, it should
- * be restored to its full win32 branch functionality, where output to a
- * file or to the debugger can be selected at runtime. */
-
-void vodxprint_fun(const char *, va_list);
-
-void
-odxprint_fun(const char *fmt, ...)
-{
-    va_list args;
-    va_start(args, fmt);
-    vodxprint_fun(fmt, args);
-    va_end(args);
-}
-
-void
-vodxprint_fun(const char *fmt, va_list args)
-{
-#ifdef LISP_FEATURE_WIN32
-    DWORD lastError = GetLastError();
-#endif
-    int original_errno = errno;
-
-    char buf[1024];
-    int n = 0;
-
-#ifdef LISP_FEATURE_SB_THREAD
-    snprintf(buf, sizeof(buf), "["THREAD_ID_LABEL"] ", THREAD_ID_VALUE);
-    n = strlen(buf);
-#endif
-
-    vsnprintf(buf + n, sizeof(buf) - n - 1, fmt, args);
-    /* buf is now zero-terminated (even in case of overflow).
-     * Our caller took care of the newline (if any) through `fmt'. */
-
-    /* A sufficiently POSIXy implementation of stdio will provide
-     * per-FILE locking, as defined in the spec for flockfile.  At least
-     * glibc complies with this.  Hence we do not need to perform
-     * locking ourselves here.  (Should it turn out, of course, that
-     * other libraries opt for speed rather than safety, we need to
-     * revisit this decision.) */
-    fputs(buf, stderr);
-
-#ifdef LISP_FEATURE_WIN32
-    /* stdio's stderr is line-bufferred, i.e. \n ought to flush it.
-     * Unfortunately, MinGW does not behave the way I would expect it
-     * to.  Let's be safe: */
-    fflush(stderr);
-#endif
-
-#ifdef LISP_FEATURE_WIN32
-    SetLastError(lastError);
-#endif
-    errno = original_errno;
-}
-
-/* Translate the rather awkward syntax
- *   FSHOW((stderr, "xyz"))
- * into the new and cleaner
- *   odxprint("xyz").
- * If we were willing to clean up all existing call sites, we could remove
- * this wrapper function.  (This is a function, because I don't know how to
- * strip the extra parens in a macro.) */
-void
-fshow_fun(void __attribute__((__unused__)) *ignored,
-          const char *fmt,
-          ...)
-{
-    va_list args;
-    va_start(args, fmt);
-    vodxprint_fun(fmt, args);
-    va_end(args);
 }
 
 #include "monitor.h"
@@ -812,7 +724,7 @@ static void print_fun_or_otherptr(lispobj obj)
 
     case FDEFN_WIDETAG:
         print_slots(fdefn_slots, 2, ptr);
-        print_obj("entry: ", fdefn_callee_lispobj((struct fdefn*)(ptr-1)));
+        print_obj("entry: ", decode_fdefn_rawfun((struct fdefn*)(ptr-1)));
         break;
 
     // Make some vectors printable from C, for when all hell breaks lose

@@ -106,13 +106,11 @@ extern void os_zero(os_vm_address_t addr, os_vm_size_t length);
 #define IS_THREAD_STRUCT 4
 #define MOVABLE_LOW      (MOVABLE|ALLOCATE_LOW)
 #define IS_GUARD_PAGE    8
-extern os_vm_address_t os_validate(int movable,
-                                   os_vm_address_t addr,
-                                   os_vm_size_t len, int execute, int jit);
+extern os_vm_address_t os_validate(int attributes, os_vm_address_t addr,
+                                   os_vm_size_t len, int space_id);
 
 #ifdef LISP_FEATURE_WIN32
-void* os_commit_memory(os_vm_address_t addr, os_vm_size_t len);
-os_vm_address_t os_validate_nocommit(int attributes, os_vm_address_t addr, os_vm_size_t len);
+void os_commit_memory(os_vm_address_t addr, os_vm_size_t len);
 #endif
 
 /* This function seems to undo the effect of os_validate(..). */
@@ -241,4 +239,21 @@ extern int os_reported_page_size;
 // Opaque context accessor
 uword_t os_context_pc(os_context_t*);
 void set_os_context_pc(os_context_t*, uword_t);
+
+#ifdef LISP_FEATURE_WIN32
+#define GETPAGESIZE 4096
+#ifdef LISP_FEATURE_64_BIT
+#  define FTELL _ftelli64
+#  define FSEEK _fseeki64
+#  define LSEEK _lseeki64
+typedef __int64 ftell_type;
+#endif
+#else
+#define GETPAGESIZE getpagesize()
+#define FTELL ftell
+#define FSEEK fseek
+#define LSEEK lseek
+typedef long ftell_type;
+#endif
+
 #endif

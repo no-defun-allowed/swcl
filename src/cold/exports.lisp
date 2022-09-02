@@ -98,7 +98,7 @@ interface stability.")
    "UNIX-OPEN" "UNIX-OPENDIR" "UNIX-PATHNAME" "UNIX-PID"
    "UNIX-PIPE" "UNIX-POLL" "UNIX-SIMPLE-POLL"
    "UNIX-READ" "UNIX-READDIR" "UNIX-READLINK" "UNIX-REALPATH"
-   "UNIX-RENAME" "UNIX-SELECT" "UNIX-STAT" "UNIX-UID"
+   "UNIX-RENAME" "UNIX-STAT" "UNIX-UID"
    "UNIX-UNLINK" "UNIX-WRITE"
    "WCONTINUED" "WNOHANG" "WUNTRACED"
    "W_OK" "X_OK"
@@ -307,7 +307,6 @@ be submitted as a CDR")
                 "PARSE-EVAL-WHEN-SITUATIONS"
                 "MAKE-GLOBAL-VAR" "MAKE-LAMBDA-VAR"
                 "*LEXENV*")
-  (:import-from "SB-VM" "SYMBOL-EXTRA-SLOT-P" "SYMBOL-EXTRA")
   (:import-from "SB-ALIEN" "%HEAP-ALIEN" "ALIEN-VALUE")
   (:import-from "SB-KERNEL" "%%TYPEP")
   (:export "BASIC-ENV"
@@ -458,6 +457,7 @@ structure representations")
            "IS-LISP-POINTER"
            #+gencgc "LARGE-OBJECT-SIZE"
            "LAYOUT"
+           "LDB-MONITOR"
            "LIST-ALLOCATED-OBJECTS" "LIST-POINTER-LOWTAG"
            ;; FIXME: Possibly these other parameters (see
            ;; compiler/{x86,sparc}/parms.lisp) should be defined
@@ -580,11 +580,10 @@ structure representations")
            "SYMBOL-HASH-SLOT" "SYMBOL-WIDETAG" "SYMBOL-NAME-SLOT"
            "SYMBOL-PACKAGE-ID-SLOT" "SYMBOL-INFO-SLOT" "SYMBOL-FDEFN-SLOT"
            "SYMBOL-SIZE" "SYMBOL-VALUE-SLOT" "SYMBOL-TLS-INDEX-SLOT"
-           "AUGMENTED-SYMBOL-SIZE"
            "*BINDING-STACK-START*"
            "*CONTROL-STACK-START*" "*CONTROL-STACK-END*"
            "CONTROL-STACK-POINTER-VALID-P"
-           "DYNAMIC-SPACE-START" "DYNAMIC-SPACE-END"
+           "DYNAMIC-SPACE-START"
            #+gencgc "MAX-DYNAMIC-SPACE-END"
            #+gencgc "PAGE-TABLE"
            #+gencgc "FIND-PAGE-INDEX"
@@ -629,10 +628,10 @@ structure representations")
    "IMMOBILE-CARD-BYTES"
    "FIXEDOBJ-SPACE-START"
    "FIXEDOBJ-SPACE-SIZE"
-   "VARYOBJ-SPACE-START"
-   "VARYOBJ-SPACE-SIZE"
+   "TEXT-SPACE-START"
+   "TEXT-SPACE-SIZE"
    "*FIXEDOBJ-SPACE-FREE-POINTER*"
-   "*VARYOBJ-SPACE-FREE-POINTER*")
+   "*TEXT-SPACE-FREE-POINTER*")
   #+sb-simd-pack
   (:export
    "SIMD-PACK-TAG-SLOT"
@@ -1956,10 +1955,16 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "%SXHASH-SIMPLE-SUBSTRING" "%TAN" "%TAN-QUICK" "%TANH"
            "THE*"
            "%UNARY-ROUND"
-           "%UNARY-TRUNCATE"
+           "%UNARY-TRUNCATE" "UNARY-TRUNCATE"
            "%UNARY-TRUNCATE/SINGLE-FLOAT"
            "%UNARY-TRUNCATE/DOUBLE-FLOAT"
            "%UNARY-FTRUNCATE"
+           "UNARY-TRUNCATE-SINGLE-FLOAT-TO-BIGNUM"
+           "UNARY-TRUNCATE-DOUBLE-FLOAT-TO-BIGNUM"
+           "%UNARY-TRUNCATE-SINGLE-FLOAT-TO-BIGNUM"
+           "%UNARY-TRUNCATE-DOUBLE-FLOAT-TO-BIGNUM"
+           "SXHASH-BIGNUM-DOUBLE-FLOAT" "SXHASH-BIGNUM-SINGLE-FLOAT"
+
            "%WITH-ARRAY-DATA"
            "%WITH-ARRAY-DATA/FP"
            "%WITH-ARRAY-DATA-MACRO"
@@ -2034,7 +2039,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "CSUBTYPEP" "CTYPE" "TYPE-HASH-VALUE" "CTYPE-OF"
            "CTYPE-P" "CTYPEP"
            "CTYPE-ARRAY-DIMENSIONS" "CTYPE-ARRAY-SPECIALIZED-ELEMENT-TYPES"
-           "CURRENT-FP" "CURRENT-SP" "CURRENT-DYNAMIC-SPACE-START"
+           "CURRENT-FP" "CURRENT-SP"
            "DATA-NIL-VECTOR-REF"
            "DATA-VECTOR-REF" "DATA-VECTOR-REF-WITH-OFFSET"
            "DATA-VECTOR-SET" "DATA-VECTOR-SET-WITH-OFFSET"
@@ -2507,7 +2512,6 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "%CODE-FUN-OFFSET"
            "CODE-N-ENTRIES"
            "CODE-N-NAMED-CALLS"
-           "CODE-OBJ-IS-FILLER-P"
            "%DENOMINATOR"
            "%OTHER-POINTER-P"
            "%OTHER-POINTER-SUBTYPE-P"
@@ -3401,11 +3405,6 @@ possibly temporarily, because it might be used internally.")
 
            "*REPL-PROMPT-FUN*"
            "*REPL-READ-FORM-FUN*"
-
-            ;; Character database
-
-           "**CHARACTER-PRIMARY-COMPOSITIONS**"
-           "**CHARACTER-COLLATIONS**"
 
             ;; Character database access
 

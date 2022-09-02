@@ -30,6 +30,7 @@ extern void mr_update_closed_region(struct alloc_region *region);
 
 extern boolean allocation_bit_marked(void *pointer);
 extern void set_allocation_bit_mark(void *pointer);
+extern void clear_allocation_bit_mark(void *pointer);
 extern boolean line_marked(void *pointer);
 
 extern lispobj *search_dynamic_space(void *pointer);
@@ -40,5 +41,6 @@ extern void mr_preserve_object(lispobj obj);
 extern void mr_pre_gc(generation_index_t generation);
 extern void mr_collect_garbage(boolean raise);
 extern void zero_all_free_ranges();
+extern void prepare_lines_for_final_gc();
 #endif
 #endif

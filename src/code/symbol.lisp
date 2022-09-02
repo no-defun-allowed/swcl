@@ -359,7 +359,10 @@ distinct from the global value. Can also be SETF."
 
 (defun %make-symbol (kind name)
   (declare (ignorable kind) (type simple-string name))
-  (logior-array-flags name sb-vm:+vector-shareable+) ; Set "logically read-only" bit
+  ;; Avoid writing to the string header if it's already flagged as readonly, or off-heap.
+  (when (and (not (logtest (ash sb-vm:+vector-shareable+ 8) (get-header-data name)))
+             (sb-kernel::dynamic-space-obj-p name))
+    (logior-array-flags name sb-vm:+vector-shareable+)) ; Set "logically read-only" bit
   (let ((symbol
          (truly-the symbol
           #+immobile-symbols (sb-vm::make-immobile-symbol name)
@@ -491,20 +494,17 @@ distinct from the global value. Can also be SETF."
 
 (flet ((%symbol-nameify (prefix counter)
   (declare (string prefix))
-  (if (typep counter '(and fixnum unsigned-byte))
+  (if (and (typep prefix 'simple-base-string)
+           (typep counter '(and fixnum unsigned-byte)))
       (let ((s ""))
-        (declare (simple-string s))
+        (declare (simple-base-string s))
         (labels ((recurse (depth n)
                    (multiple-value-bind (q r) (truncate n 10)
                      (if (plusp q)
                          (recurse (1+ depth) q)
-                         (let ((et (if (or (base-string-p prefix)
-                                           #+sb-unicode ; no #'base-char-p
-                                           (every #'base-char-p prefix))
-                                       'base-char 'character)))
-                           (setq s (make-string (+ (length prefix) depth)
-                                                :element-type et))
-                           (replace s prefix)))
+                         (replace (setq s (make-string (+ (length prefix) depth)
+                                                       :element-type 'base-char))
+                                  (truly-the simple-base-string prefix)))
                      (setf (char s (- (length s) depth))
                            (code-char (+ (char-code #\0) r)))
                      s)))

@@ -59,7 +59,7 @@
     (pure-runner (pure-cload-files) 'cload-test log)
     (impure-runner (impure-load-files) 'load-test log)
     (impure-runner (impure-cload-files) 'cload-test log)
-    #-win32 (impure-runner (sh-files) 'sh-test log)
+    (impure-runner (sh-files) 'sh-test log)
     (log-file-elapsed-time "GRAND TOTAL" start-time log))
   (report)
   (sb-ext:exit :code (if (unexpected-failures) 1 104)))
@@ -203,7 +203,8 @@
       sb-impl::*token-buf-pool*
       sb-impl::*user-hash-table-tests*
       sb-impl::**finalizer-store**
-      sb-vm::*codeblob-tree*
+      sb-vm::*immobile-codeblob-tree*
+      sb-vm::*dynspace-codeblob-tree*
       ,(maybe "SB-KERNEL" "*EVAL-CALLS*")
       sb-kernel::*type-cache-nonce*
       sb-ext:*gc-run-time*
@@ -219,6 +220,7 @@
       ,(maybe "SB-VM" "*STORE-BARRIERS-POTENTIALLY-EMITTED*")
       ,(maybe "SB-VM" "*STORE-BARRIERS-EMITTED*")
       ,(maybe "SB-INTERPRETER" "*LAST-TOPLEVEL-ENV*")
+      ,(maybe "SB-SYS" "*THRUPTION-PENDING*")
       sb-pcl::*dfun-constructors*
       #+win32 sb-impl::*waitable-timer-handle*
       #+win32 sb-impl::*timer-thread*)))
@@ -567,4 +569,23 @@
   (filter-test-files "*.impure-cload.lisp"))
 
 (defun sh-files ()
-  (filter-test-files "*.test.sh"))
+  (let ((result (filter-test-files "*.test.sh")))
+    #+unix result
+    ;; Rather than hack up the shell scripts which don't pass on #-unix
+    ;; (which would require at least a few lines of shell script and lisp
+    ;; to invoke SBCL and exit with some other code), just confine the kludge
+    ;; to this file.
+    #-unix
+    (if *explicit-test-files*
+        result
+      (remove-if
+       (lambda (x)
+         (member (pathname-name x)
+                 '("filesys.test" ; too many assertions about symlinks to care about just yet
+                   ;; foreign-test-noop-dlclose-test.c:1:10: fatal error: dlfcn.h: No such file or directory
+                   "foreign.test"
+                   ;; No built SBCL here (.../tests/run-sbcl-test-5863): run 'sh make.sh' first!
+                   "run-sbcl.test"
+                   "side-effectful-pathnames.test") ; no idea
+                 :test 'string=))
+        result))))

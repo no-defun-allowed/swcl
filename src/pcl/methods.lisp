@@ -371,18 +371,6 @@
             (or restp
                 (and number-of-requireds (/= number-of-requireds requireds)))
             specialized-argument-positions)))
-
-(defun make-discriminating-function-arglist (number-required-arguments restp)
-  (nconc (let ((args nil))
-           (dotimes (i number-required-arguments)
-             (push (format-symbol *package* ;; ! is this right?
-                                  "Discriminating Function Arg ~D"
-                                  i)
-                   args))
-           (nreverse args))
-         (when restp
-               `(&rest ,(format-symbol *package*
-                                       "Discriminating Function &rest Arg")))))
 
 (defmethod generic-function-argument-precedence-order
     ((gf standard-generic-function))
@@ -1119,9 +1107,6 @@
 (defmacro class-eq-test (arg class)
   `(eq (class-of ,arg) ',class))
 
-(defmacro eql-test (arg object)
-  `(eql ,arg ',object))
-
 (defun dnet-methods-p (form)
   (and (consp form)
        (or (eq (car form) 'methods)
@@ -1595,13 +1580,12 @@
             ;; COMPUTE-DISCRIMINATING-FUNCTION, then (at least for the
             ;; special cases implemented as of 2006-05-09) any information
             ;; in the cache is misplaced.
-            (aver (null dfun-state)))
-          (typecase dfun-state
-            (null
-             (when (eq gf (load-time-value #'compute-applicable-methods t))
-               (update-all-c-a-m-gf-info gf))
-             (cond
-               ((eq gf (load-time-value #'slot-value-using-class t))
+        (aver (null dfun-state)))
+      (typecase dfun-state
+        (null
+         (when (eq gf (load-time-value #'compute-applicable-methods t))
+           (update-all-c-a-m-gf-info gf))
+         (cond ((eq gf (load-time-value #'slot-value-using-class t))
                 (update-slot-value-gf-info gf 'reader)
                 #'slot-value-using-class-dfun)
                ((eq gf (load-time-value #'(setf slot-value-using-class) t))
@@ -1649,8 +1633,8 @@
                 (make-final-dfun gf))
                (t
                 (make-initial-dfun gf))))
-            (function dfun-state)
-            (cons (car dfun-state))))))
+        (function dfun-state)
+        (cons (car dfun-state))))))
 
 ;;; in general we need to support SBCL's encapsulation for generic
 ;;; functions: the default implementation of encapsulation changes the

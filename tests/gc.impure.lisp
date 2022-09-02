@@ -235,7 +235,9 @@
        (declare ((and fixnum (integer 1)) size))
        ;; M-A-O disables GC, therefore GET-LISP-OBJ-ADDRESS is safe
        (let ((obj-addr (sb-kernel:get-lisp-obj-address obj))
-             (array (cond ((= type sb-vm:code-header-widetag)
+             (array (cond ((member type `(,sb-vm:code-header-widetag
+                                          #+compact-instance-header
+                                          ,sb-vm:funcallable-instance-widetag))
                            (incf total-code-size size)
                            code-bits)
                           (t
@@ -271,7 +273,7 @@
   (assert (not (sb-kernel:immobile-space-addr-p
                 (+ sb-vm:fixedobj-space-start
                    sb-vm:fixedobj-space-size
-                   sb-vm:varyobj-space-size)))))
+                   sb-vm:text-space-size)))))
 
 (with-test (:name :unique-code-serialno :skipped-on :interpreter)
   (let ((a (make-array 100000 :element-type 'bit :initial-element 0)))
@@ -495,3 +497,10 @@
         (loop for i from 10 to 24
               do
            (assert (= (sb-sys:sap-ref-word sap (ash i sb-vm:word-shift)))))))))
+
+(with-test (:name :rospace-strings
+                  :fails-on :darwin-jit)
+  (let ((err (handler-case (setf (char (opaque-identity (symbol-name '*readtable*)) 0) #\*)
+               (sb-sys:memory-fault-error (c)
+                 (write-to-string c :escape nil)))))
+    (assert (search "modify a read-only object" err))))

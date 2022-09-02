@@ -28,6 +28,24 @@
 (define-move-fun (store-double 2) (vop x y)
                  ((double-reg) (double-stack))
   (storew x (current-nfp-tn vop) (tn-offset y)))
+
+(define-move-fun (load-fp-immediate 1) (vop x y)
+                 ((single-immediate) (single-reg)
+                  (double-immediate) (double-reg))
+  (let ((x (tn-value x)))
+    (cond ((or (eql x $0f0)
+               (eql x $0d0))
+           (inst fmov y zr-tn))
+          ((encode-fp-immediate  x)
+           (inst fmov y x))
+          ((load-immediate-word tmp-tn (if (double-float-p x)
+                                           (double-float-bits x)
+                                           (single-float-bits x))
+                                t)
+           (inst fmov y tmp-tn))
+          (t
+           (load-inline-constant y x)))))
+
 
 ;;;; Move VOPs:
 
@@ -188,7 +206,6 @@
                           other-pointer-lowtag))))))
 (define-move-vop move-from-complex-double :move
   (complex-double-reg) (descriptor-reg))
-
 
 ;;;
 ;;; Move from a descriptor to a complex float register

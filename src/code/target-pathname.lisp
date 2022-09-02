@@ -236,10 +236,6 @@
 
 ;;; pathname methods
 
-(defun pathname-sxhash (x)
-  (declare (pathname x))
-  (pathname-key-hash x))
-
 (defmethod print-object ((pathname pathname) stream)
   (let ((namestring (handler-case (namestring pathname)
                       (error nil))))
@@ -298,18 +294,20 @@
 ;;; *around* the get and put operations. It makes no sense to lock the table around
 ;;; individual operations, hence the unsynchronized table.
 
-(define-load-time-global *pathnames*
+(defun make-pathname-intern-table ()
     (let ((h (%make-hash-table (logior (pack-ht-flags-weakness +ht-weak-value+)
                                        (pack-ht-flags-kind 3)
                                        hash-table-userfun-flag)
                                'pathname-key=
                                #'pathname-key=
-                               #'pathname-key-hash
+                               #'pathname-sxhash
                                10
                                default-rehash-size
                                $1.0)))
       (install-hash-table-lock h)
       h))
+(define-load-time-global *pathnames* (make-pathname-intern-table))
+
 ;;; A pathname is logical if the host component is a logical host.
 ;;; This constructor is used to make an instance of the correct type
 ;;; from parsed arguments.
@@ -331,7 +329,7 @@
       (let* ((dir+hash (when directory
                          (ensure-gethash
                           directory table
-                          (cons directory (pathname-key-hash directory)))))
+                          (cons directory (pathname-sxhash directory)))))
              (key (!allocate-pathname host device dir+hash name type version)))
         (declare (truly-dynamic-extent key))
         (or (gethash key table)
@@ -535,9 +533,13 @@
 (sb-kernel::assign-equalp-impl 'pathname #'pathname=)
 (sb-kernel::assign-equalp-impl 'logical-pathname #'pathname=)
 
-;;; A pathname key is a key to an entry in *PATHNAMES*, either a pathname
-;;; or a pathname-directory.
-(defun pathname-key-hash (x)
+;;; Hash either a PATHNAME or a PATHNAME-DIRECTORY. This is called byt both SXHASH
+;;; and by the interning of pathnames, which uses a multi-step approaching to
+;;; coalescing shared subparts. If an EQUAL directory was used before, we share that.
+;;; Since a directory is stored with its hash precomputed, hashing a PATHNAME as a
+;;; whole entails at most 4 more MIX operations. So using pathnames as keys in
+;;; a hash-table pays a small up-front price for later speed improvement.
+(defun pathname-sxhash (x)
   (flet ((hash-piece (piece)
            (etypecase piece
              (string (sxhash piece)) ; transformed

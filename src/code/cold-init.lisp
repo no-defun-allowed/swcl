@@ -136,7 +136,8 @@
 
   (/show0 "entering !COLD-INIT")
   #+sb-show (setq */show* t)
-  (setq sb-vm::*codeblob-tree* nil)
+  (setq sb-vm::*immobile-codeblob-tree* nil
+        sb-vm::*dynspace-codeblob-tree* nil)
   (setq sb-kernel::*defstruct-hooks* '(sb-kernel::!bootstrap-defstruct-hook)
         sb-kernel::*struct-accesss-fragments-delayed* nil)
   (let ((stream (!make-cold-stderr-stream)))
@@ -409,7 +410,7 @@ process to continue normally."
     (sb-debug::disable-debugger))
   (call-hooks "initialization" *init-hooks*)
   #+sb-thread (finalizer-thread-start)
-  (sb-vm::setup-cpu-specific-routines))
+  (sb-vm::!setup-cpu-specific-routines))
 
 ;;;; some support for any hapless wretches who end up debugging cold
 ;;;; init code

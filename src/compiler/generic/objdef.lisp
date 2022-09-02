@@ -218,11 +218,12 @@ during backtrace.
   ;;   unless the function is non-simple, in which case
   ;;   they store a descriptorized (fun-pointer lowtag)
   ;;   pointer to the closure tramp
-  ;; - x86-64 with immobile-code feature stores a JMP instruction
-  ;;   to the function entry address. Special considerations
-  ;;   pertain to undefined functions, FINs, and closures.
   ;; - all others store a native pointer to the function entry address
-  ;;   or closure tramp
+  ;;   or closure tramp. x86-64 with immobile-code constrains this
+  ;;   to holding the address of a SIMPLE-FUN or an object that
+  ;;   has the simple-fun call convention- either a generic-function with
+  ;;   a self-contained trampoline, or closure or funcallable-instance
+  ;;   wrapped in a simplifying trampoline.
   (raw-addr :c-type "char *"))
 
 ;;; a simple function (as opposed to hairier things like closures
@@ -276,12 +277,8 @@ during backtrace.
                           :alloc-trans %make-funcallable-instance)
   (trampoline :init :funcallable-instance-tramp)
   #-compact-instance-header (layout :set-trans %set-fun-layout :ref-trans %fun-layout)
-  ;; TODO: if we can switch places of 'function' and 'fsc-instance-slots'
-  ;; (at least for the builds with compact-instance-header)
-  ;; then for both funcallable and non-funcallable instances,
-  ;; the CLOS slot vector will be in the word 5 bytes past the tagged pointer.
-  ;; This shouldn't be too hard to arrange, since nothing needs to know where
-  ;; the tagged function lives except the funcallable instance trampoline.
+  #+compact-instance-header (instword1)
+  #+compact-instance-header (instword2)
   (function :type function
             :ref-known (flushable) :ref-trans %funcallable-instance-fun
             :set-known () :set-trans (setf %funcallable-instance-fun))
@@ -375,6 +372,15 @@ during backtrace.
          :set-trans %set-symbol-global-value
          :set-known ())
 
+  ;; This slot holds an FDEFN. It's almost unnecessary to have FDEFNs at all
+  ;; for symbols. If we ensured that any function bound to a symbol had a
+  ;; call convention rendering it callable in the manner of a SIMPLE-FUN,
+  ;; then we would only need to store that function's raw entry address here,
+  ;; thereby removing the FDEFN for any global symbol. Any closure assigned
+  ;; to a symbol would need a tiny trampoline, which is already the case
+  ;; for #+immobile-code.
+  (fdefn :ref-trans %symbol-fdefn :ref-known ()
+         :cas-trans cas-symbol-fdefn)
   ;; The private accessor for INFO reads the slot verbatim.
   ;; In contrast, the SYMBOL-INFO function always returns a PACKED-INFO
   ;; instance (see info-vector.lisp) or NIL. The slot itself may hold a cons
@@ -389,15 +395,6 @@ during backtrace.
         :type (or instance list)
         :init :null)
   (name :init :arg #-compact-symbol :ref-trans #-compact-symbol symbol-name)
-  ;; This slot holds an FDEFN. It's almost unnecessary to have FDEFNs at all
-  ;; for symbols. If we ensured that any function bound to a symbol had a
-  ;; call convention rendering it callable in the manner of a SIMPLE-FUN,
-  ;; then we would only need to store that function's raw entry address here,
-  ;; thereby removing the FDEFN for any global symbol. Any closure assigned
-  ;; to a symbol would need a tiny trampoline, which is already the case
-  ;; for #+immobile-code.
-  (fdefn :ref-trans %symbol-fdefn :ref-known ()
-         :cas-trans cas-symbol-fdefn)
   #-compact-symbol
   (package-id :type index ; actually 16 bits. (Could go in the header)
               :ref-trans sb-impl::symbol-package-id
@@ -469,9 +466,9 @@ during backtrace.
             ;; The following slot's existence must NOT be conditional on #+msan
             msan-param-tls) ; = &__msan_param_tls
           #+immobile-space '(function-layout
-                             varyobj-space-addr
-                             varyobj-card-count
-                             varyobj-card-marks)))
+                             text-space-addr
+                             text-card-count
+                             text-card-marks)))
 
 (macrolet ((assign-header-slot-indices ()
              (let ((i 0))
@@ -583,6 +580,11 @@ during backtrace.
   (mach-port-name :c-type "mach_port_name_t")
   #+ppc64 (card-table)
 
+  ;; A few extra thread-local allocation buffers for special purposes
+  ;; #-sb-thread probably won't use these, to be determined...
+  (symbol-tlab :c-type "struct alloc_region" :length 3)
+  (sys-mixed-tlab :c-type "struct alloc_region" :length 3)
+  (sys-cons-tlab :c-type "struct alloc_region" :length 3)
   ;; allocation instrumenting
   (tot-bytes-alloc-boxed)
   (tot-bytes-alloc-unboxed)
@@ -723,3 +725,8 @@ during backtrace.
 ;;; size of NIL in bytes that we report for primitive-object-size.
 (defconstant static-space-objects-start
   (+ nil-symbol-slots-start (ash (1- sizeof-nil-in-words) word-shift)))
+
+#-sb-xc-host
+(progn
+(declaim (inline lowtag-of))
+(defun lowtag-of (x) (logand (get-lisp-obj-address x) sb-vm:lowtag-mask)))

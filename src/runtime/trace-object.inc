@@ -126,13 +126,11 @@ static void TRACE_NAME(lispobj* where)
         ACTION(s->value);
         ACTION(s->info);
         ACTION(s->fdefn);
-        // process the unnamed slot of augmented symbols
-        if ((s->header & 0xFF00) == (SYMBOL_SIZE<<8)) ACTION(*(1+&s->fdefn));
         }
         return;
 #endif
     case FDEFN_WIDETAG:
-        ACTION(fdefn_callee_lispobj((struct fdefn*)where));
+        ACTION(decode_fdefn_rawfun((struct fdefn*)where));
         scan_to = 3;
         break;
     case WEAK_POINTER_WIDETAG:

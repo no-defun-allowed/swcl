@@ -125,10 +125,10 @@
                (sap-int *fixedobj-space-free-pointer*)))
       #+immobile-space
       (:variable
-       (bounds varyobj-space-start
-               (sap-int *varyobj-space-free-pointer*)))
+       (bounds text-space-start
+               (sap-int *text-space-free-pointer*)))
       (:dynamic
-       (bounds (current-dynamic-space-start)
+       (bounds dynamic-space-start
                (sap-int (dynamic-space-free-pointer)))))))
 
 ;;; Return the total number of bytes used in SPACE.
@@ -219,7 +219,7 @@
        ;; don't make things go more wrong than they already are.
        (alien-funcall (extern-alien "printf" (function void system-area-pointer))
                       (vector-sap #.(format nil "map-objects-in-range failure~%")))
-       (alien-funcall (extern-alien "ldb_monitor" (function void))))
+       (ldb-monitor))
      #-sb-devel
      (aver (sap= start end)))))
 
@@ -354,18 +354,13 @@ We could try a few things to mitigate this:
                                   (map-objects-in-range fun start end)))
             #+immobile-space
             (:immobile
-             ;; Filter out filler objects. These either look like cons cells
-             ;; in fixedobj subspace, or code without enough header words
-             ;; in varyobj subspace. (cf 'filler_obj_p' in gc-internal.h)
+             (with-system-mutex (*allocator-mutex*)
+               (map-immobile-objects fun :variable))
+             ;; Filter out padding words
              (dx-flet ((filter (obj type size)
                          (unless (= type list-pointer-lowtag)
                            (funcall fun obj type size))))
-               (map-immobile-objects #'filter :fixed))
-             (dx-flet ((filter (obj type size)
-                         (unless (and (code-component-p obj)
-                                      (code-obj-is-filler-p obj))
-                           (funcall fun obj type size))))
-               (map-immobile-objects #'filter :variable))))))
+               (map-immobile-objects #'filter :fixed))))))
     (do-rest-arg ((space) spaces)
       (if (eq space :dynamic)
           (without-gcing #+cheneygc (do-1-space space)
@@ -411,7 +406,7 @@ We could try a few things to mitigate this:
        ;; in a single-threaded system.
   (close-thread-alloc-region)
   (do ((initial-next-free-page next-free-page)
-       (base (int-sap (current-dynamic-space-start)))
+       (base (int-sap dynamic-space-start))
        (start-page 0)
        (end-page 0)
        (end-page-bytes-used 0))
@@ -422,7 +417,8 @@ We could try a few things to mitigate this:
                    start-page end-page))
     (setq end-page start-page)
     (loop (setq end-page-bytes-used
-                (ash (slot (deref page-table end-page) 'words-used) word-shift))
+                (ash (ash (slot (deref page-table end-page) 'words-used*) -1)
+                     word-shift))
           ;; See 'page_ends_contiguous_block_p' in gencgc.c
           (when (or (< end-page-bytes-used gencgc-page-bytes)
                     (= (slot (deref page-table (1+ end-page)) 'start) 0))
@@ -475,15 +471,20 @@ We could try a few things to mitigate this:
              (used-bytes (ash (- free-pointer start) n-fixnum-tag-bits))
              (holes '())
              (hole-bytes 0))
-    (map-immobile-objects
-     (lambda (obj type size)
-       (let ((address (logandc2 (get-lisp-obj-address obj) lowtag-mask)))
-         (when (case subspace
-                 (:fixed (= type list-pointer-lowtag))
-                 (:variable (hole-p address)))
-           (push (cons address size) holes)
-           (incf hole-bytes size))))
-     subspace)
+    (if (eq subspace :fixed)
+        (map-immobile-objects
+         (lambda (obj type size)
+           (let ((address (logandc2 (get-lisp-obj-address obj) lowtag-mask)))
+             (when (= type list-pointer-lowtag)
+               (incf hole-bytes size))))
+         subspace)
+        (let ((sum-sizes 0))
+          (map-immobile-objects
+           (lambda (obj type size)
+             (declare (ignore obj type))
+             (incf sum-sizes size))
+           subspace)
+          (setq hole-bytes (- used-bytes sum-sizes))))
     (values holes hole-bytes used-bytes)))
 
 (defun show-fragmentation (&key (subspaces '(:fixed :variable))
@@ -896,11 +897,6 @@ We could try a few things to mitigate this:
     #+stack-grows-downward-not-upward (iter + *control-stack-end* sap>)
     #-stack-grows-downward-not-upward (iter - *control-stack-start* sap<)))
 
-(declaim (inline symbol-extra-slot-p))
-(defun symbol-extra-slot-p (x)
-  (> (logand (get-header-data x) tiny-boxed-size-mask)
-     (1- symbol-size)))
-
 ;;; Invoke FUNCTOID (a macro or function) on OBJ and any values in MORE.
 ;;; Note that neither OBJ nor items in MORE undergo ONCE-ONLY treatment.
 ;;; The fact that FUNCTOID can be a macro allows treatment of its first argument
@@ -1001,9 +997,7 @@ We could try a few things to mitigate this:
                `(,functoid (%primitive sb-c:fast-symbol-global-value ,obj) ,@more)
                `(,functoid (symbol-%info ,obj) ,@more)
                `(,functoid (symbol-name ,obj) ,@more)
-               `(,functoid (symbol-package ,obj) ,@more)
-               `(when (symbol-extra-slot-p ,obj)
-                  (,functoid (symbol-extra ,obj) ,@more)))
+               `(,functoid (symbol-package ,obj) ,@more))
             ,.(make-case 'fdefn
                `(fdefn-name ,obj)
                `(fdefn-fun ,obj)
@@ -1020,7 +1014,7 @@ We could try a few things to mitigate this:
                ;; to enliven any object other than code.
                #+immobile-code
                `(%make-lisp-obj
-                 (alien-funcall (extern-alien "fdefn_callee_lispobj" (function unsigned unsigned))
+                 (alien-funcall (extern-alien "decode_fdefn_rawfun" (function unsigned unsigned))
                                 (logandc2 (get-lisp-obj-address ,obj) lowtag-mask))))
             ,.(make-case* 'code-component
                `(loop for .i. from 2 below (code-header-words ,obj)
@@ -1210,10 +1204,10 @@ We could try a few things to mitigate this:
         (%make-lisp-obj fixedobj-space-start)
         (%make-lisp-obj (sap-int *fixedobj-space-free-pointer*))))
     (when (or (eq which :variable) (eq which :both))
-      (format t "Varyobj space~%=============~%")
+      (format t "Text space~%=============~%")
       (map-objects-in-range #'show
-        (%make-lisp-obj varyobj-space-start)
-        (%make-lisp-obj (sap-int *varyobj-space-free-pointer*))))))
+        (%make-lisp-obj text-space-start)
+        (%make-lisp-obj (sap-int *text-space-free-pointer*))))))
 
 ;;; Show objects in a much simpler way than print-allocated-objects.
 ;;; Probably don't use this for generation 0 of dynamic space. Other spaces are ok.
@@ -1240,7 +1234,8 @@ We could try a few things to mitigate this:
          (total-code-size 0))
     (map-allocated-objects
      (lambda (obj type size)
-       (declare ((and fixnum (integer 1)) size))
+      (declare ((and fixnum (integer 1)) size))
+      (unless (= type funcallable-instance-widetag)
        ;; M-A-O disables GC, therefore GET-LISP-OBJ-ADDRESS is safe
        (let ((obj-addr (get-lisp-obj-address obj))
              (array (cond ((= type code-header-widetag)
@@ -1278,7 +1273,7 @@ We could try a few things to mitigate this:
                                  (+ dynamic-space-start (* index gencgc-page-bytes)))
                          (alien-funcall (extern-alien "ldb_monitor" (function void))))
                         (t
-                         (setf (sbit array index) 1))))))
+                         (setf (sbit array index) 1)))))))
      :dynamic)))
 ;;; Because pseudo-static objects can not move nor be freed,
 ;;; this is a valid test that genesis separated code and data.
@@ -1318,7 +1313,7 @@ We could try a few things to mitigate this:
 ;;; to fail.
 (defun print-page-contents (page)
   (let* ((start
-          (+ (current-dynamic-space-start) (* gencgc-page-bytes page)))
+          (+ dynamic-space-start (* gencgc-page-bytes page)))
          (end
           (+ start gencgc-page-bytes)))
     (map-objects-in-range #'print-it (%make-lisp-obj start) (%make-lisp-obj end)))))
@@ -1327,19 +1322,14 @@ We could try a few things to mitigate this:
   (dx-flet ((filter (obj type size)
               (declare (ignore size))
               (when (= type code-header-widetag)
-                (funcall fun obj)))
-            (nofilter (obj type size)
-              (declare (ignore type size))
-              (funcall fun obj)))
-    #+cheneygc (map-allocated-objects #'filter :all)
-    #+gencgc
+                (funcall fun obj))))
     (without-gcing
       #+immobile-code
-      (map-objects-in-range #'nofilter
-                            (ash varyobj-space-start (- n-fixnum-tag-bits))
-                            (%make-lisp-obj (sap-int *varyobj-space-free-pointer*)))
+      (map-objects-in-range #'filter
+                            (ash text-space-start (- n-fixnum-tag-bits))
+                            (%make-lisp-obj (sap-int *text-space-free-pointer*)))
       (alien-funcall (extern-alien "close_code_region" (function void)))
-      (walk-dynamic-space #'nofilter
+      (walk-dynamic-space #'filter
                           #b1111111 ; all generations
                           #b111 #b111)))) ; type mask and constraint
 

@@ -787,7 +787,9 @@
                     (simple-array-header-p
                       (and (null (array-type-complexp stype))
                            (listp dims)
-                           (cdr dims))))
+                           (cdr dims)))
+                    (complexp (and (eql (array-type-complexp stype) :maybe)
+                                   (eql (array-type-complexp type) t))))
                 (if complex-tag
                     `(and (%other-pointer-p ,object)
                           (eq (%other-pointer-widetag ,object) ,complex-tag)
@@ -796,20 +798,31 @@
                     (multiple-value-bind (tests headerp)
                         (test-array-dimensions object type stype
                                                simple-array-header-p)
-                      `(and ,@(unless (or (and headerp (eql pred 'arrayp))
-                                          simple-array-header-p)
-                                ;; ARRAY-HEADER-P from TESTS will test for that
-                                `((,pred ,object)))
-                            ,@(when (and (eql (array-type-complexp stype) :maybe)
-                                         (eql (array-type-complexp type) t))
-                                ;; KLUDGE: this is a bit lame; if we get here,
-                                ;; we already know that OBJECT is an array, but
-                                ;; (NOT SIMPLE-ARRAY) doesn't know that.  On the
-                                ;; other hand, this should get compiled down to
-                                ;; two widetag tests, so it's only a bit lame.
-                                `((typep ,object '(not simple-array))))
-                            ,@tests
-                            ,@(test-array-element-type object type stype headerp)))))
+                      `(and
+                        ,@(cond ((and (eql pred 'vectorp)
+                                      complexp)
+                                 `((%other-pointer-subtype-p ,object
+                                                             ',(list sb-vm:complex-base-string-widetag
+                                                                     #+sb-unicode sb-vm:complex-character-string-widetag
+                                                                     sb-vm:complex-bit-vector-widetag
+                                                                     sb-vm:complex-vector-widetag))))
+                                ((and (eql pred 'arrayp)
+                                      complexp)
+                                 `((%other-pointer-subtype-p ,object
+                                                             ',(list sb-vm:complex-base-string-widetag
+                                                                     #+sb-unicode sb-vm:complex-character-string-widetag
+                                                                     sb-vm:complex-bit-vector-widetag
+                                                                     sb-vm:complex-vector-widetag
+                                                                     sb-vm:complex-array-widetag))))
+                                (t
+                                 `(,@(unless (or (and headerp (eql pred 'arrayp))
+                                                 simple-array-header-p)
+                                       ;; ARRAY-HEADER-P from TESTS will test for that
+                                       `((,pred ,object)))
+                                   ,@(when complexp
+                                       `((typep ,object '(not simple-array)))))))
+                        ,@tests
+                        ,@(test-array-element-type object type stype headerp)))))
               `(%typep ,object ',(type-specifier type)))))))
 
 ;;; Transform a type test against some instance type. The type test is
@@ -897,12 +910,14 @@
 
     ;; Easiest case first: single bit test.
     (cond ((member name '(condition pathname structure-object))
-           `(and (%instancep object)
-                 (logtest (,get-flags (%instance-layout object))
-                          ,(case name
-                             (condition +condition-layout-flag+)
-                             (pathname  +pathname-layout-flag+)
-                             (t         +structure-layout-flag+)))))
+           (let ((flag (case name
+                         (condition +condition-layout-flag+)
+                         (pathname  +pathname-layout-flag+)
+                         (t         +structure-layout-flag+))))
+            (if (vop-existsp :translate structure-typep)
+                `(structure-typep object ,flag)
+                `(and (%instancep object)
+                      (logtest (,get-flags (%instance-layout object)) ,flag)))))
 
           ;; TODO: remove after April 2021 release.
           ((eq name 'sb-kernel::random-class)
@@ -920,19 +935,23 @@
           ((and wrapper
                 (eq (classoid-state classoid) :sealed)
                 (not (classoid-subclasses classoid)))
-           (if lowtag-test
-               `(and ,lowtag-test
-                     ,(if (vop-existsp :translate layout-eq)
-                          `(layout-eq object ,wrapper ,lowtag)
-                          `(eq ,slot-reader ,layout)))
-               ;; `(eq ,layout
-               ;;      (if-vop-existsp (:translate %instanceoid-layout)
-               ;;        (%instanceoid-layout object)
-               ;;        ;; Slightly quicker than LAYOUT-OF. See also %PCL-INSTANCE-P
-               ;;        (cond ((%instancep object) (%instance-layout object))
-               ;;              ((funcallable-instance-p object) (%fun-layout object))
-               ;;              (t ,(find-layout 't)))))
-               (bug "Unexpected metatype for ~S" wrapper)))
+           (cond ((and (eq lowtag sb-vm:instance-pointer-lowtag)
+                       (vop-existsp :translate structure-typep))
+                  `(structure-typep object ,wrapper))
+                 (lowtag-test
+                  `(and ,lowtag-test
+                        ,(if (vop-existsp :translate layout-eq)
+                             `(layout-eq object ,wrapper ,lowtag)
+                             `(eq ,slot-reader ,layout))))
+                 (t
+                  ;; `(eq ,layout
+                  ;;      (if-vop-existsp (:translate %instanceoid-layout)
+                  ;;        (%instanceoid-layout object)
+                  ;;        ;; Slightly quicker than LAYOUT-OF. See also %PCL-INSTANCE-P
+                  ;;        (cond ((%instancep object) (%instance-layout object))
+                  ;;              ((funcallable-instance-p object) (%fun-layout object))
+                  ;;              (t ,(find-layout 't)))))
+                  (bug "Unexpected metatype for ~S" wrapper))))
 
           ;; All other structure types
           ((and (typep classoid 'structure-classoid) wrapper)
@@ -942,15 +961,15 @@
             ;; wrong; it's unnecessary because structure classes can't be redefined, and it's wrong
             ;; because it is quite legitimate to pass an object with an invalid layout
             ;; to a structure type test.
-            `(and (%instancep object)
-                    ;; If we allowed structure classes to be mixed in to standard-object,
-                    ;; this might have to change to consider object invalidation. Probably would
-                    ;; want to track structure classoids that would render this code inadmissible.
-                  ,(if (<= depthoid sb-kernel::layout-id-vector-fixed-capacity)
-                       `(%structure-is-a (%instance-layout object) ,wrapper)
-                       `(let ((,type (%instance-layout object)))
-                          (and (layout-depthoid-ge ,type ,depthoid)
-                               (%structure-is-a ,type ,wrapper))))))
+           (if (vop-existsp :translate structure-typep)
+               ;; A single VOP is easier to optimize later in ir2opt.
+               `(structure-typep object ,wrapper)
+               `(and (%instancep object)
+                     ,(if (<= depthoid sb-kernel::layout-id-vector-fixed-capacity)
+                          `(%structure-is-a (%instance-layout object) ,wrapper)
+                          `(let ((,type (%instance-layout object)))
+                             (and (layout-depthoid-ge ,type ,depthoid)
+                                  (%structure-is-a ,type ,wrapper)))))))
 
           ((> depthoid 0)
            ;; fixed-depth ancestors of non-structure types:

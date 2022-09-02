@@ -160,9 +160,7 @@ verify_pointer(lispobj thing, lispobj *where, struct verify_state *state)
 #endif
     } else {
         // The object pointed to must not have been discarded as garbage.
-        FAIL_IF(!other_immediate_lowtag_p(*native_pointer(thing)) ||
-                filler_obj_p(native_pointer(thing)),
-                "trashed object");
+        FAIL_IF(!other_immediate_lowtag_p(*native_pointer(thing)), "trashed object");
     }
     // Must not point to a forwarding pointer
     FAIL_IF(*native_pointer(thing) == FORWARDING_HEADER, "forwarding ptr");
@@ -231,9 +229,7 @@ static int verify_headered_object(lispobj* object, sword_t nwords,
             CHECK(layout, object);
             struct bitmap bitmap = get_layout_bitmap(LAYOUT(layout));
             if (widetag_of(object) == FUNCALLABLE_INSTANCE_WIDETAG) {
-#ifdef LISP_FEATURE_COMPACT_INSTANCE_HEADER
-                gc_assert(bitmap.bits[0] == (sword_t)-1 || bitmap.bits[0] == (sword_t)6);
-#else
+#ifndef LISP_FEATURE_COMPACT_INSTANCE_HEADER
                 gc_assert(bitmap.bits[0] == (sword_t)-4);
 #endif
             }
@@ -292,13 +288,10 @@ static int verify_headered_object(lispobj* object, sword_t nwords,
 #ifdef LISP_FEATURE_COMPACT_SYMBOL
     if (widetag == SYMBOL_WIDETAG) {
         struct symbol* s = (void*)object;
-        CHECK(s->hash, &s->hash);
         CHECK(s->value, &s->value);
+        CHECK(s->fdefn, &s->fdefn);
         CHECK(s->info, &s->info);
         CHECK(decode_symbol_name(s->name), &s->name);
-        CHECK(s->fdefn, &s->fdefn);
-        // augmented symbol?
-        if (nwords > ALIGN_UP(SYMBOL_SIZE,2)) CHECK(1[&s->fdefn], 1+&s->fdefn);
         return 0;
     }
 #endif
@@ -306,7 +299,7 @@ static int verify_headered_object(lispobj* object, sword_t nwords,
         struct fdefn* f = (void*)object;
         CHECK(f->name, &f->name);
         CHECK(f->fun, &f->fun);
-        CHECK(fdefn_callee_lispobj(f), (lispobj*)&f->raw_addr);
+        CHECK(decode_fdefn_rawfun(f), (lispobj*)&f->raw_addr);
         return 0;
     }
     for (i=1; i<nwords; ++i) CHECK(object[i], object+i);
@@ -354,10 +347,7 @@ static int verify_range(lispobj* start, lispobj* end, struct verify_state* state
                 continue;
             }
 #endif
-            // FIXME: should not have code acting as filler
-            if (widetag != FILLER_WIDETAG && !filler_obj_p(where)) {
-                // Any page can have a filler on it
-                if (pg >= 0) {
+            if (widetag != FILLER_WIDETAG && pg >= 0) {
                     // Assert proper page type
                     if (state->object_header) // is not a cons
                         gc_assert(page_table[pg].type != PAGE_TYPE_CONS);
@@ -371,11 +361,12 @@ static int verify_range(lispobj* start, lispobj* end, struct verify_state* state
                     if (widetag == CODE_HEADER_WIDETAG) {
                         if (!is_code(page_table[pg].type))
                             lose("object @ %p is code on non-code page", where);
+                    } else if (widetag == FUNCALLABLE_INSTANCE_WIDETAG) {
+                        // where these reside depends on the architecture
                     } else {
                         if (is_code(page_table[pg].type))
                             lose("object @ %p is non-code on code page", where);
                     }
-                }
             }
         }
         if (!state->object_header) {
@@ -443,16 +434,16 @@ int verify_heap(__attribute__((unused)) lispobj* cur_thread_approx_stackptr,
 #  ifdef __linux__
     // Try this verification if immobile-space was compiled with extra debugging.
     // But weak symbols don't work on macOS.
-    extern void __attribute__((weak)) check_varyobj_pages();
-    if (&check_varyobj_pages) check_varyobj_pages();
+    extern void __attribute__((weak)) check_text_pages();
+    if (&check_text_pages) check_text_pages();
 #  endif
     if (verbose)
         fprintf(stderr, " [immobile]");
     if (verify(FIXEDOBJ_SPACE_START,
                fixedobj_free_pointer, &state,
                flags | VERIFYING_GENERATIONAL)) goto out;
-    if (verify(VARYOBJ_SPACE_START,
-               varyobj_free_pointer, &state,
+    if (verify(TEXT_SPACE_START,
+               text_space_highwatermark, &state,
                flags | VERIFYING_GENERATIONAL)) goto out;
 #endif
     struct thread *th;
@@ -514,11 +505,17 @@ void gc_show_pte(lispobj obj)
         return;
     }
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
-    page = find_varyobj_page_index((void*)obj);
+    page = find_text_page_index((void*)obj);
     if (page>=0) {
-        printf("page %ld (v) ss=%p gens %x%s\n", page,
-               varyobj_scan_start(page),
-               varyobj_pages[page].generations,
+        lispobj* text_page_scan_start(low_page_index_t page);
+        int gens = text_page_genmask[page];
+        char genstring[9];
+        int i;
+        for (i=0;i<8;++i) genstring[i] = (gens & (1<<i)) ? '0'+i : '-';
+        genstring[8] = 0;
+        printf("page %ld (v) base %p gens %s ss=%p%s\n",
+               page, text_page_address(page), genstring,
+               text_page_scan_start(page),
                card_markedp((void*)obj)?"":" WP");
         return;
     }
@@ -537,13 +534,9 @@ void gc_show_pte(lispobj obj)
 #include <stdio.h>
 
 static int hexdump_counter;
-__attribute__((unused)) static void dump_immobile(lispobj* where, lispobj* end, FILE*f)
-{
-    while (where < end) {
-        fprintf(f, "%"OBJ_FMTX": %"OBJ_FMTX"\n", (uword_t)where, *where);
-        where += object_size(where);
-    }
-}
+
+extern void dump_immobile_fixedobjs(lispobj* where, lispobj* end, FILE*f);
+extern void dump_immobile_text(lispobj* where, lispobj* end, FILE*f);
 static int dump_completely_p(lispobj* obj, struct verify_state* state)
 {
     int i;
@@ -596,9 +589,9 @@ void hexdump_spaces(struct verify_state* state, char *reason)
 
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
     fprintf(f, "Fixedobj space:\n");
-    dump_immobile((lispobj*)FIXEDOBJ_SPACE_START, fixedobj_free_pointer, f);
-    fprintf(f, "Varyobj space:\n");
-    dump_immobile((lispobj*)VARYOBJ_SPACE_START, varyobj_free_pointer, f);
+    dump_immobile_fixedobjs((lispobj*)FIXEDOBJ_SPACE_START, fixedobj_free_pointer, f);
+    fprintf(f, "Text space (tlsf mem @ %p):\n", tlsf_mem_start);
+    dump_immobile_text((lispobj*)TEXT_SPACE_START, text_space_highwatermark, f);
 #endif
 
     fprintf(f, "Dynamic space:\n");

@@ -26,12 +26,12 @@ typedef unsigned int page_bytes_t;
 #define page_words_used(index) page_table[index].words_used_
 #define page_bytes_used(index) ((page_bytes_t)page_table[index].words_used_<<WORD_SHIFT)
 #if defined LISP_FEATURE_RISCV && defined LISP_FEATURE_LINUX // KLUDGE
-#define page_need_to_zero(index) (mmap_does_not_zero || (*(uword_t*)page_address(index) != 0))
+#define page_need_to_zero(index) (mmap_does_not_zero || page_table[index].need_zerofill)
 #else
-#define page_need_to_zero(index) (*(uword_t*)page_address(index) != 0)
+#define page_need_to_zero(index) page_table[index].need_zerofill
 #endif
 #define set_page_bytes_used(index,val) page_table[index].words_used_ = ((val)>>WORD_SHIFT)
-#define set_page_needs_zerofill(index) *(uword_t*)page_address(index) = 0xBADBAD
+#define set_page_need_to_zero(index,val) page_table[index].need_zerofill = val
 
 #if !CONDENSED_PAGE_TABLE
 
@@ -140,9 +140,7 @@ page_extensible_p(page_index_t index, generation_index_t gen, int type) {
         && page_table[index].gen == gen
         && !gc_page_pins[index];
 #else
-    /* Test 'gen' and 'type' as one comparison.
-     * The type is at 1 byte prior to 'gen' in the page structure.
-     */
+    // FIXME: "warning: dereferencing type-punned pointer will break strict-aliasing rules"
     int attributes_match =
         *(int16_t*)(&page_table[index].gen-1) == ((gen<<8)|type);
 #endif
@@ -170,5 +168,59 @@ enum {
 extern struct generation generations[NUM_GENERATIONS];
 extern os_vm_size_t bytes_allocated;
 
-void reset_page_flags(page_index_t page);
+extern void reset_page_flags(page_index_t page);
+
+/* True if the page starts a contiguous block. */
+static inline boolean
+page_starts_contiguous_block_p(page_index_t page_index)
+{
+    // Don't use the preprocessor macro: 0 means 0.
+    return page_table[page_index].scan_start_offset_ == 0;
+}
+
+/* True if the page is the last page in a contiguous block. */
+static inline boolean
+page_ends_contiguous_block_p(page_index_t page_index,
+                             generation_index_t __attribute__((unused)) gen)
+{
+    /* Re. this next test: git rev c769dd53 said that there was a bug when we don't
+     * test page_bytes_used, but I fail to see how 'page_starts_contiguous_block_p'
+     * on the next page is not a STRONGER condition, i.e. it should imply that
+     * 'page_index' ends a block without regard for the number of bytes used.
+     * Apparently at some point I understood this and now I don't again.
+     * That's what comments are for, damnit.
+     * Anyway, I *think* the issue was, at some point, as follows:
+     * |   page             |     page   |
+     *        pinned-obj
+     *     <------------------- scan-start
+     * where the first of the two pages had a small object pinned. This used to
+     * adjust the bytes used to account _only_ for the pins.  That was wrong -
+     * the page has to be counted as if it is completely full.
+     * So _maybe_ both these conditions do not need to be present now ?
+     */
+    // There is *always* a next page in the page table.
+    boolean answer = page_words_used(page_index) < GENCGC_PAGE_WORDS
+                  || page_starts_contiguous_block_p(page_index+1);
+#ifdef DEBUG
+    boolean safe_answer =
+           (/* page doesn't fill block */
+            (page_words_used(page_index) < GENCGC_PAGE_WORDS)
+            /* page is last allocated page */
+            || ((page_index + 1) >= next_free_page)
+            /* next page contains no data */
+            || !page_words_used(page_index + 1)
+            /* next page is in different generation */
+            || (page_table[page_index + 1].gen != gen)
+            /* next page starts its own contiguous block */
+            || (page_starts_contiguous_block_p(page_index + 1)));
+    gc_assert(answer == safe_answer);
+#endif
+    return answer;
+}
+
+static inline page_index_t contiguous_block_final_page(page_index_t first) {
+    page_index_t last = first;
+    while (!page_ends_contiguous_block_p(last, page_table[first].gen)) ++last;
+    return last;
+}
 #endif /* _GENCGC_PRIVATE_H_ */

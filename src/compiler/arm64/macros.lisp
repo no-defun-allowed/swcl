@@ -399,7 +399,9 @@
                (:short
                 (values (if signed 'ldrsh 'ldrh) 1))
                (:word
-                (values (if signed 'ldrsw 'ldr) 2)))
+                (values (if signed 'ldrsw 'ldr) 2))
+               (:single-float
+                (values 'ldr 2)))
            (let ((value (if (and (eq size :word)
                                  (not signed))
                             '(32-bit-reg value)
@@ -453,7 +455,7 @@
                  (values 'strb 0))
                 (:short
                  (values 'strh 1))
-                (:word
+                ((:word :single-float)
                  (values 'str 2)))
             (let ((value (if (eq size :word)
                              '(32-bit-reg value)
@@ -476,10 +478,7 @@
                            ,value (@ lip (- (* ,offset n-word-bytes) ,lowtag)))))))))))))
 
 (defun load-inline-constant (dst &rest constant-descriptor)
-  (destructuring-bind (size . label) (apply #'register-inline-constant constant-descriptor)
-    (ecase size
-      ((:qword :oword)
-       (inst load-from-label dst label)))))
+  (inst load-from-label dst (cdr (apply #'register-inline-constant constant-descriptor))))
 
 ;;;
 

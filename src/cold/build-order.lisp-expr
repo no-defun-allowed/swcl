@@ -252,6 +252,9 @@
  ;; around the compilation of "code/class". Why?
  ("src/code/class" :c-headers)
  ("src/pcl/pre-warm")
+ ("src/code/number-dispatch" :not-host)
+ ("src/code/float-inf-nan"   :not-host)
+ ("src/code/pathname" :not-host)
  ("src/code/target-sxhash" :not-host) ; needs most-fooative-foo-float constants
 
  ("src/code/debug-info" :c-headers)
@@ -304,7 +307,6 @@
  ("src/code/random")
  ("src/code/hash-table" :c-headers)
  ("src/code/readtable")
- ("src/code/pathname" :not-host)
  ("src/code/host-pprint")
 
  ("src/compiler/knownfun")
@@ -323,8 +325,6 @@
  ("src/code/unix"            :not-host)
  ("src/code/symbol"          :not-host)
  ("src/code/bignum"          :not-host #-(or bignum-assertions sb-devel) :block-compile)
- ("src/code/number-dispatch" :not-host)
- ("src/code/float-inf-nan"   :not-host)
  ("src/code/numbers"         :not-host)
  ("src/code/float-trap"      :not-host)
  ("src/code/float"           :not-host)
@@ -370,7 +370,6 @@
 
  ("src/compiler/constraint")
  ("src/compiler/equality-constraints")
- ("src/compiler/array-tran")
  ("src/compiler/saptran")
  ("src/compiler/modarith")
  ("src/compiler/sxhash")
@@ -409,6 +408,7 @@
 
  ;; this file defines the INTERVAL struct which is also used in 'srctran'
  ("src/compiler/float-tran")
+ ("src/compiler/array-tran")
  ("src/compiler/ir1final")
  ("src/compiler/generic/vm-tran")
  ("src/compiler/type-vop-macros")

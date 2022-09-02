@@ -344,3 +344,19 @@
                                            (list 1))))
                             (f)))))
                      :key (lambda (x) (combination-fun-source-name x nil))))))
+
+(with-test (:name :instance-constraint-intersection)
+  (assert (not (find 'sb-c::%type-check-error/c
+                     (ir-calls
+                      `(lambda (x)
+                         (typecase x
+                           (stream 2)
+                           (hash-table 1))))
+                     :key (lambda (x) (combination-fun-source-name x nil))))))
+
+(with-test (:name :aref-full-call-no-type-check)
+  (assert (not (find 'sb-c::%type-check-error/c
+                     (ir-calls
+                      `(lambda (x)
+                         (aref x 0)))
+                     :key (lambda (x) (combination-fun-source-name x nil))))))

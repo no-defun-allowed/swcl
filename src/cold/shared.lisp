@@ -291,8 +291,6 @@
           (pushnew :immobile-code sb-xc:*features*))
         (when (target-featurep :64-bit)
           (push :compact-symbol sb-xc:*features*))
-        (when (target-featurep '(:and :sb-thread (:not :win32)))
-          (push :pauseless-threadstart sb-xc:*features*))
         (when (target-featurep '(:and :sb-thread (:or :darwin :openbsd)))
           (push :os-thread-stack sb-xc:*features*))
         (when (target-featurep '(:and :x86 :int4-breakpoints))
@@ -304,7 +302,9 @@
           ;; Just print something and go on with life.
           (setq sb-xc:*features* (remove :int4-breakpoints sb-xc:*features*))
           (warn "Removed :INT4-BREAKPOINTS from target features"))
-        (when (target-featurep '(:or :arm64 :sse4))
+        (when (or (target-featurep :arm64)
+                  (and (target-featurep :x86-64)
+                       (member :sse4 backend-subfeatures)))
           (push :round-float sb-xc:*features*))
         (when (target-featurep '(:and :arm64 :darwin))
           (push :arm-v8.1 backend-subfeatures))
@@ -333,8 +333,6 @@
 (let ((feature-compatibility-tests
        '(("(and sb-thread (not gencgc))"
           ":SB-THREAD requires :GENCGC")
-         ("(and pauseless-threadstart (not sb-thread))"
-          ":PAUSELESS-THREADSTART requires :SB-THREAD")
          ("(and sb-safepoint (not sb-thread))" ":SB-SAFEPOINT requires :SB-THREAD")
          ("(and sb-thread (not (or riscv ppc ppc64 x86 x86-64 arm64)))"
           ":SB-THREAD not supported on selected architecture")

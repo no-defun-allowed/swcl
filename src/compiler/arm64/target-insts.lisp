@@ -311,7 +311,40 @@
                    (ash cmode 2)))))
       (princ (dpb abc (byte 3 5) defgh) stream)
       (when (plusp shift)
-        (format t ", LSL #~d" shift)))))
+        (format stream ", LSL #~d" shift)))))
+
+(defun decode-fp-immediate (imm type)
+  (let ((sign (ldb (byte 1 7) imm))
+        (exp (ldb (byte 3 4) imm))
+        (frac (ldb (byte 4 0) imm)))
+    (case type
+      (double-float
+       (sb-kernel::double-from-bits
+        sign
+        (logior (ash (logandc1 (ldb (byte 1 2) exp) 1) 10)
+                (ash (if (zerop (ldb (byte 1 2) exp))
+                         0
+                         (ldb (byte 8 0) -1))
+                     2)
+                (ldb (byte 2 0) exp))
+        (ash frac 48)))
+      (single-float
+       (sb-kernel::single-from-bits
+        sign
+        (logior (ash (logandc1 (ldb (byte 1 2) exp) 1) 7)
+                (ash (if (zerop (ldb (byte 1 2) exp))
+                         0
+                         (ldb (byte 5 0) -1))
+                     2)
+                (ldb (byte 2 0) exp))
+        (ash frac 19))))))
+
+(defun print-fp-imm (value stream dstate)
+  (declare (ignore dstate))
+  (destructuring-bind (type imm) value
+    (format stream "#~a" (decode-fp-immediate imm (if (= type 0)
+                                                      'single-float
+                                                      'double-float)))))
 
 (defun print-vbhs (value stream dstate)
   (declare (ignore dstate))
@@ -479,15 +512,35 @@
   (declare (ignore stream))
   (let* ((value (* 4 value))
          (seg (dstate-segment dstate))
-         (code (seg-code seg)))
+         (code (seg-code seg))
+         (inst (current-instruction dstate))
+         (v (ldb (byte 1 26) inst))
+         (addr (+ (dstate-cur-addr dstate) value)))
     (when code
-      (or (note-code-constant (sb-disassem::segment-offs-to-code-offs
-                               (+ (dstate-cur-offs dstate) value) seg)
-                              dstate)
-          (let ((addr (+ (dstate-cur-addr dstate) value)))
-            (and (sb-disassem::points-to-code-constant-p addr code)
-                 (maybe-note-assembler-routine (sap-ref-word (int-sap addr) 0)
-                                               nil dstate)))))))
+      (if (plusp v)
+          (when (sb-disassem::points-to-code-constant-p addr code)
+            (case (ldb (byte 2 30) inst)
+              (#b00
+               (note (lambda (stream)
+                       (format stream "~a" (sap-ref-single (int-sap addr) 0)))
+                     dstate))
+              (#b01
+               (note
+                (lambda (stream)
+                  (format stream "~a" (sap-ref-double (int-sap addr) 0)))
+                dstate))
+              (#b10
+               (note
+                (lambda (stream)
+                  (format stream "~x ~x"(sap-ref-double (int-sap addr) 0)
+                          (sap-ref-double (int-sap addr) 8)))
+                dstate))))
+          (or (note-code-constant (sb-disassem::segment-offs-to-code-offs
+                                   (+ (dstate-cur-offs dstate) value) seg)
+                                  dstate)
+              (and (sb-disassem::points-to-code-constant-p addr code)
+                   (maybe-note-assembler-routine (sap-ref-word (int-sap addr) 0)
+                                                 nil dstate)))))))
 
 ;;;; special magic to support decoding internal-error and related traps
 ;;; See EMIT-ERROR-BREAK for the scheme

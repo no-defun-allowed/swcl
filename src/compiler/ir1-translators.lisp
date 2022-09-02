@@ -742,6 +742,12 @@ be a lambda expression."
 (def-ir1-translator %funcall-lvar ((function &rest args) start next result)
   (ir1-convert-combination-args function start next result args))
 
+(def-ir1-translator %funcall-no-nargs ((function &rest args) start next result)
+  (let ((ctran (make-ctran))
+        (fun-lvar (make-lvar)))
+    (ir1-convert start ctran fun-lvar `(the function ,function))
+    (ir1-convert-combination-args fun-lvar ctran next result args nil)))
+
 ;;; This source transform exists to reduce the amount of work for the
 ;;; compiler. If the called function is a FUNCTION form, then convert
 ;;; directly to %FUNCALL, instead of waiting around for type
@@ -1226,6 +1232,7 @@ care."
       (let* ((name (first things))
              (value-form (second things))
              (leaf (or (lexenv-find name vars) (find-free-var name))))
+        (maybe-note-undefined-variable-reference leaf name)
         (etypecase leaf
           (leaf
            (when (constant-p leaf)

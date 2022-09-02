@@ -103,6 +103,7 @@
 #+64-bit (defknown layout-depthoid (sb-vm:layout) layout-depthoid (flushable always-translatable))
 #+(or x86 x86-64) (defknown (layout-depthoid-ge) (sb-vm:layout integer) boolean (flushable))
 (defknown %structure-is-a (instance t) boolean (foldable flushable))
+(defknown structure-typep (t t) boolean (foldable flushable))
 (defknown copy-structure (structure-object) structure-object
   (flushable)
   :derive-type #'result-type-first-arg)
@@ -344,6 +345,30 @@
   (real &optional real) (values integer real)
   (movable foldable flushable recursive))
 
+(defknown unary-truncate (real) (values integer real)
+  (movable foldable flushable no-verify-arg-count))
+
+(defknown unary-truncate-single-float-to-bignum (single-float) (values bignum (eql $0f0))
+   (foldable movable flushable fixed-args))
+(defknown unary-truncate-double-float-to-bignum (double-float)
+    (values #+64-bit bignum #-64-bit integer
+            (and
+             #+(and 64-bit
+                    (not (or riscv ppc64))) ;; they can't survive cold-init
+             (eql $0d0)
+             double-float))
+   (foldable movable flushable fixed-args))
+
+(defknown %unary-truncate-single-float-to-bignum (single-float) bignum
+   (foldable movable flushable fixed-args))
+(defknown %unary-truncate-double-float-to-bignum (double-float) bignum
+   (foldable movable flushable fixed-args))
+
+(defknown sxhash-bignum-double-float (double-float) hash-code
+  (foldable movable flushable fixed-args))
+(defknown sxhash-bignum-single-float (single-float) hash-code
+  (foldable movable flushable fixed-args))
+
 (defknown %multiply-high (word word) word
     (movable foldable flushable))
 
@@ -570,7 +595,8 @@
                     &rest proper-sequence)
   sequence
   (call)
-  :derive-type #'result-type-first-arg)
+  :derive-type (sequence-result-nth-arg 0 :preserve-dimensions t
+                                          :preserve-vector-type t))
 
 (defknown #.(loop for info across sb-vm:*specialized-array-element-type-properties*
                   collect
@@ -601,7 +627,8 @@
 (defknown fill ((modifying sequence) t &rest t &key
                 (:start index) (:end sequence-end)) sequence
     ()
-  :derive-type #'result-type-first-arg
+  :derive-type (sequence-result-nth-arg 0 :preserve-dimensions t
+                                          :preserve-vector-type t)
   :result-arg 0)
 ;;; Like FILL but with no keyword argument parsing
 (defknown quickfill ((modifying (simple-array * 1)) t) (simple-array * 1) ()
@@ -620,7 +647,8 @@
 (defknown replace ((modifying sequence) proper-sequence &rest t &key (:start1 index)
                    (:end1 sequence-end) (:start2 index) (:end2 sequence-end))
   sequence ()
-  :derive-type #'result-type-first-arg
+  :derive-type (sequence-result-nth-arg 0 :preserve-dimensions t
+                                          :preserve-vector-type t)
   :result-arg 0)
 
 (defknown remove
@@ -833,7 +861,8 @@
    &key (:key (function-designator ((nth-arg 0 :sequence t)))))
   sequence
   (call)
-  :derive-type #'result-type-first-arg)
+  :derive-type (sequence-result-nth-arg 0 :preserve-dimensions t
+                                          :preserve-vector-type t))
 (defknown sb-impl::stable-sort-list (list function function) list
   (call important-result no-verify-arg-count))
 (defknown sb-impl::sort-vector (vector index index function (or function null))
@@ -1892,10 +1921,10 @@
 (defknown data-vector-set (array index t) (values) (dx-safe always-translatable))
 (defknown data-vector-set-with-offset (array fixnum fixnum t) (values)
   (dx-safe always-translatable))
-(defknown hairy-data-vector-ref (array index) t (foldable))
-(defknown hairy-data-vector-set (array index t) t ())
-(defknown hairy-data-vector-ref/check-bounds (array index) t (foldable))
-(defknown hairy-data-vector-set/check-bounds (array index t) t ())
+(defknown hairy-data-vector-ref (array index) t (foldable no-verify-arg-count))
+(defknown hairy-data-vector-set (array index t) t (no-verify-arg-count))
+(defknown hairy-data-vector-ref/check-bounds (array index) t (foldable no-verify-arg-count))
+(defknown hairy-data-vector-set/check-bounds (array index t) t (no-verify-arg-count))
 (defknown %caller-frame () t (flushable))
 (defknown %caller-pc () system-area-pointer (flushable))
 (defknown %with-array-data (array index (or index null))

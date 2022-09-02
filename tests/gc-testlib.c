@@ -24,6 +24,7 @@ static void make_instances(int page_type, generation_index_t gen, lispobj result
     page_table[page].gen = 1;
     gc_assert(page_table[page].scan_start_offset_ == 0);
     page_table[page].words_used_ = (2 * GENCGC_CARD_BYTES) >> WORD_SHIFT;
+    page_table[page].need_zerofill = 1;
     bytes_allocated += 2 * GENCGC_CARD_BYTES;
     generations[gen].bytes_allocated += 2 * GENCGC_CARD_BYTES;
 
@@ -64,13 +65,22 @@ static void make_instances(int page_type, generation_index_t gen, lispobj result
 
 static void perform_gc(lispobj* stackptr)
 {
-    extern void close_current_thread_tlab(), update_immobile_nursery_bits();
+    extern void close_current_thread_tlab();
     extern void garbage_collect_generation(generation_index_t, int, void*);
 
     gc_active_p = 1;
     gc_close_collector_regions(0); // TODO: should be THREAD_PAGE_FLAG
     close_current_thread_tlab();
-    update_immobile_nursery_bits();
+
+    /* We have to clobber the dynamic space codeblob tree because ordinarily
+     * it gets smashed at the start of collect_garbage(), and since this test
+     * bypasses collect_garbage(), the GC might have problems later.
+     * (Not exactly sure how, but "header not OK for code page" was triggering)
+     * So, handily, since there are no concurrency issues in this test,
+     * it doesn't matter that the GC can't utilize the tree. It falls back
+     * to scanning code pages linearly in preserve_pointer which is fine. */
+    SYMBOL(DYNSPACE_CODEBLOB_TREE)->value = NIL;
+
     verify_heap(stackptr, VERIFY_PRE_GC);
     garbage_collect_generation(0, 0, stackptr);
     gc_active_p = 0;
