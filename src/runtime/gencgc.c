@@ -4671,7 +4671,7 @@ collect_garbage(generation_index_t last_gen)
             raise =
                 (gen < last_gen)
                 || (generations[gen].num_gc >= generations[gen].number_of_gcs_before_promotion
-                    && (gen != 0 || last_survival < 0.5));
+                    && (gen != 0 || (0.01 < last_survival && last_survival < 0.5)));
             /* If we would not normally raise this one, but we're
              * running low on space in comparison to the object-sizes
              * we've been seeing, raise it and collect the next one
@@ -4711,7 +4711,7 @@ collect_garbage(generation_index_t last_gen)
               generations[gen].bytes_allocated < dynamic_space_size / 3 &&
               bytes_consed_between_gcs < 1000000000) {
             bytes_consed_between_gcs += bytes_consed_between_gcs / 4;
-          } else if (last_survival < 0.01 && bytes_consed_between_gcs > 20000000) {
+          } else if (last_survival < 0.01 && bytes_consed_between_gcs > 50000000) {
             /* Highly unlikely, but handle the silly case. */
             bytes_consed_between_gcs -= bytes_consed_between_gcs / 4;
           }
