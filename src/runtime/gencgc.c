@@ -4671,7 +4671,7 @@ collect_garbage(generation_index_t last_gen)
             raise =
                 (gen < last_gen)
                 || (generations[gen].num_gc >= generations[gen].number_of_gcs_before_promotion
-                    && (gen != 0 || (0.01 < last_survival && last_survival < 0.5)));
+                    && (gen != 0 || (0.01 < last_survival && last_survival < 0.8)));
             /* If we would not normally raise this one, but we're
              * running low on space in comparison to the object-sizes
              * we've been seeing, raise it and collect the next one
@@ -4698,10 +4698,13 @@ collect_garbage(generation_index_t last_gen)
                 generations[gen+1].bytes_allocated;
         }
 
+#ifdef TUNE_NURSERY
         os_vm_size_t before_size = generations[gen].bytes_allocated;
+#endif
         memset(n_scav_calls, 0, sizeof n_scav_calls);
         memset(n_scav_skipped, 0, sizeof n_scav_skipped);
         garbage_collect_generation(gen, raise, cur_thread_approx_stackptr);
+#ifdef TUNE_NURSERY
         os_vm_size_t after_size = generations[gen].bytes_allocated;
         if (gen == 0 && !raise) {
           last_survival = last_survival * 0.5 + (float)after_size / (float)before_size * 0.5;
@@ -4713,9 +4716,10 @@ collect_garbage(generation_index_t last_gen)
             bytes_consed_between_gcs += bytes_consed_between_gcs / 4;
           } else if (last_survival < 0.01 && bytes_consed_between_gcs > 50000000) {
             /* Highly unlikely, but handle the silly case. */
-            //bytes_consed_between_gcs -= bytes_consed_between_gcs / 4;
+            // bytes_consed_between_gcs -= bytes_consed_between_gcs / 4;
           }
         }
+#endif
 
         /* Don't keep panicking if we freed enough now. */
         if (panic && (float)bytes_allocated / (float)dynamic_space_size < PANIC_THRESHOLD) {
