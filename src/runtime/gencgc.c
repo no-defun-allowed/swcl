@@ -4668,10 +4668,11 @@ collect_garbage(generation_index_t last_gen)
             raise = 0;
             more = 0;
         } else {
+            fprintf(stderr, "last_survival = %.4f\n", last_survival);
             raise =
                 (gen < last_gen)
-                || (generations[gen].num_gc >= generations[gen].number_of_gcs_before_promotion
-                    && (gen != 0 || (0.01 < last_survival && last_survival < 0.8)));
+              || (generations[gen].num_gc >= generations[gen].number_of_gcs_before_promotion
+                  && (gen != 0 || (0.01 < last_survival && last_survival < 0.8)));
             /* If we would not normally raise this one, but we're
              * running low on space in comparison to the object-sizes
              * we've been seeing, raise it and collect the next one
@@ -4698,17 +4699,15 @@ collect_garbage(generation_index_t last_gen)
                 generations[gen+1].bytes_allocated;
         }
 
-#ifdef TUNE_NURSERY
         os_vm_size_t before_size = generations[gen].bytes_allocated;
-#endif
         memset(n_scav_calls, 0, sizeof n_scav_calls);
         memset(n_scav_skipped, 0, sizeof n_scav_skipped);
         garbage_collect_generation(gen, raise, cur_thread_approx_stackptr);
-#ifdef TUNE_NURSERY
         os_vm_size_t after_size = generations[gen].bytes_allocated;
         if (gen == 0 && !raise) {
           last_survival = last_survival * 0.5 + (float)after_size / (float)before_size * 0.5;
           /* Honestly rather bogus values to guide nursery sizing. */
+#ifdef TUNE_NURSERY
           if (last_survival > 0.7 &&
               bytes_consed_between_gcs < dynamic_space_size / 4 &&
               generations[gen].bytes_allocated < dynamic_space_size / 3 &&
@@ -4718,8 +4717,8 @@ collect_garbage(generation_index_t last_gen)
             /* Highly unlikely, but handle the silly case. */
             // bytes_consed_between_gcs -= bytes_consed_between_gcs / 4;
           }
-        }
 #endif
+        }
 
         /* Don't keep panicking if we freed enough now. */
         if (panic && (float)bytes_allocated / (float)dynamic_space_size < PANIC_THRESHOLD) {
