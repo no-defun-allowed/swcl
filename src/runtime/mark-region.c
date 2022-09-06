@@ -313,9 +313,8 @@ static boolean pointer_survived_gc_yet(lispobj object) {
 static struct Qblock *grey_list;
 static struct Qblock *recycle_list;
 
-/* The "input packet" and "output packet" from "A Parallel, Incremental
- * and Concurrent GC for Servers". */
-static struct Qblock *input_block;
+/* The "output packet" from "A Parallel, Incremental and Concurrent GC
+ * for Servers". The "input packet" is block in trace_everything. */
 static struct Qblock *output_block;
 
 static struct Qblock *grab_qblock() {
@@ -428,45 +427,44 @@ static void trace_object(lispobj object) {
 }
 
 static boolean work_to_do() {
-  return ANY((input_block && input_block->count) || output_block || grey_list);
+  return ANY(output_block || grey_list);
 }
 
 #define PREFETCH_DISTANCE 16
-static lispobj dequeue() {
-  if (!input_block || !input_block->count) {
-    if (input_block) recycle_qblock(input_block);
-    if (output_block) {
-      /* Reuse input block */
-      input_block = output_block;
-      output_block = NULL;
-    } else if (grey_list) {
-      /* Take from grey block */
-      input_block = grey_list;
-      grey_list = grey_list->next;
-    } else {
-      /* No more work to do */
-      input_block = NULL;
-    }
+static struct Qblock *dequeue_block() {
+  struct Qblock *res;
+  if (output_block) {
+    /* Reuse input block */
+    res = output_block;
+    output_block = NULL;
+  } else if (grey_list) {
+    /* Take from grey block */
+    res = grey_list;
+    grey_list = grey_list->next;
+  } else {
+    lose("Called dequeue_block() with no work to do");
   }
-
-  if (!input_block) lose("Called dequeue() with no work to do");
-  lispobj v = input_block->elements[--input_block->count];
-  if (input_block->count > PREFETCH_DISTANCE)
-    __builtin_prefetch(native_pointer(input_block->elements[input_block->count - PREFETCH_DISTANCE]));
-  return v;
+  return res;
 }
 
 uword_t traced;
 static void __attribute__((noinline)) trace_everything() {
   while (work_to_do() ||
          (test_weak_triggers(pointer_survived_gc_yet, mark) && work_to_do())) {
-    traced++;
-    lispobj obj = dequeue();
-    trace_object(obj);
-    if (listp(obj))
-      mark_cons_line(CONS(obj));
-    else
-      mark_lines(native_pointer(obj));
+    struct Qblock *block = dequeue_block();
+    int count = block->count;
+    for (int n = 0; n < count; n++) {
+      traced++;
+      lispobj obj = block->elements[n];
+      trace_object(obj);
+      if (n + PREFETCH_DISTANCE < count)
+        __builtin_prefetch(native_pointer(block->elements[n + PREFETCH_DISTANCE]));
+      if (listp(obj))
+        mark_cons_line(CONS(obj));
+      else
+        mark_lines(native_pointer(obj));
+    }
+    recycle_qblock(block);
   }
 }
 
@@ -787,8 +785,6 @@ static void check_otherwise_dirty(lispobj *where) {
 }
 
 static void scavenge_root_object(generation_index_t gen, lispobj *where) {
-  if (embedded_obj_p(widetag_of(where)))
-    where = fun_code_header(where);
   dirty_generation_source = gen;
   trace_object(compute_lispobj(where));
   check_otherwise_dirty(where);

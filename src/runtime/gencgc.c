@@ -4668,7 +4668,6 @@ collect_garbage(generation_index_t last_gen)
             raise = 0;
             more = 0;
         } else {
-            fprintf(stderr, "last_survival = %.4f\n", last_survival);
             raise =
                 (gen < last_gen)
               || (generations[gen].num_gc >= generations[gen].number_of_gcs_before_promotion
