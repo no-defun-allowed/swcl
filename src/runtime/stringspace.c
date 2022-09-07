@@ -165,9 +165,6 @@ static void ensure_forwarded(lispobj* obj)
     gc_assert((uword_t)read_only_space_free_pointer <= READ_ONLY_SPACE_END);
     memcpy(copy, obj, nwords << WORD_SHIFT);
     set_forwarding_pointer(obj, make_lispobj(copy, OTHER_POINTER_LOWTAG));
-#ifdef LISP_FEATURE_MARK_REGION_GC
-    clear_allocation_bit_mark(obj);
-#endif
 }
 
 // We have to take the unused arg for function signature compatibility.
@@ -309,6 +306,9 @@ void move_rospace_to_dynamic(__attribute__((unused)) int print)
     for ( ; where < read_only_space_free_pointer ; where += nwords, shadow_cursor += nwords ) {
         nwords = headerobj_size(where);
         lispobj *new = gc_general_alloc(unboxed_region, nwords*N_WORD_BYTES, PAGE_TYPE_BOXED);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+        set_allocation_bit_mark(new);
+#endif
         memcpy(new, where, nwords*N_WORD_BYTES);
         *shadow_cursor = make_lispobj(new, OTHER_POINTER_LOWTAG);
     }
