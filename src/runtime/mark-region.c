@@ -796,10 +796,10 @@ static void scavenge_root_object(generation_index_t gen, lispobj *where) {
   check_otherwise_dirty(where);
 }
 
-static uword_t root_objects_checked = 0, dirty_root_objects = 0;
+static uword_t root_objects_checked = 0, dirty_root_objects = 0, dirty_cards = 0;
 static void __attribute__((noinline)) mr_scavenge_root_gens() {
   page_index_t i = 0;
-  root_objects_checked = 0; dirty_root_objects = 0;
+  root_objects_checked = 0; dirty_root_objects = 0; dirty_cards = 0;
   /* Keep this around, to avoid scanning objects which overlap cards
    * more than once. */
   lispobj *last_scavenged = 0;
@@ -841,6 +841,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
               mark(*p);
             // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
             update_card_mark(card, dirty);
+            dirty_cards++;
           }
         }
       }
@@ -851,6 +852,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
       for (int j = 0, card = page_to_card_index(i);
            j < CARDS_PER_PAGE;
            j++, card++, start += WORDS_PER_CARD) {
+        dirty_cards++;
         int last_card = -1;
         if (card_dirtyp(card)) {
           /* Check if an object overlaps the start of the card. Due to
@@ -948,7 +950,7 @@ static unsigned int collection = 0;
 void mr_pre_gc(generation_index_t generation) {
   // count_line_values("Pre GC");
 #if 1
-  fprintf(stderr, "[GC #%d gen %d %luM / %luM ", ++collection, generation,
+  fprintf(stderr, "\n[GC #%4d gen %d %5luM / %5luM ", ++collection, generation,
           generations[generation].bytes_allocated >> 20,
           bytes_allocated >> 20);
 #endif
@@ -967,9 +969,10 @@ void mr_collect_garbage(boolean raise) {
     raise_survivors(line_bytemap, line_count, generation_to_collect);
 #if 1
   fprintf(stderr,
-          "-> %luM / %luM, %lu traced %lu / %lu scavenged, page hwm = %ld%s]\n",
+          "-> %5luM / %5luM, %8lu traced, %8lu / %8lu scavenged on %8lu cards, page hwm = %8ld%s]\n",
           generations[generation_to_collect].bytes_allocated >> 20,
-          bytes_allocated >> 20, traced, dirty_root_objects, root_objects_checked,
+          bytes_allocated >> 20, traced,
+          dirty_root_objects, root_objects_checked, dirty_cards,
           next_free_page, raise ? ", raised" : "");
   // for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
   //   fprintf(stderr, "%d: %ld\n", g, generations[g].bytes_allocated);
