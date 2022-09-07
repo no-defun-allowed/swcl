@@ -13,6 +13,7 @@ extern unsigned char *line_bytemap;
 extern void mrgc_init();
 
 typedef intptr_t line_index_t;
+extern line_index_t line_count;
 
 extern void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes);
 extern void bitmap_sizes(core_entry_elt_t n_ptes, sword_t *where);

@@ -63,9 +63,10 @@ static void allocate_bitmap(uword_t **bitmap, uword_t size,
 void mrgc_init() {
   int bytes_per_heap_byte = 8 /* bits/byte */ << N_LOWTAG_BITS;
   mark_bitmap_size = dynamic_space_size / bytes_per_heap_byte;
+  line_count = 1;
+  while ((uword_t)line_count < mark_bitmap_size) line_count <<= 1;
   allocate_bitmap(&allocation_bitmap, mark_bitmap_size, "allocation bitmap");
   allocate_bitmap(&mark_bitmap, mark_bitmap_size, "mark bitmap");
-  line_count = dynamic_space_size / LINE_SIZE;
   allocate_bitmap((uword_t**)&line_bytemap, line_count, "line bytemap");
 }
 

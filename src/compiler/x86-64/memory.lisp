@@ -37,21 +37,42 @@
   (when (sc-is object constant immediate)
     (aver (symbolp (tn-value object))))
   (when (require-gc-store-barrier-p object value-tn-ref value-tn)
-    (if cell-address ; for SIMPLE-VECTOR, the page holding the specific element index gets marked
-        (inst lea scratch-reg cell-address)
-        ;; OBJECT could be a symbol in immobile space
-        (inst mov scratch-reg (encode-value-if-immediate object)))
-    (inst shr scratch-reg gencgc-card-shift)
-    ;; gc_allocate_ptes() asserts mask to be < 32 bits, which is hugely generous.
-    (inst and :dword scratch-reg card-index-mask)
-    ;; I wanted to use thread-tn as the source of the store, but it isn't 256-byte-aligned
-    ;; due to presence of negatively indexed thread header slots.
-    ;; Probably word-alignment is enough, because we can just check the lowest bit,
-    ;; borrowing upon the idea from PSEUDO-ATOMIC which uses RBP-TN as the source.
-    ;; I'd like to measure to see if using a register is actually better.
-    ;; If all threads store 0, it might be easier on the CPU's store buffer.
-    ;; Otherwise, it has to remember who "wins". 0 makes it indifferent.
-    (inst mov :byte (ea gc-card-table-reg-tn scratch-reg) 0)))
+    (labels ((load-address ()
+               (if cell-address ; for SIMPLE-VECTOR, the page holding the specific element index gets marked
+                   (inst lea scratch-reg cell-address)
+                   ;; OBJECT could be a symbol in immobile space
+                   (inst mov scratch-reg (encode-value-if-immediate object))))
+             (slow-path ()
+               (load-address)
+               (inst shr scratch-reg gencgc-card-shift)
+               ;; gc_allocate_ptes() asserts mask to be < 32 bits, which is hugely generous.
+               (inst and :dword scratch-reg card-index-mask)
+               ;; I wanted to use thread-tn as the source of the store, but it isn't 256-byte-aligned
+               ;; due to presence of negatively indexed thread header slots.
+               ;; Probably word-alignment is enough, because we can just check the lowest bit,
+               ;; borrowing upon the idea from PSEUDO-ATOMIC which uses RBP-TN as the source.
+               ;; I'd like to measure to see if using a register is actually better.
+               ;; If all threads store 0, it might be easier on the CPU's store buffer.
+               ;; Otherwise, it has to remember who "wins". 0 makes it indifferent.
+               (inst mov :byte (ea gc-card-table-reg-tn scratch-reg) 0)))
+      #+mark-region-gc
+      (let ((SLOW (gen-label "store card"))
+            (AFTER (gen-label "after write barrier")))
+        (load-address)
+        ;; TODO: #+gs-seg
+        (inst sub scratch-reg (thread-slot-ea thread-heap-start-slot))
+        (inst shr scratch-reg 7) ; Line size; urgh I need a constant somewhere
+        (inst and :qword scratch-reg (thread-slot-ea thread-line-mask-slot))
+        (inst add :qword scratch-reg (thread-slot-ea thread-line-bytemap-slot))
+        (inst cmp :byte (ea scratch-reg) 1) ; gen0 line
+        (inst jmp :ne SLOW)
+        (emit-label AFTER)
+        (assemble (:elsewhere)
+          (emit-label SLOW)
+          (slow-path)
+          (inst jmp AFTER)))
+      #-mark-region-gc
+      (slow-path))))
 
 (defun gen-cell-set (ea value val-temp)
   (sc-case value

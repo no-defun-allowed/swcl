@@ -1021,6 +1021,9 @@ alloc_thread_struct(void* spaces) {
     int bitmap_bits_per_heap_byte = 8 /* bits/byte */ << N_LOWTAG_BITS;
     th->allocation_bitmap_base =
       (char*)((uintptr_t)(allocation_bitmap) - ((uintptr_t)(DYNAMIC_SPACE_START) / bitmap_bits_per_heap_byte));
+    th->line_bytemap = line_bytemap;
+    th->heap_start = DYNAMIC_SPACE_START;
+    th->line_mask = (uword_t)line_count - 1;
 #endif
 #ifdef LISP_FEATURE_SB_THREAD
     /* This parallels the same logic in globals.c for the
