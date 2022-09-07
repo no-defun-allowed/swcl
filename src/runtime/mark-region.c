@@ -852,7 +852,6 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
       for (int j = 0, card = page_to_card_index(i);
            j < CARDS_PER_PAGE;
            j++, card++, start += WORDS_PER_CARD) {
-        dirty_cards++;
         int last_card = -1;
         if (card_dirtyp(card)) {
           /* Check if an object overlaps the start of the card. Due to
@@ -894,6 +893,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
                   relevant = _mm_cmpgt_epi8((line_pack & unmark_mask), generations),
                   relevant_marks128 = mark_pack & relevant;
           uword_t relevant_marks = _mm_cvtsi128_si64(relevant_marks128);
+          if (relevant_marks) dirty_cards++;
           while (relevant_marks) {
             root_objects_checked++;
             uword_t first_bit = __builtin_ctzl(relevant_marks);
