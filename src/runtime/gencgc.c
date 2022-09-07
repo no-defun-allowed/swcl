@@ -4670,8 +4670,7 @@ collect_garbage(generation_index_t last_gen)
         } else {
             raise =
                 (gen < last_gen)
-              || (generations[gen].num_gc >= generations[gen].number_of_gcs_before_promotion
-                  && (gen != 0 || (0.01 < last_survival && last_survival < 0.8)));
+              || (generations[gen].num_gc >= generations[gen].number_of_gcs_before_promotion);
             /* If we would not normally raise this one, but we're
              * running low on space in comparison to the object-sizes
              * we've been seeing, raise it and collect the next one

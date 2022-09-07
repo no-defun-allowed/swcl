@@ -23,7 +23,6 @@
 #include "genesis/hash-table.h"
 #include "genesis/closure.h"
 #include "gc-private.h"
-
 #ifdef LISP_FEATURE_X86_64
 #include <emmintrin.h>
 /* Some extra bytes at the end of every bitmap, so that we don't read
@@ -35,6 +34,8 @@
 
 #define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
 #define ATOMIC_INC(where, amount) __atomic_add_fetch(&(where), (amount), __ATOMIC_SEQ_CST)
+
+#define DEBUG
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -373,8 +374,10 @@ static void mark_lines(lispobj *p) {
 
 static void mark(lispobj object) {
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
+#ifdef DEBUG
     if (page_free_p(find_page_index(native_pointer(object))))
       lose("%lx is on a free page (#%ld)", object, find_page_index(native_pointer(object)));
+#endif
 
     lispobj *np = native_pointer(object);
     if (gc_gen_of(object, 0) < dirty_generation_source)
@@ -388,8 +391,10 @@ static void mark(lispobj object) {
       lispobj *base = fun_code_header(np);
       object = make_lispobj(base, OTHER_POINTER_LOWTAG);
     }
+#ifdef DEBUG
     if (!allocation_bit_marked(native_pointer(object)))
       lose("No allocation bit for 0x%lx", object);
+#endif
 
     /* Enqueue onto mark queue */
     if (!pointer_survived_gc_yet(object)) {
@@ -430,7 +435,7 @@ static boolean work_to_do() {
   return ANY(output_block || grey_list);
 }
 
-#define PREFETCH_DISTANCE 16
+#define PREFETCH_DISTANCE 32
 static struct Qblock *dequeue_block() {
   struct Qblock *res;
   if (output_block) {
@@ -457,8 +462,9 @@ static void __attribute__((noinline)) trace_everything() {
       traced++;
       lispobj obj = block->elements[n];
       trace_object(obj);
-      if (n + PREFETCH_DISTANCE < count)
+      if (n + PREFETCH_DISTANCE < count) {
         __builtin_prefetch(native_pointer(block->elements[n + PREFETCH_DISTANCE]));
+      }
       if (listp(obj))
         mark_cons_line(CONS(obj));
       else
@@ -790,10 +796,10 @@ static void scavenge_root_object(generation_index_t gen, lispobj *where) {
   check_otherwise_dirty(where);
 }
 
-static uword_t root_objects_checked = 0;
+static uword_t root_objects_checked = 0, dirty_root_objects = 0;
 static void __attribute__((noinline)) mr_scavenge_root_gens() {
   page_index_t i = 0;
-  root_objects_checked = 0;
+  root_objects_checked = 0; dirty_root_objects = 0;
   /* Keep this around, to avoid scanning objects which overlap cards
    * more than once. */
   lispobj *last_scavenged = 0;
@@ -911,6 +917,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
               }
 #endif
           // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
+          if (dirty) dirty_root_objects++;
           update_card_mark(card, dirty);
           last_card = card;
         }
@@ -960,9 +967,9 @@ void mr_collect_garbage(boolean raise) {
     raise_survivors(line_bytemap, line_count, generation_to_collect);
 #if 1
   fprintf(stderr,
-          "-> %luM / %luM, %lu traced %lu scavenged, page hwm = %ld%s]\n",
+          "-> %luM / %luM, %lu traced %lu / %lu scavenged, page hwm = %ld%s]\n",
           generations[generation_to_collect].bytes_allocated >> 20,
-          bytes_allocated >> 20, traced, root_objects_checked,
+          bytes_allocated >> 20, traced, dirty_root_objects, root_objects_checked,
           next_free_page, raise ? ", raised" : "");
   // for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
   //   fprintf(stderr, "%d: %ld\n", g, generations[g].bytes_allocated);
