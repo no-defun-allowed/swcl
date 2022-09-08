@@ -665,11 +665,16 @@ static void sweep_lines() {
         unsigned char *marks = (unsigned char*)mark_bitmap,
                       *allocs = (unsigned char*)allocation_bitmap,
                       *lines = line_bytemap;
+        page_bytes_t used = 0;
         for_lines_in_page(l, p) {
           allocs[l] = marks[l];
           lines[l] = IS_MARKED(lines[l]) ? UNMARK_GEN(lines[l]) : 0;
-          if (lines[l]) generations[DECODE_GEN(lines[l])].bytes_allocated += LINE_SIZE;
+          if (lines[l]) {
+            generations[DECODE_GEN(lines[l])].bytes_allocated += LINE_SIZE;
+            used += LINE_SIZE;
+          }
         }
+        set_page_bytes_used(p, used);
       } else {
         page_bytes_t decrement = count_dead_bytes(p);
         generations[generation_to_collect].bytes_allocated -= decrement;
@@ -974,11 +979,13 @@ void mr_collect_garbage(boolean raise) {
           bytes_allocated >> 20, traced,
           dirty_root_objects, root_objects_checked, dirty_cards,
           next_free_page, raise ? ", raised" : "");
-  // for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
-  //   fprintf(stderr, "%d: %ld\n", g, generations[g].bytes_allocated);
+  for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
+    fprintf(stderr, "%d: %12ld\n", g, generations[g].bytes_allocated);
+  fprintf(stderr, "   %12ld\n", bytes_allocated);
 #endif
   // count_line_values("Post GC");
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
+  check_weird_pages();
 }
 
 void zero_all_free_ranges() {
@@ -1046,4 +1053,10 @@ void count_line_values(char *why) {
   for (int n = 0; n < 256; n++)
     if (counts[n])
       fprintf(stderr, "%x: %d\n", n, counts[n]);
+}
+
+void check_weird_pages() {
+  for (page_index_t p = 0; p < page_table_pages; p++)
+    if (page_words_used(p) > GENCGC_PAGE_WORDS)
+      fprintf(stderr, "Page #%ld has %d words used\n", p, page_words_used(p));
 }

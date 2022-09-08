@@ -5710,11 +5710,18 @@ static void prepare_dynamic_space_for_final_gc()
         if (gen != 0) {
             int used = page_bytes_used(i);
             page_table[i].gen = 0;
+#ifndef LISP_FEATURE_MARK_REGION_GC
             generations[gen].bytes_allocated -= used;
             generations[0].bytes_allocated += used;
+#endif
         }
     }
 #ifdef LISP_FEATURE_MARK_REGION_GC
+    generations[0].bytes_allocated = bytes_allocated;
+    for (generation_index_t g = 1; g <= PSEUDO_STATIC_GENERATION; g++) {
+      generations[0].bytes_allocated += generations[g].bytes_allocated;
+      generations[g].bytes_allocated = 0;
+    }
     prepare_lines_for_final_gc();
 #endif
 
