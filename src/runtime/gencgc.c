@@ -5717,7 +5717,6 @@ static void prepare_dynamic_space_for_final_gc()
         }
     }
 #ifdef LISP_FEATURE_MARK_REGION_GC
-    generations[0].bytes_allocated = bytes_allocated;
     for (generation_index_t g = 1; g <= PSEUDO_STATIC_GENERATION; g++) {
       generations[0].bytes_allocated += generations[g].bytes_allocated;
       generations[g].bytes_allocated = 0;

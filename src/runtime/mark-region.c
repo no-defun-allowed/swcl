@@ -261,29 +261,6 @@ void mr_update_closed_region(struct alloc_region *region) {
   gc_set_region_empty(region);
 }
 
-/* Core file I/O */
-
-void bitmap_sizes(core_entry_elt_t n_ptes, sword_t *where) {
-  sword_t bytes_of_heap = n_ptes * GENCGC_PAGE_BYTES;
-  where[0] = bytes_of_heap / (8 << N_LOWTAG_BITS); /* allocation bitmap size */
-  where[1] = bytes_of_heap / LINE_SIZE;         /* line bytemap size */
-}
-
-void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
-  sword_t sizes[2];
-  bitmap_sizes(n_ptes, sizes);
-  lseek(fd, ALIGN_UP(lseek(fd, 0, SEEK_CUR), N_WORD_BYTES), SEEK_SET);
-  sword_t allocation_bitmap_size = sizes[0];
-  if (read(fd, allocation_bitmap, allocation_bitmap_size) != allocation_bitmap_size)
-    lose("failed to read allocation bitmap from core");
-
-  for (page_index_t p = 0; p < page_table_pages; p++)
-    if (page_table[p].gen == PSEUDO_STATIC_GENERATION)
-      memset(line_bytemap + address_line(page_address(p)),
-             ENCODE_GEN(PSEUDO_STATIC_GENERATION),
-             GENCGC_PAGE_BYTES / LINE_SIZE);
-}
-
 /* Marking */
 
 /* Old generation for finding old->young pointers */
@@ -677,6 +654,9 @@ static void sweep_lines() {
         set_page_bytes_used(p, used);
       } else {
         page_bytes_t decrement = count_dead_bytes(p);
+        if (page_bytes_used(p) < decrement)
+          lose("Decrement of %d on page #%ld, with only %d bytes to spare.",
+               decrement, p, page_bytes_used(p));
         generations[generation_to_collect].bytes_allocated -= decrement;
         set_page_bytes_used(p, page_bytes_used(p) - decrement);
         sweep_small_page(p);
@@ -688,7 +668,6 @@ static void __attribute__((noinline)) sweep() {
   local_smash_weak_pointers();
   gc_dispose_private_pages();
   cull_weak_hash_tables(mr_alivep_funs);
-
   /* Reset values we're about to recompute */
   bytes_allocated = 0;
   /* We recompute bytes allocated from scratch when doing full GC */
@@ -979,13 +958,14 @@ void mr_collect_garbage(boolean raise) {
           bytes_allocated >> 20, traced,
           dirty_root_objects, root_objects_checked, dirty_cards,
           next_free_page, raise ? ", raised" : "");
+#endif
+#if 0
   for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
     fprintf(stderr, "%d: %12ld\n", g, generations[g].bytes_allocated);
   fprintf(stderr, "   %12ld\n", bytes_allocated);
 #endif
   // count_line_values("Post GC");
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
-  check_weird_pages();
 }
 
 void zero_all_free_ranges() {
@@ -1003,6 +983,51 @@ void zero_all_free_ranges() {
 void prepare_lines_for_final_gc() {
   for (line_index_t l = 0; l < line_count; l++)
     line_bytemap[l] = line_bytemap[l] == 0 ? 0 : ENCODE_GEN(0);
+
+  // Now that we've unleashed pseudo-static pages onto GC, recompute
+  // everything (as we would during a full GC).
+  for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
+    generations[g].bytes_allocated = 0;
+  for (page_index_t p = 0; p < page_table_pages; p++) {
+    if (page_single_obj_p(p)) {
+      generations[0].bytes_allocated += page_bytes_used(p);
+    } else {
+      page_bytes_t new_size = 0;
+      set_page_bytes_used(p, 0);
+      for_lines_in_page(l, p) {
+        if (line_bytemap[l]) {
+          new_size += LINE_SIZE;
+        }
+      }
+      generations[0].bytes_allocated += new_size;
+      set_page_bytes_used(p, new_size);
+    }
+  }
+}
+
+/* Core file I/O */
+
+sword_t bitmap_size(core_entry_elt_t n_ptes) {
+  sword_t bytes_of_heap = n_ptes * GENCGC_PAGE_BYTES;
+  return bytes_of_heap / (8 << N_LOWTAG_BITS);
+}
+
+void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
+  sword_t size = bitmap_size(n_ptes);
+  lseek(fd, ALIGN_UP(lseek(fd, 0, SEEK_CUR), N_WORD_BYTES), SEEK_SET);
+  if (read(fd, allocation_bitmap, size) != size)
+    lose("failed to read allocation bitmap from core");
+
+  /* Mark pseudo-static lines as if everything is live. */
+  for (page_index_t p = 0; p <= page_table_pages; p++)
+    if (!page_free_p(p) && !page_single_obj_p(p)) {
+      set_page_bytes_used(p, GENCGC_PAGE_BYTES);
+      for_lines_in_page(l, p) line_bytemap[l] = ENCODE_GEN(PSEUDO_STATIC_GENERATION);
+    }
+  bytes_allocated = 0;
+  for (page_index_t p = 0; p <= page_table_pages; p++)
+    bytes_allocated += page_bytes_used(p);
+  generations[PSEUDO_STATIC_GENERATION].bytes_allocated = bytes_allocated;
 }
 
 /* Useful hacky stuff */
@@ -1038,7 +1063,7 @@ void draw_line_bytemap() {
   for (line_index_t i = 0; i < line_count; i++) {
     page_index_t p = find_page_index(line_address(i));
     int m = line_bytemap[i] > 0, r = page_table[p].type & 7,
-        g = (page_table[p].type >> 3) * 2,
+        g = (page_table[p].type >> 3) * 2 | (IS_MARKED(line_bytemap[i]) * 4),
         b = gc_gen_of((lispobj)line_address(i), 0);
     fprintf(f, "%d %d %d ", r * m, g * m, b * m);
   }
@@ -1059,4 +1084,20 @@ void check_weird_pages() {
   for (page_index_t p = 0; p < page_table_pages; p++)
     if (page_words_used(p) > GENCGC_PAGE_WORDS)
       fprintf(stderr, "Page #%ld has %d words used\n", p, page_words_used(p));
+  boolean fail = 0;
+  for (page_index_t p = 0; p < page_table_pages; p++)
+    if (!page_single_obj_p(p)) {
+      page_bytes_t size = 0;
+      for_lines_in_page(l, p) {
+        if (line_bytemap[l]) {
+          size += LINE_SIZE;
+        }
+      }
+      if (size != page_bytes_used(p)) {
+        fail = 1;
+        fprintf(stderr, "Page #%lu (%x %d) has %d bytes, not %d\n",
+                p, page_table[p].type, page_table[p].gen, size, page_bytes_used(p));
+      }
+      if (fail) lose("Errors checking line/page usage, as above.");
+    }
 }

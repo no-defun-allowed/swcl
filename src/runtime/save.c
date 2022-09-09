@@ -380,13 +380,10 @@ save_to_filehandle(FILE *file, char *filename, lispobj init_function,
         sword_t offset = write_bytes(file, data, aligned_size, core_start_pos,
                                      COMPRESSION_LEVEL_NONE, 1);
 #ifdef LISP_FEATURE_MARK_REGION_GC
-        extern void bitmap_sizes(core_entry_elt_t, sword_t*);
-        sword_t sizes[2];
-        bitmap_sizes(next_free_page, sizes);
+        extern sword_t bitmap_size(core_entry_elt_t);
+        sword_t size = bitmap_size(next_free_page);
         extern uword_t *allocation_bitmap;
-        extern char *line_bytemap;
-        write_bytes(file, (char*)allocation_bitmap, sizes[0], core_start_pos, COMPRESSION_LEVEL_NONE, 0);
-        write_bytes(file, line_bytemap, sizes[1], core_start_pos, COMPRESSION_LEVEL_NONE, 0);
+        write_bytes(file, (char*)allocation_bitmap, size, core_start_pos, COMPRESSION_LEVEL_NONE, 0);
 #endif
         write_lispobj(offset, file);
     }

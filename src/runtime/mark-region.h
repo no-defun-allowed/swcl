@@ -15,7 +15,7 @@ extern void mrgc_init();
 typedef intptr_t line_index_t;
 
 extern void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes);
-extern void bitmap_sizes(core_entry_elt_t n_ptes, sword_t *where);
+extern sword_t bitmap_sizes(core_entry_elt_t n_ptes);
 
 extern boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
                                              int page_type, generation_index_t gen,
