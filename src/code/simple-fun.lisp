@@ -311,11 +311,17 @@
     (interpreted-function (sb-interpreter:%fun-ftype function))
     (t (%simple-fun-type (%fun-fun function)))))
 
-(defun ftype-from-fdefn (name)
-  (declare (ignorable name))
-  (let ((function (awhen (find-fdefn name) (fdefn-fun it))))
-    (if (not function)
-        (specifier-type 'function)
+(defun sb-c::ftype-from-definition (name)
+  (let ((function (fboundp name)))
+    (cond
+      ((not function)
+       (specifier-type 'function))
+      ((and (symbolp name) (macro-function name))
+       ;; this seems to be called often on macros
+       ;; what's the right answer ???
+       ;; (warn "ftype-from-fdefn called on macro ~s" name)
+       (specifier-type '(function (t t) t)))
+      (t
         ;; Never signal the PARSE-UNKNOWN-TYPE condition.
         ;; This affects 2 regression tests, both very contrived:
         ;;  - in defstruct.impure ASSERT-ERROR (BUG127--FOO (MAKE-BUG127-E :FOO 3))
@@ -325,7 +331,7 @@
                 (sb-kernel::make-type-context
                  ftype nil sb-kernel::+type-parse-signal-inhibit+)))
           (declare (truly-dynamic-extent context))
-          (values (sb-kernel::basic-parse-typespec ftype context))))))
+          (values (sb-kernel::basic-parse-typespec ftype context)))))))
 
 ;;; Return the lambda expression for SIMPLE-FUN if compiled to memory
 ;;; and rentention of forms was enabled via the EVAL-STORE-SOURCE-FORM policy
@@ -425,18 +431,14 @@
   (declare (type code-component code-obj))
   (ash (code-fun-table-count code-obj) -5))
 
-;;; Index to start of named-call fdefns
-;;; FIXME: Naming symmetry between this and code-n-named-calls might be nice.
-(defun code-fdefns-start-index (code-obj)
-  (+ sb-vm:code-constants-offset
-     (* (code-n-entries code-obj) sb-vm:code-slots-per-simple-fun)))
-
-;;; Number of "called" fdefns, which does not count fdefns in the boxed
-;;; constants that are used in #'FUN syntax without a funcall necessarily
-;;; occuring, though it may.
-(defun code-n-named-calls (code-obj)
-  (ash (sb-vm::%code-boxed-size code-obj)
-       (+ -32 sb-vm:n-fixnum-tag-bits)))
+;;; Start and count of fdefns used in #'F synax or normal named call
+;;; (i.e. at the head of an expression)
+(export 'sb-vm::code-header-fdefn-range 'sb-vm) ; protect from tree-shaker
+(defun sb-vm::code-header-fdefn-range (code-obj)
+  (values (+ sb-vm:code-constants-offset
+             (* (code-n-entries code-obj) sb-vm:code-slots-per-simple-fun))
+          (ash (sb-vm::%code-boxed-size code-obj)
+               (+ -32 sb-vm:n-fixnum-tag-bits))))
 
 ;;; Return the offset in bytes from (CODE-INSTRUCTIONS CODE-OBJ)
 ;;; to its FUN-INDEXth function.

@@ -33,16 +33,6 @@
   #+immobile-code (sb-vm::%set-fdefn-fun fdefn fun)
   #-immobile-code (setf (fdefn-fun fdefn) fun))
 
-;; Return SYMBOL's fdefinition, if any, or NIL. SYMBOL must already
-;; have been verified to be a symbol by the caller.
-(defun symbol-fdefn (symbol)
-  (declare (optimize (safety 0)))
-  (let ((fdefn (sb-vm::%symbol-fdefn symbol)))
-    ;; The slot default is 0, not NIL, because I'm thinking that it might also
-    ;; be used to store the property list if there is no FDEFN,
-    ;; or a cons of an FDEFN and list, so 0 is unambiguously "no value"
-    (if (eql fdefn 0) nil fdefn)))
-
 ;;; Return the FDEFN object for NAME, or NIL if there is no fdefn.
 ;;; Signal an error if name isn't valid.
 ;;; Assume that exists-p implies LEGAL-FUN-NAME-P.
@@ -50,7 +40,8 @@
 (defun find-fdefn (name)
   (declare (explicit-check))
   (when (symbolp name) ; Don't need LEGAL-FUN-NAME-P check
-    (return-from find-fdefn (symbol-fdefn name)))
+    (let ((fdefn (sb-vm::%symbol-fdefn name))) ; slot default is 0, not NIL
+      (return-from find-fdefn (if (eql fdefn 0) nil fdefn))))
   ;; Technically the ALLOW-ATOM argument of NIL isn't needed, but
   ;; the compiler isn't figuring out not to test SYMBOLP twice in a row.
   (with-globaldb-name (key1 key2 nil) name
@@ -95,18 +86,17 @@
        (eq (load-time-value (%closure-fun (symbol-function 'dx-let)) t)
            (%closure-fun function))))
 
+;;; This is the implementation of (COERCE s 'function) when S is of type symbol
+;;; used by either the full call or the compile-time transform for that pattern.
 (defun coerce-symbol-to-fun (symbol)
-  ;; FIXME? I would think to use SYMBOL-FUNCTION here which does not strip off
-  ;; encapsulations. But Stas wrote FDEFINITION so ...
-  ;; [Also note, we won't encapsulate a macro or special-form, so this
-  ;; introspective technique to decide what kind something is works either way]
-  (let ((def (fdefinition symbol)))
-    (if (macro/special-guard-fun-p def)
-        (error (ecase (car (%fun-name def))
-                (:macro "~S names a macro.")
-                (:special "~S names a special operator."))
-               symbol)
-        def)))
+  (let ((def (%symbol-function symbol)))
+    (cond ((not def) (error 'undefined-function :name symbol))
+          ((macro/special-guard-fun-p def)
+           (error (ecase (car (%fun-name def))
+                    (:macro "~S names a macro.")
+                    (:special "~S names a special operator."))
+                  symbol))
+          (t def))))
 
 (declaim (ftype (sfunction (t) fdefn) find-or-create-fdefn))
 (defun find-or-create-fdefn (name)
@@ -151,39 +141,26 @@
       (clear-info :function :type name))))
 
 ;;; Return the fdefn-fun of NAME's fdefinition including any
-;;; encapsulations. FDEFN can be provided explicitly. As a special
-;;; case it can be computed with SYMBOL-FDEFN which is slightly
-;;; quicker.  This is the core of the implementation of the standard
+;;; encapsulations.  This is the core of the implementation of the standard
 ;;; FDEFINITION function, but as we've defined FDEFINITION, that
 ;;; strips encapsulations.
-(defun %coerce-name-to-fun (name &optional (fdefn (find-fdefn name))
-                                           strictly-functionp)
-  (declare (type boolean strictly-functionp))
-  (let (f)
-    (if (and fdefn
-             (setq f (fdefn-fun fdefn))
-             ;; If STRICTLY-FUNCTIONP is true, we make sure not to return an error
-             ;; trampoline. This extra check ensures that full calls such as
-             ;; (MAPCAR 'OR '()) signal an error that OR isn't a function.
-             ;; This accords with the non-requirement that macros store strictly
-             ;; a function in the symbol that names them. In many implementations,
-             ;; (FUNCTIONP (SYMBOL-FUNCTION 'OR)) => NIL. We want to pretend that.
-             (not (and strictly-functionp (macro/special-guard-fun-p f))))
-        f
-        (retry-%coerce-name-to-fun name strictly-functionp))))
-
-;;; If %COERCE-NAME-TO-FUN fails, continue here.
-;;; LOOKUP-FN, being more about speed than semantics, is irrelevant.
-;;; Once we're forced down the slow path, it doesn't matter whether the fdefn
-;;; lookup considers generalized function names (which require a hash-table)
-;;; versus optimizing for just symbols (by using SYMBOL-INFO).
-;;;
-;;; Furthermore we explicitly allow any function name when retrying,
-;;; even if the erring caller was SYMBOL-FUNCTION. It is consistent
-;;; that both #'(SETF MYNEWFUN) and '(SETF MYNEWFUN) are permitted
-;;; as the object to use in the USE-VALUE restart.
-(defun retry-%coerce-name-to-fun (name strictly-functionp)
-  (setq name (restart-case (error 'undefined-function :name name)
+(defun %coerce-name-to-fun (name)
+  (typecase name
+    ((and symbol (not null))
+     (let ((fun (%symbol-function name)))
+       (when (and fun (not (macro/special-guard-fun-p fun)))
+         (return-from %coerce-name-to-fun fun))))
+    (cons
+     (binding* ((fdefn (find-fdefn name) :exit-if-null)
+                (fun (fdefn-fun fdefn) :exit-if-null))
+       (return-from %coerce-name-to-fun fun))))
+  ;; We explicitly allow any function name when retrying,
+  ;; even if the erring caller was SYMBOL-FUNCTION. It is consistent
+  ;; that both #'(SETF MYNEWFUN) and '(SETF MYNEWFUN) are permitted
+  ;; as the object to use in the USE-VALUE restart.
+  (setq name (restart-case (if (legal-fun-name-p name)
+                               (error 'undefined-function :name name)
+                               (legal-fun-name-or-type-error name))
                (continue ()
                  :report (lambda (stream)
                            (format stream "Retry using ~s." name))
@@ -193,15 +170,9 @@
                            (format stream "Use specified function"))
                  :interactive read-evaluated-form
                  (if (functionp value)
-                     (return-from retry-%coerce-name-to-fun value)
+                     (return-from %coerce-name-to-fun value)
                      value))))
-  (let ((fdefn (find-fdefn name)))
-    (when fdefn
-      (let ((f (fdefn-fun (truly-the fdefn fdefn))))
-        (when (and f (or (not strictly-functionp)
-                         (not (macro/special-guard-fun-p f))))
-          (return-from retry-%coerce-name-to-fun f)))))
-  (retry-%coerce-name-to-fun name strictly-functionp))
+  (%coerce-name-to-fun name))
 
 ;; Coerce CALLABLE (a function-designator) to a FUNCTION.
 ;; The compiler emits this when someone tries to FUNCALL something.
@@ -215,16 +186,21 @@
 ;;    if a symbol does not satisfy FBOUNDP.
 (defun %coerce-callable-to-fun (callable)
   (declare (explicit-check))
-  (etypecase callable
-    (function callable)
-    (symbol (%coerce-name-to-fun callable (symbol-fdefn callable) t))))
+  (typecase callable
+    (function
+     (return-from %coerce-callable-to-fun callable))
+    ((and symbol (not null)) ; NIL can't be fboundp. Quicker test this way.
+     (let ((fun (%symbol-function callable)))
+       (when (and fun (not (macro/special-guard-fun-p fun)))
+         (return-from %coerce-callable-to-fun fun))))
+    ;; If NIL, it's not technically a type-error, so instead hit the error
+    ;; in %coerce-name-to-fun which has a restart.
+    (null)
+    (t (error 'type-error :expected-type '(or symbol function) :datum callable)))
+  (%coerce-name-to-fun callable))
 
 ;;; Behaves just like %COERCE-CALLABLE-TO-FUN but has an ir2-convert optimizer.
-(defun %coerce-callable-for-call (callable)
-  (declare (explicit-check))
-  (etypecase callable
-    (function callable)
-    (symbol (%coerce-name-to-fun callable (symbol-fdefn callable) t))))
+(setf (symbol-function '%coerce-callable-for-call) (symbol-function '%coerce-callable-to-fun))
 
 
 ;;;; definition encapsulation
@@ -365,12 +341,16 @@
    encapsulations and to return the innermost encapsulated definition.
    This is SETF'able."
   (declare (explicit-check))
-  (let ((fun (%coerce-name-to-fun name)))
+  ;; %COERCE-NAME-TO-FUN signals an error for macros and special operators,
+  ;; but FDEFINITION should not, so pick off symbols using %SYMBOL-FUNCTION.
+  (strip-encapsulation (or (and (symbolp name) (%symbol-function name))
+                           (%coerce-name-to-fun name))))
+(defun strip-encapsulation (fun)
     (loop
      (let ((encap-info (encapsulation-info fun)))
        (if encap-info
            (setf fun (encapsulation-info-definition encap-info))
-           (return fun))))))
+           (return fun)))))
 
 (defvar *setf-fdefinition-hook* nil
   "A list of functions that (SETF FDEFINITION) invokes before storing the
@@ -386,11 +366,12 @@
            :format-control "~S is not acceptable to ~S."
            :format-arguments (list object setter))))
 
-(defun %set-fdefinition (name new-value)
+(defun (setf fdefinition) (new-value name)
   "Set NAME's global function definition."
   (declare (type function new-value) (optimize (safety 1)))
   (declare (explicit-check))
   (err-if-unacceptable-function new-value '(setf fdefinition))
+  (setq new-value (strip-encapsulation new-value))
   (with-single-package-locked-error (:symbol name "setting fdefinition of ~A")
     (maybe-clobber-ftype name new-value)
 

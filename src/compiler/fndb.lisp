@@ -132,8 +132,8 @@
 (defknown set (symbol t) t ()
   :derive-type #'result-type-last-arg)
 (defknown fdefinition ((or symbol cons)) function ())
-(defknown %set-fdefinition ((or symbol cons) function) function ()
-  :derive-type #'result-type-last-arg)
+(defknown ((setf fdefinition)) (function (or symbol cons)) function ()
+  :derive-type #'result-type-first-arg)
 (defknown makunbound (symbol) symbol ()
   :derive-type #'result-type-first-arg)
 (defknown fmakunbound ((or symbol cons)) (or symbol cons)
@@ -2055,6 +2055,8 @@
 (defknown sb-vm::touch-object (t) (values)
   (always-translatable))
 
+(defknown sb-vm::touch-object-identity (t) t
+  (always-translatable))
 (defknown foreign-symbol-dataref-sap (simple-string)
   system-area-pointer
   (movable flushable))

@@ -350,18 +350,14 @@
 ;;; MAP-OBJECTS-IN-RANGE, which is unreliable in the presence of
 ;;; multiple threads. Unfortunately, some users dangerously redefine
 ;;; builtin functions, and moreover, while there are multiple threads.
-(defun statically-link-code-obj (code fixups)
-  (declare (ignorable code fixups))
-  (unless (immobile-space-obj-p code)
-    (return-from statically-link-code-obj code))
+(defun statically-link-code-obj (code fixups &optional observable-fdefns)
+  (declare (ignorable code fixups observable-fdefns))
   #+immobile-code
-  (let* ((fdefns-start (+ code-constants-offset
-                          (* code-slots-per-simple-fun (code-n-entries code))))
-         (fdefns-count (the index (code-n-named-calls code)))
-         (replacements (make-array fdefns-count :initial-element nil))
-         (ambiguous (make-array fdefns-count :initial-element 0 :element-type 'bit))
-         (any-replacements)
-         (any-ambiguous))
+  (binding* (((fdefns-start fdefns-count) (code-header-fdefn-range code))
+             (replacements (make-array fdefns-count :initial-element nil))
+             (ambiguous (make-array fdefns-count :initial-element 0 :element-type 'bit))
+             (any-replacements nil)
+             (any-ambiguous nil))
     ;; For each fdefn, decide two things:
     ;; * whether the fdefn can be replaced by its function - possible only when
     ;;   that function is in immobile space and needs no trampoline.
@@ -413,7 +409,7 @@
                        (offset (cdr fixup))
                        (fdefn (code-header-ref code (+ fdefns-start fdefn-index)))
                        (fun (aref replacements fdefn-index)))
-              (when fun
+              (when (and fun (/= (bit ambiguous fdefn-index) 1))
                 ;; Set the statically-linked flag
                 (sb-vm::set-fdefn-has-static-callers fdefn 1)
                 (when (= (bit ambiguous fdefn-index) 1)
@@ -425,6 +421,7 @@
                   (setf (signed-sap-ref-32 insts offset)
                         (sap- entry (sap+ insts (+ offset 4))))))))
           ;; Replace ambiguous elements of the code header while still holding the lock
+          #+statically-link-if-ambiguous ; never enabled
           (dotimes (i fdefns-count)
             (when (= (bit ambiguous i) 1)
               (let ((wordindex (+ fdefns-start i))

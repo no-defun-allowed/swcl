@@ -2075,9 +2075,9 @@ static void apply_absolute_fixups(lispobj fixups, struct code* code)
                 UNALIGNED_STORE32(fixup_where, fixed);
             continue;
         }
+        // Call to asm routine or linkage table entry using "CALL [#xNNNN]" form.
+        // This fixup is only for whole-heap relocation on startup.
         if (asm_routines_start <= ptr && ptr < asm_routines_end) {
-            // Call to asm routine using "CALL [#xNNNN]" form.
-            // This fixup is only for whole-heap relocation on startup.
             continue;
         }
 #ifdef LISP_FEATURE_METASPACE

@@ -174,7 +174,10 @@
    value (inst-operand-size-default-qword dstate) t stream dstate))
 
 (defun print-jmp-ea (value stream dstate)
-  (print-sized-reg/mem-default-qword value stream dstate))
+  (cond ((typep value 'machine-ea)
+         (print-mem-ref :compute value :qword stream dstate))
+        ((null stream) (operand value dstate))
+        (t (write value :stream stream))))
 
 (defun print-sized-byte-reg/mem (value stream dstate)
   (print-reg/mem-with-width value :byte t stream dstate))
@@ -273,18 +276,6 @@
   (awhen (and (typep value 'word)
               (sb-disassem::find-code-constant-from-interior-pointer value dstate))
     (note (lambda (stream) (princ it stream)) dstate)))
-
-;;; Immobile symbols are heuristically detected with MAYBE-NOTE-STATIC-LISPOBJ
-;;; so that moving the tagged pointer to a symbol is shown thusly:
-;;; ";  BACF003C50       MOV EDX, #x503C00CF             ; '*MYVAR*"
-;;;
-(defun print-imm/asm-routine (value stream dstate)
-  (cond ((not stream) (operand value dstate))
-        ((or (maybe-note-assembler-routine value nil dstate)
-             (maybe-note-static-lispobj value dstate t))
-         (princ16 value stream))
-        (t
-         (princ value stream))))
 
 ;;; Return an instance of REG or MACHINE-EA.
 ;;; MOD and R/M are the extracted bits from the instruction's ModRM byte.
@@ -440,7 +431,13 @@
          ;; compilation to memory says it is all associated with
          ;; the symbol "lisp_jit_code" which is not useful.
          (when (plusp addr)
-           (or (unless (sb-kernel:immobile-space-addr-p addr)
+           (or (when (<= sb-vm:alien-linkage-table-space-start addr
+                         (+ sb-vm:alien-linkage-table-space-start
+                            (1- sb-vm:alien-linkage-table-space-size)))
+                 (let* ((index (sb-vm::alien-linkage-table-index-from-address addr))
+                        (name (sb-impl::alien-linkage-index-to-name index)))
+                   (note (lambda (s) (format s "&~A" name)) dstate)))
+               (unless (sb-kernel:immobile-space-addr-p addr)
                  (maybe-note-assembler-routine addr nil dstate))
                ;; Show the absolute address and maybe the contents.
                (note (format nil "[#x~x]~@[ = #x~x~]"
@@ -448,6 +445,20 @@
                              (case width
                               (:qword (unboxed-constant-ref dstate addr disp))))
                      dstate))))))
+
+    ;; Recognize "[Rbase+disp]" as an alien linkage table reference if Rbase was
+    ;; just loaded with the base address in the prior instruction.
+    (when (and (eql (machine-ea-base value)
+                    (car (sb-disassem::dstate-known-register-contents dstate)))
+               (eq (cdr (sb-disassem::dstate-known-register-contents dstate))
+                   'alien-linkage)
+               (not (machine-ea-index value))
+               (integerp (machine-ea-disp value)))
+      (let* ((index (sb-vm::alien-linkage-table-index-from-address
+                     (+ sb-vm:alien-linkage-table-space-start (machine-ea-disp value))))
+             (name (sb-impl::alien-linkage-index-to-name index)))
+        (note (lambda (s) (format s "&~A" name)) dstate)))
+    (setf (sb-disassem::dstate-known-register-contents dstate) nil)
 
     (flet ((guess-symbol (predicate)
              (binding* ((code-header (seg-code (dstate-segment dstate)) :exit-if-null)
@@ -481,14 +492,22 @@
                   #+gs-seg (dstate-getprop dstate +gs-segment+)
                   #-gs-seg (not (dstate-getprop dstate +fs-segment+)) ; not system TLS
                   (not index-reg) ; no index
-                  (typep disp '(integer 0 *)) ; positive displacement
+                  (typep disp '(integer -128 *)) ; valid displacement
                   (zerop (logand disp 7))) ; lispword-aligned
-             (let ((index (ash disp -3)))
-               (when (< index (length thread-slot-names))
-                 (awhen (aref thread-slot-names index)
-                   (return-from print-mem-ref
-                     (note (lambda (stream) (format stream "thread.~(~A~)" it))
-                           dstate)))))
+             (let* ((index (ash disp -3))
+                    (symbol (cond ((minusp index)
+                                   (aref sb-vm::+thread-header-slot-names+ (1- (- index))))
+                                  ((< index (length thread-slot-names))
+                                   (aref thread-slot-names index)))))
+               (when symbol
+                 (when (and (eq symbol 'sb-vm::alien-linkage-table-base)
+                            (eql (logandc2 (sb-disassem::dstate-inst-properties dstate) +rex-r+)
+                                 (logior +rex+ +rex-w+ +rex-b+)))
+                   (setf (sb-disassem::dstate-known-register-contents dstate)
+                         `(,(reg-num (regrm-inst-reg dchunk-zero dstate)) . alien-linkage)))
+                 (return-from print-mem-ref
+                   (note (lambda (stream) (format stream "thread.~(~A~)" symbol))
+                         dstate))))
              (let ((symbol (or (guess-symbol
                                 (lambda (s) (= (symbol-tls-index s) disp)))
                                ;; static symbols aren't in the code header
@@ -602,6 +621,7 @@
          (jmp-inst (find-inst #xE9 inst-space))
          (cond-jmp-inst (find-inst #x800f inst-space))
          (lea-inst (find-inst #x8D inst-space))
+         (mov-inst (find-inst #x8B inst-space))
          (address (get-lisp-obj-address code))
          (text-start (sap-int (code-instructions code)))
          (text-end (+ text-start (%code-text-size code)))
@@ -610,7 +630,7 @@
           (seg-length segment) length
           (seg-sap-maker segment) (lambda () sap))
     (map-segment-instructions
-     (lambda (dchunk inst)
+     (lambda (dchunk inst &aux (opcode (sap-ref-8 sap (dstate-cur-offs dstate))))
        (flet ((includep (target)
                 ;; Self-relative (to the code object) operands are ignored.
                 (and (or (< target address) (>= target text-end))
@@ -629,10 +649,11 @@
                   (when (includep operand)
                     (funcall function (+ (dstate-cur-offs dstate) 2)
                              operand inst))))
-               ((eq inst lea-inst)
+               ((or (eq inst lea-inst)
+                    (and (eq inst mov-inst) (eql opcode #x8B)))
                 ;; Computing the address of UNDEFINED-FDEFN and
                 ;; FUNCALLABLE-INSTANCE-TRAMP is done with LEA.
-                (aver (eql (sap-ref-8 sap (dstate-cur-offs dstate)) #x8D))
+                ;; Load from the alien linkage table can be done with MOV Rnn,[RIP-k].
                 (let ((modrm (sap-ref-8 sap (1+ (dstate-cur-offs dstate)))))
                   (when (= (logand modrm #b11000111) #b00000101) ; RIP-relative mode
                     (let ((operand (+ (signed-sap-ref-32

@@ -136,6 +136,12 @@
                  (memq symbol
                        '(sb-c::sb-pcl sb-c::sb-impl sb-c::sb-kernel
                          sb-c::sb-c sb-c::sb-int))))))
+    ;; Delete bootstrap-only vops
+    (flet ((drop-keys (table)
+             (loop for symbol being each hash-key of table
+                   when (uninternable-p symbol) do (remhash symbol table))))
+      (drop-keys sb-c::*backend-parsed-vops*)
+      (drop-keys sb-c::*backend-template-names*))
     ;; A structure constructor name, in particular !MAKE-SAETP,
     ;; can't be uninterned if referenced by a defstruct-description.
     ;; So loop over all structure classoids and clobber any
@@ -399,7 +405,7 @@ Please check that all strings which were not recognizable to the compiler
    (lambda (symbol accessibility)
      (declare (ignore accessibility))
      (or (sb-kernel:symbol-%info symbol)
-         (sb-int:symbol-fdefn symbol) ; might be redundant with existence of %info, but ok
+         (sb-int:find-fdefn symbol) ; might be redundant with existence of %info, but ok
          (and (boundp symbol) (not (keywordp symbol)))))
    ;; Release mode: retain all symbols satisfying this intricate test
    #-sb-devel
@@ -465,7 +471,7 @@ Please check that all strings which were not recognizable to the compiler
            (or (eq accessibility :external) (asm-inst-p symbol))
            ;; By default, retain any symbol with any attachments
            (or (sb-kernel:symbol-%info symbol)
-               (sb-int:symbol-fdefn symbol)
+               (sb-int:find-fdefn symbol)
                (and (boundp symbol) (not (keywordp symbol))))))))
    :verbose nil :print nil)
   (unintern 'sb-impl::shake-packages 'sb-impl)

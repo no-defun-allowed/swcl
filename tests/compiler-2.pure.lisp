@@ -216,7 +216,7 @@
       ;; Should not have a call to SET-SYMBOL-GLOBAL-VALUE>
       (assert (not (ctu:find-code-constants f :type 'sb-kernel:fdefn))))))
 
-(with-test (:name :linkage-table-bogosity)
+(with-test (:name :alien-linkage-table-bogosity)
   (let ((strings (map 'list (lambda (x) (if (consp x) (car x) x))
                       sb-vm::+required-foreign-symbols+)))
     (assert (= (length (remove-duplicates strings :test 'string=))
@@ -2634,13 +2634,10 @@
                             (push name names)))))
              (assert (not dup-fdefns)))))
     (dolist (c (sb-vm::list-allocated-objects :all :type sb-vm:code-header-widetag))
-      (let* ((start (+ sb-vm:code-constants-offset
-                       (* (sb-kernel:code-n-entries c)
-                          sb-vm:code-slots-per-simple-fun)))
-             (end (+ start (sb-kernel:code-n-named-calls c))))
+      (sb-int:binding* (((start count) (sb-vm::code-header-fdefn-range c))
+                        (end (+ start count)))
         ;; Within each subset of FDEFNs there should be no duplicates
-        ;; by name. But there could be an fdefn that is in the union of
-        ;; the ranges twice, if used for named call and a global ref.
+        ;; by name. But there could be an fdefn that is in the union of the two sets.
         (scan-range c start end)
         (scan-range c end (sb-kernel:code-header-words c))))))
 
@@ -3730,3 +3727,16 @@
    `(lambda (x)
       (aref (the (values (and (not simple-array) vector)) x) 0))
    (((make-array 10 :adjustable t :initial-element 3)) 3)))
+
+(with-test (:name :restoring-tns-after-cleanups)
+  (checked-compile-and-assert
+      ()
+      `(lambda ()
+         (declare (notinline values))
+         (unwind-protect 1
+           (let ((a (list 'list)))
+             (declare (dynamic-extent a))
+             (unwind-protect 1 (eval a)))
+           (eval 1)
+           (eval 2)))
+    (() 1)))

@@ -105,9 +105,16 @@ distinct from the global value. Can also be SETF."
           (%set-symbol-hash symbol (compute-symbol-hash name (length name))))
       hash)))
 
+;;; Return the function binding of SYMBOL or NIL if not fboundp.
+;;; Don't strip encapsulations.
+(defmacro %symbol-function (symbol)
+  `(let ((fdefn (sb-vm::%symbol-fdefn ,symbol)))
+     (if (eql fdefn 0) nil (fdefn-fun (truly-the fdefn fdefn)))))
+
 (defun symbol-function (symbol)
   "Return SYMBOL's current function definition. Settable with SETF."
-  (%coerce-name-to-fun symbol (symbol-fdefn symbol)))
+  (truly-the function (or (%symbol-function symbol) ; fast way
+                          (%coerce-name-to-fun symbol)))) ; fallback w/restart
 
 ;; I think there are two bugs here.
 ;; Per CLHS "SETF may be used with symbol-function to replace a global
@@ -124,6 +131,7 @@ distinct from the global value. Can also be SETF."
   ;; on SYMBOL-FUNCTION. It doesn't say that SETF behaves the same, but let's
   ;; assume it does, and that we can't assign our macro/special guard funs.
   (err-if-unacceptable-function new-value '(setf symbol-function))
+  (setq new-value (strip-encapsulation new-value))
   (with-single-package-locked-error
       (:symbol symbol "setting the symbol-function of ~A")
     ;; This code is a little "surprising" in that it is not just a limited
@@ -597,3 +605,5 @@ distinct from the global value. Can also be SETF."
                        :datum new-value
                        :expected-type spec)))))))
     nil))
+
+#+sb-thread (defun symbol-tls-index (x) (symbol-tls-index x)) ; necessary stub

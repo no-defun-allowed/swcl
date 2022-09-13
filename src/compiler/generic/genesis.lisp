@@ -264,7 +264,7 @@
   (defvar *immobile-text*)
   (defvar *immobile-space-map* nil))
 
-;;; This ignores linkage-table-core-space-id
+;;; This ignores alien-linkage-table-core-space-id
 ;;; which is never present in the core file.
 (defconstant max-core-space-id (+ 3 #+immobile-space 2
                                     #+darwin-jit 1))
@@ -2389,9 +2389,9 @@ Legal values for OFFSET are -4, -8, -12, ..."
                   (cold-fun-entry-addr (cold-symbol-function name))
                   kind :static-call))))
 
-(defun linkage-table-note-symbol (symbol-name datap)
+(defun alien-linkage-table-note-symbol (symbol-name datap)
   "Register a symbol and return its address in proto-linkage-table."
-  (sb-vm::linkage-table-entry-address
+  (sb-vm::alien-linkage-table-entry-address
    (ensure-gethash (if datap (list symbol-name) symbol-name)
                    *cold-foreign-symbol-table*
                    (hash-table-count *cold-foreign-symbol-table*))))
@@ -2957,8 +2957,8 @@ Legal values for OFFSET are -4, -8, -12, ..."
              (:assembly-routine* (lookup-assembler-reference name :indirect))
              (:asm-routine-nil-offset
               (- (lookup-assembler-reference name) sb-vm:nil-value))
-             (:foreign (linkage-table-note-symbol string nil))
-             (:foreign-dataref (linkage-table-note-symbol string t))
+             (:foreign (alien-linkage-table-note-symbol string nil))
+             (:foreign-dataref (alien-linkage-table-note-symbol string t))
              (:code-object (descriptor-bits code-obj))
              #+sb-thread ; ENSURE-SYMBOL-TLS-INDEX isn't defined otherwise
              (:symbol-tls-index (ensure-symbol-tls-index name))
@@ -2973,9 +2973,11 @@ Legal values for OFFSET are -4, -8, -12, ..."
               ;; but an uninterned symbol is a descriptor.
               (descriptor-bits (if (symbolp name) (cold-intern name) name)))
              (:symbol-value (descriptor-bits (cold-symbol-value name)))
-             (:named-call
+             (:fdefn-call ; x86-64 only
               (+ (descriptor-bits (ensure-cold-fdefn name))
-                 (- 2 sb-vm:other-pointer-lowtag)))) ; wtf?
+                 ;; this jumps to the jump instruction embedded within an fdefn.
+                 ;; (It's a terrible technique which I plan to remove.)
+                 (- 2 sb-vm:other-pointer-lowtag))))
            kind flavor))))
   code-obj)
 
@@ -2988,7 +2990,7 @@ Legal values for OFFSET are -4, -8, -12, ..."
              (when (= start end) ; 0 size is allowed
                (return-from check))
              (unless (< start end)
-               (error "Bogus space: ~A" space))
+               (error "Space bounds look bad: ~A = ~X..~X" space start end))
              (let ((type (specifier-type `(integer ,start (,end)))))
                (dolist (other types)
                  (unless (eq *empty-type* (type-intersection (cdr other) type))
@@ -3006,7 +3008,9 @@ Legal values for OFFSET are -4, -8, -12, ..."
       (aver (zerop (rem sb-vm:fixedobj-space-size (* 32 sb-vm:immobile-card-bytes))))
       #-gencgc
       (check sb-vm:dynamic-0-space-start sb-vm:dynamic-0-space-end :dynamic-0)
-      (check sb-vm:linkage-table-space-start sb-vm:linkage-table-space-end :linkage-table))))
+      #-immobile-space
+      (let ((end (+ sb-vm:alien-linkage-table-space-start sb-vm:alien-linkage-table-space-size)))
+        (check sb-vm:alien-linkage-table-space-start end :linkage-table)))))
 
 ;;;; emitting C header file
 
@@ -3421,7 +3425,7 @@ lispobj symbol_package(struct symbol*);~%" (genesis-header-prefix))
                      (string-upcase c-name) (sb-vm:primitive-object-length obj))))
       (when (eq name 'sb-vm::thread)
         (format t "#define THREAD_HEADER_SLOTS ~d~%" sb-vm::thread-header-slots)
-        (dolist (x sb-vm::*thread-header-slot-names*)
+        (dovector (x sb-vm::+thread-header-slot-names+)
           (let ((s (package-symbolicate "SB-VM" "THREAD-" x "-SLOT")))
             (format t "#define ~a ~d~%" (c-name (string s)) (symbol-value s))))
         (terpri))
@@ -3694,7 +3698,7 @@ III. initially undefined function references (alphabetically):
     (let ((name (car entry)))
       (format t " ~:[   ~;(D)~] ~8x = ~a~%"
               (listp name)
-              (sb-vm::linkage-table-entry-address (cdr entry))
+              (sb-vm::alien-linkage-table-entry-address (cdr entry))
               (car (ensure-list name)))))
 
   #+sb-thread
@@ -3889,7 +3893,7 @@ III. initially undefined function references (alphabetically):
 
     ;; Prefill some linkage table entries perhaps
     (loop for (name datap) in sb-vm::*linkage-space-predefined-entries*
-          do (linkage-table-note-symbol name datap))
+          do (alien-linkage-table-note-symbol name datap))
 
     ;; Now that we've successfully read our only input file (by
     ;; loading the symbol table, if any), it's a good time to ensure

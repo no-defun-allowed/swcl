@@ -8,15 +8,10 @@
 ;;;; files for more information.
 
 (defpackage :sb-introspect-test
-  (:use "SB-INTROSPECT" "CL" "SB-RT"))
+  (:import-from #:test-util #:deftest)
+  (:use "SB-INTROSPECT" "CL"))
 
 (in-package :sb-introspect-test)
-
-(defmacro deftest* ((name &key fails-on) form &rest results)
-  `(progn
-     (when (sb-impl::featurep ',fails-on)
-       (pushnew ',name sb-rt::*expected-failures*))
-     (deftest ,name ,form ,@results)))
 
 ;; When running the tests which query for a function type, sb-interpreter
 ;; can return an answer if there were type declarations for the arguments,
@@ -52,6 +47,10 @@
            '(x b))
   t)
 
+(defmacro interpret (form)
+  `(let ((sb-ext:*evaluator-mode* :interpret))
+     (eval ',form)))
+
 #+sb-eval
 (deftest macro-lambda-list.2
     (equal (function-lambda-list (interpret (defmacro macro-lambda-list.2-m (x)
@@ -80,7 +79,9 @@
     (let* ((source (find-definition-source #'cl-user::one))
            (plist (definition-source-plist source))
            (pathname (definition-source-pathname source)))
-      (values (equalp pathname #p"SYS:CONTRIB;SB-INTROSPECT;TEST.LISP.NEWEST")
+      (declare (ignore source))
+      ;; the full pathname isn't important
+      (values (equalp (pathname-name pathname) "TEST")
               (= (definition-source-file-write-date source)
                  (file-write-date pathname))
               (or (equal (getf plist :test-outer)
@@ -88,18 +89,13 @@
                   plist)))
   t t t)
 
-;; Not sure why this fails when interpreted, and don't really care too much.
-;; The behavior seems right to me anyway.
-#.(if (eq sb-ext:*evaluator-mode* :compile)
-'(deftest definition-source-plist.2
+;;; The behavior of :SOURCE-PLIST on nested WITH-COMPILATION-UNIT
+;;; is to append. This is documented in source/compiler/main
+(test-util:with-test (:name :definition-source-plist.2)
     (let ((plist (definition-source-plist
                      (find-definition-source #'cl-user::four))))
-      (values (or (equal (getf plist :test-outer) "OUT")
-                  plist)
-              (or (equal (getf plist :test-inner) "IN")
-                  plist)))
-  t t)
-(values))
+      (assert (equal (getf plist :test-outer) "OUT"))
+      (assert (equal (getf plist :test-inner) "IN"))))
 
 (defun matchp (object form-number)
   (let ((ds (sb-introspect:find-definition-source object)))
@@ -250,7 +246,7 @@
     (matchp-name :function 'cl-user::compile-time-too-fun 28)
   t)
 
-(load "load-test.lisp")
+(load "../contrib/sb-introspect/load-test.lisp")
 (deftest find-source-stuff.32
     (matchp-name :function 'cl-user::loaded-as-source-fun 3)
   t)
@@ -384,28 +380,13 @@
     (tai 42s0 :immediate nil)
   t)
 
-;;; -- It appears that this test can also fail due to systematic issues
-;;; (possibly with the C compiler used) which we cannot detect based on
-;;; *features*.  Until this issue has been fixed, I am marking this test
-;;; as failing on Windows to allow installation of the contrib on
-;;; affected builds, even if the underlying issue is (possibly?) not even
-;;; strictly related to windows.  C.f. lp1057631.  --DFL
-;;;
-(deftest* (allocation-information.4
+(test-util:with-test (:name :allocation-information.4
            ;; Ignored as per the comment above, even though it seems
            ;; unlikely that this is the right condition.
-           :fails-on (or :win32 :ppc64 (and :sparc :gencgc)))
-    #+gencgc
+           :fails-on (or :ppc64 (and :sparc :gencgc)))
     (tai (make-list 1) :heap
          `(:space :dynamic :boxed t :large nil)
-         :ignore (list :page :pinned :generation :write-protected))
-    #-gencgc
-    (tai :cons :heap
-         ;; FIXME: Figure out what's the right cheney-result. SPARC at least
-         ;; has exhibited both :READ-ONLY and :DYNAMIC, which seems wrong.
-         '()
-         :ignore '(:space))
-  t)
+         :ignore (list :page :pinned :generation :write-protected)))
 
 (setq sb-ext:*evaluator-mode* :compile)
 (sb-ext:defglobal *large-obj* nil)
@@ -464,7 +445,7 @@
 (compile 'alloc-large-code)
 
 #+gencgc
-(deftest* (allocation-information.6)
+(deftest allocation-information.6
     ;; Remember, all tests run after all toplevel forms have executed,
     ;; so if this were (DEFGLOBAL *LARGE-CODE* ... ) or something,
     ;; the garbage collection explicitly requested for ALLOCATION-INFORMATION.5
@@ -560,10 +541,6 @@
   (or (equal typespec1 typespec2)   ; TYPE= punts on &keywords in FTYPEs.
       (sb-kernel:type= (sb-kernel:values-specifier-type typespec1)
                        (sb-kernel:values-specifier-type typespec2))))
-
-(defmacro interpret (form)
-  `(let ((sb-ext:*evaluator-mode* :interpret))
-     (eval ',form)))
 
 ;; Functions
 
@@ -744,7 +721,7 @@
         (predicate (find-definition-source #'cl-user::three-p)))
     (values (and (equalp copier accessor)
                  (equalp copier predicate))
-            (equal "TEST.LISP.NEWEST"
+            (equal "test.lisp"
                    (file-namestring (definition-source-pathname copier)))
             (equal '(5)
                    (definition-source-form-path copier))))
@@ -758,7 +735,7 @@
         (predicate (car (find-definition-sources-by-name 'cl-user::three-p :function))))
     (values (and (equalp copier accessor)
                  (equalp copier predicate))
-            (equal "TEST.LISP.NEWEST"
+            (equal "test.lisp"
                    (file-namestring (definition-source-pathname copier)))
             (equal '(5)
                    (definition-source-form-path copier))))

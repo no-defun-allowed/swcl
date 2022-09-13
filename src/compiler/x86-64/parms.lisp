@@ -108,8 +108,8 @@
                      :dynamic-space-start #x1000000000
                      #+openbsd :dynamic-space-size #+openbsd #x1bcf0000)
 
-(defconstant linkage-table-growth-direction :up)
-(defconstant linkage-table-entry-size 16)
+(defconstant alien-linkage-table-growth-direction :up)
+(defconstant alien-linkage-table-entry-size 16)
 
 
 (defenum (:start 8)
@@ -156,6 +156,13 @@
      ;; interrupt handling
     #-sb-thread *pseudo-atomic-bits*     ; ditto
     #-sb-thread *binding-stack-pointer* ; ditto
+    ;; Since the text space and alien linkage table might both get relocated on startup
+    ;; under #+immobile-space, an alien callback wrapper can't wire in the address
+    ;; of a word that holds the C function pointer to callback_wrapper_trampoline.
+    ;; (There is no register that points to a known address when entering the callback)
+    ;; A static symbol works well for this, and is sensible considering that
+    ;; the assembled wrappers also reside in static space.
+    #+(and sb-thread immobile-space) callback-wrapper-trampoline
     *cpu-feature-bits*)
   #'equalp)
 

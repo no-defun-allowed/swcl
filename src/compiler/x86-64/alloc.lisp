@@ -1038,7 +1038,7 @@
              `(let ((c-fun (make-fixup ,name :foreign)))
                 (inst call (cond ((sb-c::code-immobile-p node) c-fun)
                                  (t (progn (inst mov rax c-fun) rax)))))))
-(define-vop (alloc-immobile-fixedobj)
+(define-vop (!alloc-immobile-fixedobj)
   (:args (size-class :scs (any-reg) :target c-arg1)
          (nwords :scs (any-reg) :target c-arg2)
          (header :scs (any-reg) :target c-arg3))
@@ -1072,7 +1072,7 @@
 (eval-when (:compile-toplevel)
   (aver (evenp symbol-size))) ; assumptions in the code below
 
-(define-vop (fast-alloc-immobile-symbol)
+(define-vop (!fast-alloc-immobile-symbol)
   (:results (result :scs (descriptor-reg)))
   (:temporary (:sc unsigned-reg :offset rax-offset) rax)
   (:temporary (:sc unsigned-reg :offset rbx-offset) rbx)
@@ -1080,9 +1080,9 @@
   (:temporary (:sc unsigned-reg) header)
   (:generator 1
     ;; fixedobj_pages linkage entry: 1 PTE per page, 12-byte struct
-    (inst mov rbx (ea (make-fixup "fixedobj_pages" :foreign-dataref)))
+    (inst mov rbx (rip-relative-ea (make-fixup "fixedobj_pages" :foreign-dataref)))
     ;; fixedobj_page_hint: 1 hint per sizeclass. C type = uint32_t
-    (inst mov rax (ea (make-fixup "fixedobj_page_hint" :foreign-dataref)))
+    (inst mov rax (rip-relative-ea (make-fixup "fixedobj_page_hint" :foreign-dataref)))
     (inst mov rbx (ea rbx)) ; get the base of the fixedobj_pages array
     ;; This has to be pseudoatomic as soon as the page hint is loaded.
     ;; Consider the situation where there is exactly one symbol on a page that
@@ -1099,7 +1099,7 @@
        (inst jmp :z FAIL) ; fail if hint page is 0
        (inst lea rbx (ea rbx rax 8))  ; rbx := &fixedobj_pages[hint].free_index
        ;; compute fixedobj_page_address(hint) into RAX
-       (inst mov rcx (ea (make-fixup "FIXEDOBJ_SPACE_START" :foreign-dataref)))
+       (inst mov rcx (rip-relative-ea (make-fixup "FIXEDOBJ_SPACE_START" :foreign-dataref)))
        (inst shl rax (integer-length (1- immobile-card-bytes)))
        (inst add rax (ea rcx))
        ;; load the page's free pointer

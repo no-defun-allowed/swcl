@@ -35,6 +35,7 @@
            #:*scratch-file-prefix*
            #:with-scratch-file
            #:with-test-directory
+           #:generate-test-directory-name
            #:*test-directory*
            #:opaque-identity
            #:runtime #:split-string #:integer-sequence #:shuffle))
@@ -247,7 +248,7 @@
                            (eql package (find-package "KEYWORD")))))
              (integer t))))
     (unless (tree-equal name name :test #'name-ok)
-      (error "test name must be all-keywords: ~S" name)))
+      (error "test name must be all-keywords: ~S" name))) ; WHY????
   (cond
     ((broken-p broken-on)
      `(progn
@@ -887,14 +888,22 @@
 
 (defvar *test-directory*)
 
+(defun generate-test-directory-name ()
+  ;; Why aren't we using TMPDIR???
+  (merge-pathnames
+   (make-pathname :directory `(:relative ,(write-to-string (sb-unix:unix-getpid))))
+   (parse-native-namestring (posix-getenv "TEST_DIRECTORY")
+                            nil *default-pathname-defaults*
+                            :as-directory t)))
+
 (defun call-with-test-directory (fn)
   ;; FIXME: this writes into the source directory depending on whether
   ;; TEST_DIRECTORY has been made to point elsewhere or not.
-  (let ((test-directory (parse-native-namestring (posix-getenv "TEST_DIRECTORY")
-                                                 nil *default-pathname-defaults*
-                                                 :as-directory t)))
+  (let ((test-directory (generate-test-directory-name)))
     (ensure-directories-exist test-directory)
     (unwind-protect
+         ;; WHY REBIND *DEFAULT-PATHNAME-DEFAULTS* ? THIS SUCKS!
+         ;; (It means we can't use the WITH-TEST-DIRECTORY macro for most things)
          (let ((*default-pathname-defaults* test-directory)
                (*test-directory* test-directory))
            (funcall fn test-directory))
@@ -964,3 +973,8 @@
   (when (find-package "SB-SPROF")
     (format t "INFO: disabling SB-SPROF~%")
     (funcall (intern "STOP-PROFILING" "SB-SPROF"))))
+
+;;; This unexported symbol emulates SB-RT. Please don't use it in new tests
+(defmacro deftest (name form &rest results) ; use SB-RT syntax
+  `(test-util:with-test (:name ,(sb-int:keywordicate name))
+     (assert (equalp (multiple-value-list ,form) ',results))))
