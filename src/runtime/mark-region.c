@@ -715,6 +715,7 @@ static void trace_static_roots() {
 
 /* Entry points */
 
+/* Preserve an ambiguous pointer. */
 void mr_preserve_pointer(uword_t address) {
   if (find_page_index((void*)address) > -1) {
     lispobj *obj = find_object(address, DYNAMIC_SPACE_START, 1);
@@ -722,20 +723,24 @@ void mr_preserve_pointer(uword_t address) {
   }
 }
 
+/* Preserve exact pointers in an array. */
 void mr_preserve_range(lispobj *from, sword_t nwords) {
   for (sword_t n = 0; n < nwords; n++) {
     mark(from[n]);
   }
 }
 
-void mr_preserve_object(lispobj obj) {
+/* Preserve an exact pointer, without attempting to trace it. */
+void mr_preserve_leaf(lispobj obj) {
   if (is_lisp_pointer(obj) && in_dynamic_space(obj)) {
     set_mark_bit(obj);
     lispobj *n = native_pointer(obj);
-    add_words_used(n, object_size(n));
     mark_lines(n);
   }
 }
+
+/* Preserve an exact pointer, and trace it. */
+void mr_preserve_object(lispobj obj) { mark(obj); }
 
 static void update_card_mark(int card, boolean dirty) {
   if (gc_card_mark[card] != STICKY_MARK)

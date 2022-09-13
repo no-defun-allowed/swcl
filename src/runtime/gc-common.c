@@ -1778,7 +1778,7 @@ cull_weak_hash_table_bucket(struct hash_table *hash_table,
                 hash_table->culled_values = list;
                 // ensure this cons doesn't get smashed into (0 . 0) by full gc
 #ifdef LISP_FEATURE_MARK_REGION_GC
-                mr_preserve_object(list);
+                mr_preserve_leaf(list);
 #else
                 if (!compacting_p()) gc_mark_obj(list);
 #endif
@@ -1801,7 +1801,7 @@ cull_weak_hash_table_bucket(struct hash_table *hash_table,
                 cons[1].car = make_fixnum(index);  // which cell became free
                 cons[1].cdr = make_fixnum(bucket); // which chain was it in
 #ifdef LISP_FEATURE_MARK_REGION_GC
-                mr_preserve_object(cons->car);
+                mr_preserve_leaf(cons->car);
 #else
                 if (!compacting_p()) gc_mark_obj(cons->car);
 #endif
@@ -1817,7 +1817,7 @@ cull_weak_hash_table_bucket(struct hash_table *hash_table,
             hash_table->smashed_cells = make_lispobj(cons, LIST_POINTER_LOWTAG);
             // ensure this cons doesn't get smashed into (0 . 0) by full gc
 #ifdef LISP_FEATURE_MARK_REGION_GC
-            mr_preserve_object(hash_table->smashed_cells);
+            mr_preserve_leaf(hash_table->smashed_cells);
 #else
             if (!compacting_p()) gc_mark_obj(hash_table->smashed_cells);
 #endif
