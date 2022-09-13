@@ -1,0 +1,129 @@
+A mark-region collector is being developed for SBCL. The intention is
+that avoiding compaction/copying should allow for better performance,
+and should make implementing parallel and concurrent collection easier
+(but neither has been implemented just yet).
+
+Heap layout
+-----------
+
+The collector retains the page-orientation of gencgc, but introduces a
+second layer of "lines" as used in the Immix collector for small
+objects. Line metadata, including the generation number and a mark
+bit, is stored in a "bytemap". Memory used for small objects is
+reclaimed at the line level, rather than the page level, in order to
+reclaim most memory without having to move objects. Each line is
+assigned its own generation, to allow memory from older generations to
+be reused for newer generations. Line size is fixed to 16 words
+(i.e. 8 possible places an object could be allocated) to make bitwise
+operations simpler.
+
+The starts of objects are recorded in an allocation bitmap. Lisp uses
+a BTS instruction; as threads still claim whole pages at a time, there
+is no need for writing to the bitmap to be atomic. Ambiguous pointers
+can be checked by consulting the bitmap; it is also possible to scan
+the bitmap if support for interior pointers is desired.
+
+Marking
+-------
+
+The collector employs a classic tri-color mark-sweep algorithm. A mark
+bitmap stores mark bits for objects, storing if an object is white, or
+if an object is grey or black. Lines are assigned Grey objects are
+stored on a mark stack, represented as a linked list of "grey
+packets", each packet containing a vector of pointers to trace. The
+collector reads off pointers to trace from an "input packet", and
+writes out more pointers to trace from an "output packet". Prefetching
+the pointers in the input packet is somewhat effective.
+
+Marking can be made parallel by giving each collector thread its own
+input and output packets, and requiring the shading of an object to be
+an atomic operation. A thread does not mark an object if it fails to
+set the mark bit atomically, as another thread marked it in the
+meanwhile, and will proceed in marking the object. (We almost could go
+without atomicity, since marking and tracing are idempotent, but
+writing the bitmap must be atomic, or data races could cause objects
+to become unmarked.)
+
+Sweeping
+--------
+
+Sweeping is complicated by the use of generations, and by the rather
+odd heap layout. If a full collection was used, it would suffice to
+copy the mark bitmap to the allocation bitmap, in order to sweep the
+allocation bitmap, and to free every line that was not
+marked. However, the use of generations requires that we retain
+allocations and line usage for older generations. Conceptually, now,
+we have to "blend" the allocation and mark bitmaps, based on the
+values stored in the line bytemap.
+
+This blending operation is made rather simple, as every byte of the
+allocation bitmap corresponds to a byte of the line bytemap, due to
+our definition of the line size. We copy a byte of the mark bitmap to
+the allocation bitmap only when the corresponding line is in the
+generation being collected, preserving allocation bits for older
+objects. We unmark each line that is marked and in the generation
+being collected, and free each line that is unmarked and in the
+generation being collected, preserving older lines.
+
+Computing occupancy of each page, each generation, and the entire heap
+is also tricky. The current approach, which could be improved upon, is
+to count the number of dead lines on each page, and then decrement the
+occupancy of the page, the heap, and the generation being collected by
+the number of dead bytes found. Another approach would be to count the
+number of live lines on each page, which requires the same amount of
+work, and to also count the number of live lines in the generation
+being collected. In either case, it is only necessary to recompute
+occupancy for the generation being collected, as the collector
+performs no actions that would cause the occupancy of any other
+generation to change.
+
+All the sweeping operations can be (automatically) vectorised, which improves performance substantially.
+
+Scavenging
+----------
+
+In a generational collector, it is also necessary to trace certain
+"remembered" objects in older generations, which contain pointers to
+new objects which must be preserved. SBCL records pointer writes using
+a card map, and a subset of these writes will be to older objects, and
+a subset of those writes will be storing pointers to new objects. The
+collector scans every card to find pointers from old objects to new
+objects, and mark the new objects. Similar to sweeping, it is possible
+to use blending to compute a bitmap of only old objects, by only
+retaining bytes from the allocation bitmap that reside on older lines.
+
+One complication is that, when Lisp updates a simple vector, the card
+containing the slot being updated is dirtied, and not the card
+containing the start of the object. The different dirtying semantics
+is useful for scavenging larger vectors, as only part of an old vector
+may have pointers to new objects, and so the collector should only
+scan that part. However, when scavenging pages containing smaller
+objects, it is necessary to search the allocation bitmap backwards, to
+check if the card mark could be due to updating a slot in a vector
+which intersects the card, but does not begin on that card. Another
+option would be to dirty both the first card of a simple vector, and
+the card containing the slot being updated, which would avoid needing
+to search the allocation bitmap, at the cost of requiring more
+scavenging work for larger vectors.
+
+Another complication is that, if old and new objects both reside on a
+card, updating new objects will cause the collector to need to
+scavenge the old objects, even though the old objects were not
+updated. Scavenging can take a long time for some programs due to such
+imprecision. Boehm et al call this phenomenon "card pollution", and
+suggest that cards containing old objects should not be allocated
+into; but this would reduce our ability to reclaim and re-use
+memory. The precision of the write barrier could be improved by having
+the write barrier check the generation the line resides in, before
+dirtying a card; but this approach complicates the write barrier and
+caused a noticeable slowdown in Lisp code. An equivalent approach
+which doesn't require changing the write barrier would be to make
+cards the same size as lines, avoiding any imprecision. The
+forementioned blending operation would check if a line is old and its
+corresponding card is dirty, when selecting objects that need to be
+scavenged.
+
+Useful references:
+Immix: https://www.cs.utexas.edu/users/speedway/DaCapo/papers/immix-pldi-2008.pdf
+Grey packets: https://dl.acm.org/doi/10.1145/1108970.1108972
+Sticky marks in generational collection: https://dl.acm.org/doi/pdf/10.1145/96709.96735
