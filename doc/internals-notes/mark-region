@@ -28,12 +28,15 @@ Marking
 
 The collector employs a classic tri-color mark-sweep algorithm. A mark
 bitmap stores mark bits for objects, storing if an object is white, or
-if an object is grey or black. Lines are assigned Grey objects are
-stored on a mark stack, represented as a linked list of "grey
-packets", each packet containing a vector of pointers to trace. The
-collector reads off pointers to trace from an "input packet", and
-writes out more pointers to trace from an "output packet". Prefetching
-the pointers in the input packet is somewhat effective.
+if an object is grey or black. Lines are also assigned mark bits,
+which represent if the line can be reclaimed or not, and all lines
+intersecting an object are marked when an object is marked. Grey
+objects are stored on a mark stack, represented as a linked list of
+"grey packets", each packet containing a vector of pointers to
+trace. The collector reads off pointers to trace from an "input
+packet", and writes out more pointers to trace from an "output
+packet". Prefetching the pointers in the input packet is somewhat
+effective.
 
 Marking can be made parallel by giving each collector thread its own
 input and output packets, and requiring the shading of an object to be
@@ -77,7 +80,8 @@ occupancy for the generation being collected, as the collector
 performs no actions that would cause the occupancy of any other
 generation to change.
 
-All the sweeping operations can be (automatically) vectorised, which improves performance substantially.
+All the sweeping operations can be (automatically) vectorised, which
+improves performance substantially.
 
 Scavenging
 ----------
