@@ -5178,7 +5178,7 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
 #ifdef LISP_FEATURE_MARK_REGION_GC
     int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
     gc_assert(ret);
-    boolean largep = nbytes >= (GENCGC_PAGE_BYTES / 4 * 3);
+    boolean largep = (nbytes >= (GENCGC_PAGE_BYTES / 4 * 3)) && page_type != PAGE_TYPE_CONS;
     page_index_t alloc_start = get_alloc_start_page(page_type);
     if (largep) {
         page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,
