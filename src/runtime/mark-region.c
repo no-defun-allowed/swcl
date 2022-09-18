@@ -98,7 +98,7 @@ boolean line_marked(void *pointer) {
 #define MARK_GEN(l) ((l) | 16)
 #define UNMARK_GEN(l) ((l) & 15)
 #define ENCODE_GEN(g) ((g) + 1)
-#define DECODE_GEN(l) ((l) - 1)
+#define DECODE_GEN(l) (UNMARK_GEN(l) - 1)
 #define IS_MARKED(l) ((l) & 16)
 
 generation_index_t gc_gen_of(lispobj obj, int defaultval) {
@@ -717,7 +717,7 @@ static void trace_static_roots() {
 
 /* Preserve an ambiguous pointer. */
 void mr_preserve_pointer(uword_t address) {
-  if (find_page_index((void*)address) > -1) {
+  if (find_page_index(native_pointer(address)) > -1) {
     lispobj *obj = find_object(address, DYNAMIC_SPACE_START, 1);
     if (obj) mark(compute_lispobj(obj));
   }
@@ -937,6 +937,7 @@ static void raise_survivors(unsigned char *bytemap, line_index_t count, generati
 static unsigned int collection = 0;
 
 void mr_pre_gc(generation_index_t generation) {
+  // kill(getpid(), SIGXCPU);
   // count_line_values("Pre GC");
 #if 1
   fprintf(stderr, "\n[GC #%4d gen %d %5luM / %5luM ", ++collection, generation,

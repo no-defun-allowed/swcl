@@ -2684,7 +2684,7 @@ static void sticky_preserve_pointer(os_context_register_t register_word)
                         int i;
                         for(i=0; i<CARDS_PER_PAGE; ++i)
                             if (gc_card_mark[card+i]==CARD_MARKED) gc_card_mark[card+i]=STICKY_MARK;
-                        if (page_ends_contiguous_block_p(page, gen)) return;
+                        if (page_ends_contiguous_block_p(page, gen)) break;
                         ++page;
                     }
                 }
