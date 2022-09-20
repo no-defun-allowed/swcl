@@ -3509,17 +3509,10 @@ walk_generation(uword_t (*proc)(lispobj*,lispobj*,uword_t),
                 if (page_ends_contiguous_block_p(last_page, page_table[i].gen))
                     break;
 
-#ifdef LISP_FEATURE_MARK_REGION_GC
             uword_t result =
                 proc((lispobj*)page_address(i),
-                     (lispobj*)page_address(last_page + 1),
+                     (lispobj*)page_limit(last_page),
                      extra);
-#else
-            uword_t result =
-                proc((lispobj*)page_address(i),
-                     (lispobj*)page_address(last_page) + page_words_used(last_page),
-                     extra);
-#endif
             if (result) return result;
 
             i = last_page;

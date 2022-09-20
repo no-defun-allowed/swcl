@@ -147,11 +147,7 @@ static void walk_all_spaces(void (*fun)(lispobj*,uword_t), uword_t arg)
     for ( first = 0 ; first < next_free_page ; first = 1+last ) {
         last = contiguous_block_final_page(first);
         walk_range((lispobj*)page_address(first),
-#ifdef LISP_FEATURE_MARK_REGION_GC
-                   (lispobj*)page_address(last + 1),
-#else
-                   (lispobj*)page_address(last) + page_words_used(last),
-#endif
+                   page_limit(last),
                    fun, arg);
     }
 }
@@ -215,12 +211,8 @@ void prepare_readonly_space(int purify, int print)
     for ( first = 0; first < next_free_page; first = 1+last ) {
         last = contiguous_block_final_page(first);
         lispobj* where = (lispobj*)page_address(first);
-#ifdef LISP_FEATURE_MARK_REGION_GC
-        lispobj* limit = (lispobj*)page_address(last + 1);
+        lispobj* limit = (lispobj*)page_limit(last);
         where = next_object(where, 0, limit);
-#else
-        lispobj* limit = (lispobj*)page_address(last) + page_words_used(last);
-#endif
         int nwords;
         while (where) {
             nwords = object_size(where);
@@ -258,12 +250,8 @@ void prepare_readonly_space(int purify, int print)
     for ( first = 0; first < next_free_page; first = 1+last ) {
         last = contiguous_block_final_page(first);
         lispobj* where = (lispobj*)page_address(first);
-#ifdef LISP_FEATURE_MARK_REGION_GC
-        lispobj* limit = (lispobj*)page_address(last + 1);
+        lispobj* limit = page_limit(last);
         where = next_object(where, 0, limit);
-#else
-        lispobj* limit = (lispobj*)page_address(last) + page_words_used(last);
-#endif
         while (where) {
             if (readonly_unboxed_obj_p(where)) ensure_forwarded(where);
             where = next_object(where, careful_object_size(where), limit);
@@ -342,8 +330,9 @@ void test_dirty_all_gc_cards()
     while (first < next_free_page) {
         page_index_t last = contiguous_block_final_page(first);
         lispobj* where = (lispobj*)page_address(first);
-        lispobj* limit = (lispobj*)page_address(last) + page_words_used(last);
-        for ( ; where < limit ; where += object_size(where) )
+        lispobj* limit = page_limit(last);
+        for (where = next_object(where, 0, limit) ; where ;
+             where = next_object(where, object_size(where), limit) )
             if (widetag_of(where) == CODE_HEADER_WIDETAG) {
 #ifndef LISP_FEATURE_SOFT_CARD_MARKS // only touch code pages, others got WP faults
                 gc_card_mark[addr_to_card_index(where)] = 1;

@@ -133,12 +133,13 @@ which admittedly is less pretty. next_object just computes (where + size)
 and checks bounds when using the copying collector, and so using it is
 portable across both collectors.
 
-One currently less portable issue is the value of `end` in the supposed
-loop. With the copying collector, this is indeed
+Another less portable thing is the value of `end` in the supposed loop.
+With the copying collector, this is indeed
 `page_address(page) + page_words_used(page)`, but when using the
 mark-region collector, all of the page must be considered, and so the
-end should be `page_address(page + 1)`. Which really should be in
-walk-heap.h too, to be honest. (TODO: Make that happen.)
+end should be `page_address(page + 1)`. Similarly, page_limit may be
+used now to find the end of a page, and walk_generation will also
+do what you want.
 
 Running the write barrier manually in C is also likely to be wrong;
 we now _need_ to dirty the card on the start of the object, and not
