@@ -837,28 +837,31 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
     } else {
       /* Scavenge every object in every card and try to re-protect. */
       lispobj *start = (lispobj*)page_address(i);
-      for (int j = 0, card = page_to_card_index(i);
-           j < CARDS_PER_PAGE;
-           j++, card++, start += WORDS_PER_CARD) {
-        if (card_dirtyp(card)) {
-          // fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, start, end);
+      int first_card = page_to_card_index(i);
+      line_index_t first_line = address_line(start);
+      /* Now that cards are as large as lines, we can blast through
+       * and make a bitmap of interesting objects to scavenge. */
+      unsigned char mask[GENCGC_PAGE_BYTES / LINE_SIZE];
+      for (int n = 0; n < CARDS_PER_PAGE; n++) {
+        unsigned char mark = gc_card_mark[n + first_card];
+        mask[n] = (DECODE_GEN(line_bytemap[n + first_line]) > generation_to_collect &&
+                   mark != CARD_UNMARKED) ? 0xFF : 0x00;
+        /* Reset mark, which scavenging might re-instate. */
+        gc_card_mark[n + first_card] = (mark != STICKY_MARK) ? CARD_UNMARKED : STICKY_MARK;
+      }
+      uword_t *words = (uword_t*)mask;
+      uword_t first_allocation_word = mark_bitmap_word_index(start);
+      for (int n = 0; n < GENCGC_PAGE_BYTES / LINE_SIZE / N_WORD_BYTES; n++) {
+        uword_t word = words[n] & allocation_bitmap[first_allocation_word + n];
+        while (word) {
+          unsigned char bit = __builtin_ctzl(word);
+          int offset = bit + n * N_WORD_BITS;
+          lispobj *where = (lispobj*)(start + 2 * offset);
+          root_objects_checked++;
           dirty = 0;
-          lispobj *end = start + WORDS_PER_CARD;
-          unsigned char minimum = ENCODE_GEN(generation_to_collect);
-          unsigned char *marks = (unsigned char*)allocation_bitmap;
-          line_index_t last_line = address_line(end);
-          for (line_index_t line = address_line(start); line < last_line; line++)
-            if (UNMARK_GEN(line_bytemap[line]) > minimum && marks[line])
-              for (char offset = 0; offset < 8; offset++) {
-                lispobj *where = (lispobj*)(line_address(line)) + 2 * offset;
-                if (marks[line] & (1 << offset)) {
-                  root_objects_checked++;
-                  scavenge_root_object(DECODE_GEN(line_bytemap[line]), where);
-                }
-              }
-          // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
-          if (dirty) dirty_root_objects++;
-          update_card_mark(card, dirty);
+          scavenge_root_object(DECODE_GEN(line_bytemap[address_line(where)]), where);
+          if (dirty) { update_card_mark(addr_to_card_index(where), 1); dirty_root_objects++; }
+          word &= ~(1UL << bit);
         }
       }
     }
