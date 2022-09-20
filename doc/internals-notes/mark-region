@@ -96,38 +96,57 @@ objects, and mark the new objects. Similar to sweeping, it is possible
 to use blending to compute a bitmap of only old objects, by only
 retaining bytes from the allocation bitmap that reside on older lines.
 
-One complication is that, when Lisp updates a simple vector, the card
-containing the slot being updated is dirtied, and not the card
-containing the start of the object. The different dirtying semantics
-is useful for scavenging larger vectors, as only part of an old vector
-may have pointers to new objects, and so the collector should only
-scan that part. However, when scavenging pages containing smaller
-objects, it is necessary to search the allocation bitmap backwards, to
-check if the card mark could be due to updating a slot in a vector
-which intersects the card, but does not begin on that card. Another
-option would be to dirty both the first card of a simple vector, and
-the card containing the slot being updated, which would avoid needing
-to search the allocation bitmap, at the cost of requiring more
-scavenging work for larger vectors.
+The write barrier for mark-region collection has been extended for
+simple vectors. Unlike the barrier for the copying collector, which
+dirties only the card the slot is on, the write barrier dirties both the
+start and the dirty card. The intent is that scavenging pages
+containing small objects doesn't have to bother with dirty cards
+appearing in the middle of objects, but scavenging pages containing
+a single (large) object can pick just the lines that need to be dirtied.
+The drawbacks are, of course, that now two lines are dirtied rather
+than one, effectively doubling write barrier overhead, and the
+first line of every large simple vector has to be scavenged for no
+reason (but that is preferable to the loss of precision with larger
+cards, to be fair).
 
-Another complication is that, if old and new objects both reside on a
-card, updating new objects will cause the collector to need to
-scavenge the old objects, even though the old objects were not
-updated. Scavenging can take a long time for some programs due to such
-imprecision. Boehm et al call this phenomenon "card pollution", and
-suggest that cards containing old objects should not be allocated
-into; but this would reduce our ability to reclaim and re-use
-memory. The precision of the write barrier could be improved by having
-the write barrier check the generation the line resides in, before
-dirtying a card; but this approach complicates the write barrier and
-caused a noticeable slowdown in Lisp code. An equivalent approach
-which doesn't require changing the write barrier would be to make
-cards the same size as lines, avoiding any imprecision. The
-forementioned blending operation would check if a line is old and its
-corresponding card is dirty, when selecting objects that need to be
-scavenged.
+The C shore
+-----------
 
-Useful references:
+The heap layout breaks many things which one might have taken for
+granted in the heap layout used by gencgc. For example, objects are no
+longer really contiguous in the heap, and trying to walk a page with
+something like
+
+  for (lispobj *where = start; where < end; where += object_size(where))
+    ...
+
+is not going to work. Instead, there is a shim in walk-heap.h which
+allows for walking a non-contiguous heap correctly; this must also be
+called to initialise `where` so that the first object in the range is
+found correctly. Such a loop may instead be written like
+
+  for (lispobj *where = next_object(start, 0, end); where;
+       where = next_object(where, object_size, end))
+    ...
+
+which admittedly is less pretty. next_object just computes (where + size)
+and checks bounds when using the copying collector, and so using it is
+portable across both collectors.
+
+One currently less portable issue is the value of `end` in the supposed
+loop. With the copying collector, this is indeed
+`page_address(page) + page_words_used(page)`, but when using the
+mark-region collector, all of the page must be considered, and so the
+end should be `page_address(page + 1)`. Which really should be in
+walk-heap.h too, to be honest. (TODO: Make that happen.)
+
+Running the write barrier manually in C is also likely to be wrong;
+we now _need_ to dirty the card on the start of the object, and not
+any card intersecting the object, when the object is small. We need
+to dirty both the start and the slot when the object is large.
+
+Useful references
+-----------------
 Immix: https://www.cs.utexas.edu/users/speedway/DaCapo/papers/immix-pldi-2008.pdf
 Grey packets: https://dl.acm.org/doi/10.1145/1108970.1108972
 Sticky marks in generational collection: https://dl.acm.org/doi/pdf/10.1145/96709.96735
