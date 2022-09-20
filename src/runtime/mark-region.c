@@ -789,9 +789,6 @@ static uword_t root_objects_checked = 0, dirty_root_objects = 0, dirty_cards = 0
 static void __attribute__((noinline)) mr_scavenge_root_gens() {
   page_index_t i = 0;
   root_objects_checked = 0; dirty_root_objects = 0; dirty_cards = 0;
-  /* Keep this around, to avoid scanning objects which overlap cards
-   * more than once. */
-  lispobj *last_scavenged = 0;
   while (i < page_table_pages) {
     unsigned char page_type = page_table[i].type & PAGE_TYPE_MASK;
     if (page_type == PAGE_TYPE_UNBOXED ||
@@ -842,16 +839,19 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
       /* Now that cards are as large as lines, we can blast through
        * and make a bitmap of interesting objects to scavenge. */
       unsigned char mask[GENCGC_PAGE_BYTES / LINE_SIZE];
-      for (int n = 0; n < CARDS_PER_PAGE; n++) {
-        unsigned char mark = gc_card_mark[n + first_card];
-        mask[n] = (DECODE_GEN(line_bytemap[n + first_line]) > generation_to_collect &&
-                   mark != CARD_UNMARKED) ? 0xFF : 0x00;
-        /* Reset mark, which scavenging might re-instate. */
-        gc_card_mark[n + first_card] = (mark != STICKY_MARK) ? CARD_UNMARKED : STICKY_MARK;
+      unsigned char *cards = gc_card_mark + first_card,
+                    *lines = line_bytemap + first_line;
+      int gen = generation_to_collect;
+      for (unsigned int n = 0; n < CARDS_PER_PAGE; n++) {
+        unsigned char line = lines[n], mark = cards[n];
+        mask[n] = (DECODE_GEN(line) > gen && mark != CARD_UNMARKED) ? 0xFF : 0x00;
       }
+      /* Reset mark, which scavenging might re-instate. */
+      for (unsigned int n = 0; n < CARDS_PER_PAGE; n++)
+        cards[n] = (cards[n] == STICKY_MARK) ? STICKY_MARK : CARD_UNMARKED;
       uword_t *words = (uword_t*)mask;
       uword_t first_allocation_word = mark_bitmap_word_index(start);
-      for (int n = 0; n < GENCGC_PAGE_BYTES / LINE_SIZE / N_WORD_BYTES; n++) {
+      for (unsigned int n = 0; n < GENCGC_PAGE_BYTES / LINE_SIZE / N_WORD_BYTES; n++) {
         uword_t word = words[n] & allocation_bitmap[first_allocation_word + n];
         while (word) {
           unsigned char bit = __builtin_ctzl(word);
@@ -890,7 +890,7 @@ static unsigned int collection = 0;
 void mr_pre_gc(generation_index_t generation) {
   // kill(getpid(), SIGXCPU);
   // count_line_values("Pre GC");
-#if 1
+#if 0
   fprintf(stderr, "\n[GC #%4d gen %d %5luM / %5luM ", ++collection, generation,
           generations[generation].bytes_allocated >> 20,
           bytes_allocated >> 20);
@@ -908,7 +908,7 @@ void mr_collect_garbage(boolean raise) {
   free_mark_list();
   if (raise)
     raise_survivors(line_bytemap, line_count, generation_to_collect);
-#if 1
+#if 0
   fprintf(stderr,
           "-> %5luM / %5luM, %8lu traced, %8lu / %8lu scavenged on %8lu cards, page hwm = %8ld%s]\n",
           generations[generation_to_collect].bytes_allocated >> 20,
