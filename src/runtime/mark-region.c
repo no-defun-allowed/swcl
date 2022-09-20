@@ -836,62 +836,13 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
       }
     } else {
       /* Scavenge every object in every card and try to re-protect. */
-      boolean cons_page = page_table[i].type == PAGE_TYPE_CONS;
       lispobj *start = (lispobj*)page_address(i);
       for (int j = 0, card = page_to_card_index(i);
            j < CARDS_PER_PAGE;
            j++, card++, start += WORDS_PER_CARD) {
-        int last_card = -1;
         if (card_dirtyp(card)) {
-          /* Check if an object overlaps the start of the card. Due to
-           * alignment this cannot happen with cons pages. Also irrelevant if we scanned
-           * the card just before this card. */
-          if (card - 1 != last_card && !cons_page) {
-            uword_t search_start = last_scavenged ? (uword_t)last_scavenged : DYNAMIC_SPACE_START;
-            lispobj *first_object = find_object((lispobj)start, search_start, 0);
-            if (first_object && first_object < start && first_object != last_scavenged) {
-              /* In principle, we can mark any card that intersects the
-               * object, but we try to normalise and mark the first card. */
-              dirty = 0;
-              generation_index_t gen = gc_gen_of((lispobj)first_object, 0);
-              if (gen > generation_to_collect) {
-                dirty_generation_source = gen;
-                trace_object(compute_lispobj(first_object));
-                check_otherwise_dirty(first_object);
-                if (dirty)
-                  update_card_mark(addr_to_card_index(first_object), dirty);
-                last_scavenged = first_object;
-              }
-            }
-          }
           // fprintf(stderr, "Scavenging page %ld from %p to %p: ", i, start, end);
           dirty = 0;
-#if defined(LISP_FEATURE_X86_64) && (GENCGC_CARD_BYTES != 1024)
-#warning "There's a fast path for 1024-byte cards on x86-64, that you might want to adapt to your card size."
-#endif
-#if defined(LISP_FEATURE_X86_64) && (GENCGC_CARD_BYTES == 1024)
-          /* We only use the low 64-bits of all this computation, as
-           * we have 1 bit per 16 bytes of heap, and
-           * 64 bits x 16 heap bytes/bit = 1024 heap bytes. */
-          line_index_t start_line = address_line(start);
-          unsigned char *line_where = line_bytemap + start_line;
-          __m128i line_pack = _mm_loadu_si128((__m128i*)line_where),
-                  mark_pack = _mm_loadu_si128((__m128i*)((unsigned char*)(allocation_bitmap) + start_line)),
-                  unmark_mask = _mm_set1_epi8(15),
-                  generations = _mm_set1_epi8(ENCODE_GEN(generation_to_collect)),
-                  relevant = _mm_cmpgt_epi8((line_pack & unmark_mask), generations),
-                  relevant_marks128 = mark_pack & relevant;
-          uword_t relevant_marks = _mm_cvtsi128_si64(relevant_marks128);
-          if (relevant_marks) dirty_cards++;
-          while (relevant_marks) {
-            root_objects_checked++;
-            uword_t first_bit = __builtin_ctzl(relevant_marks);
-            lispobj *where = start + 2 * first_bit;
-            scavenge_root_object(DECODE_GEN(line_bytemap[address_line(where)]), where);
-            last_scavenged = where;
-            relevant_marks &= ~(1UL << first_bit);
-          }
-#else
           lispobj *end = start + WORDS_PER_CARD;
           unsigned char minimum = ENCODE_GEN(generation_to_collect);
           unsigned char *marks = (unsigned char*)allocation_bitmap;
@@ -903,14 +854,11 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
                 if (marks[line] & (1 << offset)) {
                   root_objects_checked++;
                   scavenge_root_object(DECODE_GEN(line_bytemap[line]), where);
-                  last_scavenged = where;
                 }
               }
-#endif
           // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
           if (dirty) dirty_root_objects++;
           update_card_mark(card, dirty);
-          last_card = card;
         }
       }
     }
