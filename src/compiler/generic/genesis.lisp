@@ -260,6 +260,7 @@
 
 #+immobile-space
 (progn
+  (defvar *asm-routine-vector*)
   (defvar *immobile-fixedobj*)
   (defvar *immobile-text*)
   (defvar *immobile-space-map* nil))
@@ -793,17 +794,15 @@
          (gen-shift (if (= widetag sb-vm:fdefn-widetag) 8 24)))
     (write-wordindexed/raw des 0 (logior (ash gen gen-shift) header-word))))
 
-(defun write-code-header-words (descriptor boxed unboxed n-named-calls)
-  (declare (ignorable n-named-calls))
+(defun write-code-header-words (descriptor boxed unboxed n-fdefns)
+  (declare (ignorable n-fdefns))
   (let ((total-words (align-up (+ boxed (ceiling unboxed sb-vm:n-word-bytes)) 2)))
     (write-header-word descriptor
                        (logior (ash total-words sb-vm:code-header-size-shift)
                                sb-vm:code-header-widetag)))
   (write-wordindexed/raw
-   descriptor
-   1
-   (logior #+64-bit (ash n-named-calls 32)
-           (* boxed sb-vm:n-word-bytes))))
+   descriptor 1
+   (logior #+64-bit (ash n-fdefns 32) (* boxed sb-vm:n-word-bytes))))
 
 (defun write-header-data+tag (des header-data widetag)
   (write-header-word des (logior (ash header-data sb-vm:n-widetag-bits)
@@ -1923,10 +1922,13 @@ core and return a descriptor to it."
   ;; and code resides above 4GB. But as the Fundamental Theorem says:
   ;;   any problem can be solved by adding another indirection.
   #+immobile-code
+  (progn
   (setf *c-callable-fdefn-vector*
         (vector-in-core (make-list (length sb-vm::+c-callable-fdefns+)
                                    :initial-element *nil-descriptor*)
                         *static*))
+  (setf *asm-routine-vector* (word-vector (make-list 70 :initial-element 0)
+                                          *static*)))
 
   #-immobile-code
   (dolist (sym sb-vm::+c-callable-fdefns+)
@@ -1991,11 +1993,15 @@ core and return a descriptor to it."
 
   (cold-set 'sb-c::*code-serialno* (make-fixnum-descriptor (1+ sb-c::*code-serialno*)))
 
+  (cold-set 'sb-impl::*setf-fdefinition-hook* *nil-descriptor*)
+  (cold-set 'sb-impl::*user-hash-table-tests* *nil-descriptor*)
+
   ;; Put the C-callable fdefns into the static-fdefn vector if #+immobile-code.
   #+immobile-code
   (let* ((space *immobile-text*)
          (wordindex (gspace-free-word-index space))
          (words-per-page (/ sb-vm:immobile-card-bytes sb-vm:n-word-bytes)))
+    (cold-set 'sb-fasl::*asm-routine-vector* *asm-routine-vector*)
     (loop for i from 0 for sym in sb-vm::+c-callable-fdefns+
           do (cold-svset *c-callable-fdefn-vector* i
                          (ensure-cold-fdefn sym)))
@@ -2355,17 +2361,22 @@ Legal values for OFFSET are -4, -8, -12, ..."
 (defun lookup-assembler-reference (symbol &optional (mode :direct))
   (let* ((code-component *cold-assembler-obj*)
          (list *cold-assembler-routines*)
+         (insts (+ (logandc2 (descriptor-bits code-component) sb-vm:lowtag-mask)
+                   (code-header-bytes code-component)))
          (offset (or (cdr (assq symbol list))
-                     (error "Assembler routine ~S not defined." symbol))))
-    (+ (logandc2 (descriptor-bits code-component) sb-vm:lowtag-mask)
-       (code-header-bytes code-component)
-       (ecase mode
-         (:direct
-            offset)
-         (:indirect
-            ;; add 1 for the prefix word that counts the absolute fixups
-            (ash (1+ (count-if (lambda (x) (< (cdr x) offset)) list))
-                 sb-vm:word-shift))))))
+                     (error "Assembler routine ~S not defined." symbol)))
+         (addr (+ insts offset)))
+    (ecase mode
+      (:direct addr)
+      #+(or ppc ppc64) (:indirect (- addr sb-vm:nil-value))
+      #+(or x86 x86-64)
+      (:indirect
+       (let ((index (count-if (lambda (x) (< (cdr x) offset)) list)))
+         #-immobile-space
+         (+ insts (ash (1+ index) sb-vm:word-shift)) ; add 1 for the jump table count
+         #+immobile-space
+         (+ (logandc2 (descriptor-bits *asm-routine-vector*) sb-vm:lowtag-mask)
+            (ash (+ sb-vm:vector-data-offset index) sb-vm:word-shift)))))))
 
 ;;; Unlike in the target, FOP-KNOWN-FUN sometimes has to backpatch.
 (defvar *deferred-known-fun-refs*)
@@ -2782,7 +2793,7 @@ Legal values for OFFSET are -4, -8, -12, ..."
 
 (define-cold-fop (fop-load-code (header n-code-bytes n-fixup-elts))
   (let* ((n-simple-funs (read-unsigned-byte-32-arg (fasl-input-stream)))
-         (n-named-calls (read-unsigned-byte-32-arg (fasl-input-stream)))
+         (n-fdefns (read-unsigned-byte-32-arg (fasl-input-stream)))
          (n-boxed-words (ash header -1))
          (n-constants (- n-boxed-words sb-vm:code-constants-offset))
          (stack-elts-consumed (+ n-constants 1 n-fixup-elts))
@@ -2798,7 +2809,7 @@ Legal values for OFFSET are -4, -8, -12, ..."
                   (+ (ash aligned-n-boxed-words sb-vm:word-shift) n-code-bytes)
                   sb-vm:other-pointer-lowtag :code)))
     (declare (ignorable immobile))
-    (write-code-header-words des aligned-n-boxed-words n-code-bytes n-named-calls)
+    (write-code-header-words des aligned-n-boxed-words n-code-bytes n-fdefns)
     (write-wordindexed des sb-vm:code-debug-info-slot
                        (svref stack (+ stack-index n-constants)))
 
@@ -2845,7 +2856,7 @@ Legal values for OFFSET are -4, -8, -12, ..."
           (write-wordindexed des header-index (svref stack stack-index))
           (incf header-index)
           (incf stack-index)))
-      (dotimes (i n-named-calls)
+      (dotimes (i n-fdefns)
         (store-named-call-fdefn des header-index (svref stack stack-index))
         (incf header-index)
         (incf stack-index))
@@ -2913,12 +2924,20 @@ Legal values for OFFSET are -4, -8, -12, ..."
     (let ((stack (%fasl-input-stack (fasl-input))))
       (apply-fixups asm-code stack (fop-stack-pop-n stack n-fixup-elts) n-fixup-elts))
     #+(or x86 x86-64) ; fill in the indirect call table
-    (let ((index (code-header-words asm-code)))
+    (let ((base (code-header-words asm-code))
+          (index 0))
       (dolist (item *cold-assembler-routines*)
-        ;; Preincrement because we skip 1 word for the word containing
-        ;; the number of absolute fixups that follow.
-        (write-wordindexed/raw asm-code (incf index)
-                               (lookup-assembler-reference (car item)))))))
+        ;; Word 0 of code-instructions is the jump table count (the asm routine entrypoints
+        ;; look to GC exactly like a jump table in any other codeblob)
+        (let ((entrypoint (lookup-assembler-reference (car item))))
+          (write-wordindexed/raw asm-code (+ base index 1) entrypoint)
+          #+immobile-space
+          (unless (member (car item) ; these can't be called from compiled Lisp
+                          '(sb-vm::fpr-save sb-vm::save-xmm sb-vm::save-ymm
+                            sb-vm::fpr-restore sb-vm::restore-xmm sb-vm::restore-ymm))
+            (write-wordindexed/raw *asm-routine-vector*
+                                   (+ sb-vm:vector-data-offset index) entrypoint)))
+        (incf index)))))
 
 ;; The partial source info is not needed during the cold load, since
 ;; it can't be interrupted.
@@ -2955,8 +2974,6 @@ Legal values for OFFSET are -4, -8, -12, ..."
            (ecase flavor
              (:assembly-routine (lookup-assembler-reference name))
              (:assembly-routine* (lookup-assembler-reference name :indirect))
-             (:asm-routine-nil-offset
-              (- (lookup-assembler-reference name) sb-vm:nil-value))
              (:foreign (alien-linkage-table-note-symbol string nil))
              (:foreign-dataref (alien-linkage-table-note-symbol string t))
              (:code-object (descriptor-bits code-obj))
@@ -3341,27 +3358,32 @@ Legal values for OFFSET are -4, -8, -12, ..."
 ~{~% ~a, ~a, ~a, ~a~^,~}~%};~%" flavor (coerce a 'list)))))
 
 (defun write-cast-operator (operator-name c-name lowtag stream)
-  (when (eq operator-name 'symbol)
-    (format stream "
+  (format stream "static inline struct ~A* ~A(lispobj obj) {
+  return (struct ~A*)(obj - ~D);~%}~%" c-name operator-name c-name lowtag)
+  (case operator-name
+    (fdefn
+     (format stream "#define StaticSymbolFunction(x) FdefnFun(x##_FDEFN)
+/* Return 'fun' given a tagged pointer to an fdefn. */
+static inline lispobj FdefnFun(lispobj fdefn) { return FDEFN(fdefn)->fun; }~%"))
+    (symbol
+     (format stream "
 lispobj symbol_function(struct symbol* symbol);
 #include \"~A/vector.h\"
 struct vector *symbol_name(struct symbol*);~%
 lispobj symbol_package(struct symbol*);~%" (genesis-header-prefix))
-    (format stream "static inline int symbol_package_id(struct symbol* s) { return ~A; }~%"
+     (format stream "static inline int symbol_package_id(struct symbol* s) { return ~A; }~%"
             #+compact-symbol (format nil "s->name >> ~D" sb-impl::symbol-name-bits)
             #-compact-symbol "fixnum_value(s->package_id)")
-    #+compact-symbol
-    (progn (format stream "#define decode_symbol_name(ptr) (ptr & (uword_t)0x~X)~%"
-                   (mask-field (byte sb-impl::symbol-name-bits 0) -1))
-           (format stream "static inline void set_symbol_name(struct symbol*s, lispobj name) {
+     #+compact-symbol
+     (progn (format stream "#define decode_symbol_name(ptr) (ptr & (uword_t)0x~X)~%"
+                    (mask-field (byte sb-impl::symbol-name-bits 0) -1))
+            (format stream "static inline void set_symbol_name(struct symbol*s, lispobj name) {
   s->name = (s->name & (uword_t)0x~X) | name;~%}~%"
-                   (mask-field (byte sb-impl::package-id-bits sb-impl::symbol-name-bits) -1)))
-    #-compact-symbol
-    (progn (format stream "#define decode_symbol_name(ptr) ptr~%")
-           (format stream "static inline void set_symbol_name(struct symbol*s, lispobj name) {
-  s->name = name;~%}~%")))
-  (format stream "static inline struct ~A* ~A(lispobj obj) {
-  return (struct ~A*)(obj - ~D);~%}~%" c-name operator-name c-name lowtag))
+                    (mask-field (byte sb-impl::package-id-bits sb-impl::symbol-name-bits) -1)))
+     #-compact-symbol
+     (progn (format stream "#define decode_symbol_name(ptr) ptr~%")
+            (format stream "static inline void set_symbol_name(struct symbol*s, lispobj name) {
+  s->name = name;~%}~%")))))
 
 (defun mangle-c-slot-name (obj-name slot-name)
   ;; For data hiding purposes, change the name of vector->length to vector->length_.
@@ -3473,16 +3495,15 @@ lispobj symbol_package(struct symbol*);~%" (genesis-header-prefix))
   (dolist (binding sb-vm::per-thread-c-interface-symbols)
     (format stream "INITIALIZE_TLS(~A, ~A);~%"
             (c-symbol-name (if (listp binding) (car binding) binding) "*")
-            (if (listp binding) (second binding)))))
+            (let ((val (if (listp binding) (second binding))))
+              (if (eq val 't) "LISP_T" val)))))
 
 (defun write-static-symbols (stream)
   (dolist (symbol (cons nil (coerce sb-vm:+static-symbols+ 'list)))
-    ;; FIXME: It would be nice to use longer names than NIL and
-    ;; (particularly) T in #define statements.
     (format stream "#define ~A LISPOBJ(0x~X)~%"
             ;; FIXME: It would be nice not to need to strip anything
             ;; that doesn't get stripped always by C-SYMBOL-NAME.
-            (c-symbol-name symbol "%*.!")
+            (if (eq symbol 't) "LISP_T" (c-symbol-name symbol "%*.!"))
             (if *static*                ; if we ran GENESIS
               ;; We actually ran GENESIS, use the real value.
               (descriptor-bits (cold-intern symbol))

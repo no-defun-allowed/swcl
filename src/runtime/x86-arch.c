@@ -69,8 +69,6 @@ os_context_flags_addr(os_context_t *context)
     return &context->uc_mcontext.mc_eflags;
 #elif defined __OpenBSD__
     return &context->sc_eflags;
-#elif defined LISP_FEATURE_DARWIN
-    return (int *)(&context->uc_mcontext->SS.EFLAGS);
 #elif defined __NetBSD__
     return &(context->uc_mcontext.__gregs[_REG_EFL]);
 #elif defined LISP_FEATURE_WIN32
@@ -289,12 +287,10 @@ sigtrap_handler(int signal, siginfo_t *info, os_context_t *context)
 
 void
 sigill_handler(int signal, siginfo_t *siginfo, os_context_t *context) {
-#ifndef LISP_FEATURE_MACH_EXCEPTION_HANDLER
     if (*(unsigned short *)OS_CONTEXT_PC(context) == UD2_INST) {
         OS_CONTEXT_PC(context) += 2;
         return sigtrap_handler(signal, siginfo, context);
     }
-#endif
     fake_foreign_function_call(context);
     lose("Unhandled SIGILL at %p.", (void*)OS_CONTEXT_PC(context));
 }
@@ -313,7 +309,7 @@ arch_install_interrupt_handlers()
      * OS I haven't tested on?) and we have to go back to the old CMU
      * CL way, I hope there will at least be a comment to explain
      * why.. -- WHN 2001-06-07 */
-#if !defined(LISP_FEATURE_WIN32) && !defined(LISP_FEATURE_MACH_EXCEPTION_HANDLER)
+#ifndef LISP_FEATURE_WIN32
     ll_install_handler(SIGILL , sigill_handler);
     ll_install_handler(SIGTRAP, sigtrap_handler);
 #endif

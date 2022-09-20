@@ -117,7 +117,7 @@ os_context_sigmask_addr(os_context_t *context)
 }
 
 os_vm_address_t
-os_validate(int attributes, os_vm_address_t addr, os_vm_size_t len, int space_id)
+os_alloc_gc_space(int space_id, int attributes, os_vm_address_t addr, os_vm_size_t len)
 {
     int __attribute((unused))
       executable = (space_id == READ_ONLY_CORE_SPACE_ID) ||
@@ -128,6 +128,12 @@ os_validate(int attributes, os_vm_address_t addr, os_vm_size_t len, int space_id
 
     int protection;
     int flags = 0;
+
+#if defined(LISP_FEATURE_OPENBSD) && defined(MAP_STACK)
+        /* OpenBSD requires MAP_STACK for pages used as stack.
+         * Note that FreeBSD has a MAP_STACK with different behavior. */
+    if (space_id == THREAD_STRUCT_CORE_SPACE_ID) flags = MAP_STACK;
+#endif
 
     // FIXME: This probaby needs to use MAP_TRYFIXED
     if (attributes & IS_GUARD_PAGE)
@@ -154,7 +160,6 @@ os_validate(int attributes, os_vm_address_t addr, os_vm_size_t len, int space_id
     attributes &= ~IS_GUARD_PAGE;
 
 #ifndef LISP_FEATURE_DARWIN // Do not use MAP_FIXED, because the OS is sane.
-
     /* The *BSD family of OSes seem to ignore 'addr' when it is outside
      * of some range which I could not figure out.  Sometimes it seems like the
      * condition is that any address below 4GB can't be requested without MAP_FIXED,
@@ -182,16 +187,7 @@ os_validate(int attributes, os_vm_address_t addr, os_vm_size_t len, int space_id
        Except for MAP_FIXED mappings, the system will never replace existing mappings. */
 
     // ALLOCATE_LOW seems never to get what we want
-    if (!(attributes & MOVABLE) || (attributes & ALLOCATE_LOW)) {
-        flags = MAP_FIXED;
-    }
-    if (attributes & IS_THREAD_STRUCT) {
-#if defined(LISP_FEATURE_OPENBSD) && defined(MAP_STACK)
-        /* OpenBSD requires MAP_STACK for pages used as stack.
-         * Note that FreeBSD has a MAP_STACK with different behavior. */
-        flags = MAP_STACK;
-#endif
-    }
+    if (!(attributes & MOVABLE) || (attributes & ALLOCATE_LOW)) flags = MAP_FIXED;
 #endif
 
 #ifdef MAP_EXCL // not defined in OpenBSD, NetBSD, DragonFlyBSD
@@ -247,13 +243,6 @@ os_validate(int attributes, os_vm_address_t addr, os_vm_size_t len, int space_id
 
     return addr;
 }
-
-void
-os_invalidate(os_vm_address_t addr, os_vm_size_t len)
-{
-    if (munmap(addr, len) == -1)
-        perror("munmap");
-}
 
 /*
  * any OS-dependent special low-level handling for signals
@@ -287,27 +276,15 @@ memory_fault_handler(int signal, siginfo_t *siginfo, os_context_t *context)
             lisp_memory_fault_error(context, fault_addr);
 }
 
-#if defined(LISP_FEATURE_MACH_EXCEPTION_HANDLER)
-void
-mach_error_memory_fault_handler(int signal, siginfo_t *siginfo,
-                                os_context_t *context) {
-    lose("Unhandled memory fault. Exiting.");
-}
-#endif
-
 void
 os_install_interrupt_handlers(void)
 {
     if (INSTALL_SIG_MEMORY_FAULT_HANDLER) {
-#if defined(LISP_FEATURE_MACH_EXCEPTION_HANDLER)
-    ll_install_handler(SIG_MEMORY_FAULT, mach_error_memory_fault_handler);
-#else
     ll_install_handler(SIG_MEMORY_FAULT,
 #if defined(LISP_FEATURE_FREEBSD) && !defined(__GLIBC__)
                                                  (__siginfohandler_t *)
 #endif
                                                  memory_fault_handler);
-#endif
 
 #ifdef LISP_FEATURE_DARWIN
     /* Unmapped pages get this and not SIGBUS. */

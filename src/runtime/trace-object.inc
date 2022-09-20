@@ -118,7 +118,6 @@ static void TRACE_NAME(lispobj* where)
         return;
 #endif
         break;
-#ifdef LISP_FEATURE_COMPACT_SYMBOL
     case SYMBOL_WIDETAG:
         {
         struct symbol* s = (void*)where;
@@ -128,7 +127,6 @@ static void TRACE_NAME(lispobj* where)
         ACTION(s->fdefn);
         }
         return;
-#endif
     case FDEFN_WIDETAG:
         ACTION(decode_fdefn_rawfun((struct fdefn*)where));
         scan_to = 3;

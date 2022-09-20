@@ -1131,16 +1131,18 @@ of specialized arrays is supported."
 
 (defun %set-fill-pointer (vector new)
   (declare (explicit-check))
-  (cond ((not (array-has-fill-pointer-p vector)) (fill-pointer-error vector))
-        ((> (the index new) (%array-available-elements vector))
-         (let ((max (%array-available-elements vector)))
-           (error 'simple-type-error
-                  :datum new
-                  :expected-type (list 'integer 0 max)
-                  :format-control "The new fill pointer, ~S, is larger than the length of the vector (~S.)"
-                  :format-arguments (list new max))))
+  (cond ((not (and (arrayp vector)
+                   (array-has-fill-pointer-p vector)))
+         (fill-pointer-error vector))
         (t
-         (setf (%array-fill-pointer vector) new))))
+         (let ((max (%array-available-elements vector)))
+           (when (> (the fixnum new) max)
+             (error 'simple-type-error
+                    :datum new
+                    :expected-type (list 'integer 0 max)
+                    :format-control "The new fill pointer, ~S, is larger than the length of the vector (~S.)"
+                    :format-arguments (list new max)))
+           (setf (%array-fill-pointer vector) (truly-the index new))))))
 
 ;;; FIXME: It'd probably make sense to use a MACROLET to share the
 ;;; guts of VECTOR-PUSH between VECTOR-PUSH-EXTEND. Such a macro
@@ -1161,21 +1163,6 @@ of specialized arrays is supported."
              (setf (aref array fill-pointer) new-element))
            (setf (%array-fill-pointer array) (1+ fill-pointer))
            fill-pointer))))
-
-(defun blt-copier-for-widetag (x)
-  (declare ((mod 256) x))
-  (aref (load-time-value
-         (map-into (make-array 32)
-                   (lambda (x) (if x (symbol-function x) 0))
-                   '#.(let ((a (make-array 32 :initial-element nil)))
-                        (dovector (saetp *specialized-array-element-type-properties* a)
-                          (when (and (not (member (saetp-specifier saetp) '(t nil)))
-                                     (<= (saetp-n-bits saetp) n-word-bits))
-                            (setf (svref a (ash (- (saetp-typecode saetp) 128) -2))
-                                  (intern (format nil "UB~D-BASH-COPY" (saetp-n-bits saetp))
-                                          "SB-KERNEL"))))))
-         t)
-        (ash (logand x #x7f) -2)))
 
 (defun extend-vector (vector min-extension)
   (declare (optimize speed)

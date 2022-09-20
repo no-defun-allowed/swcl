@@ -419,18 +419,16 @@ static void relocate_space(uword_t start, lispobj* end, struct heap_adjust* adj)
             for (i=0; i<(nwords-1); ++i)
                 if (bitmap_logbitp(i, bitmap)) adjust_pointers(slots+i, 1, adj);
             continue;
-#ifdef LISP_FEATURE_COMPACT_SYMBOL
           case SYMBOL_WIDETAG:
             { // Copied from scav_symbol() in gc-common
             struct symbol* s = (void*)where;
-            adjust_pointers(&s->value, 3, adj); // value, function, info
+            adjust_pointers(&s->value, 3, adj); // value, fdefn, info
             lispobj name = decode_symbol_name(s->name);
             lispobj adjusted_name = adjust_word(adj, name);
             // writeback the name if it changed
             if (adjusted_name != name) FIXUP(set_symbol_name(s, adjusted_name), &s->name);
             }
             continue;
-#endif
         case FDEFN_WIDETAG:
             adjust_pointers(where+1, 2, adj);
             // For most architectures, 'raw_addr' doesn't satisfy is_lisp_pointer()
@@ -528,9 +526,6 @@ static void relocate_space(uword_t start, lispobj* end, struct heap_adjust* adj)
         case COMPLEX_VECTOR_WIDETAG:
         case COMPLEX_ARRAY_WIDETAG:
         // And the rest of the purely descriptor objects.
-#ifndef LISP_FEATURE_COMPACT_SYMBOL
-        case SYMBOL_WIDETAG:
-#endif
         case VALUE_CELL_WIDETAG:
         case WEAK_POINTER_WIDETAG:
         case RATIO_WIDETAG:
@@ -593,12 +588,8 @@ static void relocate_heap(struct heap_adjust* adj)
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
     relocate_space(FIXEDOBJ_SPACE_START, fixedobj_free_pointer, adj);
 #endif
-#ifdef LISP_FEATURE_CHENEYGC
-    relocate_space(DYNAMIC_0_SPACE_START, (lispobj*)get_alloc_pointer(), adj);
-#else
     relocate_space(DYNAMIC_SPACE_START, (lispobj*)dynamic_space_highwatermark(),
                    adj);
-#endif
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
     relocate_space(TEXT_SPACE_START, text_space_highwatermark, adj);
 #endif
@@ -682,6 +673,23 @@ __attribute__((unused)) static void check_dynamic_space_addr_ok(uword_t start, u
 #endif
 }
 
+static os_vm_address_t reserve_space(int space_id, int attr,
+                                     os_vm_address_t addr, os_vm_size_t size)
+{
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+    if (space_id == IMMOBILE_TEXT_CORE_SPACE_ID) {
+        // Carve out the text space from the earlier request that was made
+        // for the fixedobj space.
+        ALIEN_LINKAGE_TABLE_SPACE_START = FIXEDOBJ_SPACE_START + FIXEDOBJ_SPACE_SIZE;
+        return (os_vm_address_t)(ALIEN_LINKAGE_TABLE_SPACE_START + ALIEN_LINKAGE_TABLE_SPACE_SIZE);
+    }
+#endif
+    if (size == 0) return addr;
+    addr = os_alloc_gc_space(space_id, attr, addr, size);
+    if (!addr) lose("Can't allocate %#"OBJ_FMTX" bytes for space %d", size, space_id);
+    return addr;
+}
+
 /* TODO: If static + readonly were mapped as desired without disabling ASLR
  * but one of the large spaces couldn't be mapped as desired, start over from
  * the top, disabling ASLR. This should help to avoid relocating the heap
@@ -705,14 +713,7 @@ process_directory(int count, struct ndir_entry *entry,
         lispobj** pfree_pointer; // pointer to x_free_pointer
     } spaces[MAX_CORE_SPACE_ID+1] = {
         {0, 0, 0, 0}, // blank for space ID 0
-#ifdef LISP_FEATURE_GENCGC
         {dynamic_space_size, 0, DYNAMIC_SPACE_START, 0},
-#else
-        // Whatever address the core's dynamic space has
-        // becomes subspace 0. The other is subspace 1.
-        // It makes no difference which has the lower address.
-        {dynamic_space_size, 0, DYNAMIC_0_SPACE_START, 0},
-#endif
         // This order is determined by constants in compiler/generic/genesis
         {0, 0, STATIC_SPACE_START, &static_space_free_pointer},
 
@@ -743,8 +744,9 @@ process_directory(int count, struct ndir_entry *entry,
                (uword_t)&lisp_code_start, (uword_t)&lisp_code_end,
                text_space_highwatermark);
 #endif
-        ALIEN_LINKAGE_TABLE_SPACE_START = (uword_t)
-            os_validate(0, 0, ALIEN_LINKAGE_TABLE_SPACE_SIZE, ALIEN_LINKAGE_TABLE_CORE_SPACE_ID);
+        ALIEN_LINKAGE_TABLE_SPACE_START =
+            (uword_t)os_alloc_gc_space(ALIEN_LINKAGE_TABLE_CORE_SPACE_ID, 0, 0,
+                                       ALIEN_LINKAGE_TABLE_SPACE_SIZE);
         // Prefill the alien linkage table so that shrinkwrapped executables which link in
         // all their C library dependencies can avoid linking with -ldl
         // but extern-alien still works for newly compiled code.
@@ -820,23 +822,8 @@ process_directory(int count, struct ndir_entry *entry,
             size_t request = spaces[id].desired_size;
             int sub_2gb_flag = (request & 1);
             request &= ~(size_t)1;
-#ifdef LISP_FEATURE_IMMOBILE_SPACE
-            if (id == IMMOBILE_TEXT_CORE_SPACE_ID) {
-                // Pretend an os_validate() happened based on the address that
-                // would be obtained by a constant offset from fixedobj space.
-                ALIEN_LINKAGE_TABLE_SPACE_START = FIXEDOBJ_SPACE_START + FIXEDOBJ_SPACE_SIZE;
-                addr = ALIEN_LINKAGE_TABLE_SPACE_START + ALIEN_LINKAGE_TABLE_SPACE_SIZE;
-            }
-            else
-#endif
-            if (request) {
-                addr = (uword_t)os_validate(sub_2gb_flag ? MOVABLE_LOW : MOVABLE,
-                                            (os_vm_address_t)addr, request, id);
-                if (!addr) {
-                    lose("Can't allocate %#"OBJ_FMTX" bytes for space %ld",
-                         (lispobj)request, id);
-                }
-            }
+            addr = (uword_t)reserve_space(id, sub_2gb_flag ? MOVABLE_LOW : MOVABLE,
+                                          (os_vm_address_t)addr, request);
             switch (id) {
 #ifndef LISP_FEATURE_DARWIN_JIT
             case READ_ONLY_CORE_SPACE_ID:
@@ -856,35 +843,15 @@ process_directory(int count, struct ndir_entry *entry,
                 break;
 #endif
             case DYNAMIC_CORE_SPACE_ID:
-#ifdef LISP_FEATURE_CHENEYGC
-                {
-                  uword_t semispace_0_start = ALIGN_UP(addr, BACKEND_PAGE_BYTES);
-                  uword_t semispace_0_end = ALIGN_DOWN(addr + request, BACKEND_PAGE_BYTES);
-                  // assign to 'addr' too, because that's where we load the core file
-                  DYNAMIC_0_SPACE_START = addr = semispace_0_start;
-                  current_dynamic_space = (lispobj*)addr;
-                  // Request that much again now
-                  uword_t addr1 = (uword_t)os_validate(MOVABLE, 0, request, 1, 0);
-                  uword_t semispace_1_start = ALIGN_UP(addr1, BACKEND_PAGE_BYTES);
-                  uword_t semispace_1_end = ALIGN_DOWN(addr1 + request, BACKEND_PAGE_BYTES);
-
-                  DYNAMIC_1_SPACE_START = semispace_1_start;
-                  uword_t semispace_0_size = semispace_0_end - semispace_0_start;
-                  uword_t semispace_1_size = semispace_1_end - semispace_1_start;
-                  dynamic_space_size =
-                      semispace_0_size < semispace_1_size ? semispace_0_size : semispace_1_size;
-                }
-#else /* gencgc */
                 {
                 uword_t aligned_start = ALIGN_UP(addr, GENCGC_PAGE_BYTES);
-                /* Misalignment can happen only if card size exceeds OS page.
-                 * Drop one card to avoid overrunning the allocated space */
+                /* Misalignment can happen only if GC page size exceeds OS page.
+                 * Drop one GC page to avoid overrunning the allocated space */
                 if (aligned_start > addr) // not card-aligned
                     dynamic_space_size -= GENCGC_PAGE_BYTES;
                 DYNAMIC_SPACE_START = addr = aligned_start;
                 check_dynamic_space_addr_ok(addr, dynamic_space_size);
                 }
-#endif
                 break;
             }
 
@@ -928,16 +895,8 @@ process_directory(int count, struct ndir_entry *entry,
                 *spaces[id].pfree_pointer = free_pointer;
             break;
         case DYNAMIC_CORE_SPACE_ID:
-#ifdef LISP_FEATURE_CHENEYGC
-            /* 'addr' is the actual address if relocatable.
-             * For cheneygc, this will be whatever the GC was using
-             * at the time the core was saved.
-             * For gencgc this is #defined as DYNAMIC_SPACE_START */
-            current_dynamic_space = (lispobj *)addr;
-#else
             next_free_page = ALIGN_UP(entry->nwords<<WORD_SHIFT, GENCGC_PAGE_BYTES)
               / GENCGC_PAGE_BYTES;
-#endif
             anon_dynamic_space_start = (os_vm_address_t)(addr + len);
         }
     }
@@ -948,15 +907,9 @@ process_directory(int count, struct ndir_entry *entry,
                    spaces[READ_ONLY_CORE_SPACE_ID].base, // expected
                    spaces[READ_ONLY_CORE_SPACE_ID].len);
 #endif
-#ifdef LISP_FEATURE_GENCGC
     set_adjustment(adj, DYNAMIC_SPACE_START, // actual
                    spaces[DYNAMIC_CORE_SPACE_ID].base, // expected
                    spaces[DYNAMIC_CORE_SPACE_ID].len);
-#else
-    set_adjustment(adj, DYNAMIC_0_SPACE_START, // actual
-                   spaces[DYNAMIC_CORE_SPACE_ID].base, // expected
-                   spaces[DYNAMIC_CORE_SPACE_ID].len);
-#endif // LISP_FEATURE_GENCGC
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
     if (lisp_code_in_elf() && TEXT_SPACE_START != spaces[IMMOBILE_TEXT_CORE_SPACE_ID].base) {
         lose("code-in-elf + PIE not supported");
@@ -992,12 +945,8 @@ process_directory(int count, struct ndir_entry *entry,
 #endif
 }
 
-#ifdef LISP_FEATURE_GENCGC
 extern void gc_load_corefile_ptes(int, core_entry_elt_t, core_entry_elt_t,
                                   os_vm_offset_t offset, int fd);
-#else
-#define gc_load_corefile_ptes(dummy1,dummy2,dummy3,dummy4,dummy5)
-#endif
 
 static void sanity_check_loaded_core(lispobj);
 
@@ -1075,14 +1024,13 @@ load_core_file(char *file, os_vm_offset_t file_offset, int merge_core_pages)
                 // fprintf(stderr, "NOTE: TLS size increased to %x\n", dynamic_values_bytes);
             }
 #endif
-#ifdef LISP_FEATURE_GENCGC
+            // simple-fun implies cold-init, not a warm core (it would be a closure then)
             if (widetag_of(native_pointer(initial_function)) == SIMPLE_FUN_WIDETAG
                 && !lisp_startup_options.noinform) {
                 fprintf(stderr, "Initial page table:\n");
                 extern void print_generation_stats(void);
                 print_generation_stats();
             }
-#endif
             sanity_check_loaded_core(initial_function);
             return initial_function;
         case RUNTIME_OPTIONS_MAGIC: break; // already processed
@@ -1280,12 +1228,7 @@ static uword_t visit(lispobj* where, lispobj* limit, uword_t arg)
     return 0;
 }
 
-#ifdef LISP_FEATURE_GENCGC
 #define count_this_pointer_p(ptr) (find_page_index((void*)ptr) >= 0)
-#endif
-#ifdef LISP_FEATURE_CHENEYGC
-#define count_this_pointer_p(ptr) (1)
-#endif
 
 static void sanity_check_loaded_core(lispobj initial_function)
 {
@@ -1314,13 +1257,7 @@ static void sanity_check_loaded_core(lispobj initial_function)
         if (count_this_pointer_p(ptr)) tally(ptr, &v[0]);
     // Pass 2: Count all heap objects
     v[1].reached = &reached;
-#ifdef LISP_FEATURE_GENCGC
     walk_generation(visit, -1, (uword_t)&v[1]);
-#endif
-#ifdef LISP_FEATURE_CHENEYGC
-    visit((lispobj*)READ_ONLY_SPACE_START, read_only_space_free_pointer, (uword_t)&v[1]);
-    visit((lispobj*)STATIC_SPACE_START, static_space_free_pointer, (uword_t)&v[1]);
-#endif
 
     // Pass 3: Compare
     // Start with the conses

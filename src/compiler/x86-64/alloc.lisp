@@ -146,9 +146,8 @@
       (push patch-loc (sb-assem::asmstream-alloc-points sb-assem:*asmstream*))
       (inst jmp skip-instrumentation)
       (emit-alignment 3 :long-nop)
-      (let ((helper (if (integerp size)
-                        'enable-alloc-counter
-                        'enable-sized-alloc-counter)))
+      (let ((helper
+             (if (integerp size) 'enable-alloc-counter 'enable-sized-alloc-counter)))
         ;; This jump is always encoded as 5 bytes
         (inst call (if (or (not node) ; assembly routine
                            (sb-c::code-immobile-p node))
@@ -215,7 +214,7 @@
             (if systemp
                 (if (eql type +cons-primtype+) 'sys-list-alloc-tramp 'sys-alloc-tramp)
                 (if (eql type +cons-primtype+) 'list-alloc-tramp 'alloc-tramp))
-            node t)
+            node)
            (inst pop alloc-tn)))
     (let* ((NOT-INLINE (gen-label))
            (DONE (gen-label))
@@ -923,16 +922,14 @@
 
 ;;;; automatic allocators for primitive objects
 
-;;; FIXME: figure out how not to need this?
 (define-vop (make-funcallable-instance-tramp)
   (:args)
   (:results (result :scs (any-reg)))
   (:vop-var vop)
   (:generator 1
-    (let ((tramp (make-fixup 'funcallable-instance-tramp :assembly-routine)))
-      (if (sb-c::code-immobile-p vop)
-          (inst lea result (ea tramp rip-tn))
-          (inst mov result tramp)))))
+    ;; gets "... is not the name of a defined VOP." if not defined at all
+    #+compact-instance-header (bug "Shouldn't get here")
+    (inst mov result (make-fixup 'funcallable-instance-tramp :assembly-routine))))
 
 (flet
   ((alloc (name words type lowtag stack-allocate-p result

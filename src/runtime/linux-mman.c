@@ -10,8 +10,8 @@
 #include "sys_mmap.inc"
 
 os_vm_address_t
-os_validate(int attributes, os_vm_address_t addr, os_vm_size_t len,
-            int __attribute__((unused)) space_id)
+os_alloc_gc_space(int __attribute__((unused)) space_id,
+                  int attributes, os_vm_address_t addr, os_vm_size_t len)
 {
     int protection = attributes & IS_GUARD_PAGE ? OS_VM_PROT_NONE : OS_VM_PROT_ALL;
     attributes &= ~IS_GUARD_PAGE;
@@ -25,7 +25,7 @@ os_validate(int attributes, os_vm_address_t addr, os_vm_size_t len,
     actual = sbcl_mmap(addr, len, protection, flags, -1, 0);
     if (actual == MAP_FAILED) {
         if (errno == ENOMEM)
-            fprintf(stderr, "os_validate(%d,%p,%zu) failed with ENOMEM\n",
+            fprintf(stderr, "os_alloc_gc_space(%d,%p,%zu) failed with ENOMEM\n",
                     attributes, addr, len);
         else
             perror("mmap");
@@ -48,12 +48,4 @@ os_validate(int attributes, os_vm_address_t addr, os_vm_size_t len,
     }
 
     return actual;
-}
-
-void
-os_invalidate(os_vm_address_t addr, os_vm_size_t len)
-{
-    if (sbcl_munmap(addr,len) == -1) {
-        perror("munmap");
-    }
 }

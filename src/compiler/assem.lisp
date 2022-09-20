@@ -257,13 +257,13 @@
   ;; (second) instruction.
   ;;
   ;; instructions whose writes this instruction tries to read
-  (read-dependencies (make-sset) :type sset)
+  (read-dependencies (make-sset) :type sset :read-only t)
   ;; instructions whose writes or reads are overwritten by this instruction
-  (write-dependencies (make-sset) :type sset)
+  (write-dependencies (make-sset) :type sset :read-only t)
   ;; instructions which write what we read or write
-  (write-dependents (make-sset) :type sset)
+  (write-dependents (make-sset) :type sset :read-only t)
   ;; instructions which read what we write
-  (read-dependents (make-sset) :type sset))
+  (read-dependents (make-sset) :type sset :read-only t))
 (declaim (freeze-type instruction))
 #+sb-show-assem (defvar *inst-ids* (make-hash-table :test 'eq))
 #+sb-show-assem (defvar *next-inst-id* 0)
@@ -319,7 +319,6 @@
 
 (defstruct asmstream
   (data-section (make-section) :read-only t)
-  (indirections-section (make-section) :read-only t)
   (code-section (make-section) :read-only t)
   (elsewhere-section (make-section) :read-only t)
   (data-origin-label (gen-label "data start") :read-only t)
@@ -454,8 +453,6 @@
                      ,(case dest
                         (:code '(asmstream-code-section *asmstream*))
                         (:elsewhere '(asmstream-elsewhere-section *asmstream*))
-                        (:indirections
-                         '(asmstream-indirections-section *asmstream*))
                         (t dest)))))
               ,@(when vop `((*current-vop* ,vop)))
               ,@(mapcar (lambda (name)
@@ -1502,10 +1499,8 @@
          (end-text (gen-label))
          (combined
            (append-sections
-            (append-sections (asmstream-data-section asmstream)
-                             (append-sections
-                              (asmstream-code-section asmstream)
-                              (asmstream-indirections-section asmstream)))
+             (append-sections (asmstream-data-section asmstream)
+                              (asmstream-code-section asmstream))
              (let ((section (asmstream-elsewhere-section asmstream)))
                (emit section
                      end-text

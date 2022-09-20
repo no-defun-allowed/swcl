@@ -242,7 +242,6 @@ sword_t scavenge(lispobj *start, sword_t n_words)
  *
  * In case of card-spanning objects, the 'start' and 'end' parameters might not
  * exactly delimit objects boundaries. */
-#ifdef LISP_FEATURE_GENCGC
 int descriptors_scavenge(lispobj *start, lispobj* end,
                          generation_index_t gen, int dirty)
 {
@@ -297,7 +296,6 @@ int descriptors_scavenge(lispobj *start, lispobj* end,
     }
     return dirty;
 }
-#endif
 
 /* If 'fun' is provided, then call it on each livened object,
  * otherwise use scav1() */
@@ -356,9 +354,7 @@ extern int pin_all_dynamic_space_code;
 static struct code *
 trans_code(struct code *code)
 {
-#ifdef LISP_FEATURE_GENCGC
     gc_dcheck(!pin_all_dynamic_space_code);
-#endif
     /* if object has already been transported, just return pointer */
     if (forwarding_pointer_p((lispobj *)code)) {
         return (struct code *)native_pointer(forwarding_pointer_value((lispobj*)code));
@@ -413,11 +409,7 @@ trans_code(struct code *code)
         }
     })
     gencgc_apply_code_fixups(code, new_code);
-#ifdef LISP_FEATURE_GENCGC
-    /* Cheneygc doesn't need this os_flush_icache, it flushes the whole
-       spaces once when all copying is done. */
     os_flush_icache(code_text_start(new_code), code_text_size(new_code));
-#endif
     return new_code;
 }
 
@@ -562,7 +554,6 @@ static inline lispobj copy_instance(lispobj object)
     void* region = small_mixed_region;
     int page_type = PAGE_TYPE_SMALL_MIXED;
 
-#ifdef LISP_FEATURE_GENCGC
     struct layout* layout = (void*)native_pointer(instance_layout(INSTANCE(object)));
     struct bitmap bitmap;
     const int words_per_card = GENCGC_CARD_BYTES>>WORD_SHIFT;
@@ -583,7 +574,6 @@ static inline lispobj copy_instance(lispobj object)
                  (layout_flags(layout) & STRICTLY_BOXED_FLAG))
             page_type = PAGE_TYPE_BOXED, region = boxed_region;
     }
-#endif
 
     lispobj copy;
     // KLUDGE: reading both flags at once doesn't really work
@@ -815,30 +805,32 @@ static sword_t size_consfiller(lispobj *where)
 
 DEF_SCAV_BOXED(boxed, BOXED_NWORDS)
 DEF_SCAV_BOXED(short_boxed, SHORT_BOXED_NWORDS)
-DEF_SCAV_BOXED(tiny_boxed, TINY_BOXED_NWORDS)
 
 static lispobj trans_boxed(lispobj object) {
     return gc_copy_object(object, 1 + BOXED_NWORDS(*native_pointer(object)),
                           boxed_region, PAGE_TYPE_BOXED);
 }
-static lispobj trans_tiny_mixed(lispobj object) {
-    return gc_copy_object(object, 1 + TINY_BOXED_NWORDS(*native_pointer(object)),
-                          small_mixed_region, PAGE_TYPE_SMALL_MIXED);
-}
 
+/* Symbol */
 static sword_t scav_symbol(lispobj *where, lispobj header) {
-#ifdef LISP_FEATURE_COMPACT_SYMBOL
     struct symbol* s = (void*)where;
-    scavenge(&s->value, 3); // value, function, info
+#ifdef LISP_FEATURE_COMPACT_SYMBOL
+    scavenge(&s->value, 3); // value, fdefn, info
     lispobj name = decode_symbol_name(s->name);
     lispobj new = name;
     scavenge(&new, 1);
     if (new != name) set_symbol_name(s, new);
-    int indicated_nwords = (header>>N_WIDETAG_BITS) & 0xFF;
-    return 1 + (indicated_nwords|1); // round to odd, then add 1 for the header
 #else
-    return scav_tiny_boxed(where, header);
+    scavenge(&s->value, 4); // value, fdefn, info, name
 #endif
+    return ALIGN_UP(SYMBOL_SIZE, 2);
+}
+static lispobj trans_symbol(lispobj object) {
+    return gc_copy_object(object, ALIGN_UP(SYMBOL_SIZE,2),
+                          small_mixed_region, PAGE_TYPE_SMALL_MIXED);
+}
+static sword_t size_symbol(lispobj __attribute__((unused)) *where) {
+    return ALIGN_UP(SYMBOL_SIZE,2);
 }
 
 static inline int array_header_nwords(lispobj header) {
@@ -1246,11 +1238,9 @@ void smash_weak_pointers(void)
          * it has been, the weak pointer is still good and needs to be
          * updated. Otherwise, the weak pointer needs to be broken. */
         TEST_WEAK_CELL(wp->value, val, UNBOUND_MARKER_WIDETAG)
-#ifdef LISP_FEATURE_GENCGC
         // Large objects are "moved" by touching the page table gen field.
         // Do nothing if the target of this weak pointer had that happen.
         else if (new_space_p(val)) { }
-#endif
         else
             lose("unbreakable pointer %p", wp);
     }
@@ -1571,7 +1561,7 @@ static void scan_nonweak_kv_vector(struct vector *kv_vector, void (*scav_entry)(
         struct hash_table* ht = (struct hash_table*)native_pointer(kv_supplement);
         eql_hashing = hashtable_kind(ht) == 1;
         kv_supplement = ht->hash_vector;
-    } else if (kv_supplement == T) { // EQL hashing on a non-weak table
+    } else if (kv_supplement == LISP_T) { // EQL hashing on a non-weak table
         eql_hashing = 1;
         kv_supplement = NIL;
     }
@@ -1923,10 +1913,8 @@ void cull_weak_hash_tables(int (*alivep[4])(lispobj,lispobj))
      * which is what an extra reset would do if it saw no inserts. */
     if (weak_objects.count)
         hopscotch_reset(&weak_objects);
-#ifdef LISP_FEATURE_GENCGC
     // Close the region used when pushing items to the finalizer queue
     ensure_region_closed(cons_region, PAGE_TYPE_CONS);
-#endif
 }
 
 
@@ -2124,15 +2112,6 @@ properly_tagged_p_internal(lispobj pointer, lispobj *start_addr)
     return 0; // no good
 }
 
-/* META: Note the ambiguous word "validate" in the comment below.
- * This means "Decide whether <x> is valid".
- * But when you see os_validate() elsewhere, that doesn't mean to ask
- * whether something is valid, it says to *make* it valid.
- * I think it would be nice if we could avoid using the word in the
- * sense in which os_validate() uses it, which would entail renaming
- * a bunch of stuff, which is harder than just explaining why
- * the comments can be deceptive */
-
 /* Used by the debugger to validate possibly bogus pointers before
  * calling MAKE-LISP-OBJ on them.
  *
@@ -2156,7 +2135,6 @@ valid_lisp_pointer_p(lispobj pointer)
      * cases when we could answer the question more simply.
      * So unfortunately this generic interface has to know something about
      * which GC is in use. */
-#ifdef LISP_FEATURE_GENCGC
     page_index_t page = find_page_index((void*)pointer);
     if (page >= 0 &&
         (page_table[page].type & PAGE_TYPE_MASK) == PAGE_TYPE_BOXED) {
@@ -2168,7 +2146,6 @@ valid_lisp_pointer_p(lispobj pointer)
                             LOWTAG_FOR_WIDETAG(*native_pointer(pointer) & WIDETAG_MASK))
                == pointer;
     }
-#endif
     lispobj *start = search_all_gc_spaces((void*)pointer);
     if (start != NULL)
         return properly_tagged_descriptor_p((void*)pointer, start);
@@ -2248,11 +2225,7 @@ maybe_gc(os_context_t *context)
      * we may even be in a WITHOUT-INTERRUPTS. */
     gc_happened = funcall1(StaticSymbolFunction(SUB_GC), 0);
     FSHOW((stderr, "/maybe_gc: gc_happened=%s\n",
-           (gc_happened == NIL)
-           ? "NIL"
-           : ((gc_happened == T)
-              ? "T"
-              : "0")));
+           gc_happened == NIL ? "NIL" : gc_happened == LISP_T ? "T" : "0"));
     /* gc_happened can take three values: T, NIL, 0.
      *
      * T means that the thread managed to trigger a GC, and post-gc
@@ -2265,7 +2238,7 @@ maybe_gc(os_context_t *context)
      * triggered by this thread; success, but post-gc doesn't have
      * to be called.
      */
-    if ((gc_happened == T) &&
+    if ((gc_happened == LISP_T) &&
         /* See if interrupts are enabled or it's possible to enable
          * them. POST-GC has a similar check, but we don't want to
          * unlock deferrables in that case and get a pending interrupt
@@ -2442,7 +2415,7 @@ scavenge_control_stack(struct thread *th)
 
 static int boxed_registers[] = BOXED_REGISTERS;
 
-// Nothing usees os_context_pc_addr any more, except ACCESS_INTERIOR_POINTER_pc.
+// Nothing uses os_context_pc_addr any more, except ACCESS_INTERIOR_POINTER_pc.
 // I didn't see a good way to remove that one.
 extern os_context_register_t* os_context_pc_addr(os_context_t*);
 

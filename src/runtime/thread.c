@@ -27,12 +27,6 @@
 #include <sys/wait.h>
 #endif
 
-#ifdef LISP_FEATURE_MACH_EXCEPTION_HANDLER
-#include <mach/mach.h>
-#include <mach/mach_error.h>
-#include <mach/mach_types.h>
-#endif
-
 #include "runtime.h"
 #include "validate.h"           /* for BINDING_STACK_SIZE etc */
 #include "thread.h"
@@ -74,7 +68,7 @@ struct thread *all_threads;
 #ifdef LISP_FEATURE_GCC_TLS
 __thread struct thread *current_thread;
 #elif !defined LISP_FEATURE_WIN32
-pthread_key_t specials = 0;
+pthread_key_t current_thread = 0;
 #endif
 
 #ifdef LISP_FEATURE_WIN32
@@ -265,7 +259,7 @@ extern int arch_prctl(int code, unsigned long *addr);
 #elif defined LISP_FEATURE_GCC_TLS
 # define ASSIGN_CURRENT_THREAD(x) current_thread = x
 #elif !defined LISP_FEATURE_WIN32
-# define ASSIGN_CURRENT_THREAD(x) pthread_setspecific(specials, x)
+# define ASSIGN_CURRENT_THREAD(x) pthread_setspecific(current_thread, x)
 #else
 # define ASSIGN_CURRENT_THREAD(x) TlsSetValue(OUR_TLS_INDEX, x)
 #endif
@@ -336,7 +330,7 @@ void create_main_lisp_thread(lispobj function) {
         lose("can't create initial thread");
     th->state_word.sprof_enable = 1;
 #if defined LISP_FEATURE_SB_THREAD && !defined LISP_FEATURE_GCC_TLS && !defined LISP_FEATURE_WIN32
-    pthread_key_create(&specials, 0);
+    pthread_key_create(&current_thread, 0);
 #endif
 #if defined LISP_FEATURE_DARWIN && defined LISP_FEATURE_SB_THREAD
     pthread_key_create(&foreign_thread_ever_lispified, 0);
@@ -395,7 +389,7 @@ void create_main_lisp_thread(lispobj function) {
 
 void free_thread_struct(struct thread *th)
 {
-    os_invalidate((os_vm_address_t) th->os_address, THREAD_STRUCT_SIZE);
+    os_deallocate((os_vm_address_t) th->os_address, THREAD_STRUCT_SIZE);
 }
 
 /* Note: scribble must be stack-allocated */
@@ -483,10 +477,6 @@ unregister_thread(struct thread *th,
     os_sem_destroy(&semaphores->state_not_stopped_sem);
 #endif
 
-#ifdef LISP_FEATURE_MACH_EXCEPTION_HANDLER
-    mach_lisp_thread_destroy(th);
-#endif
-
 #if defined(LISP_FEATURE_WIN32)
     int i;
     for (i = 0; i<NUM_PRIVATE_EVENTS; ++i)
@@ -533,7 +523,7 @@ void* new_thread_trampoline(void* arg)
     // 'th->lisp_thread' remains valid despite not being in all_threads
     // due to the pinning via *STARTING-THREADS*.
     struct thread_instance *lispthread = (void*)native_pointer(th->lisp_thread);
-    if (lispthread->_ephemeral_p == T) th->state_word.user_thread_p = 0;
+    if (lispthread->_ephemeral_p == LISP_T) th->state_word.user_thread_p = 0;
 
     /* Potentially set the externally-visible name of this thread,
      * and for a whole pile of crazy, look at get_max_thread_name_length_impl() in
@@ -870,14 +860,10 @@ callback_wrapper_trampoline(
 
 struct thread *
 alloc_thread_struct(void* spaces) {
-    /* May as well allocate all the spaces at once: it saves us from
-     * having to decide what to do if only some of the allocations
-     * succeed. SPACES must be appropriately aligned, since the GC
-     * expects the control stack to start at a page boundary -- and
-     * the OS may have even more rigorous requirements. We can't rely
-     * on the alignment passed from os_validate, since that might
-     * assume the current (e.g. 4k) pagesize, while we calculate with
-     * the biggest (e.g. 64k) pagesize allowed by the ABI. */
+    /* Allocate the thread structure in one fell swoop as there is no way to recover
+     * from failing to obtain contiguous memory. Note that the OS may have a smaller
+     * alignment granularity than BACKEND_PAGE_BYTES so we may have to adjust the
+     * result to make it conform to our guard page alignment requirement. */
     boolean zeroize_stack = 0;
     if (spaces) {
         // If reusing memory from a previously exited thread, start by removing
@@ -887,7 +873,8 @@ alloc_thread_struct(void* spaces) {
         // if any newly started thread could refer a dead thread's heap objects.
         zeroize_stack = 1;
     } else {
-        spaces = os_validate(MOVABLE|IS_THREAD_STRUCT, NULL, THREAD_STRUCT_SIZE, 0);
+        spaces = os_alloc_gc_space(THREAD_STRUCT_CORE_SPACE_ID, MOVABLE,
+                                   NULL, THREAD_STRUCT_SIZE);
         if (!spaces) return NULL;
     }
     /* Aligning up is safe as THREAD_STRUCT_SIZE has
@@ -916,7 +903,7 @@ alloc_thread_struct(void* spaces) {
 
     __attribute((unused)) lispobj* tls = (lispobj*)th;
 #ifdef THREAD_T_NIL_CONSTANTS_SLOT
-    tls[THREAD_T_NIL_CONSTANTS_SLOT] = (NIL << 32) | T;
+    tls[THREAD_T_NIL_CONSTANTS_SLOT] = (NIL << 32) | LISP_T;
 #endif
 #ifdef THREAD_ALIEN_LINKAGE_TABLE_BASE_SLOT
     tls[THREAD_ALIEN_LINKAGE_TABLE_BASE_SLOT] = (lispobj)ALIEN_LINKAGE_TABLE_SPACE_START;

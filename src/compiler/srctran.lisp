@@ -309,9 +309,6 @@
 (define-source-transform oddp (x) `(logtest ,x 1))
 (define-source-transform evenp (x) `(not (logtest ,x 1)))
 
-;;; Note that all the integer division functions are available for
-;;; inline expansion.
-
 (macrolet ((deffrob (fun)
              `(define-source-transform ,fun (x &optional (y nil y-p))
                 (declare (ignore y))
@@ -1617,6 +1614,8 @@
          ;; are REAL so the result is a REAL.
          'real)))
 
+(defvar *conservative-quotient-bound* t)
+
 (defun truncate-derive-type-quot (number-type divisor-type)
   (let* ((rem-type (rem-result-type number-type divisor-type))
          (number-interval (numeric-type->interval number-type))
@@ -1633,11 +1632,16 @@
                         (interval-high divisor-interval))))
              (specifier-type (if (listp res) res 'integer))))
           (t
-           (let ((quot (truncate-quotient-bound
-                        (interval-div number-interval
-                                      divisor-interval))))
-             (specifier-type `(integer ,(or (interval-low quot) '*)
-                                       ,(or (interval-high quot) '*))))))))
+           (multiple-value-bind (quot conservative)
+               (if (and (eql (interval-high divisor-interval) 1)
+                        (eql (interval-low divisor-interval) 1))
+                   (values number-interval nil)
+                   (values (interval-div number-interval
+                                         divisor-interval)))
+             (let* ((*conservative-quotient-bound* conservative)
+                    (quot (truncate-quotient-bound quot)))
+               (specifier-type `(integer ,(or (interval-low quot) '*)
+                                         ,(or (interval-high quot) '*)))))))))
 
 (defun truncate-derive-type-rem (number-type divisor-type)
   (let* ((rem-type (rem-result-type number-type divisor-type))
@@ -1901,7 +1905,8 @@
   (let ((result-sym (gensym)))
     `(let ((,result-sym ,result))
        (,direction ,result-sym
-                   (if (and (floatp ,bound)
+                   (if (and *conservative-quotient-bound*
+                            (floatp ,bound)
                             (/= ,result-sym 0))
                        1
                        0)))))

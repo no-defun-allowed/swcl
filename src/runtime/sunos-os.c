@@ -28,8 +28,8 @@
 
 void os_init() {}
 
-os_vm_address_t os_validate(int attributes, os_vm_address_t addr, os_vm_size_t len,
-                            int __attribute__((unused)) space_id)
+os_vm_address_t os_alloc_gc_space(int __attribute__((unused)) space_id,
+                                  int attributes, os_vm_address_t addr, os_vm_size_t len)
 {
     int protection = attributes & IS_GUARD_PAGE ? OS_VM_PROT_NONE : OS_VM_PROT_ALL;
     attributes &= ~IS_GUARD_PAGE;
@@ -51,12 +51,6 @@ os_vm_address_t os_validate(int attributes, os_vm_address_t addr, os_vm_size_t l
     }
 
     return addr;
-}
-
-void os_invalidate(os_vm_address_t addr, os_vm_size_t len)
-{
-    if(munmap((void*) addr, len) == -1)
-        perror("munmap");
 }
 
 #if defined LISP_FEATURE_GENCGC

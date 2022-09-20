@@ -558,7 +558,7 @@ write_heap_exhaustion_report(FILE *file, long available, long requested,
     fprintf(file, "GC control variables:\n");
     fprintf(file, "   *GC-INHIBIT* = %s\n   *GC-PENDING* = %s\n",
             read_TLS(GC_INHIBIT,thread)==NIL ? "false" : "true",
-            (read_TLS(GC_PENDING, thread) == T) ?
+            (read_TLS(GC_PENDING, thread) == LISP_T) ?
             "true" : ((read_TLS(GC_PENDING, thread) == NIL) ?
                       "false" : "in progress"));
 #ifdef LISP_FEATURE_SB_THREAD
@@ -645,8 +645,8 @@ zero_range_with_mmap(os_vm_address_t addr, os_vm_size_t length) {
     }
 #else
     void *new_addr;
-    os_invalidate(addr, length);
-    new_addr = os_validate(NOT_MOVABLE, addr, length, DYNAMIC_CORE_SPACE_ID);
+    os_deallocate(addr, length);
+    new_addr = os_alloc_gc_space(DYNAMIC_CORE_SPACE_ID, NOT_MOVABLE, addr, length);
     if (new_addr == NULL || new_addr != addr) {
         lose("remap_free_pages: page moved, %p ==> %p",
              addr, new_addr);
@@ -1074,7 +1074,7 @@ gc_alloc_new_region(sword_t nbytes, int page_type, struct alloc_region *alloc_re
         int remap_from = first_page + (page_words_used(first_page)?1:0);
         if (last_page >= remap_from) {
             long len = npage_bytes(1+last_page-remap_from);
-            os_invalidate(page_address(remap_from), len);
+            os_deallocate(page_address(remap_from), len);
             mmap(page_address(remap_from), len,
                  OS_VM_PROT_ALL, MAP_ANON|MAP_PRIVATE|MAP_JIT, -1, 0);
             page_index_t p;
@@ -2035,7 +2035,12 @@ static lispobj conservative_root_p(lispobj addr, page_index_t addr_page_index)
             return 0;
 #ifdef LISP_FEATURE_X86_64
         case FUNCALLABLE_INSTANCE_WIDETAG:
+            // Allow any of these to pin a funcallable instance:
+            //  - pointer to embedded machine instructions
+            //  - untagged pointer to trampoline word
+            //  - correctly tagged pointer
             if ((addr >= (uword_t)(object_start+2) && addr < (uword_t)(object_start+4))
+                || addr == (lispobj)(object_start+1)
                 || addr == make_lispobj(object_start, FUN_POINTER_LOWTAG))
                 return make_lispobj(object_start, FUN_POINTER_LOWTAG);
             return 0;
@@ -2805,6 +2810,8 @@ static inline void protect_page(void* page_addr)
 }
 #endif
 
+#define LOCKFREE_LIST_NEXT(x) ((struct instance*)x)->slots[INSTANCE_DATA_START]
+
 /* Helper function for update_writeprotection.
  * If the [where,limit) contain an old->young pointer, then return
  * the address - or approximate address - containing such pointer.
@@ -2812,58 +2819,50 @@ static inline void protect_page(void* page_addr)
  * want to see the address */
 static lispobj* range_dirty_p(lispobj* where, lispobj* limit, generation_index_t gen)
 {
-    while ( where < limit ) {
+    sword_t nwords;
+    for ( ; where < limit ; where += nwords ) {
         lispobj word = *where;
         if (is_cons_half(word)) {
             if (is_lisp_pointer(word) && !ptr_ok_to_writeprotect(word, gen)) return where;
             word = where[1];
             if (is_lisp_pointer(word) && !ptr_ok_to_writeprotect(word, gen)) return where;
-            where += 2;
+            nwords = 2;
             continue;
         }
         int widetag = widetag_of(where);
-        sword_t nwords = sizetab[widetag](where);
-        sword_t index;
-        if (leaf_obj_widetag_p(widetag)) {
-            // Do nothing
-        } else if (widetag == CODE_HEADER_WIDETAG) {
-            // This function will never be called on a page of code
-            lose("code @ %p on non-code page", where);
-        } else {
+        gc_dcheck(widetag !== CODE_HEADER_WIDETAG); // This can't be called on a code page
+        nwords = sizetab[widetag](where);
+        if (leaf_obj_widetag_p(widetag)) continue; // Do nothing
 #ifdef LISP_FEATURE_COMPACT_INSTANCE_HEADER
-            if (instanceoid_widetag_p(widetag)) {
-                // instance_layout works on funcallable or regular instances
-                // and we have to specially check it because it's in the upper
-                // bytes of the 0th word.
-                lispobj layout = instance_layout(where);
-                if (layout) {
-                    if (!ptr_ok_to_writeprotect(layout, gen)) return where;
-                    if (lockfree_list_node_layout_p(LAYOUT(layout)) &&
-                        !ptr_ok_to_writeprotect(((struct instance*)where)
-                                                ->slots[INSTANCE_DATA_START], gen))
-                        return where;
-                }
-            }
-#else
-            if (widetag == INSTANCE_WIDETAG) {
-                // instance_layout works only on regular instances,
-                // we don't have to treat it specially but we do have to
-                // check for lockfree list nodes.
-                lispobj layout = instance_layout(where);
-                if (layout && lockfree_list_node_layout_p(LAYOUT(layout)) &&
-                    !ptr_ok_to_writeprotect(((struct instance*)where)
-                                            ->slots[INSTANCE_DATA_START], gen))
-                    return where;
-            }
-#endif
-            // Scan all the rest of the words even if some of them are raw bits.
-            // At worst this overestimates the set of pointer words.
-            for (index=1; index<nwords; ++index) {
-                if (is_lisp_pointer(where[index]) && !ptr_ok_to_writeprotect(where[index], gen))
+        if (instanceoid_widetag_p(widetag)) {
+            // instance_layout works on funcallable or regular instances
+            // and we have to specially check it because it's in the upper
+            // bytes of the 0th word.
+            lispobj layout = instance_layout(where);
+            if (layout) {
+                if (!ptr_ok_to_writeprotect(layout, gen)) return where;
+                if (lockfree_list_node_layout_p(LAYOUT(layout)) &&
+                    !ptr_ok_to_writeprotect(LOCKFREE_LIST_NEXT(where), gen))
                     return where;
             }
         }
-        where += nwords;
+#else
+        if (widetag == INSTANCE_WIDETAG) {
+            // instance_layout works only on regular instances,
+            // we don't have to treat it specially but we do have to
+            // check for lockfree list nodes.
+            lispobj layout = instance_layout(where);
+            if (layout && lockfree_list_node_layout_p(LAYOUT(layout)) &&
+                !ptr_ok_to_writeprotect(LOCKFREE_LIST_NEXT(where), gen))
+                return where;
+        }
+#endif
+        // Scan all the rest of the words even if some of them are raw bits.
+        // At worst this overestimates the set of pointer words.
+        sword_t index;
+        for (index=1; index<nwords; ++index)
+            if (is_lisp_pointer(where[index]) && !ptr_ok_to_writeprotect(where[index], gen))
+                return where;
     }
     return 0;
 }
@@ -3797,7 +3796,8 @@ static void pin_call_chain_and_boxed_registers(struct thread* th) {
 static void NO_SANITIZE_ADDRESS NO_SANITIZE_MEMORY
 conservative_stack_scan(struct thread* th,
                         __attribute__((unused)) generation_index_t gen,
-                        lispobj* cur_thread_approx_stackptr)
+                        // #+sb-safepoint uses os_get_csp() and not this arg
+                        __attribute__((unused)) lispobj* cur_thread_approx_stackptr)
 {
     /* there are potentially two stacks for each thread: the main
      * stack, which may contain Lisp pointers, and the alternate stack.
@@ -5139,7 +5139,7 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
         if (read_TLS(GC_PENDING,thread) == NIL) {
             /* set things up so that GC happens when we finish the PA
              * section */
-            write_TLS(GC_PENDING,T,thread);
+            write_TLS(GC_PENDING, LISP_T, thread);
             if (read_TLS(GC_INHIBIT,thread) == NIL) {
 #ifdef LISP_FEATURE_SB_SAFEPOINT
                 thread_register_gc_trigger();

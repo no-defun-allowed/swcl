@@ -201,8 +201,9 @@ void prepare_readonly_space(int purify, int print)
         // at READ_ONLY_SPACE_START if the free_pointer isn't higher than the start.
         int string_space_size = BACKEND_PAGE_BYTES;
         READ_ONLY_SPACE_START =
-            (uword_t)os_validate(MOVABLE, (char*)DYNAMIC_SPACE_START - string_space_size,
-                                 string_space_size, 0);
+            (uword_t)os_alloc_gc_space(READ_ONLY_CORE_SPACE_ID,
+                                       MOVABLE, (char*)DYNAMIC_SPACE_START - string_space_size,
+                                       string_space_size);
         READ_ONLY_SPACE_END = READ_ONLY_SPACE_START + string_space_size;
         read_only_space_free_pointer = (lispobj*)READ_ONLY_SPACE_START;
         return;
@@ -236,8 +237,9 @@ void prepare_readonly_space(int purify, int print)
     int string_space_size = ALIGN_UP(sum_sizes, BACKEND_PAGE_BYTES);
     // Try to place readonly just below dynamic space, but it doesn't really matter where
     READ_ONLY_SPACE_START =
-        (uword_t)os_validate(MOVABLE, (char*)DYNAMIC_SPACE_START - string_space_size,
-                             string_space_size, 0);
+        (uword_t)os_alloc_gc_space(READ_ONLY_CORE_SPACE_ID,
+                                   MOVABLE, (char*)DYNAMIC_SPACE_START - string_space_size,
+                                   string_space_size);
     READ_ONLY_SPACE_END = READ_ONLY_SPACE_START + string_space_size;
     read_only_space_free_pointer = (lispobj*)READ_ONLY_SPACE_START;
 
@@ -313,7 +315,7 @@ void move_rospace_to_dynamic(__attribute__((unused)) int print)
         *shadow_cursor = make_lispobj(new, OTHER_POINTER_LOWTAG);
     }
     ensure_region_closed(unboxed_region, PAGE_TYPE_BOXED);
-    os_invalidate((void*)READ_ONLY_SPACE_START, READ_ONLY_SPACE_END - READ_ONLY_SPACE_START);
+    os_deallocate((void*)READ_ONLY_SPACE_START, READ_ONLY_SPACE_END - READ_ONLY_SPACE_START);
     walk_all_spaces(undo_rospace_ptrs, (uword_t)shadow_base);
     // Set it empty
     read_only_space_free_pointer = (lispobj*)READ_ONLY_SPACE_START;

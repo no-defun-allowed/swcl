@@ -139,6 +139,7 @@
 ;;; Lisp assembler routines are named by Lisp symbols, not strings,
 ;;; and so can be compared by EQ.
 (define-load-time-global *assembler-routines* nil)
+#+immobile-space (define-load-time-global *asm-routine-vector* nil)
 #-sb-xc-host (declaim (code-component *assembler-routines*))
 
 ;;; Output the current number of semicolons after a fresh-line.
@@ -1146,15 +1147,31 @@
 #-sb-xc-host
 (defun possibly-log-new-code (object reason &aux (show *show-new-code*))
   (when show
-    (let ((*print-pretty* nil))
+    (let ((size (code-object-size object))
+          (fmt "~&New code(~Db,~A): ~A~%")
+          (file "jit-code.txt")
+          (*print-pretty* nil))
       ;; DISASSEMBLE is for limited debugging only.
       ;; It may write garbled output if multiple threads
-      (when (eq show 'disassemble)
-        (with-open-file (f "jit-code.txt" :direction :output
-                                          :if-exists :append :if-does-not-exist :create)
-          (disassemble object :stream f)
-          (terpri f)))
-      (format t "~&New code(~Db,~A): ~A~%" (code-object-size object) reason object)))
+      ;; I tried WITH-OPEN-STREAM during cold-init and got:
+      ;;   "vicious metacircle:  The computation of an effective method of
+      ;;    #<STREAM-FUNCTION COMMON-LISP:CLOSE (2)> for arguments of types
+      ;;    (#<STRUCTURE-CLASS SB-SYS:FD-STREAM>) uses the effective method
+      ;; being computed."
+      ;; so just leave the stream open. Or we could call the fd-stream misc routine.
+      (if (or (eq show 'disassemble) (streamp show))
+          (let ((f (if (streamp show)
+                       show
+                       (prog1
+                           (setq *show-new-code*
+                                 (open file :direction :output
+                                       :if-exists :append :if-does-not-exist :create))
+                         (format t "~&; Logging code allocation to ~S~%" file)))))
+            (format f fmt size reason object)
+            (disassemble object :stream f)
+            (terpri f)
+            (force-output f))
+          (format *trace-output* fmt (code-object-size object) reason object))))
   object)
 
 (define-fop 17 :not-host (fop-load-code ((:operands header n-code-bytes n-fixup-elts)))
@@ -1162,17 +1179,16 @@
   ;; ... | constant0 constant1 ... constantN | DEBUG-INFO | FIXUPS-ITEMS ....   ||
   ;;     | <--------- n-constants ---------> |            | <-- n-fixup-elts -> ||
   (let* ((n-simple-funs (read-unsigned-byte-32-arg (fasl-input-stream)))
-         (n-named-calls (read-unsigned-byte-32-arg (fasl-input-stream)))
+         (n-fdefns (read-unsigned-byte-32-arg (fasl-input-stream)))
          (n-boxed-words (ash header -1))
          (n-constants (- n-boxed-words sb-vm:code-constants-offset))
          (stack-elts-consumed (+ n-constants 1 n-fixup-elts)))
     (with-fop-stack ((stack (operand-stack)) ptr stack-elts-consumed)
       ;; We've already ensured that all FDEFNs the code uses exist.
       ;; This happened by virtue of calling fop-fdefn for each.
-      (let ((stack-index (+ ptr (* n-simple-funs sb-vm:code-slots-per-simple-fun))))
-        (dotimes (i n-named-calls)
-          (aver (typep (svref stack stack-index) 'fdefn))
-          (incf stack-index)))
+      (loop for stack-index from (+ ptr (* n-simple-funs sb-vm:code-slots-per-simple-fun))
+            repeat n-fdefns
+            do (aver (typep (svref stack stack-index) 'fdefn)))
       (binding* (((code total-nwords)
                   (sb-c:allocate-code-object
                    (if (oddp header) :immobile :dynamic)
@@ -1181,34 +1197,32 @@
                  (real-code code)
                  (debug-info (svref stack (+ ptr n-constants))))
         (with-writable-code-instructions
-            (code total-nwords debug-info n-named-calls n-simple-funs)
+            (code total-nwords debug-info n-fdefns n-simple-funs)
           :copy (read-n-bytes (fasl-input-stream) (code-instructions code) 0 n-code-bytes)
           :fixup (sb-c::apply-fasl-fixups code stack (+ ptr (1+ n-constants)) n-fixup-elts real-code))
         ;; Don't need the code pinned from here on
-        (progn
-          (setf (sb-c::debug-info-source (%code-debug-info code))
-                (%fasl-input-partial-source-info (fasl-input)))
-          ;; Boxed constants can be assigned only after figuring out where the range
-          ;; of implicitly tagged words is, which requires knowing how many functions
-          ;; are in the code component, which requires reading the code trailer.
-          #+darwin-jit (sb-c::assign-code-constants
-                        code (subseq stack ptr (+ ptr n-constants)))
-          #-darwin-jit
-          (let* ((header-index sb-vm:code-constants-offset)
-                 (stack-index ptr))
+        (setf (sb-c::debug-info-source (%code-debug-info code))
+              (%fasl-input-partial-source-info (fasl-input)))
+        ;; Boxed constants can be assigned only after figuring out where the range
+        ;; of implicitly tagged words is, which requires knowing how many functions
+        ;; are in the code component, which requires reading the code trailer.
+        #+darwin-jit (sb-c::assign-code-constants code (subseq stack ptr (+ ptr n-constants)))
+        #-darwin-jit
+        (let* ((header-index sb-vm:code-constants-offset)
+               (stack-index ptr))
             (declare (type index header-index stack-index))
             (dotimes (n (* n-simple-funs sb-vm:code-slots-per-simple-fun))
               (setf (code-header-ref code header-index) (svref stack stack-index))
               (incf header-index)
               (incf stack-index))
-            (dotimes (i n-named-calls)
+            (dotimes (i n-fdefns)
               (sb-c::set-code-fdefn code header-index (svref stack stack-index))
               (incf header-index)
               (incf stack-index))
             (do () ((>= header-index n-boxed-words))
               (setf (code-header-ref code header-index) (svref stack stack-index))
               (incf header-index)
-              (incf stack-index))))
+              (incf stack-index)))
         (when (typep (code-header-ref code (1- n-boxed-words))
                      '(cons (eql sb-c::coverage-map)))
           ;; Record this in the global list of coverage-instrumented code.
