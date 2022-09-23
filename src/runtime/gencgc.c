@@ -4978,17 +4978,7 @@ void gc_allocate_ptes()
     // 'nbits' is what we need, 'gc_card_table_nbits' is what the core was compiled for.
     if (nbits > gc_card_table_nbits) {
         gc_card_table_nbits = nbits;
-#if defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 \
-  || defined LISP_FEATURE_X86 || defined LISP_FEATURE_X86_64
-        // The value needed based on dynamic space size exceeds the value that the
-        // core was compiled for, so we need to patch all code blobs.
-        gcbarrier_patch_code_range(READ_ONLY_SPACE_START, read_only_space_free_pointer);
-        gcbarrier_patch_code_range(STATIC_SPACE_START, static_space_free_pointer);
-        gcbarrier_patch_code_range(DYNAMIC_SPACE_START, (lispobj*)dynamic_space_highwatermark());
-#ifdef LISP_FEATURE_IMMOBILE_SPACE
-        gcbarrier_patch_code_range(TEXT_SPACE_START, text_space_highwatermark);
-#endif
-#endif
+        should_patch_code = 1;
     }
     // Regardless of the mask implied by space size, it has to be gc_card_table_nbits wide
     // even if that is excessive - when the core is restarted using a _smaller_ dynamic space
@@ -5036,7 +5026,7 @@ void gc_allocate_ptes()
  * loading in the allocation bitmap before we can walk the heap. */
 static void maybe_patch_code() {
     if (should_patch_code) {
-#if defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64     \
+#if defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC64 \
   || defined LISP_FEATURE_X86 || defined LISP_FEATURE_X86_64
         // The value needed based on dynamic space size exceeds the value that the
         // core was compiled for, so we need to patch all code blobs.
@@ -5044,7 +5034,7 @@ static void maybe_patch_code() {
         gcbarrier_patch_code_range(STATIC_SPACE_START, static_space_free_pointer);
         gcbarrier_patch_code_range(DYNAMIC_SPACE_START, (lispobj*)dynamic_space_highwatermark());
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
-        gcbarrier_patch_code_range(VARYOBJ_SPACE_START, varyobj_free_pointer);
+        gcbarrier_patch_code_range(TEXT_SPACE_START, text_space_highwatermark);
 #endif
 #endif
     }
