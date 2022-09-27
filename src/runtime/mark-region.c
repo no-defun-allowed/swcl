@@ -280,6 +280,10 @@ static void set_mark_bit(lispobj object) {
   mark_bitmap[word_index] |= ((uword_t)(1) << bit_index);
 }
 
+static uword_t mark_bitmap_word_index(void *where) {
+  return ((uword_t)where - DYNAMIC_SPACE_START) / (N_WORD_BITS << N_LOWTAG_BITS);
+}
+
 static boolean in_dynamic_space(lispobj object) {
   return find_page_index((void*)object) != -1;
 }
@@ -374,18 +378,15 @@ static void mark(lispobj object) {
 #endif
 
     /* Enqueue onto mark queue */
-    if (!pointer_survived_gc_yet(object)) {
-      set_mark_bit(object);
-      if (!output_block || output_block->count == QBLOCK_CAPACITY) {
-        struct Qblock *n = grab_qblock();
-        if (output_block) {
-          output_block->next = grey_list;
-          grey_list = output_block;
-        }
-        output_block = n;
+    if (!output_block || output_block->count == QBLOCK_CAPACITY) {
+      struct Qblock *n = grab_qblock();
+      if (output_block) {
+        output_block->next = grey_list;
+        grey_list = output_block;
       }
-      output_block->elements[output_block->count++] = object;
+      output_block = n;
     }
+    output_block->elements[output_block->count++] = object;
   }
 }
 
@@ -462,14 +463,16 @@ static void __attribute__((noinline)) trace_everything() {
     for (int n = 0; n < count; n++) {
       traced++;
       lispobj obj = block->elements[n];
-      trace_object(obj);
-      if (n + PREFETCH_DISTANCE < count) {
+      if (n + PREFETCH_DISTANCE < count)
         __builtin_prefetch(native_pointer(block->elements[n + PREFETCH_DISTANCE]));
+      if (!object_marked_p(obj)) {
+        set_mark_bit(obj);
+        if (listp(obj))
+          mark_cons_line(CONS(obj));
+        else
+          mark_lines(native_pointer(obj));
+        trace_object(obj);
       }
-      if (listp(obj))
-        mark_cons_line(CONS(obj));
-      else
-        mark_lines(native_pointer(obj));
     }
     recycle_qblock(block);
   }
@@ -516,10 +519,6 @@ void clear_allocation_bit_mark(void *address) {
   uword_t first_bit_index = ((uword_t)(address) - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
   uword_t first_word_index = first_bit_index / N_WORD_BITS;
   allocation_bitmap[first_word_index] &= ~((uword_t)(1) << (first_bit_index % N_WORD_BITS));
-}
-
-static uword_t mark_bitmap_word_index(void *where) {
-  return ((uword_t)where - DYNAMIC_SPACE_START) / (N_WORD_BITS << N_LOWTAG_BITS);
 }
 
 static lispobj *find_object(uword_t address, uword_t start, boolean precise) {
