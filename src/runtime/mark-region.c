@@ -487,17 +487,11 @@ static lispobj *last_address_in(uword_t bitword, uword_t word_index) {
   return (lispobj*)x;
 }
 
-/* precise is true for stack scanning, but false for card crossing
- * detection, since the latter produces pretty nasty cache misses. When
- * "imprecise" we don't bother to check if the object actually intersects
- * the pointer. */
-static lispobj *fix_pointer(lispobj *p, uword_t original, boolean precise) {
-  if (precise) {
-    if (embedded_obj_p(widetag_of(p)))
-      p = fun_code_header(p);
-    if (native_pointer(original) >= p + object_size(p))
-      return 0;
-  }
+static lispobj *fix_pointer(lispobj *p, uword_t original) {
+  if (embedded_obj_p(widetag_of(p)))
+    p = fun_code_header(p);
+  if (native_pointer(original) >= p + object_size(p))
+    return 0;
   return p;
 }
 
@@ -521,7 +515,7 @@ void clear_allocation_bit_mark(void *address) {
   allocation_bitmap[first_word_index] &= ~((uword_t)(1) << (first_bit_index % N_WORD_BITS));
 }
 
-static lispobj *find_object(uword_t address, uword_t start, boolean precise) {
+static lispobj *find_object(uword_t address, uword_t start) {
   page_index_t p = find_page_index((void*)address);
   if (page_free_p(p)) return 0;
   if (page_table[p].type == PAGE_TYPE_CONS) {
@@ -550,13 +544,12 @@ static lispobj *find_object(uword_t address, uword_t start, boolean precise) {
     if (allocation_bitmap[first_word_index] & all_not_after)
       return fix_pointer(last_address_in(allocation_bitmap[first_word_index] & all_not_after,
                                          first_word_index),
-                         address,
-                         precise);
+                         address);
     uword_t i = first_word_index - 1;
     while (i >= start_word_index) {
       if (allocation_bitmap[i])
         /* Return the last location. */
-        return fix_pointer(last_address_in(allocation_bitmap[i], i), address, precise);
+        return fix_pointer(last_address_in(allocation_bitmap[i], i), address);
       /* Don't underflow */
       if (i == 0) break;
       i--;
@@ -566,7 +559,7 @@ static lispobj *find_object(uword_t address, uword_t start, boolean precise) {
 }
 
 lispobj *search_dynamic_space(void *pointer) {
-  return find_object((uword_t)pointer, DYNAMIC_SPACE_START, 1);
+  return find_object((uword_t)pointer, DYNAMIC_SPACE_START);
 }
 
 /* Sweeping ("regioning"?) */
@@ -741,7 +734,7 @@ static void trace_static_roots() {
 /* Preserve an ambiguous pointer. */
 void mr_preserve_pointer(uword_t address) {
   if (find_page_index(native_pointer(address)) > -1) {
-    lispobj *obj = find_object(address, DYNAMIC_SPACE_START, 1);
+    lispobj *obj = find_object(address, DYNAMIC_SPACE_START);
     if (obj) mark(compute_lispobj(obj));
   }
 }
