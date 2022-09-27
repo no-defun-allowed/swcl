@@ -807,8 +807,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
   while (i < page_table_pages) {
     unsigned char page_type = page_table[i].type & PAGE_TYPE_MASK;
     if (page_type == PAGE_TYPE_UNBOXED ||
-        !page_words_used(i) ||
-        !cardseq_any_marked(page_to_card_index(i))) {
+        !page_words_used(i)) {
       i++; continue;
     }
     // fprintf(stderr, "Scavenging page %ld\n", i);
@@ -819,10 +818,9 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
         lispobj widetag = widetag_of((lispobj*)(page_address(i) - page_scan_start_offset(i)));
         if (widetag != SIMPLE_VECTOR_WIDETAG) {
           /* How odd. Just remove the card marks. */
-          for (int j = 0, card = page_to_card_index(i);
-               j < CARDS_PER_PAGE; j++, card++)
+          for (int j = 0, card = page_to_card_index(i); j < CARDS_PER_PAGE; j++, card++)
             gc_card_mark[card] = CARD_UNMARKED;
-          continue;
+          i++; continue;
         }
         /* The only time that page_address + page_words_used actually
          * demarcates the end of a (sole) object on the page, with this
