@@ -404,7 +404,7 @@ static void trace_object(lispobj object) {
     struct cons *c = CONS(object);
     mark(c->car);
     lispobj next = c->cdr;
-#if 0
+#if 1
     /* Tail-recurse on the cdr, unless we're recording dirty cards. */
     if (!dirty_generation_source && is_lisp_pointer(next)) {
       /* Fix up embedded simple-fun objects. */
@@ -412,13 +412,14 @@ static void trace_object(lispobj object) {
       if (functionp(next) && embedded_obj_p(widetag_of(np))) {
         lispobj *base = fun_code_header(np);
         next = make_lispobj(base, OTHER_POINTER_LOWTAG);
+        np = base;
       }
       if (!pointer_survived_gc_yet(next)) {
         set_mark_bit(next);
         if (listp(next))
           mark_cons_line(CONS(next));
         else
-          mark_lines(next);
+          mark_lines(np);
         object = next;
         goto again;
       }
