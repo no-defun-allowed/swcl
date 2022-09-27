@@ -1200,7 +1200,7 @@ void
 gc_close_region(struct alloc_region *alloc_region, int page_type)
 {
     (void)page_type;
-    mr_update_closed_region(alloc_region);
+    mr_update_closed_region(alloc_region, gc_alloc_generation);
 }
 #else
 void
@@ -5099,7 +5099,7 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
     }
 
 #ifdef LISP_FEATURE_MARK_REGION_GC
-    if (try_allocate_small_after_region(nbytes, region, gc_alloc_generation))
+    if (try_allocate_small_after_region(nbytes, region))
       return region->start_addr;
 #endif
 

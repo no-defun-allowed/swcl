@@ -33,7 +33,6 @@
 #endif
 
 #define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
-#define ATOMIC_INC(where, amount) __atomic_add_fetch(&(where), (amount), __ATOMIC_SEQ_CST)
 
 #define DEBUG
 
@@ -100,6 +99,7 @@ boolean line_marked(void *pointer) {
 #define ENCODE_GEN(g) ((g) + 1)
 #define DECODE_GEN(l) (UNMARK_GEN(l) - 1)
 #define IS_MARKED(l) ((l) & 16)
+#define COPY_MARK(from, to) (((from) & 16) | (to))
 
 generation_index_t gc_gen_of(lispobj obj, int defaultval) {
   page_index_t p = find_page_index((void*)obj);
@@ -128,9 +128,7 @@ DEF_FINDER(find_used_line, line_index_t, line_bytemap[where], end);
  * and `end`. Updates `region` and returns true if we succeed, keeps
  * `region` untouched and returns false if we fail. */
 boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
-                           page_index_t page,
-                           line_index_t start, line_index_t end,
-                           generation_index_t gen) {
+                           line_index_t start, line_index_t end) {
   sword_t nlines = ALIGN_UP(nbytes, LINE_SIZE) / LINE_SIZE;
   line_index_t where = start;
   while (1) {
@@ -149,10 +147,6 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
        * system. */
       os_vm_size_t claimed = addr_diff(region->end_addr, region->start_addr);
       memset(region->start_addr, 0, claimed);
-      memset(line_bytemap + chunk_start, ENCODE_GEN(gen), chunk_end - chunk_start);
-      ATOMIC_INC(bytes_allocated, claimed);
-      ATOMIC_INC(generations[gen].bytes_allocated, claimed);
-      set_page_bytes_used(page, page_bytes_used(page) + claimed);
       return 1;
     }
     if (chunk_end == end) return 0;
@@ -162,20 +156,24 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
 
 /* Medium path for allocation, wherein we use another chunk that the
  * thread already claimed. */
-boolean try_allocate_small_after_region(sword_t nbytes, struct alloc_region *region,
-                                        generation_index_t gen) {
+boolean try_allocate_small_after_region(sword_t nbytes, struct alloc_region *region) {
   /* Can't do this if we have no page. */
   if (!region->start_addr) return 0;
-  page_index_t index = find_page_index(region->start_addr);
-  gc_assert(!page_free_p(index));
   /* We search to the end of this page. */
   line_index_t end = address_line(PTR_ALIGN_UP(region->end_addr, GENCGC_PAGE_BYTES));
-  return try_allocate_small(nbytes, region, index, address_line(region->end_addr), end, gen);
+  return try_allocate_small(nbytes, region, address_line(region->end_addr), end);
 }
 
 /* We try not to allocate small objects from free pages, to reduce
  * fragmentation. Something like "wilderness preservation". */
 boolean allow_free_pages[16] = {0};
+
+/* Eugh, shouldn't copy this but I need it inlined here, for
+ * vectorisation to work. */
+inline char *also_page_address(page_index_t page_num)
+{
+    return (void*)(DYNAMIC_SPACE_START + (page_num * GENCGC_PAGE_BYTES));
+}
 
 /* try_allocate_small_from_pages updates the start pointer to after the
  * claimed page. */
@@ -190,15 +188,19 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
         ((allow_free_pages[page_type & PAGE_TYPE_MASK] && page_free_p(where)) ||
          (page_table[where].type == page_type &&
           page_table[where].gen != PSEUDO_STATIC_GENERATION)) &&
-        try_allocate_small(nbytes, region, where,
+        try_allocate_small(nbytes, region,
                            address_line(page_address(where)),
-                           address_line(page_address(where + 1)),
-                           gen)) {
+                           address_line(page_address(where + 1)))) {
       page_table[where].type = page_type | OPEN_REGION_PAGE_FLAG;
       page_table[where].gen = 0;
       set_page_scan_start_offset(where, 0);
       *start = where + 1;
       // printf(" => %ld\n", where);
+      /* Update residency statistics */
+      page_bytes_t used = page_bytes_used(where), claimed = GENCGC_PAGE_BYTES - used;
+      bytes_allocated += claimed;
+      generations[gen].bytes_allocated += claimed;
+      set_page_bytes_used(where, GENCGC_PAGE_BYTES);
       return 1;
     }
   }
@@ -241,8 +243,8 @@ page_index_t try_allocate_large(sword_t nbytes,
       *start = chunk_start + pages_needed;
       memset(page_address(chunk_start), 0, pages_needed * GENCGC_PAGE_BYTES);
       // printf(" => %ld\n", chunk_start);
-      ATOMIC_INC(bytes_allocated, nbytes);
-      ATOMIC_INC(generations[gen].bytes_allocated, nbytes);
+      bytes_allocated += nbytes;
+      generations[gen].bytes_allocated += nbytes;
       return chunk_start;
     }
     if (chunk_end == end) return -1;
@@ -251,12 +253,28 @@ page_index_t try_allocate_large(sword_t nbytes,
   return -1;
 }
 
-void mr_update_closed_region(struct alloc_region *region) {
+#define for_lines_in_page(l, p) \
+  for (line_index_t l = address_line(also_page_address(p)); \
+       l < address_line(also_page_address(p + 1)); \
+       l++)
+/* Use AVX2 versions of code when we can, since blasting bytes faster
+ * is always nice */
+#define CPU_SPLIT __attribute__((target_clones("default,avx2")))
+
+void mr_update_closed_region(struct alloc_region *region, generation_index_t gen) {
   /* alloc_regions never span multiple pages. */
   page_index_t the_page = find_page_index(region->start_addr);
   if (!(page_table[the_page].type & OPEN_REGION_PAGE_FLAG))
     lose("Page %lu wasn't open", the_page);
-  //printf("closing %lu\n", the_page);
+  // fprintf(stderr, "closing %lu gen %d\n", the_page, gen);
+
+  /* Mark the lines as allocated. */
+  unsigned char *lines = line_bytemap;
+  for_lines_in_page (l, the_page) {
+    /* GC might have allocated in here and marked lines already, so
+     * remember to copy the mark bit. */
+    lines[l] = UNMARK_GEN(lines[l]) ? lines[l] : COPY_MARK(lines[l], ENCODE_GEN(gen));
+  }
   page_table[the_page].type &= ~(OPEN_REGION_PAGE_FLAG);
   gc_set_region_empty(region);
 }
@@ -405,7 +423,6 @@ static void trace_object(lispobj object) {
     struct cons *c = CONS(object);
     mark(c->car);
     lispobj next = c->cdr;
-#if 1
     /* Tail-recurse on the cdr, unless we're recording dirty cards. */
     if (!dirty_generation_source && is_lisp_pointer(next)) {
       /* Fix up embedded simple-fun objects. */
@@ -425,7 +442,6 @@ static void trace_object(lispobj object) {
         goto again;
       }
     }
-#endif
     mark(next);
   } else {
     lispobj *p = native_pointer(object);
@@ -605,21 +621,6 @@ static void reset_statistics() {
     }
   }
 }
-
-/* Eugh, shouldn't copy this but I need it inlined here, for
- * vectorisation to work. */
-inline char *also_page_address(page_index_t page_num)
-{
-    return (void*)(DYNAMIC_SPACE_START + (page_num * GENCGC_PAGE_BYTES));
-}
-
-#define for_lines_in_page(l, p) \
-  for (line_index_t l = address_line(also_page_address(p)); \
-       l < address_line(also_page_address(p + 1)); \
-       l++)
-/* Use AVX2 versions of code when we can, since blasting bytes faster
- * is always nice */
-#define CPU_SPLIT __attribute__((target_clones("default,avx2")))
 
 /* Pulled out these functions to clue auto-vectorisation. */
 CPU_SPLIT
@@ -931,11 +932,6 @@ void mr_collect_garbage(boolean raise) {
           bytes_allocated >> 20, traced,
           dirty_root_objects, root_objects_checked, dirty_cards,
           next_free_page, raise ? ", raised" : "");
-#endif
-#if 0
-  for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
-    fprintf(stderr, "%d: %12ld\n", g, generations[g].bytes_allocated);
-  fprintf(stderr, "   %12ld\n", bytes_allocated);
 #endif
   // count_line_values("Post GC");
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
