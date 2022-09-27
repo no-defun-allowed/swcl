@@ -23,14 +23,6 @@
 #include "genesis/hash-table.h"
 #include "genesis/closure.h"
 #include "gc-private.h"
-#ifdef LISP_FEATURE_X86_64
-#include <emmintrin.h>
-/* Some extra bytes at the end of every bitmap, so that we don't read
- * out of bounds when SIMD scanning. */
-#define BITMAP_PADDING 8
-#else
-#define BITMAP_PADDING 0
-#endif
 
 #define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
 
@@ -54,7 +46,7 @@ uword_t mark_bitmap_size;
 
 static void allocate_bitmap(uword_t **bitmap, uword_t size,
                             const char *description) {
-  *bitmap = calloc(size + BITMAP_PADDING, 1);
+  *bitmap = calloc(size, 1);
   if (!*bitmap)
     lose("Failed to allocate %s (of %lu bytes)", description, size);
 }
