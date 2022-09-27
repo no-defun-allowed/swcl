@@ -293,25 +293,26 @@
   ;; to be a register allocator with, so I don't try. We can still clobber
   ;; TEMP if we were given one, which minimizes the damage a bit.
   ;; Note that ALLOCATE can be called to allocate multiple objects at once,
-  ;; but this is (currently) only done with cons cells, and we don't need to
-  ;; use the allocation bitmap to work with derived pointers to cons pages.
+  ;; but this is (currently) only done with cons cells.
   #+mark-region-gc
-  (let ((another-temp (or temp (if (location= alloc-tn rax-tn) rbx-tn rax-tn))))
-    (inst push alloc-tn)
-    (unless (eq another-temp temp)
-      (inst push another-temp))
-    (inst mov another-temp
+  (let ((temp* (or temp (if (location= alloc-tn rax-tn) rbx-tn rax-tn))))
+    (when (null temp) (inst push temp*))
+    (inst mov temp*
           (thread-slot-ea thread-allocation-bitmap-base-slot
                           #+gs-seg thread-temp))
     (inst shr :qword alloc-tn n-lowtag-bits)
     ;; Mark all the cons cells, if the caller wants that.
     (dotimes (n cells)
-      (inst bts :qword (ea another-temp) alloc-tn)
+      (inst bts :qword (ea temp*) alloc-tn)
       (unless (= n (1- cells))
         (inst inc alloc-tn)))
-    (unless (eq another-temp temp)
-      (inst pop another-temp))
-    (inst pop alloc-tn))
+    ;; Undo the decrements, if there were any.
+    (when (> cells 1)
+      (inst sub alloc-tn (1- cells)))
+    ;; Undo the shift.
+    (inst shl :qword alloc-tn n-lowtag-bits)
+    (unless (zerop lowtag) (inst or :byte alloc-tn lowtag))
+    (when (null temp) (inst pop temp*)))
   t)
 
 ;;; Allocate an other-pointer object of fixed NWORDS with a single-word

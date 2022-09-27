@@ -26,7 +26,7 @@
 
 #define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
 
-#define DEBUG
+//#define DEBUG
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -926,15 +926,10 @@ void mr_collect_garbage(boolean raise) {
 }
 
 void zero_all_free_ranges() {
-#if 0
   for (page_index_t p = 0; p < page_table_pages; p++)
     if (!page_single_obj_p(p))
-      for (line_index_t l = address_line(page_address(p));
-           l < address_line(page_address(p + 1));
-           l++)
-        if (!line_bytemap[l])
-          memset(line_address(l), 0, LINE_SIZE);
-#endif
+      for_lines_in_page (l, p)
+        if (!line_bytemap[l]) memset(line_address(l), 0, LINE_SIZE);
 }
 
 void prepare_lines_for_final_gc() {
