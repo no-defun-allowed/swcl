@@ -115,10 +115,10 @@ generation_index_t gc_gen_of(lispobj obj, int defaultval) {
 /* Allocation of small objects is done by finding contiguous lines
  * that can fit the object to allocate. Small objects can span lines
  * but cannot pages, so we examine lines in each page separately. */
-#define DEF_FINDER(name, type, test, fail)         \
-  static type name(type start, type end) {         \
-    for (type where = start; where < end; where++) \
-      if (test) return where;                      \
+#define DEF_FINDER(name, type, test, fail)              \
+  static type name(type start, type end) {              \
+    for (type where = start; where < end; where++)      \
+      if (test) return where;                           \
     return fail; }
 
 DEF_FINDER(find_free_line, line_index_t, !line_bytemap[where], -1);
@@ -167,13 +167,6 @@ boolean try_allocate_small_after_region(sword_t nbytes, struct alloc_region *reg
 /* We try not to allocate small objects from free pages, to reduce
  * fragmentation. Something like "wilderness preservation". */
 boolean allow_free_pages[16] = {0};
-
-/* Eugh, shouldn't copy this but I need it inlined here, for
- * vectorisation to work. */
-inline char *also_page_address(page_index_t page_num)
-{
-    return (void*)(DYNAMIC_SPACE_START + (page_num * GENCGC_PAGE_BYTES));
-}
 
 /* try_allocate_small_from_pages updates the start pointer to after the
  * claimed page. */
@@ -253,6 +246,11 @@ page_index_t try_allocate_large(sword_t nbytes,
   return -1;
 }
 
+/* Eugh, shouldn't copy this but I need it inlined here, for
+ * vectorisation to work. */
+inline char *also_page_address(page_index_t page_num) {
+    return (void*)(DYNAMIC_SPACE_START + (page_num * GENCGC_PAGE_BYTES));
+}
 #define for_lines_in_page(l, p) \
   for (line_index_t l = address_line(also_page_address(p)); \
        l < address_line(also_page_address(p + 1)); \
