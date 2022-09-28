@@ -5099,8 +5099,10 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
     }
 
 #ifdef LISP_FEATURE_MARK_REGION_GC
-    if (try_allocate_small_after_region(nbytes, region))
+    if (try_allocate_small_after_region(nbytes, region)) {
+      memset(region->start_addr, 0, addr_diff(region->end_addr, region->start_addr));
       return region->start_addr;
+    }
 #endif
 
     /* We don't want to count nbytes against auto_gc_trigger unless we
@@ -5159,6 +5161,7 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
 #endif
 
 #ifdef LISP_FEATURE_MARK_REGION_GC
+    ensure_region_closed(region, page_type);
     int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
     gc_assert(ret);
     boolean largep = (nbytes >= (GENCGC_PAGE_BYTES / 4 * 3)) && page_type != PAGE_TYPE_CONS;
@@ -5167,19 +5170,22 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
         page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,
                                                    &alloc_start, page_table_pages);
         if (new_page == -1) gc_heap_exhausted_error_or_lose(0, nbytes);
+        ret = mutex_release(&free_pages_lock);
+        gc_assert(ret);
         new_obj = page_address(new_page);
+        memset(new_obj, 0, nbytes);
     } else {
-        ensure_region_closed(region, page_type);
         boolean success =
             try_allocate_small_from_pages(nbytes, region, page_type,
                                           gc_alloc_generation,
                                           &alloc_start, page_table_pages);
         if (!success) gc_heap_exhausted_error_or_lose(0, nbytes);
+        ret = mutex_release(&free_pages_lock);
+        gc_assert(ret);
         new_obj = region->start_addr;
+        memset(new_obj, 0, addr_diff(region->end_addr, new_obj));
     }
     set_alloc_start_page(page_type, alloc_start);
-    ret = mutex_release(&free_pages_lock);
-    gc_assert(ret);
 #else
     if (flags & 1) return gc_alloc_large(nbytes, page_type);
 

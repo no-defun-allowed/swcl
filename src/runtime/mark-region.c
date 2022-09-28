@@ -118,7 +118,8 @@ DEF_FINDER(find_used_line, line_index_t, line_bytemap[where], end);
 
 /* Try to find space to fit a new object in the lines between `start`
  * and `end`. Updates `region` and returns true if we succeed, keeps
- * `region` untouched and returns false if we fail. */
+ * `region` untouched and returns false if we fail. The caller must
+ * zero memory itself, if it wants zeroed memory. */
 boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
                            line_index_t start, line_index_t end) {
   sword_t nlines = ALIGN_UP(nbytes, LINE_SIZE) / LINE_SIZE;
@@ -131,14 +132,7 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
       region->start_addr = line_address(chunk_start);
       region->free_pointer = line_address(chunk_start) + nbytes;
       region->end_addr = line_address(chunk_end);
-      /* TODO: We currently always zero memory, even when it's not
-       * really necessary per the page table. We'd need to decide what
-       * "page needs zeroing" means when we are allocating parts of
-       * pages. Always zeroing is perhaps not that bad, as we have to
-       * zero after reusing memory, which is the stable state of the
-       * system. */
       os_vm_size_t claimed = addr_diff(region->end_addr, region->start_addr);
-      memset(region->start_addr, 0, claimed);
       return 1;
     }
     if (chunk_end == end) return 0;
@@ -226,7 +220,6 @@ page_index_t try_allocate_large(sword_t nbytes,
                                    GENCGC_PAGE_BYTES * (p - chunk_start));
       }
       *start = chunk_start + pages_needed;
-      memset(page_address(chunk_start), 0, pages_needed * GENCGC_PAGE_BYTES);
       // printf(" => %ld\n", chunk_start);
       bytes_allocated += nbytes;
       generations[gen].bytes_allocated += nbytes;
