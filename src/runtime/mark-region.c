@@ -256,7 +256,8 @@ void mr_update_closed_region(struct alloc_region *region, generation_index_t gen
   for_lines_in_page (l, the_page) {
     /* GC might have allocated in here and marked lines already, so
      * remember to copy the mark bit. */
-    lines[l] = UNMARK_GEN(lines[l]) ? lines[l] : COPY_MARK(lines[l], ENCODE_GEN(gen));
+    unsigned char copied = COPY_MARK(lines[l], ENCODE_GEN(gen));
+    lines[l] = UNMARK_GEN(lines[l]) ? lines[l] : copied;
   }
   page_table[the_page].type &= ~(OPEN_REGION_PAGE_FLAG);
   gc_set_region_empty(region);
