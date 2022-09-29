@@ -284,6 +284,8 @@ static boolean set_mark_bit(lispobj object) {
   uword_t index = (uword_t)((object - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS);
   uword_t bit_index = index % N_WORD_BITS, word_index = index / N_WORD_BITS;
   uword_t bit = ((uword_t)(1) << bit_index);
+  /* Avoid doing an atomic op if we're obviously not going to win it. */
+  if (mark_bitmap[word_index] & bit) return 0;
   /* Return if we claimed successfully i.e. the bit was 0 before. */
   return !ANY(atomic_fetch_or(mark_bitmap + word_index, bit) & bit);
 }
