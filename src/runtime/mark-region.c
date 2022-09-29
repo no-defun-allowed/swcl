@@ -17,6 +17,7 @@
 #include "globals.h"
 #include "lispobj.h"
 #include "queue.h"
+#include "incremental-compact.h"
 
 #include "genesis/cons.h"
 #include "genesis/gc-tables.h"
@@ -132,7 +133,6 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
       region->start_addr = line_address(chunk_start);
       region->free_pointer = line_address(chunk_start) + nbytes;
       region->end_addr = line_address(chunk_end);
-      os_vm_size_t claimed = addr_diff(region->end_addr, region->start_addr);
       return 1;
     }
     if (chunk_end == end) return 0;
@@ -889,11 +889,12 @@ static unsigned int collection = 0;
 void mr_pre_gc(generation_index_t generation) {
   // kill(getpid(), SIGXCPU);
   // count_line_values("Pre GC");
-#if 0
+#if 1
   fprintf(stderr, "\n[GC #%4d gen %d %5luM / %5luM ", ++collection, generation,
           generations[generation].bytes_allocated >> 20,
           bytes_allocated >> 20);
 #endif
+  consider_compaction(generation);
   generation_to_collect = generation;
   reset_statistics();
 }
@@ -905,9 +906,10 @@ void mr_collect_garbage(boolean raise) {
   trace_everything();
   sweep();
   free_mark_list();
+  run_compaction();
   if (raise)
     raise_survivors(line_bytemap, line_count, generation_to_collect);
-#if 0
+#if 1
   fprintf(stderr,
           "-> %5luM / %5luM, %8lu traced, %8lu / %8lu scavenged on %8lu cards, page hwm = %8ld%s]\n",
           generations[generation_to_collect].bytes_allocated >> 20,
