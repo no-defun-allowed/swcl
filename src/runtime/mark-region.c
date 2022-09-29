@@ -1,7 +1,9 @@
-#include <string.h>
+#define _GNU_SOURCE
+#include <pthread.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <stdatomic.h>
+#include <string.h>
 
 #include "align.h"
 #include "os.h"
@@ -19,6 +21,7 @@
 #include "lispobj.h"
 #include "queue.h"
 #include "incremental-compact.h"
+#include "tiny-lock.h"
 
 #include "genesis/cons.h"
 #include "genesis/gc-tables.h"
@@ -297,8 +300,13 @@ static boolean pointer_survived_gc_yet(lispobj object) {
   return !in_dynamic_space(object) || object_marked_p(object) || gc_gen_of(object, 0) > generation_to_collect;
 }
 
-static struct Qblock *grey_list;
-static struct Qblock *recycle_list;
+/* The number of blocks on the grey list and being processed.
+ * Tracing terminates when we end up with 0 blocks in flight again. */
+static sword_t blocks_in_flight = 0;
+static struct lock grey_list_lock = { 0 };
+static struct Qblock *grey_list = NULL;
+static struct lock recycle_list_lock = { 0 };
+static struct Qblock *recycle_list = NULL;
 
 /* The "output packet" from "A Parallel, Incremental and Concurrent GC
  * for Servers". The "input packet" is block in trace_everything. */
@@ -306,19 +314,28 @@ static _Thread_local struct Qblock *output_block;
 
 static struct Qblock *grab_qblock() {
   struct Qblock *block;
+  acquire_lock(&recycle_list_lock);
   if (recycle_list) {
     block = recycle_list;
     recycle_list = recycle_list->next;
+    release_lock(&recycle_list_lock);
   } else {
+    release_lock(&recycle_list_lock);
     block = (struct Qblock*)os_allocate(QBLOCK_BYTES);
     if (!block) lose("Failed to allocate new mark-queue block");
   }
   block->count = 0;
+  atomic_fetch_add(&blocks_in_flight, 1);
   return block;
 }
 static void recycle_qblock(struct Qblock *block) {
+  if (block->count == -1) lose("%p is already dead", block);
+  block->count = -1;
+  acquire_lock(&recycle_list_lock);
   block->next = recycle_list;
   recycle_list = block;
+  acquire_lock(&recycle_list_lock);
+  atomic_fetch_add(&blocks_in_flight, -1);
 }
 static void free_mark_list() {
   gc_assert(grey_list == NULL);
@@ -384,12 +401,14 @@ static void mark(lispobj object) {
 
     /* Enqueue onto mark queue */
     if (!output_block || output_block->count == QBLOCK_CAPACITY) {
-      struct Qblock *n = grab_qblock();
+      struct Qblock *next = grab_qblock();
       if (output_block) {
+        acquire_lock(&grey_list_lock);
         output_block->next = grey_list;
         grey_list = output_block;
+        acquire_lock(&grey_list_lock);
       }
-      output_block = n;
+      output_block = next;
     }
     output_block->elements[output_block->count++] = object;
   }
@@ -440,11 +459,15 @@ static boolean work_to_do(struct Qblock **where) {
     *where = output_block;
     output_block = NULL;
     return 1;
-  } else if (grey_list) {
-    *where = grey_list;
-    grey_list = grey_list->next;
-    return 1;
   } else {
+    acquire_lock(&grey_list_lock);
+    if (grey_list) {
+      *where = grey_list;
+      grey_list = grey_list->next;
+      release_lock(&grey_list_lock);
+      return 1;
+    }
+    release_lock(&grey_list_lock);
     return 0;
   }
 }
@@ -454,7 +477,12 @@ uword_t traced;
 static boolean trace_step() {
   struct Qblock *block;
   boolean did_anything = 0;
-  while (work_to_do(&block)) {
+  while (atomic_load(&blocks_in_flight)) {
+    /* Spinlock */
+    if (!work_to_do(&block)) {
+      pthread_yield();
+      continue;
+    }
     did_anything = 1;
     int count = block->count;
     for (int n = 0; n < count; n++) {

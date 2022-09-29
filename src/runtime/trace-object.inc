@@ -10,8 +10,15 @@
 #error "Need TRACE_NAME to be defined"
 #endif
 
-#define USING_LAYOUT TRACE_NAME ## _using_layout
-#define TRACE_PAIR TRACE_NAME ## _pair
+#ifndef LOCK
+#define LOCK(x) 0
+#define UNLOCK(x) 0
+#endif
+
+#define cat2(x, y) x ## y
+#define cat(x, y) cat2(x, y)
+#define USING_LAYOUT cat(TRACE_NAME, _using_layout)
+#define TRACE_PAIR cat(TRACE_NAME, _pair)
 
 static void TRACE_PAIR(lispobj* where)
 {
