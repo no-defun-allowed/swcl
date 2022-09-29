@@ -11,8 +11,8 @@
 #endif
 
 #ifndef LOCK
-#define LOCK() 0
-#define UNLOCK() 0
+#define LOCK() (void)(0)
+#define UNLOCK() (void)(0)
 #endif
 
 #define cat2(x, y) x ## y
