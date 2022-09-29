@@ -14,6 +14,7 @@ extern void mrgc_init();
 
 typedef intptr_t line_index_t;
 
+extern void mrgc_init();
 extern void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes);
 extern sword_t bitmap_sizes(core_entry_elt_t n_ptes);
 

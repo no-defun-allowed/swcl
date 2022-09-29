@@ -32,6 +32,7 @@
 #define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
 
 //#define DEBUG
+#define LOG_COLLECTIONS
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -305,24 +306,23 @@ static boolean pointer_survived_gc_yet(lispobj object) {
 /* The number of blocks on the grey list and being processed.
  * Tracing terminates when we end up with 0 blocks in flight again. */
 static sword_t blocks_in_flight = 0;
-static struct lock grey_list_lock = { 0 };
+static lock_t grey_list_lock = LOCK_INITIALIZER;
 static struct Qblock *grey_list = NULL;
-static struct lock recycle_list_lock = { 0 };
-static struct Qblock *recycle_list = NULL;
 
+/* Thanks to Larry Masinter for suggesting that I use per-thread
+ * free lists, rather than hurting my head on lock-free free lists.
+ * (Say that five times fast.)*/
+static _Thread_local struct Qblock *recycle_list = NULL;
 /* The "output packet" from "A Parallel, Incremental and Concurrent GC
  * for Servers". The "input packet" is block in trace_everything. */
 static _Thread_local struct Qblock *output_block;
 
 static struct Qblock *grab_qblock() {
   struct Qblock *block;
-  acquire_lock(&recycle_list_lock);
   if (recycle_list) {
     block = recycle_list;
     recycle_list = recycle_list->next;
-    release_lock(&recycle_list_lock);
   } else {
-    release_lock(&recycle_list_lock);
     block = (struct Qblock*)os_allocate(QBLOCK_BYTES);
     if (!block) lose("Failed to allocate new mark-queue block");
   }
@@ -333,14 +333,11 @@ static struct Qblock *grab_qblock() {
 static void recycle_qblock(struct Qblock *block) {
   if (block->count == -1) lose("%p is already dead", block);
   block->count = -1;
-  acquire_lock(&recycle_list_lock);
   block->next = recycle_list;
   recycle_list = block;
-  release_lock(&recycle_list_lock);
   atomic_fetch_add(&blocks_in_flight, -1);
 }
 static void free_mark_list() {
-  gc_assert(grey_list == NULL);
   while (recycle_list) {
     struct Qblock *old = recycle_list;
     recycle_list = recycle_list->next;
@@ -419,7 +416,7 @@ static void mark(lispobj object) {
 /* Tracing configuration */
 
 /* A lock protecting structures to do with weak references. */
-static struct lock weak_lists_lock = { 0 };
+static lock_t weak_lists_lock = LOCK_INITIALIZER;
 static boolean interesting_pointer_p(lispobj object) {
   return in_dynamic_space(object);
 }
@@ -485,6 +482,7 @@ static boolean work_to_do(struct Qblock **where) {
 #define PREFETCH_DISTANCE 32
 uword_t traced;
 static boolean trace_step() {
+  uword_t local_traced = 0;
   struct Qblock *block;
   boolean did_anything = 0;
   while (atomic_load(&blocks_in_flight)) {
@@ -496,11 +494,11 @@ static boolean trace_step() {
     did_anything = 1;
     int count = block->count;
     for (int n = 0; n < count; n++) {
-      traced++;
       lispobj obj = block->elements[n];
       if (n + PREFETCH_DISTANCE < count)
         __builtin_prefetch(native_pointer(block->elements[n + PREFETCH_DISTANCE]));
       if (!object_marked_p(obj) && set_mark_bit(obj)) {
+        traced++;
         if (listp(obj))
           mark_cons_line(CONS(obj));
         else
@@ -510,10 +508,12 @@ static boolean trace_step() {
     }
     recycle_qblock(block);
   }
+  free_mark_list();
+  atomic_fetch_add(&traced, local_traced);
   return did_anything;
 }
 
-#define GC_THREADS 4
+#define GC_THREADS 0
 static void *parallel_trace_worker(void *did_work) {
   if (trace_step()) *(boolean*)did_work = 1;
   return NULL;
@@ -946,7 +946,7 @@ static unsigned int collection = 0;
 void mr_pre_gc(generation_index_t generation) {
   // kill(getpid(), SIGXCPU);
   // count_line_values("Pre GC");
-#if 0
+#ifdef LOG_COLLECTIONS
   fprintf(stderr, "\n[GC #%4d gen %d %5luM / %5luM ", ++collection, generation,
           generations[generation].bytes_allocated >> 20,
           bytes_allocated >> 20);
@@ -962,11 +962,10 @@ void mr_collect_garbage(boolean raise) {
   trace_static_roots();
   trace_everything();
   sweep();
-  free_mark_list();
   run_compaction();
   if (raise)
     raise_survivors(line_bytemap, line_count, generation_to_collect);
-#if 0
+#ifdef LOG_COLLECTIONS
   fprintf(stderr,
           "-> %5luM / %5luM, %8lu traced, %8lu / %8lu scavenged on %8lu cards, page hwm = %8ld%s]\n",
           generations[generation_to_collect].bytes_allocated >> 20,
