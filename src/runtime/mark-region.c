@@ -435,32 +435,27 @@ static void trace_object(lispobj object) {
   }
 }
 
-static boolean work_to_do() {
-  return ANY(output_block || grey_list);
+static boolean work_to_do(struct Qblock **where) {
+  if (output_block) {
+    *where = output_block;
+    output_block = NULL;
+    return 1;
+  } else if (grey_list) {
+    *where = grey_list;
+    grey_list = grey_list->next;
+    return 1;
+  } else {
+    return 0;
+  }
 }
 
 #define PREFETCH_DISTANCE 32
-static struct Qblock *dequeue_block() {
-  struct Qblock *res;
-  if (output_block) {
-    /* Reuse input block */
-    res = output_block;
-    output_block = NULL;
-  } else if (grey_list) {
-    /* Take from grey block */
-    res = grey_list;
-    grey_list = grey_list->next;
-  } else {
-    lose("Called dequeue_block() with no work to do");
-  }
-  return res;
-}
-
 uword_t traced;
-static void __attribute__((noinline)) trace_everything() {
-  while (work_to_do() ||
-         (test_weak_triggers(pointer_survived_gc_yet, mark) && work_to_do())) {
-    struct Qblock *block = dequeue_block();
+static boolean trace_step() {
+  struct Qblock *block;
+  boolean did_anything = 0;
+  while (work_to_do(&block)) {
+    did_anything = 1;
     int count = block->count;
     for (int n = 0; n < count; n++) {
       traced++;
@@ -477,6 +472,11 @@ static void __attribute__((noinline)) trace_everything() {
     }
     recycle_qblock(block);
   }
+  return did_anything;
+}
+
+static void __attribute__((noinline)) trace_everything() {
+  while (trace_step()) test_weak_triggers(pointer_survived_gc_yet, mark);
 }
 
 /* Conservative pointer scanning */
