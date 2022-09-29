@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <pthread.h>
 #include <unistd.h>
+#include <semaphore.h>
 #include <stdio.h>
 #include <stdatomic.h>
 #include <string.h>
@@ -32,7 +33,7 @@
 #define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
 
 //#define DEBUG
-#define LOG_COLLECTIONS
+//#define LOG_COLLECTIONS
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -57,7 +58,7 @@ static void allocate_bitmap(uword_t **bitmap, uword_t size,
     lose("Failed to allocate %s (of %lu bytes)", description, size);
 }
 
-void mrgc_init() {
+static void allocate_bitmaps() {
   int bytes_per_heap_byte = 8 /* bits/byte */ << N_LOWTAG_BITS;
   mark_bitmap_size = dynamic_space_size / bytes_per_heap_byte;
   allocate_bitmap(&allocation_bitmap, mark_bitmap_size, "allocation bitmap");
@@ -513,22 +514,44 @@ static boolean trace_step() {
   return did_anything;
 }
 
-#define GC_THREADS 0
-static void *parallel_trace_worker(void *did_work) {
-  if (trace_step()) *(boolean*)did_work = 1;
+#define GC_THREADS 3
+static pthread_t threads[GC_THREADS];
+static boolean threads_did_any_work;
+static sem_t start_semaphore;
+static sem_t join_semaphore;
+
+static void *parallel_trace_worker(void *nothing) {
+  (void)nothing;
+  while (1) {
+    sem_wait(&start_semaphore);
+    if (trace_step()) threads_did_any_work = 1;
+    sem_post(&join_semaphore);
+  }
   return NULL;
 }
+
+static void create_helper_threads() {
+  sem_init(&start_semaphore, 0, 0);
+  sem_init(&join_semaphore, 0, 0);
+  
+  for (int i = 0; i < GC_THREADS; i++)
+    if (pthread_create(threads + i, NULL, parallel_trace_worker, NULL))
+      lose("Failed to create GC thread #%d", i);
+}
+
+static void wake_gc_threads() {
+  for (int i = 0; i < GC_THREADS; i++) sem_post(&start_semaphore);
+}
+static void join_gc_threads() {
+  for (int i = 0; i < GC_THREADS; i++) sem_wait(&join_semaphore);
+}
+
 static boolean parallel_trace_step() {
-  pthread_t threads[GC_THREADS];
-  boolean did_work = 0;
-  for (int i = 0; i < GC_THREADS; i++)
-    if (pthread_create(&threads[i], NULL, parallel_trace_worker, (void*)&did_work))
-      lose("Failed to create a worker thread");
-  if (trace_step()) did_work = 1;
-  for (int i = 0; i < GC_THREADS; i++)
-    if (pthread_join(threads[i], NULL))
-      lose("Failed to join a worker thread");
-  return did_work;
+  threads_did_any_work = 0;
+  wake_gc_threads();
+  if (trace_step()) threads_did_any_work = 1;
+  join_gc_threads();
+  return threads_did_any_work;
 }
 
 static void __attribute__((noinline)) trace_everything() {
@@ -942,6 +965,11 @@ static void raise_survivors(unsigned char *bytemap, line_index_t count, generati
 }
 
 static unsigned int collection = 0;
+
+void mrgc_init() {
+  allocate_bitmaps();
+  create_helper_threads();
+}
 
 void mr_pre_gc(generation_index_t generation) {
   // kill(getpid(), SIGXCPU);
