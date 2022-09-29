@@ -50,7 +50,7 @@ static void pick_targets() {
       /*         p, page_bytes_used(p)); */
       bytes_remaining -= page_bytes_used(p);
     }
-    if (p == 1) break;
+    if (p == 0) break;
     p--;
   }
 }
