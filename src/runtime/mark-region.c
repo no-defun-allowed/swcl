@@ -334,7 +334,7 @@ static void recycle_qblock(struct Qblock *block) {
   acquire_lock(&recycle_list_lock);
   block->next = recycle_list;
   recycle_list = block;
-  acquire_lock(&recycle_list_lock);
+  release_lock(&recycle_list_lock);
   atomic_fetch_add(&blocks_in_flight, -1);
 }
 static void free_mark_list() {
@@ -406,7 +406,7 @@ static void mark(lispobj object) {
         acquire_lock(&grey_list_lock);
         output_block->next = grey_list;
         grey_list = output_block;
-        acquire_lock(&grey_list_lock);
+        release_lock(&grey_list_lock);
       }
       output_block = next;
     }
@@ -414,10 +414,18 @@ static void mark(lispobj object) {
   }
 }
 
+/* Tracing configuration */
+
+/* A lock protecting structures to do with weak references. */
+static struct lock weak_lists_lock = { 0 };
 static boolean interesting_pointer_p(lispobj object) {
   return in_dynamic_space(object);
 }
+static void lock_weak() { acquire_lock(&weak_lists_lock); }
+static void unlock_weak() { release_lock(&weak_lists_lock); }
 
+#define LOCK lock_weak
+#define UNLOCK unlock_weak
 #define ACTION mark
 #define TRACE_NAME trace_other_object
 #define HT_ENTRY_LIVENESS_FUN_ARRAY_NAME mr_alivep_funs
@@ -503,8 +511,26 @@ static boolean trace_step() {
   return did_anything;
 }
 
+#define GC_THREADS 4
+static void *parallel_trace_worker(void *did_work) {
+  if (trace_step()) *(boolean*)did_work = 1;
+  return NULL;
+}
+static boolean parallel_trace_step() {
+  pthread_t threads[GC_THREADS];
+  boolean did_work = 0;
+  for (int i = 0; i < GC_THREADS; i++)
+    if (pthread_create(&threads[i], NULL, parallel_trace_worker, (void*)&did_work))
+      lose("Failed to create a worker thread");
+  if (trace_step()) did_work = 1;
+  for (int i = 0; i < GC_THREADS; i++)
+    if (pthread_join(threads[i], NULL))
+      lose("Failed to join a worker thread");
+  return did_work;
+}
+
 static void __attribute__((noinline)) trace_everything() {
-  while (trace_step()) test_weak_triggers(pointer_survived_gc_yet, mark);
+  while (parallel_trace_step()) test_weak_triggers(pointer_survived_gc_yet, mark);
 }
 
 /* Conservative pointer scanning */

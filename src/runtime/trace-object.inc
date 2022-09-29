@@ -11,8 +11,8 @@
 #endif
 
 #ifndef LOCK
-#define LOCK(x) 0
-#define UNLOCK(x) 0
+#define LOCK() 0
+#define UNLOCK() 0
 #endif
 
 #define cat2(x, y) x ## y
@@ -73,7 +73,9 @@ static void TRACE_NAME(lispobj* where)
         // However, weakness remains as a special case.
         if (vector_flagp(header, VectorWeak)) {
             if (!vector_flagp(header, VectorHashing)) {
+                LOCK();
                 add_to_weak_vector_list(where, header);
+                UNLOCK();
                 return;
             }
             // Ok, we're looking at a weak hash-table.
@@ -89,6 +91,7 @@ static void TRACE_NAME(lispobj* where)
             gc_assert(hash_table->next_weak_hash_table == NIL);
             int weakness = hashtable_weakness(hash_table);
             boolean defer = 1;
+            LOCK();
             if (weakness != WEAKNESS_KEY_AND_VALUE)
                 defer = scan_weak_hashtable(hash_table, HT_ENTRY_LIVENESS_FUN_ARRAY_NAME[weakness],
                                             TRACE_PAIR);
@@ -96,6 +99,7 @@ static void TRACE_NAME(lispobj* where)
                 hash_table->next_weak_hash_table = (lispobj)weak_hash_tables;
                 weak_hash_tables = hash_table;
             }
+            UNLOCK();
             return;
         }
         break;
@@ -140,8 +144,11 @@ static void TRACE_NAME(lispobj* where)
         break;
     case WEAK_POINTER_WIDETAG:
         weakptr = (struct weak_pointer*)where;
-        if (is_lisp_pointer(weakptr->value) && interesting_pointer_p(weakptr->value))
+        if (is_lisp_pointer(weakptr->value) && interesting_pointer_p(weakptr->value)) {
+            LOCK();
             add_to_weak_pointer_chain(weakptr);
+            UNLOCK();
+        }
         return;
     default:
         if (leaf_obj_widetag_p(widetag)) return;
