@@ -889,7 +889,7 @@ static unsigned int collection = 0;
 void mr_pre_gc(generation_index_t generation) {
   // kill(getpid(), SIGXCPU);
   // count_line_values("Pre GC");
-#if 1
+#if 0
   fprintf(stderr, "\n[GC #%4d gen %d %5luM / %5luM ", ++collection, generation,
           generations[generation].bytes_allocated >> 20,
           bytes_allocated >> 20);
@@ -909,7 +909,7 @@ void mr_collect_garbage(boolean raise) {
   run_compaction();
   if (raise)
     raise_survivors(line_bytemap, line_count, generation_to_collect);
-#if 1
+#if 0
   fprintf(stderr,
           "-> %5luM / %5luM, %8lu traced, %8lu / %8lu scavenged on %8lu cards, page hwm = %8ld%s]\n",
           generations[generation_to_collect].bytes_allocated >> 20,

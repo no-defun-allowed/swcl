@@ -7,6 +7,7 @@
 #include "gc-internal.h"
 #include "gencgc-internal.h"
 #include "gencgc-private.h"
+#include "queue.h"
 
 /* Maximum ratio between pages used and pages "needed" to compact. */
 float page_overhead_threshold = 1.3;
@@ -18,8 +19,11 @@ uword_t byte_target = 2000000;
 generation_index_t minimum_compact_gen = 1;
 
 boolean compacting = 1;
+/* A queue of sources and pointers to interesting slots. */
+static struct Qblock *remset = NULL;
+uword_t remset_pages = 0;
 
-boolean should_compact() {
+static boolean should_compact() {
   /* If there are many more small-object pages than there could 
    * be, start compacting. */
   uword_t pages = 0, bytes = 0;
@@ -34,7 +38,7 @@ boolean should_compact() {
   return ratio > page_overhead_threshold;
 }
 
-void pick_targets() {
+static void pick_targets() {
   uword_t bytes_remaining = byte_target;
   page_index_t p = page_table_pages - 1;
   while (1) {
@@ -61,3 +65,7 @@ void consider_compaction(generation_index_t gen) {
 }
 
 void run_compaction() {}
+
+void log_for_compactor(lispobj source, lispobj *where) {
+  (void)source; (void)where;
+}
