@@ -1,6 +1,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <stdatomic.h>
 
 #include "align.h"
 #include "os.h"
@@ -276,10 +277,12 @@ static boolean object_marked_p(lispobj object) {
   uword_t bit_index = index % N_WORD_BITS, word_index = index / N_WORD_BITS;
   return ANY(mark_bitmap[word_index] & ((uword_t)(1) << bit_index));
 }
-static void set_mark_bit(lispobj object) {
+static boolean set_mark_bit(lispobj object) {
   uword_t index = (uword_t)((object - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS);
   uword_t bit_index = index % N_WORD_BITS, word_index = index / N_WORD_BITS;
-  mark_bitmap[word_index] |= ((uword_t)(1) << bit_index);
+  uword_t bit = ((uword_t)(1) << bit_index);
+  /* Return if we claimed successfully i.e. the bit was 0 before. */
+  return !ANY(atomic_fetch_or(mark_bitmap + word_index, bit) & bit);
 }
 
 static uword_t mark_bitmap_word_index(void *where) {
@@ -299,7 +302,7 @@ static struct Qblock *recycle_list;
 
 /* The "output packet" from "A Parallel, Incremental and Concurrent GC
  * for Servers". The "input packet" is block in trace_everything. */
-static struct Qblock *output_block;
+static _Thread_local struct Qblock *output_block;
 
 static struct Qblock *grab_qblock() {
   struct Qblock *block;
@@ -416,8 +419,7 @@ static void trace_object(lispobj object) {
         next = make_lispobj(base, OTHER_POINTER_LOWTAG);
         np = base;
       }
-      if (!pointer_survived_gc_yet(next)) {
-        set_mark_bit(next);
+      if (!pointer_survived_gc_yet(next) && set_mark_bit(next)) {
         if (listp(next))
           mark_cons_line(CONS(next));
         else
@@ -465,8 +467,7 @@ static void __attribute__((noinline)) trace_everything() {
       lispobj obj = block->elements[n];
       if (n + PREFETCH_DISTANCE < count)
         __builtin_prefetch(native_pointer(block->elements[n + PREFETCH_DISTANCE]));
-      if (!object_marked_p(obj)) {
-        set_mark_bit(obj);
+      if (!object_marked_p(obj) && set_mark_bit(obj)) {
         if (listp(obj))
           mark_cons_line(CONS(obj));
         else
