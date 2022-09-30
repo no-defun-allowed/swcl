@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdatomic.h>
 #include <string.h>
+#include <sys/time.h>
 
 #include "align.h"
 #include "os.h"
@@ -481,9 +482,15 @@ static boolean work_to_do(struct Qblock **where) {
 }
 
 #define PREFETCH_DISTANCE 32
-uword_t traced;
+static uword_t traced;
+static uword_t par_time_taken = 0, time_taken = 0;
+static uword_t get_time() {
+  struct timeval t;
+  gettimeofday(&t, NULL);
+  return t.tv_sec * 1000000 + t.tv_usec;
+}
 static boolean trace_step() {
-  uword_t local_traced = 0;
+  uword_t local_traced = 0, local_time_taken = 0;
   struct Qblock *block;
   boolean did_anything = 0;
   while (atomic_load(&blocks_in_flight)) {
@@ -492,14 +499,15 @@ static boolean trace_step() {
       pthread_yield();
       continue;
     }
+    uword_t start = get_time();
     did_anything = 1;
     int count = block->count;
     for (int n = 0; n < count; n++) {
       lispobj obj = block->elements[n];
       if (n + PREFETCH_DISTANCE < count)
         __builtin_prefetch(native_pointer(block->elements[n + PREFETCH_DISTANCE]));
-      if (!object_marked_p(obj) && set_mark_bit(obj)) {
-        traced++;
+      if (set_mark_bit(obj)) {
+        local_traced++;
         if (listp(obj))
           mark_cons_line(CONS(obj));
         else
@@ -508,9 +516,11 @@ static boolean trace_step() {
       }
     }
     recycle_qblock(block);
+    local_time_taken += get_time() - start;
   }
   free_mark_list();
   atomic_fetch_add(&traced, local_traced);
+  atomic_fetch_add(&par_time_taken, local_time_taken);
   return did_anything;
 }
 
@@ -537,6 +547,8 @@ static void create_helper_threads() {
   for (int i = 0; i < GC_THREADS; i++)
     if (pthread_create(threads + i, NULL, parallel_trace_worker, NULL))
       lose("Failed to create GC thread #%d", i);
+    else
+      pthread_setname_np(threads[i], "Parallel GC");
 }
 
 static void wake_gc_threads() {
@@ -555,10 +567,14 @@ static boolean parallel_trace_step() {
 }
 
 static void __attribute__((noinline)) trace_everything() {
+  uword_t real_start = get_time();
   while (parallel_trace_step()) test_weak_triggers(pointer_survived_gc_yet, mark);
+  time_taken += get_time() - real_start;
+  //fprintf(stderr, "Parallel %ld real %ld\n", par_time_taken, time_taken);
 }
 
 /* Conservative pointer scanning */
+
 static lispobj *last_address_in(uword_t bitword, uword_t word_index) {
   /* TODO: Make this portable? MSVC uses _BitScanReverse64 and
    * we should probably have a portable fallback too. */
