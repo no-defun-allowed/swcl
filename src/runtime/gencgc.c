@@ -217,7 +217,9 @@ void reset_page_flags(page_index_t page) {
     //    page_table[page].gen = 0;
     // Free pages are dirty (MARKED) because MARKED is equivalent
     // to not-write-protected, which is what you want for allocation.
+#ifndef LISP_FEATURE_MARK_REGION_GC
     assign_page_card_marks(page, CARD_MARKED);
+#endif
 }
 
 /// External function for calling from Lisp.

@@ -49,11 +49,22 @@
  * phase, rather than copying and marking in one pass, to make parallel
  * compacting easier, and to enable concurrent marking. */
 
-/* Initialisation */
-uword_t *allocation_bitmap, *mark_bitmap;
-unsigned char *line_bytemap;             /* 1 if line used, 0 if not used */
-line_index_t line_count;
-uword_t mark_bitmap_size;
+/* Metering */
+static struct {
+  uword_t scavenge; uword_t trace;
+  uword_t sweep; uword_t sweep_lines; uword_t sweep_pages;
+  uword_t compact; uword_t raise; }
+  meters = { 0 };
+#define METER(name, action) \
+  { uword_t before = get_time(); \
+  action; \
+  meters.name += get_time() - before; }
+
+static uword_t get_time() {
+  struct timeval t;
+  gettimeofday(&t, NULL);
+  return t.tv_sec * 1000000 + t.tv_usec;
+}
 
 static void allocate_bitmap(uword_t **bitmap, uword_t size,
                             const char *description) {
@@ -61,6 +72,12 @@ static void allocate_bitmap(uword_t **bitmap, uword_t size,
   if (!*bitmap)
     lose("Failed to allocate %s (of %lu bytes)", description, size);
 }
+
+/* Initialisation */
+uword_t *allocation_bitmap, *mark_bitmap;
+unsigned char *line_bytemap;             /* 1 if line used, 0 if not used */
+line_index_t line_count;
+uword_t mark_bitmap_size;
 
 static void allocate_bitmaps() {
   int bytes_per_heap_byte = 8 /* bits/byte */ << N_LOWTAG_BITS;
@@ -701,7 +718,7 @@ static void sweep_lines() {
   os_vm_size_t total_decrement = 0;
   page_index_t claim, limit;
   for_each_claim (claim, limit) {
-    for (page_index_t p = claim; p < limit; p++)
+    for (page_index_t p = claim; p < limit; p++) {
       if (!page_free_p(p) && !page_single_obj_p(p)) {
         if (generation_to_collect == PSEUDO_STATIC_GENERATION) {
           unsigned char *marks = (unsigned char*)mark_bitmap,
@@ -727,8 +744,36 @@ static void sweep_lines() {
           sweep_small_page(p);
         }
       }
+    }
   }
   atomic_fetch_add(&generations[generation_to_collect].bytes_allocated, -total_decrement);
+}
+
+#define LINES_PER_PAGE (GENCGC_PAGE_BYTES / LINE_SIZE)
+static void sweep_pages() {
+  /* next_free_page is only maintained for page walking - we
+   * reuse partially filled pages, so it's not useful for allocation */
+  next_free_page = page_table_pages;
+  for (page_index_t p = 0; p < page_table_pages; p++) {
+    /* Rather than clearing marks for every page, we only clear marks for
+     * pages which were live before, as a dead page cannot have any marks
+     * that we need to clear. */
+    if (!page_free_p(p))
+      memset((unsigned char*)(mark_bitmap) + p * LINES_PER_PAGE, 0, LINES_PER_PAGE);
+    if (page_words_used(p) == 0) {
+      /* Remove allocation bit for the large object here. */
+      if (page_single_obj_p(p))
+        allocation_bitmap[mark_bitmap_word_index(page_address(p))] = 0;
+      reset_page_flags(p);
+      page_table[p].gen = 0;
+    } else {
+      bytes_allocated += page_bytes_used(p);
+      if (page_single_obj_p(p) &&
+          (page_table[p].gen == generation_to_collect || generation_to_collect == PSEUDO_STATIC_GENERATION))
+        generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
+      next_free_page = p + 1;
+    }
+  }
 }
 
 static void __attribute__((noinline)) sweep() {
@@ -741,35 +786,14 @@ static void __attribute__((noinline)) sweep() {
   if (generation_to_collect == PSEUDO_STATIC_GENERATION)
     for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
       generations[g].bytes_allocated = 0;
-  /* Currently I haven't made full GC sweeping parallel, as you have to
-   * trigger that manually, and so its performance isn't that important. */
+  /* Currently I haven't made full GC sweeping parallel, but as you have
+   * to trigger that manually, its performance isn't that important. */
   last_page_processed = 0;
   if (generation_to_collect == PSEUDO_STATIC_GENERATION)
     sweep_lines();
   else
-    run_on_thread_pool(sweep_lines);
-
-  next_free_page = page_table_pages;
-  uword_t small_pages = 0;
-  for (page_index_t p = 0; p < page_table_pages; p++) {
-    if (!page_free_p(p) && !page_single_obj_p(p)) small_pages++;
-    if (page_words_used(p) == 0) {
-      /* Remove allocation bit for the large object here. */
-      if (page_single_obj_p(p))
-        allocation_bitmap[mark_bitmap_word_index(page_address(p))] = 0;
-      reset_page_flags(p);
-      page_table[p].gen = 0;
-    } else {
-      bytes_allocated += page_bytes_used(p);
-      if (page_single_obj_p(p) &&
-          (page_table[p].gen == generation_to_collect || generation_to_collect == PSEUDO_STATIC_GENERATION))
-        generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
-      /* next_free_page is only maintained for page walking - we
-       * reuse partially filled pages, so it's not useful for allocation */
-      next_free_page = p + 1;
-    }
-  }
-  memset(mark_bitmap, 0, mark_bitmap_size);
+    METER(sweep_lines, run_on_thread_pool(sweep_lines));
+  METER(sweep_pages, sweep_pages());
 }
 
 extern lispobj lisp_init_function, gc_object_watcher;
@@ -984,18 +1008,6 @@ void mr_pre_gc(generation_index_t generation) {
   reset_statistics();
 }
 
-static uword_t get_time() {
-  struct timeval t;
-  gettimeofday(&t, NULL);
-  return t.tv_sec * 1000000 + t.tv_usec;
-}
-
-static struct { uword_t scavenge; uword_t trace; uword_t sweep; uword_t compact; uword_t raise; } meters = { 0 };
-#define METER(name, action) \
-  { uword_t before = get_time(); \
-  action; \
-  meters.name += get_time() - before; }
-
 void mr_collect_garbage(boolean raise) {
   if (generation_to_collect != PSEUDO_STATIC_GENERATION) {
     METER(scavenge, mr_scavenge_root_gens());
@@ -1016,8 +1028,10 @@ void mr_collect_garbage(boolean raise) {
           next_free_page, raise ? ", raised" : "");
 #endif
 #ifdef LOG_METERS
-  fprintf(stderr, "%ld scavenge %ld trace %ld sweep %ld compact %ld raise\n",
-          meters.scavenge, meters.trace, meters.sweep, meters.compact, meters.raise);
+  fprintf(stderr, "%ld scavenge %ld trace %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
+          meters.scavenge, meters.trace,
+          meters.sweep, meters.sweep_lines, meters.sweep_pages,
+          meters.compact, meters.raise);
 #endif
   // count_line_values("Post GC");
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
