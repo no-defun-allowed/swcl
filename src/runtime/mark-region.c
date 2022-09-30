@@ -32,11 +32,12 @@
 #include "genesis/closure.h"
 #include "gc-private.h"
 
-#define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
 #define PAGES_CLAIMED_PER_THREAD 64
+#define PREFETCH_DISTANCE 32
 
 //#define DEBUG
 //#define LOG_COLLECTIONS
+//#define LOG_METERS
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -275,8 +276,8 @@ void mr_update_closed_region(struct alloc_region *region, generation_index_t gen
 /* Marking */
 
 /* Old generation for finding old->young pointers */
-static generation_index_t dirty_generation_source = 0;
-static boolean dirty = 0;
+static _Thread_local generation_index_t dirty_generation_source = 0;
+static _Thread_local boolean dirty = 0;
 static generation_index_t generation_to_collect = 0;
 
 #define ANY(x) ((x) != 0)
@@ -483,7 +484,6 @@ static boolean work_to_do(struct Qblock **where) {
   }
 }
 
-#define PREFETCH_DISTANCE 32
 static uword_t traced;          /* Number of objects traced. */
 static boolean threads_did_any_work;
 static void trace_step() {
@@ -692,14 +692,15 @@ static void sweep_small_page(page_index_t p) {
 }
 
 static page_index_t last_page_processed;
+#define for_each_claim(claim, limit)                                    \
+  while ((claim = atomic_fetch_add(&last_page_processed, PAGES_CLAIMED_PER_THREAD)) < page_table_pages && \
+         (limit = claim + PAGES_CLAIMED_PER_THREAD, limit = (limit >= page_table_pages) ? page_table_pages - 1 : limit, 1))
 static void sweep_lines() {
   /* Free this gen, and work out how much space is used on each small
    * page. */
   os_vm_size_t total_decrement = 0;
-  page_index_t claim;
-  while ((claim = atomic_fetch_add(&last_page_processed, PAGES_CLAIMED_PER_THREAD)) < page_table_pages) {
-    page_index_t limit = claim + PAGES_CLAIMED_PER_THREAD;
-    if (limit >= page_table_pages) limit = page_table_pages - 1;
+  page_index_t claim, limit;
+  for_each_claim (claim, limit) {
     for (page_index_t p = claim; p < limit; p++)
       if (!page_free_p(p) && !page_single_obj_p(p)) {
         if (generation_to_collect == PSEUDO_STATIC_GENERATION) {
@@ -716,7 +717,7 @@ static void sweep_lines() {
             }
           }
           set_page_bytes_used(p, used);
-        } else {
+        } else if (page_table[p].gen != PSEUDO_STATIC_GENERATION) {
           page_bytes_t decrement = count_dead_bytes(p);
           if (page_bytes_used(p) < decrement)
             lose("Decrement of %d on page #%ld, with only %d bytes to spare.",
@@ -749,7 +750,9 @@ static void __attribute__((noinline)) sweep() {
     run_on_thread_pool(sweep_lines);
 
   next_free_page = page_table_pages;
+  uword_t small_pages = 0;
   for (page_index_t p = 0; p < page_table_pages; p++) {
+    if (!page_free_p(p) && !page_single_obj_p(p)) small_pages++;
     if (page_words_used(p) == 0) {
       /* Remove allocation bit for the large object here. */
       if (page_single_obj_p(p))
@@ -857,87 +860,93 @@ static void scavenge_root_object(generation_index_t gen, lispobj *where) {
   check_otherwise_dirty(where);
 }
 
-static uword_t root_objects_checked = 0, dirty_root_objects = 0, dirty_cards = 0;
-static void __attribute__((noinline)) mr_scavenge_root_gens() {
-  page_index_t i = 0;
-  root_objects_checked = 0; dirty_root_objects = 0; dirty_cards = 0;
-  while (i < page_table_pages) {
-    unsigned char page_type = page_table[i].type & PAGE_TYPE_MASK;
-    if (page_type == PAGE_TYPE_UNBOXED ||
-        !page_words_used(i)) {
-      i++; continue;
-    }
-    // fprintf(stderr, "Scavenging page %ld\n", i);
-    if (page_single_obj_p(i) && page_type == PAGE_TYPE_MIXED) {
-      if (page_table[i].gen > generation_to_collect) {
-        /* Check the widetag, to make sure we aren't going to
-         * scavenge complete junk. */
-        lispobj widetag = widetag_of((lispobj*)(page_address(i) - page_scan_start_offset(i)));
-        if (widetag != SIMPLE_VECTOR_WIDETAG) {
-          /* How odd. Just remove the card marks. */
-          for (int j = 0, card = page_to_card_index(i); j < CARDS_PER_PAGE; j++, card++)
-            gc_card_mark[card] = CARD_UNMARKED;
-          i++; continue;
+#define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
+static uword_t root_objects_checked = 0, dirty_root_objects = 0;
+static void scavenge_root_gens_worker() {
+  page_index_t claim, limit;
+  uword_t local_root_objects_checked = 0, local_dirty_root_objects = 0;
+  for_each_claim (claim, limit) {
+    for (page_index_t i = claim; i < limit; i++) {
+      unsigned char page_type = page_table[i].type & PAGE_TYPE_MASK;
+      if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(i)) continue;
+      // fprintf(stderr, "Scavenging page %ld\n", i);
+      if (page_single_obj_p(i) && page_type == PAGE_TYPE_MIXED) {
+        if (page_table[i].gen > generation_to_collect) {
+          /* Check the widetag, to make sure we aren't going to
+           * scavenge complete junk. */
+          lispobj widetag = widetag_of((lispobj*)(page_address(i) - page_scan_start_offset(i)));
+          if (widetag != SIMPLE_VECTOR_WIDETAG) {
+            /* How odd. Just remove the card marks. */
+            for (int j = 0, card = page_to_card_index(i); j < CARDS_PER_PAGE; j++, card++)
+              gc_card_mark[card] = CARD_UNMARKED;
+            continue;
+          }
+          /* The only time that page_address + page_words_used actually
+           * demarcates the end of a (sole) object on the page, with this
+           * heap layout. */
+          generation_index_t gen = page_table[i].gen;
+          lispobj *limit = (lispobj*)page_address(i) + page_words_used(i);
+          lispobj *start = (lispobj*)page_address(i);
+          for (int j = 0, card = addr_to_card_index(start);
+               j < CARDS_PER_PAGE;
+               j++, card++, start += WORDS_PER_CARD) {
+            if (card_dirtyp(card)) {
+              lispobj *card_end = start + WORDS_PER_CARD;
+              lispobj *end = (limit < card_end) ? limit : card_end;
+              // fprintf(stderr, "Scavenging large page %ld from %p to %p: ", i, start, end);
+              dirty_generation_source = gen, dirty = 0;
+              for (lispobj *p = start; p < end; p++)
+                mark(*p);
+              // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
+              update_card_mark(card, dirty);
+            }
+          }
         }
-        /* The only time that page_address + page_words_used actually
-         * demarcates the end of a (sole) object on the page, with this
-         * heap layout. */
-        generation_index_t gen = page_table[i].gen;
-        lispobj *limit = (lispobj*)page_address(i) + page_words_used(i);
+      } else {
+        /* Scavenge every object in every card and try to re-protect. */
         lispobj *start = (lispobj*)page_address(i);
-        for (int j = 0, card = addr_to_card_index(start);
-             j < CARDS_PER_PAGE;
-             j++, card++, start += WORDS_PER_CARD) {
-          if (card_dirtyp(card)) {
-            lispobj *card_end = start + WORDS_PER_CARD;
-            lispobj *end = (limit < card_end) ? limit : card_end;
-            // fprintf(stderr, "Scavenging large page %ld from %p to %p: ", i, start, end);
-            dirty_generation_source = gen, dirty = 0;
-            for (lispobj *p = start; p < end; p++)
-              mark(*p);
-            // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
-            update_card_mark(card, dirty);
-            dirty_cards++;
+        int first_card = page_to_card_index(i);
+        line_index_t first_line = address_line(start);
+        /* Now that cards are as large as lines, we can blast through
+         * and make a bitmap of interesting objects to scavenge. */
+        unsigned char mask[GENCGC_PAGE_BYTES / LINE_SIZE];
+        unsigned char *cards = gc_card_mark + first_card,
+                      *lines = line_bytemap + first_line;
+        int gen = generation_to_collect;
+        for (unsigned int n = 0; n < CARDS_PER_PAGE; n++) {
+          unsigned char line = lines[n], mark = cards[n];
+          mask[n] = (DECODE_GEN(line) > gen && mark != CARD_UNMARKED) ? 0xFF : 0x00;
+        }
+        /* Reset mark, which scavenging might re-instate. */
+        for (unsigned int n = 0; n < CARDS_PER_PAGE; n++)
+          cards[n] = (cards[n] == STICKY_MARK) ? STICKY_MARK : CARD_UNMARKED;
+        uword_t *words = (uword_t*)mask;
+        uword_t first_allocation_word = mark_bitmap_word_index(start);
+        for (unsigned int n = 0; n < GENCGC_PAGE_BYTES / LINE_SIZE / N_WORD_BYTES; n++) {
+          uword_t word = words[n] & allocation_bitmap[first_allocation_word + n];
+          while (word) {
+            unsigned char bit = __builtin_ctzl(word);
+            int offset = bit + n * N_WORD_BITS;
+            lispobj *where = (lispobj*)(start + 2 * offset);
+            local_root_objects_checked++;
+            dirty = 0;
+            scavenge_root_object(DECODE_GEN(line_bytemap[address_line(where)]), where);
+            if (dirty) { update_card_mark(addr_to_card_index(where), 1); local_dirty_root_objects++; }
+            word &= ~(1UL << bit);
           }
         }
       }
-    } else {
-      /* Scavenge every object in every card and try to re-protect. */
-      lispobj *start = (lispobj*)page_address(i);
-      int first_card = page_to_card_index(i);
-      line_index_t first_line = address_line(start);
-      /* Now that cards are as large as lines, we can blast through
-       * and make a bitmap of interesting objects to scavenge. */
-      unsigned char mask[GENCGC_PAGE_BYTES / LINE_SIZE];
-      unsigned char *cards = gc_card_mark + first_card,
-                    *lines = line_bytemap + first_line;
-      int gen = generation_to_collect;
-      for (unsigned int n = 0; n < CARDS_PER_PAGE; n++) {
-        unsigned char line = lines[n], mark = cards[n];
-        mask[n] = (DECODE_GEN(line) > gen && mark != CARD_UNMARKED) ? 0xFF : 0x00;
-      }
-      /* Reset mark, which scavenging might re-instate. */
-      for (unsigned int n = 0; n < CARDS_PER_PAGE; n++)
-        cards[n] = (cards[n] == STICKY_MARK) ? STICKY_MARK : CARD_UNMARKED;
-      uword_t *words = (uword_t*)mask;
-      uword_t first_allocation_word = mark_bitmap_word_index(start);
-      for (unsigned int n = 0; n < GENCGC_PAGE_BYTES / LINE_SIZE / N_WORD_BYTES; n++) {
-        uword_t word = words[n] & allocation_bitmap[first_allocation_word + n];
-        while (word) {
-          unsigned char bit = __builtin_ctzl(word);
-          int offset = bit + n * N_WORD_BITS;
-          lispobj *where = (lispobj*)(start + 2 * offset);
-          root_objects_checked++;
-          dirty = 0;
-          scavenge_root_object(DECODE_GEN(line_bytemap[address_line(where)]), where);
-          if (dirty) { update_card_mark(addr_to_card_index(where), 1); dirty_root_objects++; }
-          word &= ~(1UL << bit);
-        }
-      }
     }
-    i++;
   }
   dirty_generation_source = 0;
+  atomic_fetch_add(&root_objects_checked, local_root_objects_checked);
+  atomic_fetch_add(&dirty_root_objects, local_dirty_root_objects);
+}
+
+static void __attribute__((noinline)) mr_scavenge_root_gens() {
+  root_objects_checked = 0; dirty_root_objects = 0;
+  last_page_processed = 0;
+  run_on_thread_pool(scavenge_root_gens_worker);
 }
 
 /* Everything has to be an argument here, in order to convince
@@ -1000,14 +1009,16 @@ void mr_collect_garbage(boolean raise) {
   }
 #ifdef LOG_COLLECTIONS
   fprintf(stderr,
-          "-> %5luM / %5luM, %8lu traced, %8lu / %8lu scavenged on %8lu cards, page hwm = %8ld%s]\n",
+          "-> %5luM / %5luM, %8lu traced, %8lu / %8lu scavenged, page hwm = %8ld%s]\n",
           generations[generation_to_collect].bytes_allocated >> 20,
           bytes_allocated >> 20, traced,
-          dirty_root_objects, root_objects_checked, dirty_cards,
+          dirty_root_objects, root_objects_checked,
           next_free_page, raise ? ", raised" : "");
 #endif
+#ifdef LOG_METERS
   fprintf(stderr, "%ld scavenge %ld trace %ld sweep %ld compact %ld raise\n",
           meters.scavenge, meters.trace, meters.sweep, meters.compact, meters.raise);
+#endif
   // count_line_values("Post GC");
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
 }
