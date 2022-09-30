@@ -24,6 +24,7 @@
 #include "queue.h"
 #include "incremental-compact.h"
 #include "tiny-lock.h"
+#include "gc-thread-pool.h"
 
 #include "genesis/cons.h"
 #include "genesis/gc-tables.h"
@@ -483,14 +484,10 @@ static boolean work_to_do(struct Qblock **where) {
 
 #define PREFETCH_DISTANCE 32
 static uword_t traced;
-static uword_t par_time_taken = 0, time_taken = 0;
-static uword_t get_time() {
-  struct timeval t;
-  gettimeofday(&t, NULL);
-  return t.tv_sec * 1000000 + t.tv_usec;
-}
-static boolean trace_step() {
-  uword_t local_traced = 0, local_time_taken = 0;
+static boolean threads_did_any_work;
+
+static void trace_step() {
+  uword_t local_traced = 0;
   struct Qblock *block;
   boolean did_anything = 0;
   while (atomic_load(&blocks_in_flight)) {
@@ -499,7 +496,6 @@ static boolean trace_step() {
       pthread_yield();
       continue;
     }
-    uword_t start = get_time();
     did_anything = 1;
     int count = block->count;
     for (int n = 0; n < count; n++) {
@@ -516,61 +512,20 @@ static boolean trace_step() {
       }
     }
     recycle_qblock(block);
-    local_time_taken += get_time() - start;
   }
+  if (did_anything) threads_did_any_work = 1;
   free_mark_list();
   atomic_fetch_add(&traced, local_traced);
-  atomic_fetch_add(&par_time_taken, local_time_taken);
-  return did_anything;
-}
-
-#define GC_THREADS 3
-static pthread_t threads[GC_THREADS];
-static boolean threads_did_any_work;
-static sem_t start_semaphore;
-static sem_t join_semaphore;
-
-static void *parallel_trace_worker(void *nothing) {
-  (void)nothing;
-  while (1) {
-    sem_wait(&start_semaphore);
-    if (trace_step()) threads_did_any_work = 1;
-    sem_post(&join_semaphore);
-  }
-  return NULL;
-}
-
-static void create_helper_threads() {
-  sem_init(&start_semaphore, 0, 0);
-  sem_init(&join_semaphore, 0, 0);
-  
-  for (int i = 0; i < GC_THREADS; i++)
-    if (pthread_create(threads + i, NULL, parallel_trace_worker, NULL))
-      lose("Failed to create GC thread #%d", i);
-    else
-      pthread_setname_np(threads[i], "Parallel GC");
-}
-
-static void wake_gc_threads() {
-  for (int i = 0; i < GC_THREADS; i++) sem_post(&start_semaphore);
-}
-static void join_gc_threads() {
-  for (int i = 0; i < GC_THREADS; i++) sem_wait(&join_semaphore);
 }
 
 static boolean parallel_trace_step() {
   threads_did_any_work = 0;
-  wake_gc_threads();
-  if (trace_step()) threads_did_any_work = 1;
-  join_gc_threads();
+  run_on_thread_pool(trace_step);
   return threads_did_any_work;
 }
 
 static void __attribute__((noinline)) trace_everything() {
-  uword_t real_start = get_time();
   while (parallel_trace_step()) test_weak_triggers(pointer_survived_gc_yet, mark);
-  time_taken += get_time() - real_start;
-  //fprintf(stderr, "Parallel %ld real %ld\n", par_time_taken, time_taken);
 }
 
 /* Conservative pointer scanning */
@@ -984,7 +939,7 @@ static unsigned int collection = 0;
 
 void mrgc_init() {
   allocate_bitmaps();
-  create_helper_threads();
+  thread_pool_init();
 }
 
 void mr_pre_gc(generation_index_t generation) {
@@ -1000,15 +955,29 @@ void mr_pre_gc(generation_index_t generation) {
   reset_statistics();
 }
 
+static uword_t get_time() {
+  struct timeval t;
+  gettimeofday(&t, NULL);
+  return t.tv_sec * 1000000 + t.tv_usec;
+}
+
+static struct { uword_t scavenge; uword_t trace; uword_t sweep; uword_t compact; uword_t raise; } meters = { 0 };
+#define METER(name, action) \
+  { uword_t before = get_time(); \
+  action; \
+  meters.name += get_time() - before; }
+
 void mr_collect_garbage(boolean raise) {
-  if (generation_to_collect != PSEUDO_STATIC_GENERATION)
-    mr_scavenge_root_gens();
+  if (generation_to_collect != PSEUDO_STATIC_GENERATION) {
+    METER(scavenge, mr_scavenge_root_gens());
+  }
   trace_static_roots();
-  trace_everything();
-  sweep();
-  run_compaction();
-  if (raise)
-    raise_survivors(line_bytemap, line_count, generation_to_collect);
+  METER(trace, trace_everything());
+  METER(sweep, sweep());
+  METER(compact, run_compaction());
+  if (raise) {
+    METER(raise, raise_survivors(line_bytemap, line_count, generation_to_collect));
+  }
 #ifdef LOG_COLLECTIONS
   fprintf(stderr,
           "-> %5luM / %5luM, %8lu traced, %8lu / %8lu scavenged on %8lu cards, page hwm = %8ld%s]\n",
@@ -1017,6 +986,8 @@ void mr_collect_garbage(boolean raise) {
           dirty_root_objects, root_objects_checked, dirty_cards,
           next_free_page, raise ? ", raised" : "");
 #endif
+  fprintf(stderr, "%ld scavenge %ld trace %ld sweep %ld compact %ld raise\n",
+          meters.scavenge, meters.trace, meters.sweep, meters.compact, meters.raise);
   // count_line_values("Post GC");
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
 }
