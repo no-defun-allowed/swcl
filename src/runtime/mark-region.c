@@ -33,6 +33,7 @@
 #include "gc-private.h"
 
 #define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
+#define PAGES_CLAIMED_PER_THREAD 64
 
 //#define DEBUG
 //#define LOG_COLLECTIONS
@@ -483,15 +484,15 @@ static boolean work_to_do(struct Qblock **where) {
 }
 
 #define PREFETCH_DISTANCE 32
-static uword_t traced;
+static uword_t traced;          /* Number of objects traced. */
 static boolean threads_did_any_work;
-
 static void trace_step() {
   uword_t local_traced = 0;
-  struct Qblock *block;
   boolean did_anything = 0;
   while (atomic_load(&blocks_in_flight)) {
-    /* Spinlock */
+    /* Spin if we're out of work, since there isn't anything more
+     * intelligent we can do, I think. */
+    struct Qblock *block;
     if (!work_to_do(&block)) {
       pthread_yield();
       continue;
@@ -504,6 +505,11 @@ static void trace_step() {
         __builtin_prefetch(native_pointer(block->elements[n + PREFETCH_DISTANCE]));
       if (set_mark_bit(obj)) {
         local_traced++;
+        /* Per the Immix paper, we mark lines while tracing, to
+         * cover memory latency. We also would need to compute object size,
+         * which reads object data most of the time, so doing it while tracing
+         * an object (when we also have to read data) is better than doing it
+         * while marking a pointer (when we don't have to read data). */
         if (listp(obj))
           mark_cons_line(CONS(obj));
         else
@@ -685,35 +691,43 @@ static void sweep_small_page(page_index_t p) {
     lines[l] = (lines[l] == unmarked) ? 0 : (lines[l] == marked) ? unmarked : lines[l];
 }
 
+static page_index_t last_page_processed;
 static void sweep_lines() {
   /* Free this gen, and work out how much space is used on each small
    * page. */
-  for (page_index_t p = 0; p < page_table_pages; p++)
-    if (!page_free_p(p) && !page_single_obj_p(p)) {
-      if (generation_to_collect == PSEUDO_STATIC_GENERATION) {
-        unsigned char *marks = (unsigned char*)mark_bitmap,
-                      *allocs = (unsigned char*)allocation_bitmap,
-                      *lines = line_bytemap;
-        page_bytes_t used = 0;
-        for_lines_in_page(l, p) {
-          allocs[l] = marks[l];
-          lines[l] = IS_MARKED(lines[l]) ? UNMARK_GEN(lines[l]) : 0;
-          if (lines[l]) {
-            generations[DECODE_GEN(lines[l])].bytes_allocated += LINE_SIZE;
-            used += LINE_SIZE;
+  os_vm_size_t total_decrement = 0;
+  page_index_t claim;
+  while ((claim = atomic_fetch_add(&last_page_processed, PAGES_CLAIMED_PER_THREAD)) < page_table_pages) {
+    page_index_t limit = claim + PAGES_CLAIMED_PER_THREAD;
+    if (limit >= page_table_pages) limit = page_table_pages - 1;
+    for (page_index_t p = claim; p < limit; p++)
+      if (!page_free_p(p) && !page_single_obj_p(p)) {
+        if (generation_to_collect == PSEUDO_STATIC_GENERATION) {
+          unsigned char *marks = (unsigned char*)mark_bitmap,
+                        *allocs = (unsigned char*)allocation_bitmap,
+                        *lines = line_bytemap;
+          page_bytes_t used = 0;
+          for_lines_in_page(l, p) {
+            allocs[l] = marks[l];
+            lines[l] = IS_MARKED(lines[l]) ? UNMARK_GEN(lines[l]) : 0;
+            if (lines[l]) {
+              generations[DECODE_GEN(lines[l])].bytes_allocated += LINE_SIZE;
+              used += LINE_SIZE;
+            }
           }
+          set_page_bytes_used(p, used);
+        } else {
+          page_bytes_t decrement = count_dead_bytes(p);
+          if (page_bytes_used(p) < decrement)
+            lose("Decrement of %d on page #%ld, with only %d bytes to spare.",
+                 decrement, p, page_bytes_used(p));
+          total_decrement += decrement;
+          set_page_bytes_used(p, page_bytes_used(p) - decrement);
+          sweep_small_page(p);
         }
-        set_page_bytes_used(p, used);
-      } else {
-        page_bytes_t decrement = count_dead_bytes(p);
-        if (page_bytes_used(p) < decrement)
-          lose("Decrement of %d on page #%ld, with only %d bytes to spare.",
-               decrement, p, page_bytes_used(p));
-        generations[generation_to_collect].bytes_allocated -= decrement;
-        set_page_bytes_used(p, page_bytes_used(p) - decrement);
-        sweep_small_page(p);
       }
-    }
+  }
+  atomic_fetch_add(&generations[generation_to_collect].bytes_allocated, -total_decrement);
 }
 
 static void __attribute__((noinline)) sweep() {
@@ -726,7 +740,13 @@ static void __attribute__((noinline)) sweep() {
   if (generation_to_collect == PSEUDO_STATIC_GENERATION)
     for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
       generations[g].bytes_allocated = 0;
-  sweep_lines();
+  /* Currently I haven't made full GC sweeping parallel, as you have to
+   * trigger that manually, and so its performance isn't that important. */
+  last_page_processed = 0;
+  if (generation_to_collect == PSEUDO_STATIC_GENERATION)
+    sweep_lines();
+  else
+    run_on_thread_pool(sweep_lines);
 
   next_free_page = page_table_pages;
   for (page_index_t p = 0; p < page_table_pages; p++) {
