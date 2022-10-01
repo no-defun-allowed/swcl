@@ -773,8 +773,9 @@ static void __attribute__((noinline)) sweep_pages() {
       /* Remove allocation bit for the large object here. */
       if (page_single_obj_p(p))
         allocation_bitmap[mark_bitmap_word_index(page_address(p))] = 0;
-      reset_page_flags(p);
-      page_table[p].gen = 0;
+      /* Why is reset_page_flags(p) much slower here? It does other stuff
+       * for gencgc, sure, but not that much more stuff. */
+      page_table[p].type = FREE_PAGE_FLAG;
     } else {
       bytes_allocated += page_bytes_used(p);
       if (page_single_obj_p(p) &&
@@ -991,8 +992,9 @@ static void raise_survivors() {
   unsigned char line = ENCODE_GEN((unsigned char)gen);
   unsigned char target = ENCODE_GEN((unsigned char)gen + 1);
   for (page_index_t p = 0; p < next_free_page; p++)
-    for_lines_in_page(l, p)
-      bytemap[l] = (bytemap[l] == line) ? target : bytemap[l];
+    if (!page_free_p(p))
+      for_lines_in_page(l, p)
+        bytemap[l] = (bytemap[l] == line) ? target : bytemap[l];
   for (page_index_t p = 0; p < next_free_page; p++)
     if (page_table[p].gen == gen && page_single_obj_p(p))
       page_table[p].gen++;
