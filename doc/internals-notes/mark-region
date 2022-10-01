@@ -38,12 +38,12 @@ packet", and writes out more pointers to trace from an "output
 packet". Prefetching the pointers in the input packet is somewhat
 effective.
 
-Marking can be made parallel by giving each collector thread its own
+Marking is made parallel by giving each collector thread its own
 input and output packets, and requiring the shading of an object to be
-an atomic operation. A thread does not mark an object if it fails to
-set the mark bit atomically, as another thread marked it in the
-meanwhile, and will proceed in marking the object. (We almost could go
-without atomicity, since marking and tracing are idempotent, but
+an atomic operation. A thread does not trace an object if it fails to
+set the mark bit atomically, as another thread traced it in the
+meanwhile, and will proceed in marking the object. (Atomicity might
+seem unnecessary, since marking and tracing are idempotent, but
 writing the bitmap must be atomic, or data races could cause objects
 to become unmarked.)
 
@@ -81,7 +81,11 @@ performs no actions that would cause the occupancy of any other
 generation to change.
 
 All the sweeping operations can be (automatically) vectorised, which
-improves performance substantially.
+improves performance substantially. Parallelisation also improves
+performance, but it is very possible that one can run out of memory
+bandwidth long before one runs out of cores. To make the best use of
+memory bandwidth, it is important to avoid touching metadata which
+is irrelevant (say, by corresponding to pages with no objects on them).
 
 Scavenging
 ----------
@@ -145,6 +149,20 @@ Running the write barrier manually in C is also likely to be wrong;
 we now _need_ to dirty the card on the start of the object, and not
 any card intersecting the object, when the object is small. We need
 to dirty both the start and the slot when the object is large.
+
+Todo
+----
+
+We should crack free_pages_lock. If Lisp only ever allocated single
+pages at a time, each page could be claimed/opened with a
+compare-and-swap. A readers-writer lock could be used to allow for
+claiming multiple sequential pages (for large objects) too; threads
+trying to claim single pages take the readers lock and use the
+forementioned CAS protocol, whereas (less frequent) threads trying
+to claim multiple pages take the writers lock. I tried implementing
+this, but somehow threads would update the allocator start pages
+to nearly the end of the heap, causing very premature heap
+exhaustion; but I haven't a clue how that would happen.
 
 Useful references
 -----------------
