@@ -37,7 +37,7 @@
 
 //#define DEBUG
 //#define LOG_COLLECTIONS
-//#define LOG_METERS
+#define LOG_METERS
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -712,6 +712,7 @@ static page_index_t last_page_processed;
 #define for_each_claim(claim, limit)                                    \
   while ((claim = atomic_fetch_add(&last_page_processed, PAGES_CLAIMED_PER_THREAD)) < page_table_pages && \
          (limit = claim + PAGES_CLAIMED_PER_THREAD, limit = (limit >= page_table_pages) ? page_table_pages - 1 : limit, 1))
+
 static void sweep_lines() {
   /* Free this gen, and work out how much space is used on each small
    * page. */
@@ -750,7 +751,7 @@ static void sweep_lines() {
 }
 
 #define LINES_PER_PAGE (GENCGC_PAGE_BYTES / LINE_SIZE)
-static void sweep_pages() {
+static void __attribute__((noinline)) sweep_pages() {
   /* next_free_page is only maintained for page walking - we
    * reuse partially filled pages, so it's not useful for allocation */
   next_free_page = page_table_pages;
@@ -758,8 +759,13 @@ static void sweep_pages() {
     /* Rather than clearing marks for every page, we only clear marks for
      * pages which were live before, as a dead page cannot have any marks
      * that we need to clear. */
-    if (!page_free_p(p))
-      memset((unsigned char*)(mark_bitmap) + p * LINES_PER_PAGE, 0, LINES_PER_PAGE);
+    if (!page_free_p(p)) {
+      if (page_single_obj_p(p))
+        /* There can only be one mark on a large-object page. */
+        mark_bitmap[mark_bitmap_word_index(page_address(p))] = 0;
+      else
+        memset((unsigned char*)(mark_bitmap) + p * LINES_PER_PAGE, 0, LINES_PER_PAGE);
+    }
     if (page_words_used(p) == 0) {
       /* Remove allocation bit for the large object here. */
       if (page_single_obj_p(p))
@@ -976,16 +982,19 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
 /* Everything has to be an argument here, in order to convince
  * auto-vectorisation to do its thing. */
 CPU_SPLIT
-static void raise_survivors(unsigned char *bytemap, line_index_t count, generation_index_t gen) {
+static void raise_survivors() {
+  unsigned char *bytemap = line_bytemap;
+  generation_index_t gen = generation_to_collect;
   unsigned char line = ENCODE_GEN((unsigned char)gen);
   unsigned char target = ENCODE_GEN((unsigned char)gen + 1);
-  for (line_index_t l = 0; l < count; l++)
-    bytemap[l] = (bytemap[l] == line) ? target : bytemap[l];
-  for (page_index_t p = 0; p < page_table_pages; p++)
-    if (page_table[p].gen == generation_to_collect && page_single_obj_p(p))
+  for (page_index_t p = 0; p < next_free_page; p++)
+    for_lines_in_page(l, p)
+      bytemap[l] = (bytemap[l] == line) ? target : bytemap[l];
+  for (page_index_t p = 0; p < next_free_page; p++)
+    if (page_table[p].gen == gen && page_single_obj_p(p))
       page_table[p].gen++;
-  generations[generation_to_collect + 1].bytes_allocated += generations[generation_to_collect].bytes_allocated;
-  generations[generation_to_collect].bytes_allocated = 0;
+  generations[gen + 1].bytes_allocated += generations[gen].bytes_allocated;
+  generations[gen].bytes_allocated = 0;
 }
 
 static unsigned int collection = 0;
@@ -1017,7 +1026,7 @@ void mr_collect_garbage(boolean raise) {
   METER(sweep, sweep());
   METER(compact, run_compaction());
   if (raise) {
-    METER(raise, raise_survivors(line_bytemap, line_count, generation_to_collect));
+    METER(raise, raise_survivors());
   }
 #ifdef LOG_COLLECTIONS
   fprintf(stderr,
