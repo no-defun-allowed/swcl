@@ -32,12 +32,12 @@
 #include "genesis/closure.h"
 #include "gc-private.h"
 
-#define PAGES_CLAIMED_PER_THREAD 64
+#define PAGES_CLAIMED_PER_THREAD 128
 #define PREFETCH_DISTANCE 32
 
 //#define DEBUG
 //#define LOG_COLLECTIONS
-#define LOG_METERS
+//#define LOG_METERS
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -759,7 +759,9 @@ static void __attribute__((noinline)) sweep_pages() {
     /* Rather than clearing marks for every page, we only clear marks for
      * pages which were live before, as a dead page cannot have any marks
      * that we need to clear. */
-    if (!page_free_p(p)) {
+    if (!page_free_p(p) &&
+        (generation_to_collect == PSEUDO_STATIC_GENERATION ||
+         page_table[p].gen < PSEUDO_STATIC_GENERATION)) {
       if (page_single_obj_p(p))
         /* There can only be one mark on a large-object page. */
         mark_bitmap[mark_bitmap_word_index(page_address(p))] = 0;
