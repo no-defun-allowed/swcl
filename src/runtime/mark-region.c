@@ -37,7 +37,7 @@
 
 //#define DEBUG
 //#define LOG_COLLECTIONS
-//#define LOG_METERS
+#define LOG_METERS
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -706,6 +706,8 @@ static void sweep_small_page(page_index_t p) {
   }
   for_lines_in_page(l, p)
     lines[l] = (lines[l] == unmarked) ? 0 : (lines[l] == marked) ? unmarked : lines[l];
+  for_lines_in_page(l, p)
+    marks[l] = 0;
 }
 
 static page_index_t last_page_processed;
@@ -733,6 +735,7 @@ static void sweep_lines() {
               generations[DECODE_GEN(lines[l])].bytes_allocated += LINE_SIZE;
               used += LINE_SIZE;
             }
+            marks[l] = 0;
           }
           set_page_bytes_used(p, used);
         } else if (page_table[p].gen != PSEUDO_STATIC_GENERATION) {
@@ -765,8 +768,6 @@ static void __attribute__((noinline)) sweep_pages() {
       if (page_single_obj_p(p))
         /* There can only be one mark on a large-object page. */
         mark_bitmap[mark_bitmap_word_index(page_address(p))] = 0;
-      else
-        memset((unsigned char*)(mark_bitmap) + p * LINES_PER_PAGE, 0, LINES_PER_PAGE);
     }
     if (page_words_used(p) == 0) {
       /* Remove allocation bit for the large object here. */
