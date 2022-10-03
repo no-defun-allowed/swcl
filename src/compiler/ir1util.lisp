@@ -447,9 +447,13 @@
             (let ((var (ref-leaf value-ref)))
               (when (and (lambda-var-p (ref-leaf value-ref))
                          (not (lambda-var-sets (ref-leaf value-ref))))
-                (when (member (functional-kind (lambda-var-home var))
-                              '(:external :optional))
-                  (return-from set-slot-old-p t))
+                (let ((home (lambda-var-home var)))
+                  (when (member (functional-kind home) '(:external :optional))
+                    (return-from set-slot-old-p
+                      (eq (lambda-environment (if (eq (functional-kind home) :external)
+                                                  (functional-entry-fun home)
+                                                  home))
+                          (node-environment allocator)))))
                 (setf uses (principal-lvar-ref-use value-lvar)))))
           (when uses
             (if (consp uses)
@@ -632,7 +636,8 @@
     (not (and (global-var-p leaf)
               (member (global-var-kind leaf)
                       '(:special :global :unknown))
-              (not (always-boundp (leaf-source-name leaf)))))))
+              (not (or (always-boundp (leaf-source-name leaf))
+                       (policy node (< safety 3))))))))
 
 (defun flushable-callable-arg-p (name arg-count)
   (typecase name

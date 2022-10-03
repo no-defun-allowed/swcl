@@ -56,78 +56,19 @@ export SBCL SBCL_BUILDING_CONTRIB
 # as SB-RT and SB-GROVEL, but FIXME: there's probably a better
 # solution.  -- CSR, 2003-05-30
 if [ -z "$DONT_CLEAN_SBCL_CONTRIB" ] ; then
+  rm -rf obj/from-xc/contrib/
   rm -fr obj/sbcl-home/contrib/
   rm -fr obj/asdf-cache/
 fi
 
 find output -name 'building-contrib.*' -print | xargs rm -f
 
+set -e # exit with failure if any $GNUMAKE fails
 # Ignore all source registries.
 if [ -z "$*" ]; then
-    $GNUMAKE $SBCL_MAKE_JOBS -C contrib
+    $GNUMAKE $SBCL_MAKE_JOBS -k -C contrib
 else
     for x in "$@"; do
         $GNUMAKE -C contrib $x.fasl
     done
-fi
-
-# Otherwise report expected failures:
-HEADER_HAS_BEEN_PRINTED=false
-for dir in `cd ./obj/asdf-cache/ ; echo *`; do
-  f="obj/asdf-cache/$dir/build-passed.test-report"
-  if test -f "$f" && grep -i fail "$f" >/dev/null; then
-      if ! $HEADER_HAS_BEEN_PRINTED; then
-          cat <<EOF
-
-Note: Build failures which are expected for this combination of
-platform and features have been ignored:
-EOF
-          HEADER_HAS_BEEN_PRINTED=true
-      fi
-      echo "  contrib/$dir"
-      (unset IFS; while read line; do echo "    $line"; done <"$f")
-  fi
-done
-
-if [ -z "$*" ]; then
-    contrib_candidates="`cd ./contrib ; echo *`"
-else
-    contrib_candidates=="$*"
-fi
-
-# Filter out candidates that are not actually contribs and skip those that
-# have been blocked explicitly with a --without-CONTRIB argument to
-# make.sh.
-contrib_dirs=""
-for candidate in $contrib_candidates
-do
-    if [ -d "contrib/$candidate" -a -f "contrib/$candidate/Makefile" ]; then
-        case $SBCL_CONTRIB_BLOCKLIST in
-            *"$candidate"*) ;;
-            *) contrib_dirs="$contrib_dirs $candidate" ;;
-    esac
-    fi
-done
-
-# Sometimes people used to see the "No tests failed." output from the last
-# DEFTEST in contrib self-tests and think that's all that is. So...
-HEADER_HAS_BEEN_PRINTED=false
-for dir in $contrib_dirs
-do
-  if [ ! -f "obj/asdf-cache/$dir/build-passed.test-report" ]; then
-      if $HEADER_HAS_BEEN_PRINTED; then
-          echo > /dev/null
-      else
-          cat <<EOF
-
-WARNING! Some of the contrib modules did not build successfully. Failed contribs:"
-EOF
-          HEADER_HAS_BEEN_PRINTED=true
-      fi
-      echo "  $dir"
-  fi
-done
-
-if [ $HEADER_HAS_BEEN_PRINTED = true ]; then
-  exit 1
 fi

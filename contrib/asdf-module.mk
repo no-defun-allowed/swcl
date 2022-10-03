@@ -6,7 +6,8 @@
 # ones as dependencies.
 
 UNAME:=$(shell uname -s)
-DEST=$(SBCL_TOP)/obj/sbcl-home/contrib/
+# no trailing slash on DEST. Don't want a "//" in FASL and ASD
+DEST=$(SBCL_TOP)/obj/sbcl-home/contrib
 FASL=$(DEST)/$(SYSTEM).fasl
 ASD=$(DEST)/$(SYSTEM).asd
 
@@ -26,25 +27,10 @@ endif
 
 export CC SBCL EXTRA_CFLAGS
 
-all: $(FASL) $(ASD)
+all: $(FASL)
 
-$(FASL)::
-	$(SBCL) --eval '(setf (sb-ext:readtable-base-char-preference *readtable*) :both)' \
-		--eval '(declaim (muffle-conditions (and compiler-note (not sb-c::unknown-typep-note))))' \
-		--load ../asdf-stub.lisp \
-		--eval '(asdf::build-asdf-contrib "$(SYSTEM)")'
+$(FASL):: # this produces $(ASD) as a side-effect
+	$(SBCL)	--load ../make-contrib.lisp "$(SYSTEM)" $(MODULE_REQUIRES)
 
-$(ASD)::
-	echo "(defsystem :$(SYSTEM) :class require-system)" > $@
-
-build: $(FASL) $(ASD)
-	true
-
-test: $(FASL) $(ASD)
-	$(SBCL) --load ../asdf-stub.lisp \
-		--eval '(asdf::test-asdf-contrib "$(SYSTEM)")'
-
-# KLUDGE: There seems to be no portable way to tell tar to not to
-# preserve owner, so chown after installing for the current user.
 install:
 	cp $(FASL) $(ASD) "$(BUILD_ROOT)$(INSTALL_DIR)"

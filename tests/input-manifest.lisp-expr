@@ -104,8 +104,7 @@
  ("sb-mpfr.impure.lisp" "contrib/sb-gmp.fasl" "contrib/sb-mpfr.fasl"
   "../contrib/sb-mpfr/tests.lisp")
  ("sb-posix.impure.lisp" "contrib/sb-posix.fasl"
-  "../contrib/sb-posix/posix-tests.lisp" "../contrib/sb-posix/libc-tests.lisp"
-  "test-output/write-test.txt")
+  "../contrib/sb-posix/posix-tests.lisp" "../contrib/sb-posix/libc-tests.lisp")
  ("sb-simd.impure.lisp" "contrib/sb-simd.fasl"
   "../contrib/sb-simd/test-suite/packages.lisp"
   "../contrib/sb-simd/test-suite/numbers.lisp"
@@ -116,7 +115,8 @@
   "../contrib/sb-simd/test-suite/test-horizontal-functions.lisp"
   "../contrib/sb-simd/test-suite/test-hairy-simd-functions.lisp"
   "../contrib/sb-simd/test-suite/test-packages.lisp")
- ("sb-simple-streams.impure.lisp" "contrib/sb-simple-streams.fasl" "contrib/sb-bsd-sockets.fasl")
+ ("sb-simple-streams.impure.lisp" "contrib/sb-simple-streams.fasl" "contrib/sb-bsd-sockets.fasl"
+  "../contrib/sb-simple-streams/simple-stream-tests.lisp")
  ("sb-rotate-byte.impure.lisp" "contrib/sb-rotate-byte.fasl"
   "../contrib/sb-rotate-byte/rotate-byte-tests.lisp")
  ("sb-sprof.impure.lisp" "contrib/sb-sprof.fasl"
