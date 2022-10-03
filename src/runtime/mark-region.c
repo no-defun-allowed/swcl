@@ -37,7 +37,7 @@
 
 //#define DEBUG
 //#define LOG_COLLECTIONS
-#define LOG_METERS
+//#define LOG_METERS
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.

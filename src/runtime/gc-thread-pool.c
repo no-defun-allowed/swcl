@@ -22,7 +22,7 @@ static void *worker(void *nothing) {
 void thread_pool_init() {
   sem_init(&start_semaphore, 0, 0);
   sem_init(&join_semaphore, 0, 0);
-  
+
   for (int i = 0; i < GC_THREADS; i++)
     if (pthread_create(threads + i, NULL, worker, NULL))
       lose("Failed to create GC thread #%d", i);

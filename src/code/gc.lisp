@@ -67,7 +67,8 @@
   ;; GC delaying the decision? It seems wrong.
   (gc)
   (setf *n-bytes-freed-or-purified* 0
-        *gc-run-time* 0))
+        *gc-run-time* 0
+        *gc-real-time* 0))
 
 (declaim (ftype (sfunction () unsigned-byte) get-bytes-consed))
 (defun get-bytes-consed ()
@@ -195,16 +196,19 @@ run in any thread.")
                   ;; awkwardly long piece of code to nest so deeply.
                   (let ((old-usage (dynamic-usage))
                         (new-usage 0)
-                        (start-time (get-internal-run-time)))
+                        (start-time (get-internal-run-time))
+                        (start-real-time (get-internal-real-time)))
                     (collect-garbage gen)
                     (setf *gc-epoch* (cons 0 0))
-                    (let ((run-time (- (get-internal-run-time) start-time)))
+                    (let ((run-time (- (get-internal-run-time) start-time))
+                          (real-time (- (get-internal-real-time) start-real-time)))
                       ;; KLUDGE: Sometimes we see the second getrusage() call
                       ;; return a smaller value than the first, which can
                       ;; lead to *GC-RUN-TIME* to going negative, which in
                       ;; turn is a type-error.
                       (when (plusp run-time)
-                        (incf *gc-run-time* run-time)))
+                        (incf *gc-run-time* run-time))
+                      (incf *gc-real-time* real-time))
                     #+(and sb-thread sb-safepoint)
                     (setf *stop-for-gc-pending* nil)
                     (setf *gc-pending* nil

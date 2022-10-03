@@ -7,7 +7,7 @@ static void release_lock(lock_t *l) { gc_assert(!pthread_mutex_unlock(l)); }
 
 #define LOCK_INITIALIZER PTHREAD_MUTEX_INITIALIZER
 #else
-/* A lock that has the sole benefit of not being the pthreads lock. 
+/* A lock that has the sole benefit of not being the pthreads lock.
  * And the sole downside of not being the pthreads lock. */
 struct lock { int grabbed; };
 typedef struct lock lock_t;

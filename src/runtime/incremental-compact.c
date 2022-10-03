@@ -24,7 +24,7 @@ static struct Qblock *remset = NULL;
 uword_t remset_pages = 0;
 
 static boolean should_compact() {
-  /* If there are many more small-object pages than there could 
+  /* If there are many more small-object pages than there could
    * be, start compacting. */
   uword_t pages = 0, bytes = 0;
   for (page_index_t p = 0; p < page_table_pages; p++) {
@@ -43,7 +43,7 @@ static void pick_targets() {
   page_index_t p = page_table_pages - 1;
   while (1) {
     if (!page_single_obj_p(p) &&
-        !page_free_p(p) && 
+        !page_free_p(p) &&
         (float)(page_bytes_used(p)) / GENCGC_PAGE_BYTES < page_utilisation_threshold) {
       if (page_bytes_used(p) > bytes_remaining) break;
       /* fprintf(stderr, "Moving page #%ld with %d bytes used\n", */
