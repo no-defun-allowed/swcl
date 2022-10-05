@@ -37,7 +37,7 @@
 
 //#define DEBUG
 //#define LOG_COLLECTIONS
-//#define LOG_METERS
+#define LOG_METERS
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -51,7 +51,7 @@
 
 /* Metering */
 static struct {
-  uword_t scavenge; uword_t trace;
+  uword_t consider; uword_t scavenge; uword_t trace;
   uword_t sweep; uword_t sweep_lines; uword_t sweep_pages;
   uword_t compact; uword_t raise; }
   meters = { 0 };
@@ -1017,7 +1017,7 @@ void mr_pre_gc(generation_index_t generation) {
           generations[generation].bytes_allocated >> 20,
           bytes_allocated >> 20);
 #endif
-  consider_compaction(generation);
+  METER(consider, consider_compaction(generation));
   generation_to_collect = generation;
   reset_statistics();
 }
@@ -1042,8 +1042,8 @@ void mr_collect_garbage(boolean raise) {
           next_free_page, raise ? ", raised" : "");
 #endif
 #ifdef LOG_METERS
-  fprintf(stderr, "%ld scavenge %ld trace %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
-          meters.scavenge, meters.trace,
+  fprintf(stderr, "%ld consider %ld scavenge %ld trace %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
+          meters.consider, meters.scavenge, meters.trace,
           meters.sweep, meters.sweep_lines, meters.sweep_pages,
           meters.compact, meters.raise);
 #endif
