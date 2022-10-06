@@ -198,6 +198,7 @@
     `(sb-c::*code-serialno*
       sb-c::*compile-elapsed-time*
       sb-c::*compile-file-elapsed-time*
+      *gc-real-time*
       sb-impl::*package-names-cookie*
       sb-impl::*available-buffers*
       sb-impl::*token-buf-pool*

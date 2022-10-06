@@ -7,6 +7,7 @@
 static pthread_t threads[GC_THREADS];
 static sem_t start_semaphore;
 static sem_t join_semaphore;
+static int semaphores_initializedp;
 static void (*action)(void);
 
 static void *worker(void *nothing) {
@@ -20,8 +21,11 @@ static void *worker(void *nothing) {
 }
 
 void thread_pool_init() {
-  sem_init(&start_semaphore, 0, 0);
-  sem_init(&join_semaphore, 0, 0);
+  if (!semaphores_initializedp) {
+      sem_init(&start_semaphore, 0, 0);
+      sem_init(&join_semaphore, 0, 0);
+      semaphores_initializedp = 1;
+  }
 
   for (int i = 0; i < GC_THREADS; i++)
     if (pthread_create(threads + i, NULL, worker, NULL))
