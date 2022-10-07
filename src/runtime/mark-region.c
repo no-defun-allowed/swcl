@@ -61,9 +61,9 @@ static struct {
   meters.name += get_time() - before; }
 
 static uword_t get_time() {
-  struct timeval t;
-  gettimeofday(&t, NULL);
-  return t.tv_sec * 1000000 + t.tv_usec;
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return t.tv_sec * 1000000 + t.tv_nsec/1000;
 }
 
 static void allocate_bitmap(uword_t **bitmap, uword_t size,
@@ -1042,6 +1042,7 @@ void mr_collect_garbage(boolean raise) {
           next_free_page, raise ? ", raised" : "");
 #endif
 #ifdef LOG_METERS
+  if (gencgc_verbose)
   fprintf(stderr, "%ld consider %ld scavenge %ld trace %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
           meters.consider, meters.scavenge, meters.trace,
           meters.sweep, meters.sweep_lines, meters.sweep_pages,
