@@ -272,6 +272,7 @@ inline char *also_page_address(page_index_t page_num) {
 #define CPU_SPLIT __attribute__((target_clones("default,avx2")))
 
 void mr_update_closed_region(struct alloc_region *region, generation_index_t gen) {
+  extern boolean gc_active_p;
   /* alloc_regions never span multiple pages. */
   page_index_t the_page = find_page_index(region->start_addr);
   if (!(page_table[the_page].type & OPEN_REGION_PAGE_FLAG))
@@ -280,11 +281,17 @@ void mr_update_closed_region(struct alloc_region *region, generation_index_t gen
 
   /* Mark the lines as allocated. */
   unsigned char *lines = line_bytemap;
-  for_lines_in_page (l, the_page) {
-    /* GC might have allocated in here and marked lines already, so
-     * remember to copy the mark bit. */
-    unsigned char copied = COPY_MARK(lines[l], ENCODE_GEN(gen));
-    lines[l] = UNMARK_GEN(lines[l]) ? lines[l] : copied;
+  if (gc_active_p) {
+    for_lines_in_page (l, the_page) {
+      /* GC might have allocated in here and marked lines already, so
+       * remember to copy the mark bit. */
+      unsigned char copied = COPY_MARK(lines[l], ENCODE_GEN(gen));
+      lines[l] = UNMARK_GEN(lines[l]) ? lines[l] : copied;
+    }
+  } else {
+    for_lines_in_page (l, the_page) {
+      lines[l] = lines[l] ? lines[l] : ENCODE_GEN(gen);
+    }
   }
   page_table[the_page].type &= ~(OPEN_REGION_PAGE_FLAG);
   gc_set_region_empty(region);
