@@ -1510,7 +1510,7 @@
 
 (with-test (:name :dxify-downward-funargs-malformed)
   (checked-compile
-      '(lambda () (sb-debug::map-backtrace))
+      '(lambda () (sb-debug:map-backtrace))
       :allow-style-warnings t))
 
 (with-test (:name :dxify-downward-funargs-casts)
@@ -2623,7 +2623,7 @@
                (rem x 10)))))
         (assert (not (ctu:find-code-constants f :type 'bignum)))))
 
-(with-test (:name :deduplicated-fdefns :fails-on (not :64-bit))
+(with-test (:name :deduplicated-fdefns)
   (flet ((scan-range (c start end)
            (let (dup-fdefns names)
              (loop for i from start below end
@@ -2634,8 +2634,8 @@
                               (push obj dup-fdefns))
                             (push name names)))))
              (assert (not dup-fdefns)))))
-    (dolist (c (sb-vm::list-allocated-objects :all :type sb-vm:code-header-widetag))
-      (sb-int:binding* (((start count) (sb-vm::code-header-fdefn-range c))
+    (dolist (c (sb-vm:list-allocated-objects :all :type sb-vm:code-header-widetag))
+      (sb-int:binding* (((start count) (sb-kernel:code-header-fdefn-range c))
                         (end (+ start count)))
         ;; Within each subset of FDEFNs there should be no duplicates
         ;; by name. But there could be an fdefn that is in the union of the two sets.
@@ -3750,3 +3750,39 @@
 (with-test (:name :flush-symbol-function :skipped-on :interpreter)
   (assert (ctu:find-code-constants #'noflush-symbol-function))
   (assert (not (ctu:find-code-constants #'flush-symbol-function))))
+
+(with-test (:name :symbolp-other-pointer)
+  (checked-compile-and-assert
+      ()
+      `(lambda (x)
+         (declare ((or symbol bit-vector) x))
+         (the symbol x))
+    ((t) t)))
+
+(with-test (:name :non-nil-symbolp-other-pointer)
+  (checked-compile-and-assert
+      ()
+      `(lambda (x)
+         (declare ((or bignum symbol) x))
+         (sb-kernel:non-null-symbol-p x))
+    ((t) t)
+    (((1+ most-positive-fixnum)) nil)
+    ((nil) nil)))
+
+(with-test (:name :list-constant-coalesce)
+  (checked-compile-and-assert
+      ()
+      `(lambda ()
+         (list -13303942049971317088
+               -6714119381493
+               -13303942049971317088))
+    (() '(-13303942049971317088 -6714119381493 -13303942049971317088) :test #'equal)))
+
+(with-test (:name :constraint-loop)
+  (checked-compile-and-assert
+      ()
+      `(lambda (b)
+         (let ((v (elt '(2444 2740 3237 8155 3296 7304 7612 2949) b)))
+           (progv '(*) (list (ceiling v 40))
+             *)))
+    ((3) 204)))

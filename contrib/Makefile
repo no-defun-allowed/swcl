@@ -21,11 +21,17 @@ sb-simple-streams.fasl: sb-posix.fasl sb-bsd-sockets.fasl
 sb-grovel.fasl: asdf.fasl # for building the module, not for our build
 
 # Notes:
-# 1. Not sure if we still need mkdir asdf-cache. Nothing goes there.
-# 2. Invoking $(MAKE) for nested make eliminates a warning about jobserver mode.
-# 3. This could be made to 'tee' into output/building-contrib as it used to,
+# 1. Invoking $(MAKE) for nested make eliminates a warning about jobserver mode.
+# 2. This could be made to 'tee' into output/{something} as it used to,
 #    but it would be more Lispy if not elegant to have 'make-contrib.lisp' bind
 #    *ERROR-OUTPUT* to a broadcast stream of SYS:*STDERR* and a file stream.
-%.fasl:
-	mkdir -p ../obj/asdf-cache/$(basename $(@F))
-	$(MAKE) MODULE_REQUIRES="$^" -C $(basename $(@F)) </dev/null 2>&1
+# 3. The massively overapproximates the set of inputs needed to compile any given contrib
+#    which avoids using per-target lists of files, or any power-user tricks such
+#    as .SECONDEXPANSION and $(wildcard) in this makefile.
+#    I tried all kinds of variations on "%/*.lisp" and nothing worked easily.
+#    I suspect the right solution involves eliminating the other level of Makefile.
+#    Also: a motivated person might be able to figure out how to express a dependence
+#    on src/runtime/sbcl or src/runtime/sbcl.exe depending on the OS.
+#    I'm going to assume that the depending on the core is enough.
+%.fasl: */*.lisp */*/*.lisp ../output/sbcl.core
+	$(MAKE) MODULE_REQUIRES="$(filter %.fasl, $^)" -C $*

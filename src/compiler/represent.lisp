@@ -596,7 +596,9 @@
                        (ir2-block-start-vop block)))))
           (coerce-some-operands (vop-args new) pass-tn
                                 (vop-info-arg-load-scs res)
-                                after)))))
+                                after)
+          (when (vop-info-after-sc-selection (vop-info new))
+            (funcall (vop-info-after-sc-selection (vop-info new)) new))))))
   (values))
 
 (defun maybe-move-from-fixnum+-1 (x y &optional x-tn-ref)
@@ -894,13 +896,19 @@
                             (svref *backend-sc-numbers* sc)))
                      ;; Translate primitive type scs into constant scs
                      ((= sc sb-vm:descriptor-reg-sc-number)
-                      (setf (tn-sc tn)
-                            (svref *backend-sc-numbers* sb-vm:constant-sc-number)
-                            (tn-offset tn)
-                            (or (position (tn-leaf tn)
-                                          (ir2-component-constants 2comp))
-                                (vector-push-extend (tn-leaf tn)
-                                                    (ir2-component-constants 2comp)))))
+                      (cond #+(or arm64 x86-64)
+                            ((eql (tn-value tn) $0f0)
+                             ;; Can be loaded using just SINGLE-FLOAT-WIDETAG.
+                             (setf (tn-sc tn)
+                                   (svref *backend-sc-numbers* sb-vm:immediate-sc-number)))
+                            (t
+                             (setf (tn-sc tn)
+                                   (svref *backend-sc-numbers* sb-vm:constant-sc-number)
+                                   (tn-offset tn)
+                                   (or (position (tn-leaf tn)
+                                                 (ir2-component-constants 2comp))
+                                       (vector-push-extend (tn-leaf tn)
+                                                           (ir2-component-constants 2comp)))))))
                      (t
                       (setf (tn-sc tn)
                             (svref *backend-sc-numbers*

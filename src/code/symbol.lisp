@@ -310,6 +310,11 @@ distinct from the global value. Can also be SETF."
 
 (defun sb-xc:symbol-package (symbol)
   "Return SYMBOL's home package, or NIL if none."
+  (%symbol-package symbol))
+(defun %symbol-package (symbol)
+  ;; only called via transform
+  ;; don't need arg-count check, type check, or vector bounds check.
+  (declare (optimize (safety 0)))
   (let ((id (symbol-package-id symbol)))
     (truly-the (or null package)
                (if (= id +package-id-overflow+)
@@ -373,7 +378,7 @@ distinct from the global value. Can also be SETF."
   (declare (ignorable kind) (type simple-string name))
   ;; Avoid writing to the string header if it's already flagged as readonly, or off-heap.
   (when (and (not (logtest (ash sb-vm:+vector-shareable+ 8) (get-header-data name)))
-             (sb-kernel::dynamic-space-obj-p name))
+             (dynamic-space-obj-p name))
     (logior-array-flags name sb-vm:+vector-shareable+)) ; Set "logically read-only" bit
   (let ((symbol
          (truly-the symbol

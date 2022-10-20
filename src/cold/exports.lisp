@@ -730,7 +730,7 @@ like *STACK-TOP-HINT* and unsupported stuff like *TRACED-FUN-LIST*.")
            "BACKTRACE" "BACKTRACE-AS-LIST"
            ;; Replaced by
 
-           "PRINT-BACKTRACE" "LIST-BACKTRACE"))
+           "MAP-BACKTRACE" "PRINT-BACKTRACE" "LIST-BACKTRACE"))
 
 (defpackage* "SB-EXT"
   (:documentation "public: miscellaneous supported extensions to the ANSI Lisp spec")
@@ -755,7 +755,6 @@ like *STACK-TOP-HINT* and unsupported stuff like *TRACED-FUN-LIST*.")
 
    "CAS"
    "COMPARE-AND-SWAP"
-   "DEFCAS"
    "GET-CAS-EXPANSION"
 
    ;; Other atomic operations and types related to them
@@ -2017,6 +2016,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "CLASS-CLASSOID"
            "CODE-COMPONENT" "CODE-COMPONENT-P"
            "CODE-HEADER-REF" "CODE-HEADER-SET" "CODE-HEADER-WORDS"
+           "CODE-HEADER-FDEFN-RANGE"
            "CODE-JUMP-TABLE-WORDS"
            "CODE-INSTRUCTIONS" "CODE-N-UNBOXED-DATA-BYTES"
            "CODE-OBJECT-SIZE" "CODE-TRAILER-REF"
@@ -2060,6 +2060,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "DOUBLE-FLOAT-LOW-BITS" "DOUBLE-FLOAT-SIGNIFICAND"
            "DSD-ACCESSOR-NAME" "DSD-ALWAYS-BOUNDP" "DSD-DEFAULT" "DSD-INDEX"
            "DSD-NAME" "DSD-RAW-TYPE" "DSD-READ-ONLY" "DSD-TYPE"
+           "DYNAMIC-SPACE-OBJ-P"
            "DYNBIND"
            "FLOAT-WAIT" "DYNAMIC-SPACE-FREE-POINTER" "DYNAMIC-USAGE"
            "EFFECTIVE-FIND-POSITION-TEST"
@@ -2266,6 +2267,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "POINTERP"
            #+(or x86 x86-64) "*PSEUDO-ATOMIC-BITS*"
            "PUNT-PRINT-IF-TOO-LONG"
+           "READ-ONLY-SPACE-OBJ-P"
            "READER-IMPOSSIBLE-NUMBER-ERROR"
            "READER-EOF-ERROR"
            "RESTART-DESIGNATOR"
@@ -2543,6 +2545,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "%FUNCALLABLE-INSTANCE-FUN" "SYMBOL-HASH" "SYMBOL-HASH*"
            "SYMBOL-%INFO" "SYMBOL-DBINFO" "%INFO-REF"
            "%SYMBOL-FUNCTION"
+           "SYMBOL-PACKAGE-ID" "%SYMBOL-PACKAGE"
 
            "EXTENDED-SEQUENCE" "*EXTENDED-SEQUENCE-TYPE*"
            "EXTENDED-SEQUENCE-P"
@@ -3154,7 +3157,7 @@ possibly temporarily, because it might be used internally.")
            "PICK-BEST-SXHASH-BITS"
 
            "MAKE-UNPRINTABLE-OBJECT"
-           "POSSIBLY-BASE-STRINGIZE"
+           "POSSIBLY-BASE-STRINGIZE" "POSSIBLY-BASE-STRINGIZE-TO-HEAP"
            "POWER-OF-TWO-CEILING"
            "PRINT-NOT-READABLE-ERROR"
            "HASH-TABLE-REPLACE"

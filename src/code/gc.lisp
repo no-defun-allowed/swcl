@@ -13,11 +13,6 @@
 
 ;;;; DYNAMIC-USAGE and friends
 
-(defun dynamic-space-obj-p (x) ; X must not be an immediate object
-  (with-pinned-objects (x)
-    (let ((addr (get-lisp-obj-address x)))
-      (< sb-vm:dynamic-space-start addr (sap-int (dynamic-space-free-pointer))))))
-
 (declaim (inline dynamic-usage))
 (defun dynamic-usage ()
   #+mark-region-gc
@@ -91,48 +86,6 @@ and submit it as a patch."
          (with-alien ((sizer (function unsigned unsigned) :extern "primitive_object_size"))
            (with-pinned-objects (object)
              (alien-funcall sizer (get-lisp-obj-address object)))))))
-
-(defun sb-vm:hexdump (thing &optional (n-words nil wordsp)
-                            ;; pass NIL explicitly if T crashes on you
-                            (decode t))
-  (multiple-value-bind (obj addr count)
-      (if (typep thing 'word) ; ambiguous in the edge case, but assume it's
-          ;; an address (though you might be trying to dump a bignum's data)
-          (values nil thing (if wordsp n-words 1))
-          (values
-           thing
-           (logandc2 (get-lisp-obj-address thing) sb-vm:lowtag-mask)
-           (if wordsp
-               n-words
-               (if (and (typep thing 'code-component) (plusp (code-n-entries thing)))
-                   ;; Display up through the first fun header
-                   (+ (code-header-words thing)
-                      (ash (%code-fun-offset thing 0) (- sb-vm:word-shift))
-                      sb-vm:simple-fun-insts-offset)
-                   ;; at most 16 words
-                   (min 16 (ash (primitive-object-size thing) (- sb-vm:word-shift)))))))
-    (with-pinned-objects (obj)
-      (dotimes (i count)
-        (let ((word (sap-ref-word (int-sap addr) (ash i sb-vm:word-shift))))
-          (multiple-value-bind (lispobj ok fmt)
-              (cond ((and (typep thing 'code-component)
-                          (< 1 i (code-header-words thing)))
-                     (values (code-header-ref thing i) t))
-                    #+compact-symbol
-                    ((and (typep thing '(and symbol (not null)))
-                          (= i sb-vm:symbol-name-slot))
-                     (values (list (sb-impl::symbol-package-id thing)
-                                   (symbol-name thing))
-                             t
-                             "{~{~A,~S~}}"))
-                    (decode
-                     (make-lisp-obj word nil)))
-            (let ((*print-lines* 1)
-                  (*print-pretty* t))
-              (format t "~x: ~v,'0x~:[~; = ~@?~]~%"
-                      (+ addr (ash i sb-vm:word-shift))
-                      (* 2 sb-vm:n-word-bytes)
-                      word ok (or fmt "~S") lispobj))))))))
 
 ;;;; GC hooks
 
@@ -280,6 +233,7 @@ run in any thread.")
 (defun post-gc ()
   (sb-impl::finalizer-thread-notify)
   (alien-funcall (extern-alien "empty_thread_recyclebin" (function void)))
+  (setq sb-impl::*pn-cache-force-rehash* t)
   ;; Post-GC actions are invoked synchronously by the GCing thread,
   ;; which is an arbitrary one. If those actions aquire any locks, or are sensitive
   ;; to the state of *ALLOW-WITH-INTERRUPTS*, any deadlocks of what-have-you

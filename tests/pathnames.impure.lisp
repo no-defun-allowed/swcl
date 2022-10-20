@@ -17,14 +17,10 @@
 
 ;;;; Pathname accessors
 
-(with-test (:name :pathname-table-clobbered-on-save)
-  (let ((kvv (sb-impl::hash-table-pairs sb-impl::*pathnames*)))
-    (sb-int:dovector (element kvv)
-      (when (and (eq (heap-allocated-p element) :dynamic)
-                 (pathnamep element)
-                 (not (equal element #P"")))
-        (assert (/= (sb-kernel:generation-of element)
-                    sb-vm:+pseudo-static-generation+))))))
+(defun nuke-pathname-cache ()
+  ;; This is dangerous because it potentially breaks our invariant
+  ;; that EQUAL pathnames are EQ. Of course, that's not actually enforced yet.
+  (fill sb-impl::*pn-cache* nil))
 
 (with-test (:name (pathname :accessors :stream-not-associated-to-file type-error))
   (let ((*stream* (make-string-output-stream)))
@@ -151,6 +147,39 @@
         '("demo0::bla;file.lisp"
           "FOO.txt"
           "SYS:%")))
+
+;; Ensure LOGICAL-PATHNAME signals the required type of error for all
+;; the stream cases enumerated in CLHS.
+(with-test (:name (logical-pathname streams))
+  (flet ((check-it (stream)
+           (assert-error (logical-pathname stream) type-error)))
+    (with-open-stream (in (make-string-input-stream ""))
+      (with-open-stream (out (make-string-output-stream))
+        (check-it in)
+        (check-it out)
+        (with-open-stream (two-way (make-two-way-stream in out))
+          (check-it two-way))
+        (with-open-stream (echo (make-echo-stream in out))
+          (check-it echo))
+        (with-open-stream (broadcast (make-broadcast-stream))
+          (check-it broadcast))
+        (with-open-stream (concatenated (make-concatenated-stream))
+          (check-it concatenated))))
+    ;; CLHS: "If PATHSPEC is a stream, it should be one for which
+    ;; PATHNAME returns a logical pathname".
+    (with-scratch-file (tmp "tmp")
+      (with-open-file (file tmp :direction :output)
+        ;; PATHNAME will return a physical pathname.
+        (check-it file)))))
+
+;; Because FD-STREAM is a subclass of FILE-STREAM (lp#310098), some
+;; file-streams have no associated pathname. In this case PATHNAME
+;; errors; let's ensure LOGICAL-PATHNAME signals the required
+;; TYPE-ERROR. (SB-SYS:*STDIN* is one such FILE-STREAM. If something
+;; changes about SB-SYS:*STDIN* but there are still FILE-STREAMs
+;; without pathnames, pick or make a different one.)
+(with-test (:name (logical-pathname anonymous-file-stream))
+  (assert-error (logical-pathname sb-sys:*stdin*) type-error))
 
 ;;; some things SBCL-0.6.9 used not to parse correctly:
 ;;;
@@ -901,8 +930,7 @@
     (((make-pathname) (make-pathname :version :newest)) t))
   (let ((s "#p\"sys:contrib/f[1-9].txt\""))
     (let ((a (read-from-string s)))
-      ;; result shouldn't depend on the pathnames being EQ
-      (clrhash sb-impl::*pathnames*)
+      (nuke-pathname-cache) ; result shouldn't depend on the pathnames being EQ
       (let ((b (read-from-string s)))
         (assert (not (eq a b)))
         (equalp a b)))))
@@ -912,12 +940,12 @@
 ;;; PATTERN instances which can comprise the subcomponents of a pathname.
 ;;; So make sure the hash is based on the string contents of the pattern.
 ;;; Read pathnames from strings to guarantee that some magic effect of reading
-;;; pathnames doesn't coalesce them. To be especially certain, clear the
-;;; SB-IMPL::*PATHNAMES* table between the read-from-string calls.
+;;; pathnames doesn't coalesce them. To be especially certain, zap the cache
+;;; of pathnames between the read-from-string calls.
 (with-test (:name :wild-pathnames-string-based-hash)
   (let ((string "#p\"file[0-9].txt\""))
     (let ((a (read-from-string string)))
-      (clrhash (clrhash sb-impl::*pathnames*))
+      (nuke-pathname-cache)
       (let ((b (read-from-string string)))
         (assert (not (eq a b)))
         (assert (eql (sxhash a) (sxhash b)))))))
@@ -932,3 +960,97 @@
                    #P"build/bin/foo.tmp"))
     (assert (equal (compile-file-pathname "a/b/srcfile.lsp")
                    #P"a/b/srcfile.fasl"))))
+
+(load "compiler-test-util.lisp")
+(with-test (:name :intern-pathname-non-consy
+            :skipped-on :interpreter)
+  (ctu:assert-no-consing (make-pathname :name "hi" :type "txt")))
+
+(defun pathname-peristence-test ()
+  ;; This probably isn't something that users expect to be able to work,
+  ;; but I want (rather "need") it to.
+  (sb-int:dx-let ((s (make-string 6)))
+    (replace s "mytype")
+    (make-pathname :name "fred" :type s)))
+(compile 'pathname-peristence-test)
+
+(with-test (:name :dx-pathname-parts-dont-crash)
+  (prin1 (pathname-peristence-test)))
+
+(import '(sb-impl::%pathname-host
+          sb-impl::%pathname-dir+hash
+          sb-impl::%pathname-device
+          sb-impl::%pathname-name
+          sb-impl::%pathname-type
+          sb-impl::%pathname-version
+          sb-impl::compare-component))
+
+;;; This is the comparator used for the cache, which is _more_ _stringent_ than
+;;; PATHNAME=. Obviously the regression test has to use the right comparator.
+;;; e.g. version :NEWEST and version NIL are the same according to PATHNAME=
+;;; but not the cache. Honestly though, should the cache distinguish entries that
+;;; are by definition supposed to behave indistinguishably?
+(defun pn-cache-line= (a b)
+  (and (eq (%pathname-host a) (%pathname-host b)) ; Interned
+       (eq (%pathname-dir+hash a) (%pathname-dir+hash b))
+       (compare-component (%pathname-device a) (%pathname-device b))
+       (compare-component (%pathname-name a) (%pathname-name b))
+       (compare-component (%pathname-type a) (%pathname-type b))
+       (eql (%pathname-version a) (%pathname-version b))))
+
+(defun probing-sequence (table pathname)
+  (let* ((mask (1- (length table)))
+         (index (logand (sb-impl::pathname-sxhash pathname) mask))
+         (interval 1)
+         (sequence))
+    (loop
+     (push index sequence)
+     (let ((probed-value (aref table index)))
+       (when (sb-int:unbound-marker-p probed-value) (error "Can't hapepn"))
+       (when (and probed-value (pn-cache-line= probed-value pathname))
+         (return (nreverse sequence)))
+       (setq index (logand (+ index interval) mask))
+       (incf interval)))))
+
+;; recall that MAKE-PATHNAME is unsafely-flushable
+(dotimes (i 20) (opaque-identity (make-pathname :name (write-to-string i) :type "testfile")))
+;; Only fake GC-nullifying an entry that was added specifically for the test
+(defun can-safely-remove-entry (table index)
+  (equal (pathname-type (aref table index)) "testfile"))
+(defun find-worst-pn-cache-entry (&optional print &aux (worst '(0)))
+  (let ((cache sb-impl::*pn-cache*))
+    (dotimes (i (length cache) (cdr worst))
+      (let ((entry (aref cache i)))
+        (when (pathnamep entry)
+          (let ((sequence (probing-sequence cache entry)))
+            (when print (format t "~s -> ~s~%" entry sequence))
+            (when (and (equal (pathname-type entry) "testfile")
+                       (> (length sequence) (car worst))
+                       (some (lambda (x) (can-safely-remove-entry cache x))
+                             (butlast sequence)))
+              (setq worst (cons (length sequence) sequence)))))))))
+
+(with-test (:name :pn-cache-hit-sequence-shorten)
+  (let ((sequence (find-worst-pn-cache-entry)))
+    (unless sequence
+      (error "Expect at least 1 pn-cache collision. Can't test"))
+    (let* ((cache sb-impl::*pn-cache*)
+           (my-index (car (last sequence)))
+           (pathname (aref cache my-index))
+           (index-to-remove
+            (find-if (lambda (x) (can-safely-remove-entry cache x))
+                     sequence))
+           (position-of-index (position index-to-remove sequence)))
+      #+nil
+      (format t "~&Probe for ~S -> ~S, will cull index ~D (~:R position)~%"
+              pathname sequence index-to-remove (1+ position-of-index))
+      (setf (aref cache index-to-remove) nil) ; pretend GC did this
+      ;; seek PATHNAME in the cache again
+      (opaque-identity (make-pathname :name (pathname-name pathname) :type "testfile"))
+      (let ((new-sequence (probing-sequence cache pathname)))
+        ;; I don't know a good black-box test on the probing algorithm, so just
+        ;; assert that the old location of PATHNAME now holds a tombstone.
+        (assert (null (aref cache my-index)))
+        ;; should have been found in fewer probes
+        (assert (equal (subseq sequence 0 (1+ position-of-index))
+                       new-sequence))))))

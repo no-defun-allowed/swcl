@@ -233,6 +233,8 @@
         *cl-package*
         p)))
 
+(defun possibly-base-stringize (s) (coerce (the string s) 'simple-base-string))
+
 ;;; printing structures
 
 (defun default-structure-print (structure stream depth)
@@ -329,6 +331,9 @@
 ;;;; Variables which have meaning only to the cross-compiler, defined here
 ;;;; in lieu of #+sb-xc-host elsewere which messes up toplevel form numbers.
 (in-package "SB-C")
+
+;;; For macro lambdas that are processed by the host
+(declaim (declaration top-level-form))
 
 ;;; The opposite of *undefined-fun-allowlist* - if certain full calls
 ;;; are seen, it is probably the result of a missed transform and/or

@@ -48,7 +48,7 @@
   (:args (symbol :scs (descriptor-reg)))
   (:results (result :scs (unsigned-reg)))
   (:result-types positive-fixnum)
-  (:translate sb-impl::symbol-package-id)
+  (:translate symbol-package-id)
   (:policy :fast-safe)
   (:generator 5
    (inst cmpld symbol null-tn)
@@ -540,7 +540,7 @@
 #-sb-xc-host
 (defun code-header-ref (code index)
   (declare (index index))
-  (binding* (((start count) (sb-vm::code-header-fdefn-range code))
+  (binding* (((start count) (code-header-fdefn-range code))
              (end (+ start count)))
     (values (if (and (>= index start) (< index end))
                 (%primitive code-header-ref+tag code index other-pointer-lowtag)

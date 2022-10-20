@@ -344,12 +344,12 @@
   (test-this-object 'equal (find-class 'class)))
 
 (with-test (:name :remhash-eq-comparable-in-equalp-table)
-  ;; EQUALP tables worked a little better, because more objects have
-  ;; are hashed non-address-sensitively by EQUALP-HASH relative to EQUAL-HASH,
+  ;; EQUALP tables worked a little better, because more objects are
+  ;; hashed non-address-sensitively by EQUALP-HASH relative to EQUAL-HASH,
   ;; and those objects have comparators that descend.
   ;; However, there are still some things hashed by address:
   (test-this-object 'equalp (make-weak-pointer "bleep"))
-  (test-this-object 'equalp (sb-int:find-fdefn 'cons))
+  (test-this-object 'equalp (sb-int:find-fdefn '(setf car)))
   (test-this-object 'equalp #'car)
   (test-this-object 'equalp (constantly 5))
   (test-this-object 'equal (sb-sys:int-sap 0)))
@@ -368,16 +368,15 @@
     (assert (eql (setf (gethash 3d0 table) 1)
                  (gethash 3   table)))))
 
+;;; Check that hashing a stringlike thing which is possibly NIL uses
+;;; a specialized hasher (after prechecking for NIL via the transform).
 (with-test (:name :transform-sxhash-string-and-bv)
-  (let ((f (compile
-            nil
-            '(lambda (x y)
-               (logxor (ash (sxhash (truly-the (or string null) x)) -3)
-                       (sxhash (truly-the (or bit-vector null) y))))))
-        (fdefn1 (sb-int:find-fdefn 'sb-kernel:%sxhash-string))
-        (fdefn2 (sb-int:find-fdefn 'sb-kernel:%sxhash-bit-vector)))
-    (every (lambda (x) (member x `(,fdefn1 ,fdefn2)))
-           (ctu:find-code-constants f))))
+  (dolist (case `((bit-vector . ,#'sb-kernel:%sxhash-bit-vector)
+                  (string . ,#'sb-kernel:%sxhash-string)
+                  (simple-bit-vector . ,#'sb-kernel:%sxhash-simple-bit-vector)
+                  (simple-string . ,#'sb-kernel:%sxhash-simple-string)))
+    (let ((f (compile nil `(lambda (x) (sxhash (truly-the (or null ,(car case)) x))))))
+      (assert (eq (car (ctu:find-named-callees f)) (cdr case))))))
 
 (with-test (:name :sxhash-on-displaced-string
             :fails-on :sbcl)

@@ -612,7 +612,7 @@
 
                ,@(unless variable
                    `((args :more t ,@(unless (eq args :fixed)
-                                       '(:scs (descriptor-reg)))))))
+                                       '(:scs (descriptor-reg control-stack)))))))
 
                ,@(when (eq return :fixed)
                    '((:results (values :more t))))
@@ -844,8 +844,11 @@
       ;; a :STATIC-CALL fixup is the address of the entry point of
       ;; the function itself, and a :FDEFN-CALL fixup is the address
       ;; of the JMP instruction embedded in the header for the named FDEFN.
-  (let* ((fixup (make-fixup name
-                 (if (static-fdefn-offset name) :static-call :fdefn-call)))
+  (when (static-fdefn-offset name)
+    (let ((fixup (make-fixup name :static-call)))
+      (return-from emit-direct-call
+        (inst* instruction (if (sb-c::code-immobile-p node) fixup (ea fixup))))))
+  (let* ((fixup (make-fixup name :fdefn-call))
          (target
               (if (and (sb-c::code-immobile-p node)
                        (not step-instrumenting))

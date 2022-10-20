@@ -34,16 +34,13 @@
     (declare (ignore x))
     (values t nil)))
 
-(defun find-named-callees (fun &key (type t) (name nil namep))
-  (let ((code (fun-code-header (%fun-fun fun))))
-    (loop for i from sb-vm:code-constants-offset below (code-header-words code)
+(defun find-named-callees (fun &key (name nil namep))
+  (sb-int:binding* ((code (fun-code-header (%fun-fun fun)))
+                    ((start count) (sb-kernel:code-header-fdefn-range code)))
+    (loop for i from start repeat count
           for c = (code-header-ref code i)
-          when (and (typep c 'sb-impl::fdefn)
-                    (let ((fun (sb-impl::fdefn-fun c)))
-                      (and (typep fun type)
-                           (or (not namep)
-                               (equal name (sb-impl::fdefn-name c))))))
-          collect (sb-impl::fdefn-fun c))))
+          when (or (not namep) (equal name (sb-kernel:fdefn-name c)))
+          collect (sb-kernel:fdefn-fun c))))
 
 (defun find-anonymous-callees (fun &key (type 'function))
   (let ((code (fun-code-header (%fun-fun fun))))
