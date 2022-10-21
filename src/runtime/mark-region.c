@@ -513,14 +513,17 @@ static boolean threads_did_any_work;
 static void trace_step() {
   uword_t local_traced = 0;
   boolean did_anything = 0;
+  uword_t backoff = 1;
   while (atomic_load(&blocks_in_flight)) {
     /* Spin if we're out of work, since there isn't anything more
      * intelligent we can do, I think. */
     struct Qblock *block;
     if (!work_to_do(&block)) {
-      pthread_yield();
+      usleep(backoff);
+      backoff *= 2;
       continue;
     }
+    backoff = 1;
     did_anything = 1;
     int count = block->count;
     for (int n = 0; n < count; n++) {
