@@ -25,6 +25,7 @@
 #include "incremental-compact.h"
 #include "tiny-lock.h"
 #include "gc-thread-pool.h"
+#include "queue-suballocator.h"
 
 #include "genesis/cons.h"
 #include "genesis/gc-tables.h"
@@ -359,8 +360,7 @@ static struct Qblock *grab_qblock() {
     block = recycle_list;
     recycle_list = recycle_list->next;
   } else {
-    METER(alloc, block = (struct Qblock*)os_allocate(QBLOCK_BYTES));
-    if (!block) lose("Failed to allocate new mark-queue block");
+    METER(alloc, block = suballoc_allocate());
   }
   block->count = 0;
   atomic_fetch_add(&blocks_in_flight, 1);
@@ -372,13 +372,6 @@ static void recycle_qblock(struct Qblock *block) {
   block->next = recycle_list;
   recycle_list = block;
   atomic_fetch_add(&blocks_in_flight, -1);
-}
-static void free_mark_list() {
-  while (recycle_list) {
-    struct Qblock *old = recycle_list;
-    recycle_list = recycle_list->next;
-    os_deallocate((char*)old, QBLOCK_BYTES);
-  }
 }
 
 static void add_words_used(void *where, uword_t count) {
@@ -554,13 +547,14 @@ static void trace_step() {
     recycle_qblock(block);
   }
   if (did_anything) threads_did_any_work = 1;
-  free_mark_list();
   atomic_fetch_add(&traced, local_traced);
+  recycle_list = NULL;
 }
 
 static boolean parallel_trace_step() {
   threads_did_any_work = 0;
   run_on_thread_pool(trace_step);
+  suballoc_release();
   return threads_did_any_work;
 }
 
