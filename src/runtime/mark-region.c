@@ -37,7 +37,6 @@
 
 //#define DEBUG
 //#define LOG_COLLECTIONS
-#define LOG_METERS
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -51,14 +50,22 @@
 
 /* Metering */
 static struct {
-  uword_t consider; uword_t scavenge; uword_t trace;
+  uword_t consider; uword_t scavenge; uword_t trace; uword_t alloc;
   uword_t sweep; uword_t sweep_lines; uword_t sweep_pages;
   uword_t compact; uword_t raise; }
   meters = { 0 };
 #define METER(name, action) \
   { uword_t before = get_time(); \
   action; \
-  meters.name += get_time() - before; }
+  atomic_fetch_add(&meters.name, get_time() - before); }
+
+void mr_print_meters() {
+  fprintf(stderr, "%ld consider %ld scavenge %ld trace (%ld alloc) %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
+          meters.consider, meters.scavenge,
+          meters.trace, meters.alloc,
+          meters.sweep, meters.sweep_lines, meters.sweep_pages,
+          meters.compact, meters.raise);
+}
 
 static uword_t get_time() {
   struct timespec t;
@@ -352,7 +359,7 @@ static struct Qblock *grab_qblock() {
     block = recycle_list;
     recycle_list = recycle_list->next;
   } else {
-    block = (struct Qblock*)os_allocate(QBLOCK_BYTES);
+    METER(alloc, block = (struct Qblock*)os_allocate(QBLOCK_BYTES));
     if (!block) lose("Failed to allocate new mark-queue block");
   }
   block->count = 0;
@@ -1051,13 +1058,7 @@ void mr_collect_garbage(boolean raise) {
           dirty_root_objects, root_objects_checked,
           next_free_page, raise ? ", raised" : "");
 #endif
-#ifdef LOG_METERS
-  if (gencgc_verbose)
-  fprintf(stderr, "%ld consider %ld scavenge %ld trace %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
-          meters.consider, meters.scavenge, meters.trace,
-          meters.sweep, meters.sweep_lines, meters.sweep_pages,
-          meters.compact, meters.raise);
-#endif
+  if (gencgc_verbose) mr_print_meters();
   // count_line_values("Post GC");
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
 }

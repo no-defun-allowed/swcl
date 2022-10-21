@@ -20,7 +20,7 @@ struct Qblock {
 
 #if 1
 #ifdef LISP_FEATURE_MARK_REGION_GC
-#define QBLOCK_BYTES (sizeof(lispobj) << 9)
+#define QBLOCK_BYTES (sizeof(lispobj) << 10)
 #else
 #define QBLOCK_BYTES GENCGC_PAGE_BYTES
 #endif
