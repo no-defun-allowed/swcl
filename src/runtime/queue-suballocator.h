@@ -20,16 +20,22 @@ static struct suballocator_chunk chunks[CHUNKS + 1] = { 0 };
 static unsigned int current_chunk = 0;
 static lock_t suballocator_lock = LOCK_INITIALIZER;
 
+static boolean chunk_has_space(int index) {
+  return chunks[index].free < chunks[index].start + chunks[index].size;
+}
+
 /* Free all memory used by the mark stack, giving back to the OS. */
 static void suballoc_release() {
   for (int i = 0; i < CHUNKS; i++) {
     if (chunks[i].start) {
-      if (chunks[i].age >= AGE_LIMIT)
+      if (chunks[i].age >= AGE_LIMIT) {
         os_deallocate((void*)chunks[i].start, chunks[i].size);
-      else
+        chunks[i].start = chunks[i].free = chunks[i].size = 0;
+      } else {
         chunks[i].age++;
+        chunks[i].free = chunks[i].start;
+      }
     }
-    chunks[i].start = chunks[i].free = chunks[i].size = 0;
   }
   current_chunk = 0;
 }
@@ -38,16 +44,20 @@ static struct Qblock *suballoc_allocate() {
   acquire_lock(&suballocator_lock);
   struct suballocator_chunk *chunk = chunks + current_chunk;
   /* Check if we need to make a new chunk first. */
-  if (chunk->free == chunk->start + chunk->size) {
+  if (!chunk_has_space(current_chunk)) {
     /* This skips over chunk[0]. Oh well. */
     if (current_chunk == CHUNKS) lose("Ran out of suballocator chunks.");
-    uword_t size = INITIAL_SIZE << current_chunk++;
-    uword_t address = (uword_t)os_allocate(size);
-    if (!address) lose("Failed to allocate suballocator chunk with %ld bytes.", size);
-    // fprintf(stderr, "alloc %ld at %ld\n", size, address);
+    current_chunk++;
     chunk = chunks + current_chunk;
-    chunk->start = chunk->free = address;
-    chunk->size = size;
+    /* Check if we can reuse a chunk which was allocated before. */
+    if (!chunk_has_space(current_chunk)) {
+      uword_t size = INITIAL_SIZE << current_chunk;
+      uword_t address = (uword_t)os_allocate(size);
+      if (!address) lose("Failed to allocate suballocator chunk with %ld bytes.", size);
+      //fprintf(stderr, "alloc #%d: %ld at %ld\n", current_chunk, size, address);
+      chunk->start = chunk->free = address;
+      chunk->size = size;
+    }
     chunk->age = 0;
   }
 
@@ -55,5 +65,6 @@ static struct Qblock *suballoc_allocate() {
   uword_t where = chunk->free;
   chunk->free += QBLOCK_BYTES;
   release_lock(&suballocator_lock);
+  gc_assert(where != NULL);
   return (struct Qblock*)where;
 }
