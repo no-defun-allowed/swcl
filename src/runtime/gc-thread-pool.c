@@ -37,7 +37,7 @@ void thread_pool_init() {
     if (tail == str) lose("%s isn't a number of GC threads", str);
   }
   threads = successful_malloc(sizeof(pthread_t) * gc_threads);
-  
+
   for (int i = 0; i < gc_threads; i++)
     if (pthread_create(threads + i, NULL, worker, NULL))
       lose("Failed to create GC thread #%d", i);

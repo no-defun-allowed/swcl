@@ -55,13 +55,15 @@ static struct {
   uword_t sweep; uword_t sweep_lines; uword_t sweep_pages;
   uword_t compact; uword_t raise; }
   meters = { 0 };
+static unsigned int collection = 0;
 #define METER(name, action) \
   { uword_t before = get_time(); \
   action; \
   atomic_fetch_add(&meters.name, get_time() - before); }
 
 void mr_print_meters() {
-  fprintf(stderr, "%ld consider %ld scavenge %ld trace (%ld alloc) %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
+  fprintf(stderr, "collection %d: %ld consider %ld scavenge %ld trace (%ld alloc) %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
+          collection,
           meters.consider, meters.scavenge,
           meters.trace, meters.alloc,
           meters.sweep, meters.sweep_lines, meters.sweep_pages,
@@ -1013,18 +1015,15 @@ static void raise_survivors() {
   generations[gen].bytes_allocated = 0;
 }
 
-static unsigned int collection = 0;
-
 void mrgc_init() {
   allocate_bitmaps();
   thread_pool_init();
 }
 
 void mr_pre_gc(generation_index_t generation) {
-  // kill(getpid(), SIGXCPU);
-  // count_line_values("Pre GC");
+  collection++;
 #ifdef LOG_COLLECTIONS
-  fprintf(stderr, "\n[GC #%4d gen %d %5luM / %5luM ", ++collection, generation,
+  fprintf(stderr, "\n[GC #%4d gen %d %5luM / %5luM ", collection, generation,
           generations[generation].bytes_allocated >> 20,
           bytes_allocated >> 20);
 #endif
@@ -1053,7 +1052,6 @@ void mr_collect_garbage(boolean raise) {
           next_free_page, raise ? ", raised" : "");
 #endif
   if (gencgc_verbose) mr_print_meters();
-  // count_line_values("Post GC");
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
 }
 

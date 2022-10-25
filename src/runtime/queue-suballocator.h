@@ -54,7 +54,7 @@ static struct Qblock *suballoc_allocate() {
       uword_t size = INITIAL_SIZE << current_chunk;
       uword_t address = (uword_t)os_allocate(size);
       if (!address) lose("Failed to allocate suballocator chunk with %ld bytes.", size);
-      //fprintf(stderr, "alloc #%d: %ld at %ld\n", current_chunk, size, address);
+      fprintf(stderr, "alloc #%d: %ld at %ld\n", current_chunk, size, address);
       chunk->start = chunk->free = address;
       chunk->size = size;
     }
@@ -62,9 +62,9 @@ static struct Qblock *suballoc_allocate() {
   }
 
   /* Now get another block from the current chunk. */
-  uword_t where = chunk->free;
+  struct Qblock *where = (struct Qblock*)chunk->free;
+  gc_assert(where != NULL);
   chunk->free += QBLOCK_BYTES;
   release_lock(&suballocator_lock);
-  gc_assert(where != NULL);
-  return (struct Qblock*)where;
+  return where;
 }
