@@ -51,7 +51,8 @@
 
 /* Metering */
 static struct {
-  uword_t consider; uword_t scavenge; uword_t trace; uword_t alloc;
+  uword_t consider; uword_t scavenge;
+  uword_t trace; uword_t trace_alive; uword_t trace_running;
   uword_t sweep; uword_t sweep_lines; uword_t sweep_pages;
   uword_t compact; uword_t raise; }
   meters = { 0 };
@@ -63,9 +64,10 @@ static unsigned int collection = 0;
 
 void mr_print_meters() {
 #define NORM(x) (collection ? meters.x / collection : 0)
-  fprintf(stderr, "collection %d: %ldus consider %ld scavenge %ld trace (%ld alloc) %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
+  fprintf(stderr, "collection %d: %ldus consider %ld scavenge %ld trace (%ld alive %ld running) %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
           collection,
-          NORM(consider), NORM(scavenge), NORM(trace), NORM(alloc),
+          NORM(consider), NORM(scavenge),
+          NORM(trace), NORM(trace_alive), NORM(trace_running),
           NORM(sweep), NORM(sweep_lines), NORM(sweep_pages),
           NORM(compact), NORM(raise));
 #undef NORM
@@ -363,7 +365,7 @@ static struct Qblock *grab_qblock() {
     block = recycle_list;
     recycle_list = recycle_list->next;
   } else {
-    METER(alloc, block = suballoc_allocate());
+    block = suballoc_allocate();
   }
   block->count = 0;
   atomic_fetch_add(&blocks_in_flight, 1);
@@ -515,6 +517,7 @@ static uword_t traced;          /* Number of objects traced. */
 static boolean threads_did_any_work;
 static void trace_step() {
   uword_t local_traced = 0;
+  uword_t start_time = get_time();
   boolean did_anything = 0;
   uword_t backoff = 1;
   while (atomic_load(&blocks_in_flight)) {
@@ -526,6 +529,7 @@ static void trace_step() {
       backoff *= 2;
       continue;
     }
+    uword_t trace_start = get_time();
     backoff = 1;
     did_anything = 1;
     int count = block->count;
@@ -548,9 +552,11 @@ static void trace_step() {
       }
     }
     recycle_qblock(block);
+    atomic_fetch_add(&meters.trace_running, get_time() - trace_start);
   }
   if (did_anything) threads_did_any_work = 1;
   atomic_fetch_add(&traced, local_traced);
+  atomic_fetch_add(&meters.trace_alive, get_time() - start_time);
   recycle_list = NULL;
 }
 
