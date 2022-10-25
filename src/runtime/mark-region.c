@@ -516,8 +516,7 @@ static boolean work_to_do(struct Qblock **where) {
 static uword_t traced;          /* Number of objects traced. */
 static boolean threads_did_any_work;
 static void trace_step() {
-  uword_t local_traced = 0;
-  uword_t start_time = get_time();
+  uword_t local_traced = 0, start_time = get_time(), running_time = 0;
   boolean did_anything = 0;
   uword_t backoff = 1;
   while (atomic_load(&blocks_in_flight)) {
@@ -552,11 +551,12 @@ static void trace_step() {
       }
     }
     recycle_qblock(block);
-    atomic_fetch_add(&meters.trace_running, get_time() - trace_start);
+    running_time += get_time() - trace_start;
   }
   if (did_anything) threads_did_any_work = 1;
   atomic_fetch_add(&traced, local_traced);
   atomic_fetch_add(&meters.trace_alive, get_time() - start_time);
+  atomic_fetch_add(&meters.trace_running, running_time);
   recycle_list = NULL;
 }
 
