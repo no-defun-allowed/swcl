@@ -62,12 +62,13 @@ static unsigned int collection = 0;
   atomic_fetch_add(&meters.name, get_time() - before); }
 
 void mr_print_meters() {
-  fprintf(stderr, "collection %d: %ld consider %ld scavenge %ld trace (%ld alloc) %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
+#define NORM(x) (collection ? meters.x / collection : 0)
+  fprintf(stderr, "collection %d: %ldus consider %ld scavenge %ld trace (%ld alloc) %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
           collection,
-          meters.consider, meters.scavenge,
-          meters.trace, meters.alloc,
-          meters.sweep, meters.sweep_lines, meters.sweep_pages,
-          meters.compact, meters.raise);
+          NORM(consider), NORM(scavenge), NORM(trace), NORM(alloc),
+          NORM(sweep), NORM(sweep_lines), NORM(sweep_pages),
+          NORM(compact), NORM(raise));
+#undef NORM
 }
 
 static uword_t get_time() {
