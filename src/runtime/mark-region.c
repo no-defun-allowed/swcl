@@ -433,17 +433,19 @@ static void mark(lispobj object) {
 #endif
 
     /* Enqueue onto mark queue */
-    if (!output_block || output_block->count == QBLOCK_CAPACITY) {
-      struct Qblock *next = grab_qblock();
-      if (output_block) {
-        acquire_lock(&grey_list_lock);
-        output_block->next = grey_list;
-        grey_list = output_block;
-        release_lock(&grey_list_lock);
+    if (set_mark_bit(object)) {
+      if (!output_block || output_block->count == QBLOCK_CAPACITY) {
+        struct Qblock *next = grab_qblock();
+        if (output_block) {
+          acquire_lock(&grey_list_lock);
+          output_block->next = grey_list;
+          grey_list = output_block;
+          release_lock(&grey_list_lock);
+        }
+        output_block = next;
       }
-      output_block = next;
+      output_block->elements[output_block->count++] = object;
     }
-    output_block->elements[output_block->count++] = object;
   }
 }
 
@@ -479,6 +481,7 @@ static void trace_object(lispobj object) {
         next = make_lispobj(base, OTHER_POINTER_LOWTAG);
         np = base;
       }
+      /* Inlined logic from mark() */
       if (!pointer_survived_gc_yet(next) && set_mark_bit(next)) {
         if (listp(next))
           mark_cons_line(CONS(next));
@@ -536,19 +539,17 @@ static void trace_step() {
       lispobj obj = block->elements[n];
       if (n + PREFETCH_DISTANCE < count)
         __builtin_prefetch(native_pointer(block->elements[n + PREFETCH_DISTANCE]));
-      if (set_mark_bit(obj)) {
-        local_traced++;
-        /* Per the Immix paper, we mark lines while tracing, to
-         * cover memory latency. We also would need to compute object size,
-         * which reads object data most of the time, so doing it while tracing
-         * an object (when we also have to read data) is better than doing it
-         * while marking a pointer (when we don't have to read data). */
-        if (listp(obj))
-          mark_cons_line(CONS(obj));
-        else
-          mark_lines(native_pointer(obj));
-        trace_object(obj);
-      }
+      local_traced++;
+      /* Per the Immix paper, we mark lines while tracing, to
+       * cover memory latency. We also would need to compute object size,
+       * which reads object data most of the time, so doing it while tracing
+       * an object (when we also have to read data) is better than doing it
+       * while marking a pointer (when we don't have to read data). */
+      if (listp(obj))
+        mark_cons_line(CONS(obj));
+      else
+        mark_lines(native_pointer(obj));
+      trace_object(obj);
     }
     recycle_qblock(block);
     running_time += get_time() - trace_start;
