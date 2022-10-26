@@ -5,7 +5,7 @@
 #include <semaphore.h>
 #include "interr.h"
 
-static int gc_threads;
+static unsigned int gc_threads;
 static pthread_t *threads;
 static sem_t start_semaphore;
 static sem_t join_semaphore;
@@ -33,12 +33,13 @@ void thread_pool_init() {
   if (str == NULL) {
     gc_threads = 3;
   } else {
-    gc_threads = strtoul(str, &tail, 10);
-    if (tail == str) lose("%s isn't a number of GC threads", str);
+    unsigned long parse = strtoul(str, &tail, 10);
+    if (tail == str || parse >= 256) lose("%s isn't a number of GC threads", str);
+    gc_threads = parse;
   }
   threads = successful_malloc(sizeof(pthread_t) * gc_threads);
 
-  for (int i = 0; i < gc_threads; i++)
+  for (unsigned int i = 0; i < gc_threads; i++)
     if (pthread_create(threads + i, NULL, worker, NULL))
       lose("Failed to create GC thread #%d", i);
     else
@@ -46,11 +47,11 @@ void thread_pool_init() {
 }
 
 static void wake_gc_threads() {
-  for (int i = 0; i < gc_threads; i++) sem_post(&start_semaphore);
+  for (unsigned int i = 0; i < gc_threads; i++) sem_post(&start_semaphore);
 }
 
 static void join_gc_threads() {
-  for (int i = 0; i < gc_threads; i++) sem_wait(&join_semaphore);
+  for (unsigned int i = 0; i < gc_threads; i++) sem_wait(&join_semaphore);
 }
 
 void run_on_thread_pool(void (*act)(void)) {

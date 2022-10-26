@@ -917,6 +917,7 @@ static void scavenge_root_object(generation_index_t gen, lispobj *where) {
 
 #define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
 static uword_t root_objects_checked = 0, dirty_root_objects = 0;
+CPU_SPLIT
 static void scavenge_root_gens_worker() {
   page_index_t claim, limit;
   uword_t local_root_objects_checked = 0, local_dirty_root_objects = 0;
