@@ -99,14 +99,8 @@ run in any thread.")
 
 (define-alien-routine collect-garbage int (last-gen int))
 
-#+(or sb-thread sb-safepoint)
-(progn
-  (define-alien-routine gc-stop-the-world void)
-  (define-alien-routine gc-start-the-world void))
-#-(or sb-thread sb-safepoint)
-(progn
-  (defun gc-stop-the-world ())
-  (defun gc-start-the-world ()))
+(define-alien-routine gc-stop-the-world void)
+(define-alien-routine gc-start-the-world void)
 
 (declaim (inline dynamic-space-size))
 (defun dynamic-space-size ()
@@ -233,7 +227,8 @@ run in any thread.")
 (defun post-gc ()
   (sb-impl::finalizer-thread-notify)
   (alien-funcall (extern-alien "empty_thread_recyclebin" (function void)))
-  (setq sb-impl::*pn-cache-force-rehash* t)
+  ;; This is probably the same as detecting a change in *GC-EPOCH*. Maybe remove?
+  (setq sb-impl::*pn-cache-force-recount* t)
   ;; Post-GC actions are invoked synchronously by the GCing thread,
   ;; which is an arbitrary one. If those actions aquire any locks, or are sensitive
   ;; to the state of *ALLOW-WITH-INTERRUPTS*, any deadlocks of what-have-you

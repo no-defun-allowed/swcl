@@ -134,6 +134,9 @@
     (let ((data temp)
           (patch-loc (gen-label))
           (skip-instrumentation (gen-label)))
+      ;; Don't count allocations to the arena
+      (inst cmp :qword (thread-slot-ea thread-arena-slot) 0)
+      (inst jmp :nz skip-instrumentation)
       (inst mov data (thread-slot-ea thread-profile-data-slot thread-temp))
       (inst test data data)
       ;; This instruction is modified to "JMP :z" when profiling is
@@ -164,6 +167,23 @@
              (inst .skip 8 :long-nop)))
       (emit-label skip-instrumentation))))
 
+(defun system-tlab-p (type node)
+  #-system-tlabs (declare (ignore type node))
+  #+system-tlabs
+  (or sb-c::*force-system-tlab*
+      (and (sb-kernel::wrapper-p type)
+           (let ((typename (classoid-name (wrapper-classoid type))))
+             (or (sb-xc:subtypep typename 'ctype)
+                 (eq typename 'sb-thread::avlnode))))
+      (and node
+           (named-let search-env ((env (sb-c::node-lexenv node)))
+             (dolist (data (sb-c::lexenv-user-data env)
+                           (and (sb-c::lexenv-parent env)
+                                (search-env (sb-c::lexenv-parent env))))
+               (when (and (eq (first data) :declare)
+                          (eq (second data) 'sb-c::tlab))
+                 (return (eq (third data) :system))))))))
+
 ;;; An arbitrary marker for the cons primitive-type, not to be confused
 ;;; with the CONS-TYPE in our type-algebraic sense. Mostly just informs
 ;;; the allocator to use cons_tlab.
@@ -181,23 +201,9 @@
 ;;; 1. what to allocate: type, size, lowtag describe the object
 ;;; 2. where to put the result
 ;;; 3. node (for determining immobile-space-p) and a scratch register or two
-(defvar *use-system-tlab* nil)
-(defun system-tlab-p (node)
-  #-system-tlabs (declare (ignore node))
-  #+system-tlabs
-  (or *use-system-tlab*
-      (and node
-           (named-let search-env ((env (sb-c::node-lexenv node)))
-             (dolist (data (sb-c::lexenv-user-data env)
-                           (and (sb-c::lexenv-parent env)
-                                (search-env (sb-c::lexenv-parent env))))
-               (when (and (eq (first data) :declare)
-                          (eq (second data) 'sb-c::tlab))
-                 (return (eq (third data) :system))))))))
-
 (defun allocation (type size lowtag alloc-tn node temp thread-temp
                    &key overflow (cells 1)
-                   &aux (systemp (system-tlab-p node)))
+                   &aux (systemp (system-tlab-p type node)))
   (declare (ignorable thread-temp cells))
   (flet ((fallback (size)
            ;; Call an allocator trampoline and get the result in the proper register.
@@ -295,24 +301,25 @@
   ;; Note that ALLOCATE can be called to allocate multiple objects at once,
   ;; but this is (currently) only done with cons cells.
   #+mark-region-gc
-  (let ((temp* (or temp (if (location= alloc-tn rax-tn) rbx-tn rax-tn))))
-    (when (null temp) (inst push temp*))
-    (inst mov temp*
-          (thread-slot-ea thread-allocation-bitmap-base-slot
-                          #+gs-seg thread-temp))
-    (inst shr :qword alloc-tn n-lowtag-bits)
-    ;; Mark all the cons cells, if the caller wants that.
-    (dotimes (n cells)
-      (inst bts :qword (ea temp*) alloc-tn)
-      (unless (= n (1- cells))
-        (inst inc alloc-tn)))
-    ;; Undo the decrements, if there were any.
-    (when (> cells 1)
-      (inst sub alloc-tn (1- cells)))
-    ;; Undo the shift.
-    (inst shl :qword alloc-tn n-lowtag-bits)
-    (unless (zerop lowtag) (inst or :byte alloc-tn lowtag))
-    (when (null temp) (inst pop temp*)))
+  (unless systemp
+    (let ((temp* (or temp (if (location= alloc-tn rax-tn) rbx-tn rax-tn))))
+      (when (null temp) (inst push temp*))
+      (inst mov temp*
+            (thread-slot-ea thread-allocation-bitmap-base-slot
+                            #+gs-seg thread-temp))
+      (inst shr :qword alloc-tn n-lowtag-bits)
+      ;; Mark all the cons cells, if the caller wants that.
+      (dotimes (n cells)
+        (inst bts :qword (ea temp*) alloc-tn)
+        (unless (= n (1- cells))
+          (inst inc alloc-tn)))
+      ;; Undo the decrements, if there were any.
+      (when (> cells 1)
+        (inst sub alloc-tn (1- cells)))
+      ;; Undo the shift.
+      (inst shl :qword alloc-tn n-lowtag-bits)
+      (unless (zerop lowtag) (inst or :byte alloc-tn lowtag))
+      (when (null temp) (inst pop temp*))))
   t)
 
 ;;; Allocate an other-pointer object of fixed NWORDS with a single-word
@@ -356,20 +363,21 @@
                          (constant
                           (unless (and (constant-tn-p ,tn)
                                        (eql prev-constant (tn-value ,tn)))
-                            (setf prev-constant (and (constant-tn-p ,tn)
-                                                     (tn-value ,tn)))
+                            (setf prev-constant (if (constant-tn-p ,tn)
+                                                    (tn-value ,tn)
+                                                    temp))
                             (move temp ,tn))
                           temp)
+                         (immediate
+                          (if (eql prev-constant (setf immediate-value (tn-value ,tn)))
+                              temp
+                              (encode-value-if-immediate ,tn)))
                          (control-stack
-                          (setf prev-constant nil)
+                          (setf prev-constant temp) ;; a non-eq initial value
                           (move temp ,tn)
                           temp)
                          (t
-                          (setf immediate-value (encode-value-if-immediate ,tn))
-                          (if (and (sc-is ,tn immediate)
-                                   (eql prev-constant immediate-value))
-                              temp
-                              immediate-value)))))
+                          ,tn))))
                 (when (eq (storew reg ,list ,slot ,lowtag temp)
                           temp)
                   (setf prev-constant immediate-value)))))
@@ -385,7 +393,7 @@
   (:generator 10
     (let ((stack-allocate-p (node-stack-allocate-p node))
           (nbytes (* cons-size n-word-bytes))
-          prev-constant)
+          (prev-constant temp)) ;; a non-eq initial value
       (unless stack-allocate-p
         (instrument-alloc +cons-primtype+ nbytes node (list temp alloc) thread-tn))
       (pseudo-atomic (:elide-if stack-allocate-p :thread-tn thread-tn)
@@ -411,14 +419,14 @@
   (:policy :fast-safe)
   (:generator 10
     (let ((nbytes (* cons-size 2 n-word-bytes))
-          prev-constant)
+          (prev-constant temp))
       (instrument-alloc +cons-primtype+ nbytes node (list temp alloc) thread-tn)
       (pseudo-atomic (:thread-tn thread-tn)
         (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn :cells 2)
         (store-slot tail alloc cons-cdr-slot 0)
         (inst lea temp (ea (+ 16 list-pointer-lowtag) alloc))
         (store-slot temp alloc cons-car-slot 0)
-        (setf prev-constant nil)
+        (setf prev-constant temp)
         (let ((pair temp) (temp alloc)) ; give STORE-SLOT the ALLOC as its TEMP
           (store-slot key pair)
           (store-slot val pair cons-cdr-slot))
@@ -442,7 +450,7 @@
   (:generator 10
     (let ((stack-allocate-p (node-stack-allocate-p node))
           (nbytes (* cons-size 2 n-word-bytes))
-          prev-constant)
+          (prev-constant temp))
       (unless stack-allocate-p
         (instrument-alloc +cons-primtype+ nbytes node (list temp alloc) thread-tn))
       (pseudo-atomic (:elide-if stack-allocate-p :thread-tn thread-tn)
@@ -470,7 +478,7 @@
     (aver (>= cons-cells 3)) ; prevent regressions in ir2tran's vop selection
     (let ((stack-allocate-p (node-stack-allocate-p node))
           (size (* (pad-data-block cons-size) cons-cells))
-          prev-constant)
+          (prev-constant temp))
       (unless stack-allocate-p
         (instrument-alloc +cons-primtype+ size node (list ptr temp) thread-tn))
       (pseudo-atomic (:elide-if stack-allocate-p :thread-tn thread-tn)
@@ -838,14 +846,14 @@
                        (inst push (if (integerp size) (constantize size) size))
                        (inst push (if (sc-is element immediate) (tn-value element) element))
                        (invoke-asm-routine
-                        'call (if (system-tlab-p node) 'sys-make-list 'make-list) node)
+                        'call (if (system-tlab-p 0 node) 'sys-make-list 'make-list) node)
                        (inst pop result)
                        (inst jmp leave-pa))
                      :cells 0)
          (compute-end)
          (inst mov next result)
          #+mark-region-gc
-         (progn
+         (unless (system-tlab-p 0 node)
            (inst mov bitmap-base
                  (thread-slot-ea thread-allocation-bitmap-base-slot
                                  #+gs-seg thread-tn))
@@ -859,7 +867,7 @@
          (inst add next (* 2 n-word-bytes))
          (storew element tail cons-car-slot list-pointer-lowtag)
          #+mark-region-gc
-         (progn
+         (unless (system-tlab-p 0 node)
            (inst bts :qword (ea bitmap-base) bitmap-index)
            (inst inc bitmap-index))
          (inst cmp next limit)
@@ -971,7 +979,7 @@
              (invoke-asm-routine 'call 'alloc-funinstance vop)
              (inst pop result))
             (t
-             (allocation nil bytes (if type 0 lowtag) result node alloc-temp thread-tn)))
+             (allocation type bytes (if type 0 lowtag) result node alloc-temp thread-tn)))
       (let ((header (compute-object-header words type)))
         (cond #+compact-instance-header
               ((and (eq name '%make-structure-instance) stack-allocate-p)

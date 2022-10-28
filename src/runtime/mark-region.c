@@ -827,16 +827,25 @@ static void __attribute__((noinline)) sweep() {
   METER(sweep_pages, sweep_pages());
 }
 
-extern lispobj lisp_init_function, gc_object_watcher;
-static void trace_static_roots() {
-  trace_other_object((lispobj*)NIL_SYMBOL_SLOTS_START);
-  lispobj *where = (lispobj*)STATIC_SPACE_OBJECTS_START;
-  lispobj *end = static_space_free_pointer;
+/* Trace a bump-allocated range, e.g. static space or an arena. */
+void mr_trace_bump_range(lispobj* start, lispobj *end) {
+  lispobj *where = start;
   while (where < end) {
     lispobj obj = compute_lispobj(where);
     trace_object(obj);
     where += listp(obj) ? 2 : headerobj_size(where);
   }
+}
+
+extern lispobj lisp_init_function, gc_object_watcher;
+static void trace_static_roots() {
+  trace_other_object((lispobj*)NIL_SYMBOL_SLOTS_START);
+  mr_trace_bump_range((lispobj*)STATIC_SPACE_OBJECTS_START,
+                      static_space_free_pointer);
+#ifdef LISP_FEATURE_SYSTEM_TLABS
+  extern void gc_scavenge_arenas();
+  gc_scavenge_arenas();
+#endif
   mark(lisp_package_vector);
   if (lisp_init_function) mark(lisp_init_function);
   if (gc_object_watcher) mark(gc_object_watcher);

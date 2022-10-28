@@ -172,6 +172,10 @@ void dump_marked_objects() {
     fprintf(stderr, "Total: %d\n", n);
 }
 
+/* If stray pointer detection is being performed, then all weak references
+ * (weak pointers, weak hash tables) are treated as strong.
+ * This informs the consumer whether it is possible to reach an object
+ * that satisfies the test given the current heap state */
 lispobj stray_pointer_source_obj;
 int (*stray_pointer_detector_fn)(lispobj);
 static void __mark_obj(lispobj pointer)
@@ -235,6 +239,7 @@ void gc_mark_range(lispobj* where, long count) {
 #define ACTION __mark_obj
 #define TRACE_NAME trace_object
 #define HT_ENTRY_LIVENESS_FUN_ARRAY_NAME alivep_funs
+#define DO_WEAKNESS_P !stray_pointer_detector_fn
 #include "trace-object.inc"
 
 void prepare_for_full_mark_phase()

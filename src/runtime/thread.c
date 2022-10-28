@@ -670,7 +670,7 @@ static void attach_os_thread(init_thread_data *scribble)
 #ifndef LISP_FEATURE_SB_SAFEPOINT
     /* new-lisp-thread-trampoline doesn't like when the GC signal is blocked */
     /* FIXME: could be done using a single call to pthread_sigmask
-       together with locking the deferrable signals above. */
+       together with blocking the deferrable signals above. */
     unblock_gc_signals();
 #endif
 
@@ -1236,6 +1236,10 @@ void gc_start_the_world()
 }
 
 #endif /* !LISP_FEATURE_SB_SAFEPOINT */
+#else
+// no threads
+void gc_stop_the_world() {}
+void gc_start_the_world() {}
 #endif /* !LISP_FEATURE_SB_THREAD */
 
 int

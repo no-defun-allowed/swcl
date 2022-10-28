@@ -113,7 +113,7 @@ int n_gcs;
 
 /* the verbosity level. All non-error messages are disabled at level 0;
  * and only a few rare messages are printed at level 1. */
-boolean gencgc_verbose = 0;
+boolean gencgc_verbose = 1;
 
 /* FIXME: At some point enable the various error-checking things below
  * and see what they say. */
@@ -121,7 +121,7 @@ boolean gencgc_verbose = 0;
 /* We hunt for pointers to old-space, when GCing generations >= verify_gen.
  * Set verify_gens to HIGHEST_NORMAL_GENERATION + 2 to disable this kind of
  * check. */
-generation_index_t verify_gens = HIGHEST_NORMAL_GENERATION + 2;
+generation_index_t verify_gens = 0; // HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
 boolean pre_verify_gen_0 = 0; // FIXME: should be named 'pre_verify_gc'
@@ -262,6 +262,9 @@ static CRITICAL_SECTION free_pages_lock;
 static pthread_mutex_t free_pages_lock = PTHREAD_MUTEX_INITIALIZER;
 #endif
 #endif
+
+void acquire_gc_page_table_lock() { ignore_value(mutex_acquire(&free_pages_lock)); }
+void release_gc_page_table_lock() { ignore_value(mutex_release(&free_pages_lock)); }
 
 extern os_vm_size_t gencgc_release_granularity;
 os_vm_size_t gencgc_release_granularity = GENCGC_RELEASE_GRANULARITY;
@@ -4230,6 +4233,10 @@ garbage_collect_generation(generation_index_t generation, int raise,
     if (GC_LOGGING) fprintf(gc_activitylog(), "begin scavenge static roots\n");
     heap_scavenge((lispobj*)NIL_SYMBOL_SLOTS_START, (lispobj*)NIL_SYMBOL_SLOTS_END);
     heap_scavenge((lispobj*)STATIC_SPACE_OBJECTS_START, static_space_free_pointer);
+#ifdef LISP_FEATURE_SYSTEM_TLABS
+    extern void gc_scavenge_arenas();
+    gc_scavenge_arenas();
+#endif
 
     /* All generations but the generation being GCed need to be
      * scavenged. The new_space generation needs special handling as
@@ -5057,6 +5064,13 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
     gc_assert((((uword_t)region->free_pointer & LOWTAG_MASK) == 0)
               && ((nbytes & LOWTAG_MASK) == 0));
 
+#define SYSTEM_ALLOCATION_FLAG 2
+#ifdef LISP_FEATURE_SYSTEM_TLABS
+    lispobj* handle_arena_alloc(struct thread*, struct alloc_region *, int, sword_t);
+    if (page_type != PAGE_TYPE_CODE && thread->arena && !(flags & SYSTEM_ALLOCATION_FLAG))
+        return handle_arena_alloc(thread, region, page_type, nbytes);
+#endif
+
     ++thread->slow_path_allocs;
     if ((os_vm_size_t) nbytes > large_allocation)
         large_allocation = nbytes;
@@ -5189,6 +5203,11 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
     region->free_pointer = (char*)new_obj + nbytes;
     // addr_diff asserts that 'end' >= 'free_pointer'
     int remaining = addr_diff(region->end_addr, region->free_pointer);
+
+    // System TLABs are not important to refill right away (in the nearly-empty case)
+    // so put a high-enough number in 'remaining' to suppress the grab-another-page test
+    if (flags & SYSTEM_ALLOCATION_FLAG) remaining = 256;
+
     // Try to avoid the next Lisp -> C -> Lisp round-trip by possibly
     // requesting yet another region.
     if (page_type == PAGE_TYPE_CONS) {
@@ -5222,10 +5241,10 @@ static pthread_mutex_t code_allocator_lock = PTHREAD_MUTEX_INITIALIZER;
 // The asm routines have been modified so that alloc() and alloc_list()
 // each receive the size an a single-bit flag affecting locality of the result.
 #define DEFINE_LISP_ENTRYPOINT(name, largep, TLAB, page_type) \
-NO_SANITIZE_MEMORY lispobj AMD64_SYSV_ABI *name(sword_t nbytes, int systemp) { \
+NO_SANITIZE_MEMORY lispobj AMD64_SYSV_ABI *name(sword_t nbytes, int sys) { \
     struct thread *self = get_sb_vm_thread(); \
-    return lisp_alloc(largep | systemp,                               \
-                      systemp ? &self->sys_##TLAB##_tlab : THREAD_ALLOC_REGION(self,TLAB), \
+    return lisp_alloc(largep | sys, \
+                      sys ? &self->sys_##TLAB##_tlab : THREAD_ALLOC_REGION(self,TLAB), \
                       nbytes, page_type, self); }
 
 DEFINE_LISP_ENTRYPOINT(alloc, (nbytes >= LARGE_OBJECT_SIZE), mixed, PAGE_TYPE_MIXED)
@@ -5291,6 +5310,21 @@ lispobj AMD64_SYSV_ABI alloc_code_object(unsigned total_words, unsigned boxed)
     return make_lispobj(code, OTHER_POINTER_LOWTAG);
 }
 
+#ifdef LISP_FEATURE_SYSTEM_TLABS
+#define PREPARE_LIST_ALLOCATION() \
+    struct alloc_region *region = sys ? &self->sys_cons_tlab : &self->cons_tlab; \
+    int partial_request = (self->arena && !sys) ? \
+                          nbytes : (char*)region->end_addr - (char*)region->free_pointer; \
+    gc_assert(nbytes >= (sword_t)partial_request); \
+    if (partial_request == 0) partial_request = CONS_PAGE_USABLE_BYTES
+#else /* no system tlabs */
+#define PREPARE_LIST_ALLOCATION() \
+    struct alloc_region *region = THREAD_ALLOC_REGION(self, cons); \
+    int partial_request = (char*)region->end_addr - (char*)region->free_pointer; \
+    gc_assert(nbytes > (sword_t)partial_request); \
+    if (partial_request == 0) partial_request = CONS_PAGE_USABLE_BYTES
+#endif
+
 #ifdef LISP_FEATURE_X86_64
 NO_SANITIZE_MEMORY lispobj AMD64_SYSV_ABI alloc_funinstance(sword_t nbytes)
 {
@@ -5307,24 +5341,15 @@ NO_SANITIZE_MEMORY lispobj AMD64_SYSV_ABI alloc_funinstance(sword_t nbytes)
 /* Make a list that couldn't be inline-allocated. Break it up into contiguous
  * blocks of conses not to exceed one GC page each. */
 NO_SANITIZE_MEMORY lispobj AMD64_SYSV_ABI
-make_list(lispobj element, sword_t nbytes, __attribute__((unused)) int sys) {
+make_list(lispobj element, sword_t nbytes, int sys) {
     // Technically this overflow handler could permit garbage collection
     // between separate allocation. For now the entire thing is pseudo-atomic.
     struct thread *self = get_sb_vm_thread();
-#ifdef LISP_FEATURE_SYSTEM_TLABS
-    struct alloc_region *region = sys ? &self->sys_cons_tlab : &self->cons_tlab;
-#else
-    struct alloc_region *region = THREAD_ALLOC_REGION(self, cons);
-#endif
-    int partial_request = (char*)region->end_addr - (char*)region->free_pointer;
-    gc_assert(nbytes > (sword_t)partial_request);
-    // We might be even cleverer by accepting however few bytes are actually available
-    // on any cons page, rather than asking for the maximum.
-    if (partial_request == 0) partial_request = CONS_PAGE_USABLE_BYTES;
+    PREPARE_LIST_ALLOCATION();
     lispobj result, *tail = &result;
     do {
         if (nbytes < partial_request) partial_request = nbytes;
-        struct cons* c = (void*)lisp_alloc(0, region, partial_request, PAGE_TYPE_CONS, self);
+        struct cons* c = (void*)lisp_alloc(sys, region, partial_request, PAGE_TYPE_CONS, self);
         *tail = make_lispobj((void*)c, LIST_POINTER_LOWTAG);
         int ncells = partial_request >> (1+WORD_SHIFT);
         nbytes -= N_WORD_BYTES * 2 * ncells;
@@ -5347,21 +5372,14 @@ make_list(lispobj element, sword_t nbytes, __attribute__((unused)) int sys) {
 /* Convert a &MORE context to a list. Split it up like make_list if we have to */
 #ifdef LISP_FEATURE_C_STACK_IS_CONTROL_STACK
 NO_SANITIZE_MEMORY lispobj AMD64_SYSV_ABI
-listify_rest_arg(lispobj* context, sword_t nbytes, __attribute__((unused)) int sys) {
+listify_rest_arg(lispobj* context, sword_t nbytes, int sys) {
     // same comment as above in make_list() applies about the scope of pseudo-atomic
     struct thread *self = get_sb_vm_thread();
-#ifdef LISP_FEATURE_SYSTEM_TLABS
-    struct alloc_region *region = sys ? &self->sys_cons_tlab : &self->cons_tlab;
-#else
-    struct alloc_region *region = THREAD_ALLOC_REGION(self, cons);
-#endif
-    int partial_request = (char*)region->end_addr - (char*)region->free_pointer;
-    gc_assert(nbytes > (sword_t)partial_request);
-    if (partial_request == 0) partial_request = CONS_PAGE_USABLE_BYTES;
+    PREPARE_LIST_ALLOCATION();
     lispobj result, *tail = &result;
     do {
         if (nbytes < partial_request) partial_request = nbytes;
-        struct cons* c = (void*)lisp_alloc(0, region, partial_request, PAGE_TYPE_CONS, self);
+        struct cons* c = (void*)lisp_alloc(sys, region, partial_request, PAGE_TYPE_CONS, self);
         *tail = make_lispobj((void*)c, LIST_POINTER_LOWTAG);
         int ncells = partial_request >> (1+WORD_SHIFT);
         nbytes -= N_WORD_BYTES * 2 * ncells;
@@ -5466,7 +5484,9 @@ static void sync_close_regions(int block_signals, int locking,
         gc_dcheck(result);
     }
     int i;
-    for(i=0; i<count; ++i) ensure_region_closed(a[i].r, a[i].type);
+    for (i=0; i<count; ++i)
+        if (find_page_index(a[i].r->start_addr) >= 0)
+            ensure_region_closed(a[i].r, a[i].type);
     if (locking & LOCK_PAGE_TABLE) {
         result = mutex_release(&free_pages_lock);
         gc_dcheck(result);

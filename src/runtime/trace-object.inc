@@ -2,23 +2,32 @@
 
 #include "weak-hash-pred.inc"
 
+/* Function name to call with every pointer */
 #ifndef ACTION
 #error "Need ACTION to be defined"
 #endif
 
+/* Base name for generated tracing functions */
 #ifndef TRACE_NAME
 #error "Need TRACE_NAME to be defined"
 #endif
 
+/* Mutex stuff */
 #ifndef LOCK
 #define LOCK() (void)(0)
 #define UNLOCK() (void)(0)
 #endif
 
+/* Generated names */
 #define cat2(x, y) x ## y
 #define cat(x, y) cat2(x, y)
 #define USING_LAYOUT cat(TRACE_NAME, _using_layout)
 #define TRACE_PAIR cat(TRACE_NAME, _pair)
+
+/* Ignore weak vectors and pointers */
+#ifndef DO_WEAKNESS_P
+#define DO_WEAKNESS_P 1
+#endif
 
 static void TRACE_PAIR(lispobj* where)
 {
@@ -71,7 +80,7 @@ static void TRACE_NAME(lispobj* where)
         // so the table will not need rehash as a result of gc.
         // Ergo, those may be treated just like ordinary simple vectors.
         // However, weakness remains as a special case.
-        if (vector_flagp(header, VectorWeak)) {
+        if (DO_WEAKNESS_P && vector_flagp(header, VectorWeak)) {
             if (!vector_flagp(header, VectorHashing)) {
                 LOCK();
                 add_to_weak_vector_list(where, header);
@@ -144,7 +153,8 @@ static void TRACE_NAME(lispobj* where)
         break;
     case WEAK_POINTER_WIDETAG:
         weakptr = (struct weak_pointer*)where;
-        if (is_lisp_pointer(weakptr->value) && interesting_pointer_p(weakptr->value)) {
+        if (!DO_WEAKNESS_P) ACTION(weakptr->value);
+        else if (is_lisp_pointer(weakptr->value) && interesting_pointer_p(weakptr->value)) {
             LOCK();
             add_to_weak_pointer_chain(weakptr);
             UNLOCK();

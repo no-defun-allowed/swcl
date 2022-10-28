@@ -999,7 +999,7 @@
        (eql (%pathname-version a) (%pathname-version b))))
 
 (defun probing-sequence (table pathname)
-  (let* ((mask (1- (length table)))
+  (let* ((mask (- (length table) 2))
          (index (logand (sb-impl::pathname-sxhash pathname) mask))
          (interval 1)
          (sequence))
@@ -1012,6 +1012,13 @@
        (setq index (logand (+ index interval) mask))
        (incf interval)))))
 
+;;; a GC here helps this test pass reliably in two ways:
+;;; 1. by ensuring that the PN cache is reasonably devoid of entries
+;;;    so that it doesn't size up, and thereby reduce the chance of producing
+;;;    collisions (beacuse this tests *needs* collisions)
+;;; 2. avoiding GCing just after inserting the 20 testfile pathnames
+;;;    which would blow them away, leaving nothing at all to test
+(gc)
 ;; recall that MAKE-PATHNAME is unsafely-flushable
 (dotimes (i 20) (opaque-identity (make-pathname :name (write-to-string i) :type "testfile")))
 ;; Only fake GC-nullifying an entry that was added specifically for the test
