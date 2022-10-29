@@ -275,7 +275,8 @@ void list_lisp_threads(int regions) {
         memcpy(&pthread, &th->os_thread, N_WORD_BYTES);
         struct thread_instance* i = (void*)(th->lisp_thread - INSTANCE_POINTER_LOWTAG);
         char* name = NULL;
-        if (i->name != NIL &&
+        if (th->lisp_thread &&
+            i->name != NIL &&
             widetag_of(native_pointer(i->name)) == SIMPLE_BASE_STRING_WIDETAG)
             name = (char*)VECTOR(i->name)->data;
         fprintf(stderr, "%p %p %p \"%s\"\n", th, pthread, (void*)i, name);
