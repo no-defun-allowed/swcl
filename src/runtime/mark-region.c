@@ -852,9 +852,10 @@ static void trace_static_roots() {
   if (alloc_profile_data) mark(alloc_profile_data);
 }
 
-/* Entry points */
+/* Entry points to convince the GC of different liveness */
 
-/* Preserve an ambiguous pointer. */
+/* Preserve an ambiguous pointer.
+ * Used for pointers in registers and the stack. */
 void mr_preserve_ambiguous(uword_t address) {
   if (find_page_index(native_pointer(address)) > -1) {
     lispobj *obj = find_object(address, DYNAMIC_SPACE_START);
@@ -862,14 +863,16 @@ void mr_preserve_ambiguous(uword_t address) {
   }
 }
 
-/* Preserve exact pointers in an array. */
+/* Preserve exact pointers in an array.
+ * Used for scanning thread-local storage for roots. */
 void mr_preserve_range(lispobj *from, sword_t nwords) {
   for (sword_t n = 0; n < nwords; n++) {
     mark(from[n]);
   }
 }
 
-/* Preserve an exact pointer, without attempting to trace it. */
+/* Preserve an exact pointer, without attempting to trace it.
+ * Used by weak hash table culling, for the list of culled values. */
 void mr_preserve_leaf(lispobj obj) {
   if (is_lisp_pointer(obj) && in_dynamic_space(obj)) {
     set_mark_bit(obj);
@@ -878,8 +881,17 @@ void mr_preserve_leaf(lispobj obj) {
   }
 }
 
-/* Preserve an exact pointer, and trace it. */
+/* Trace through an object outside dynamic space.
+ * Used by immobile space. */
+void mr_trace_object(lispobj *obj) {
+  trace_object(compute_lispobj(obj));
+}
+
+/* Preserve an exact pointer, and trace it.
+ * Used by pin_exact_root (but this doesn't pin, as we don't move...yet). */
 void mr_preserve_object(lispobj obj) { mark(obj); }
+
+/* Scavenging older generations */
 
 static void update_card_mark(int card, boolean dirty) {
   if (gc_card_mark[card] != STICKY_MARK)
@@ -892,7 +904,6 @@ static void update_card_mark(int card, boolean dirty) {
  * without tracing, however, in order to allow weak values to be culled
  * without a (more) major GC. We still treat large weak vectors as non-weak
  * though - I'm not sure if that's for the better. */
-
 static void check_otherwise_dirty(lispobj *where) {
   uword_t header = *where;
   int widetag = header_widetag(header);
@@ -1014,8 +1025,6 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
   run_on_thread_pool(scavenge_root_gens_worker);
 }
 
-/* Everything has to be an argument here, in order to convince
- * auto-vectorisation to do its thing. */
 CPU_SPLIT
 static void raise_survivors() {
   unsigned char *bytemap = line_bytemap;
@@ -1032,6 +1041,8 @@ static void raise_survivors() {
   generations[gen + 1].bytes_allocated += generations[gen].bytes_allocated;
   generations[gen].bytes_allocated = 0;
 }
+
+/* Main entrypoints into GC */
 
 void mrgc_init() {
   allocate_bitmaps();
@@ -1140,6 +1151,9 @@ void find_references_to(lispobj something) {
   }
 }
 
+/* Print out some of the page table.
+ * Colour indicates page type, letter type and flags,
+ * numbers generation and occupancy. */
 void draw_page_table(int from, int to) {
   for (int i = from; i < to; i++) {
     if (i % 50 == 0) fprintf(stderr, "\n%4d ", i);
@@ -1153,6 +1167,9 @@ void draw_page_table(int from, int to) {
   }
 }
 
+/* Save a PBM image of the line bytemap.
+ * Red channel stores page type, green channel stores flags and mark,
+ * blue channel stores generation. */
 int drawing_count = 0;
 #define BYTEMAP_WIDTH 4096
 void draw_line_bytemap() {
@@ -1180,6 +1197,7 @@ void count_line_values(char *why) {
       fprintf(stderr, "%x: %d\n", n, counts[n]);
 }
 
+/* Check that page occupancy makes sense. (Put this in verify?) */
 void check_weird_pages() {
   for (page_index_t p = 0; p < page_table_pages; p++)
     if (page_words_used(p) > GENCGC_PAGE_WORDS)
