@@ -1544,7 +1544,7 @@ gc_find_freeish_pages(page_index_t *restart_page_ptr, sword_t nbytes,
 void *collector_alloc_fallback(struct alloc_region* region, sword_t nbytes, int page_type) {
     page_index_t alloc_start = get_alloc_start_page(page_type);
     void *new_obj;
-    if (nbytes >= (GENCGC_PAGE_BYTES / 4 * 3)) {
+    if ((uword_t)nbytes >= (GENCGC_PAGE_BYTES / 4 * 3)) {
         page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,
                                                    &alloc_start, page_table_pages);
         if (new_page == -1) gc_heap_exhausted_error_or_lose(0, nbytes);
@@ -2519,7 +2519,7 @@ int sb_introspect_pinnedp(lispobj obj) {
  */
 #define PAGE_PINNED 0xFF
 #ifdef LISP_FEATURE_MARK_REGION_GC
-static void preserve_pointer(lispobj object) { mr_preserve_pointer(object); }
+static void preserve_pointer(lispobj object) { mr_preserve_ambiguous(object); }
 #else
 static void pin_object(lispobj object)
 {
@@ -3883,7 +3883,7 @@ conservative_stack_scan(struct thread* th,
         // (most OSes don't let users map memory there, though they used to).
         if (word >= BACKEND_PAGE_BYTES && potential_heap_pointer(word)) {
 #ifdef LISP_FEATURE_MARK_REGION_GC
-            mr_preserve_pointer(word);
+            mr_preserve_ambiguous(word);
 #else
             preserve_pointer(word);
 #endif
@@ -4196,7 +4196,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
             scav_binding_stack((lispobj*)th->binding_stack_start,
                                (lispobj*)get_binding_stack_pointer(th),
 #ifdef LISP_FEATURE_MARK_REGION_GC
-                               mr_preserve_pointer
+                               mr_preserve_ambiguous
 #else
                                compacting_p() ? 0 : gc_mark_obj
 #endif
@@ -5169,7 +5169,7 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
     ensure_region_closed(region, page_type);
     int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
     gc_assert(ret);
-    boolean largep = (nbytes >= (GENCGC_PAGE_BYTES / 4 * 3)) && page_type != PAGE_TYPE_CONS;
+    boolean largep = ((uword_t)nbytes >= (GENCGC_PAGE_BYTES / 4 * 3)) && page_type != PAGE_TYPE_CONS;
     page_index_t alloc_start = get_alloc_start_page(page_type);
     if (largep) {
         page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,
@@ -5708,9 +5708,9 @@ static void prepare_dynamic_space_for_final_gc()
 #endif
         generation_index_t gen = page_table[i].gen;
         if (gen != 0) {
-            int used = page_bytes_used(i);
             page_table[i].gen = 0;
 #ifndef LISP_FEATURE_MARK_REGION_GC
+            int used = page_bytes_used(i);
             generations[gen].bytes_allocated -= used;
             generations[0].bytes_allocated += used;
 #endif

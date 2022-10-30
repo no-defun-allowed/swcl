@@ -855,7 +855,7 @@ static void trace_static_roots() {
 /* Entry points */
 
 /* Preserve an ambiguous pointer. */
-void mr_preserve_pointer(uword_t address) {
+void mr_preserve_ambiguous(uword_t address) {
   if (find_page_index(native_pointer(address)) > -1) {
     lispobj *obj = find_object(address, DYNAMIC_SPACE_START);
     if (obj) mark(compute_lispobj(obj));
