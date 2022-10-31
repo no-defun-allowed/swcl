@@ -32,6 +32,7 @@ extern void clear_allocation_bit_mark(void *pointer);
 extern boolean line_marked(void *pointer);
 
 extern lispobj *search_dynamic_space(void *pointer);
+extern generation_index_t gc_gen_of(lispobj obj, int defaultval);
 
 extern void mr_preserve_ambiguous(uword_t address);
 extern void mr_preserve_range(lispobj *from, sword_t nwords);

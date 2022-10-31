@@ -6068,9 +6068,7 @@ void gc_store_corefile_ptes(struct corefile_pte *ptes)
 }
 
 #define ARTIFICIALLY_HIGH_GEN 8
-#ifdef LISP_FEATURE_MARK_REGION_GC
-extern generation_index_t gc_gen_of(lispobj obj, int defaultval);
-#else
+#ifndef LISP_FEATURE_MARK_REGION_GC
 generation_index_t gc_gen_of(lispobj obj, int defaultval) {
     int page = find_page_index((void*)obj);
     if (page >= 0) return page_table[page].gen;

@@ -422,7 +422,14 @@ static void mark(lispobj object) {
       if (immobile_space_p(object)) {
         acquire_lock(&immobile_space_lock);
         lispobj *ptr = base_pointer(object);
-        if (immobile_obj_generation(ptr) < dirty_generation_source)
+        generation_index_t gen = immobile_obj_generation(ptr);
+        /* enliven_immobile_obj updates the generation, so we may see
+         * an object in new_space already. new_space is either
+         * SCRATCH_GENERATION or 1 + generation; we check for the former
+         * case explicitly, and the source object is only really dirty
+         * if the object is still in a lower generation after promotion,
+         * so reading the updated generation in that case is fine too. */
+        if (gen < dirty_generation_source || gen == SCRATCH_GENERATION)
           dirty = 1;
         if (immobile_obj_gen_bits(ptr) <= generation_to_collect)
           enliven_immobile_obj(ptr, 1);

@@ -819,7 +819,11 @@ pointee_gen(lispobj thing, int keep_gen, int new_gen)
     // the default return value should be larger than any real generation number.
     int gen = 127; // generation_index_t is a signed char
     if (to_page >= 0) { // points to ordinary dynamic space
+#ifdef LISP_FEATURE_MARK_REGION_GC
+        gen = gc_gen_of(thing, gen);
+#else
         gen = page_table[to_page].gen;
+#endif
         if (gen == PSEUDO_STATIC_GENERATION+1) // scratch gen
             gen = new_gen; // is actually this
     } else if (immobile_space_p(thing)) {
@@ -1135,6 +1139,22 @@ sweep_text_pages(int raise)
     }
 }
 
+// After a full GC with mark-region, we just promoted everything in
+// immobile space, but not dynamic space, so dirty every immobile page,
+// as a very conservative approximation.
+static void
+dirty_everything()
+{
+  // Unprotect text pages; 1 means unprotected.
+  low_page_index_t max_used_text_page = calc_max_used_text_page();
+  for (int i = 0; i < ALIGN_UP(max_used_text_page, 32) / 32; i++)
+    text_page_touched_bits[i] = (unsigned int)-1;
+  // Unprotect fixedobj pages.
+  low_page_index_t max_used_fixedobj_page = calc_max_used_fixedobj_page();
+  for (low_page_index_t page = 0; page <= max_used_fixedobj_page; page++)
+    SET_WP_FLAG(page, 0);
+}
+
 // TODO: (Maybe this won't work. Not sure yet.) rather than use the
 // same 'raise' concept as in gencgc, each immobile object can store bits
 // indicating whether it has survived any GC at its current generation.
@@ -1146,6 +1166,10 @@ sweep_immobile_space(int raise)
   gc_assert(immobile_scav_queue_count == 0);
   sweep_fixedobj_pages(raise);
   sweep_text_pages(raise);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+  if (new_space == PSEUDO_STATIC_GENERATION)
+    dirty_everything();
+#endif
 }
 
 void gc_init_immobile()
