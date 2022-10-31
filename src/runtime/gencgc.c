@@ -113,7 +113,7 @@ int n_gcs;
 
 /* the verbosity level. All non-error messages are disabled at level 0;
  * and only a few rare messages are printed at level 1. */
-boolean gencgc_verbose = 0;
+boolean gencgc_verbose = 1;
 
 /* FIXME: At some point enable the various error-checking things below
  * and see what they say. */
@@ -4220,10 +4220,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
         }
     }
 
-#ifdef LISP_FEATURE_MARK_REGION_GC
-    mr_collect_garbage(raise);
-    RESET_ALLOC_START_PAGES();
-#else
+#ifndef LISP_FEATURE_MARK_REGION_GC
     if (!compacting_p()) {
         extern void execute_full_mark_phase();
         extern void execute_full_sweep_phase();
@@ -4239,6 +4236,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
     extern void gc_scavenge_arenas();
     gc_scavenge_arenas();
 #endif
+#endif
 
     /* All generations but the generation being GCed need to be
      * scavenged. The new_space generation needs special handling as
@@ -4252,6 +4250,11 @@ garbage_collect_generation(generation_index_t generation, int raise,
 #endif
       scavenge_immobile_roots(generation+1, SCRATCH_GENERATION);
 
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    mr_collect_garbage(raise);
+    RESET_ALLOC_START_PAGES();
+    sweep_immobile_space(raise);
+#else
     // When collecting gen0, ordinarily the roots would be gen1 and higher,
     // but if gen0 is getting raised to 1 on this cycle, then we skip roots in gen1
     // because we'll eventually examine all of gen1 as part of newspace.

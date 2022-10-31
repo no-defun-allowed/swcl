@@ -59,6 +59,7 @@ static struct {
   uword_t compact; uword_t raise; }
   meters = { 0 };
 static unsigned int collection = 0;
+static generation_index_t generation_to_collect = 0;
 #define METER(name, action) \
   { uword_t before = get_time(); \
   action; \
@@ -66,8 +67,9 @@ static unsigned int collection = 0;
 
 void mr_print_meters() {
 #define NORM(x) (collection ? meters.x / collection : 0)
-  fprintf(stderr, "collection %d: %ldus consider %ld scavenge %ld trace (%ld alive %ld running) %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
+  fprintf(stderr, "collection %d gen %d: %ldus consider %ld scavenge %ld trace (%ld alive %ld running) %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
           collection,
+          generation_to_collect,
           NORM(consider), NORM(scavenge),
           NORM(trace), NORM(trace_alive), NORM(trace_running),
           NORM(sweep), NORM(sweep_lines), NORM(sweep_pages),
@@ -296,7 +298,6 @@ void mr_update_closed_region(struct alloc_region *region, generation_index_t gen
   page_index_t the_page = find_page_index(region->start_addr);
   if (!(page_table[the_page].type & OPEN_REGION_PAGE_FLAG))
     lose("Page %lu wasn't open", the_page);
-  // fprintf(stderr, "closing %lu gen %d\n", the_page, gen);
 
   /* Mark the lines as allocated. */
   unsigned char *lines = line_bytemap;
@@ -321,7 +322,6 @@ void mr_update_closed_region(struct alloc_region *region, generation_index_t gen
 /* Old generation for finding old->young pointers */
 static _Thread_local generation_index_t dirty_generation_source = 0;
 static _Thread_local boolean dirty = 0;
-static generation_index_t generation_to_collect = 0;
 
 #define ANY(x) ((x) != 0)
 static boolean object_marked_p(lispobj object) {
@@ -422,9 +422,10 @@ static void mark(lispobj object) {
       if (immobile_space_p(object)) {
         acquire_lock(&immobile_space_lock);
         lispobj *ptr = base_pointer(object);
-        if (immobile_obj_gen_bits(ptr) <= generation_to_collect) {
+        if (immobile_obj_generation(ptr) < dirty_generation_source)
+          dirty = 1;
+        if (immobile_obj_gen_bits(ptr) <= generation_to_collect)
           enliven_immobile_obj(ptr, 1);
-        }
         release_lock(&immobile_space_lock);
       }
       return;
@@ -588,12 +589,21 @@ static boolean parallel_trace_step() {
 }
 
 static void __attribute__((noinline)) trace_everything() {
-  while (1) {
-    if (!parallel_trace_step() &&
-        !test_weak_triggers(pointer_survived_gc_yet, mark) &&
-        !immobile_scav_queue_count)
-      break;
-    scavenge_immobile_newspace();
+  boolean working = 1;
+  while (working) {
+    working = 0;
+    /* Break when it appears we can't trace any more, and avoid trying
+     * things we can't possibly do. The latter probably would be okay for
+     * a serial GC, but we don't want to wake up and join worker
+     * threads for no reason. */
+    if (blocks_in_flight) {
+      working |= parallel_trace_step();
+    }
+    working |= test_weak_triggers(pointer_survived_gc_yet, mark);
+    if (immobile_scav_queue_count) {
+      working = 1;
+      scavenge_immobile_newspace();
+    }
   }
 }
 
