@@ -440,7 +440,11 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
 {
     gc_assert(widetag_of(ptr) != SIMPLE_FUN_WIDETAG); // can't enliven interior pointer
     gc_assert(widetag_of(ptr) != FILLER_WIDETAG);
+    /* Doing a full GC using mark-region sets
+     * from_space = PSEUDO_STATIC_GENERATION, violating this assertion. */
+#ifndef LISP_FEATURE_MARK_REGION_GC
     gc_assert(immobile_obj_gen_bits(ptr) == from_space);
+#endif
     int pointerish = !leaf_obj_widetag_p(widetag_of(ptr));
     int bits = (pointerish ? 0 : IMMOBILE_OBJ_VISITED_FLAG);
     // enlivening makes the object appear as if written, so that
@@ -448,6 +452,7 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
     // scavenge + enliven newspace objects.
     if (widetag_of(ptr) == CODE_HEADER_WIDETAG)
         bits |= OBJ_WRITTEN_FLAG;
+    generation_index_t target_generation = new_space;
     assign_generation(ptr, bits | new_space);
     low_page_index_t page_index = find_fixedobj_page_index(ptr);
     boolean is_text = 0;
@@ -571,6 +576,15 @@ boolean immobile_space_preserve_pointer(void* addr)
     return 0;
 }
 
+/* Full GC traces every object, regardless of generation. */
+static boolean obj_relevant_p(lispobj *obj) {
+#ifdef LISP_FEATURE_MARK_REGION_GC
+  return from_space == PSEUDO_STATIC_GENERATION || immobile_obj_gen_bits(obj) == new_space;
+#else
+  return immobile_obj_gen_bits(obj) == new_space;
+#endif
+}
+
 // Loop over the newly-live objects, scavenging them for pointers.
 // As with the ordinary gencgc algorithm, this uses almost no stack.
 static void full_scavenge_immobile_newspace()
@@ -588,10 +602,14 @@ static void full_scavenge_immobile_newspace()
         lispobj* obj    = fixedobj_page_address(page);
         lispobj* limit  = compute_fixedobj_limit(obj, obj_spacing);
         do {
-            if (!fixnump(*obj) && immobile_obj_gen_bits(obj) == new_space) {
+            if (!fixnump(*obj) && obj_relevant_p(obj)) {
                 set_visited(obj);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+                mr_trace_object(obj);
+#else
                 lispobj header = *obj;
                 scavtab[header_widetag(header)](obj, header);
+#endif
             }
         } while (NEXT_FIXEDOBJ(obj, obj_spacing) <= limit);
     }
@@ -613,9 +631,14 @@ static void full_scavenge_immobile_newspace()
             int n_words;
             for ( ; obj < limit ; obj += n_words ) {
                 lispobj header = *obj;
-                if (immobile_obj_gen_bits(obj) == new_space) {
+                if (obj_relevant_p(obj)) {
                     set_visited(obj);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+                    mr_trace_object(obj);
+                    n_words = headerobj_size2(obj, header);
+#else
                     n_words = scavtab[header_widetag(header)](obj, header);
+#endif
                 } else {
                     n_words = headerobj_size2(obj, header);
                 }
@@ -670,8 +693,12 @@ void scavenge_immobile_newspace()
               // but a gc_assert() that it wasn't visited fails.
               if (!(immobile_obj_gen_bits(obj) & IMMOBILE_OBJ_VISITED_FLAG)) {
                 set_visited(obj);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+                mr_trace_object(obj);
+#else
                 lispobj header = *obj;
                 scavtab[header_widetag(header)](obj, header);
+#endif
               }
           } while (i != queue_index_to);
       }
@@ -699,8 +726,12 @@ scavenge_immobile_roots(generation_index_t min_gen, generation_index_t max_gen)
         do {
             if (!fixnump(*obj) && (genmask >> (gen=immobile_obj_gen_bits(obj)) & 1)) {
                 if (gen == new_space) { set_visited(obj); }
+#ifdef LISP_FEATURE_MARK_REGION_GC
+                mr_trace_object(obj);
+#else
                 lispobj header = *obj;
                 scavtab[header_widetag(header)](obj, header);
+#endif
             }
         } while (NEXT_FIXEDOBJ(obj, obj_spacing) <= limit);
     }
@@ -725,7 +756,12 @@ scavenge_immobile_roots(generation_index_t min_gen, generation_index_t max_gen)
                 // marked as written.
                 if (genmask >> (gen=immobile_obj_gen_bits(obj)) & 1) {
                     if (gen == new_space) { set_visited(obj); }
+#ifdef LISP_FEATURE_MARK_REGION_GC
+                    mr_trace_object(obj);
+                    n_words = headerobj_size2(obj, header);
+#else
                     n_words = scavtab[header_widetag(header)](obj, header);
+#endif
                 } else {
                     n_words = headerobj_size2(obj, header);
                 }

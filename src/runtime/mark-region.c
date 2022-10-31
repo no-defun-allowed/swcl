@@ -22,6 +22,8 @@
 #include "globals.h"
 #include "lispobj.h"
 #include "queue.h"
+#include "immobile-space.h"
+
 #include "incremental-compact.h"
 #include "tiny-lock.h"
 #include "gc-thread-pool.h"
@@ -408,8 +410,19 @@ static void mark_lines(lispobj *p) {
   add_words_used(p, word_count);
 }
 
+static lock_t immobile_space_lock = LOCK_INITIALIZER;
 static void mark(lispobj object) {
-  if (is_lisp_pointer(object) && in_dynamic_space(object)) {
+  if (is_lisp_pointer(object)) {
+    if (!in_dynamic_space(object)) {
+      /* The object might be in immobile space; defer to that then. */
+      if (immobile_space_p(object) && immobile_obj_gen_bits(object) <= generation_to_collect) {
+        acquire_lock(&immobile_space_lock);
+        lispobj *ptr = base_pointer(object);
+        enliven_immobile_obj(ptr, 1);
+        release_lock(&immobile_space_lock);
+      }
+      return;
+    }
 #ifdef DEBUG
     if (page_free_p(find_page_index(native_pointer(object))))
       lose("%lx is on a free page (#%ld)", object, find_page_index(native_pointer(object)));
@@ -454,7 +467,7 @@ static void mark(lispobj object) {
 /* A lock protecting structures to do with weak references. */
 static lock_t weak_lists_lock = LOCK_INITIALIZER;
 static boolean interesting_pointer_p(lispobj object) {
-  return in_dynamic_space(object);
+  return in_dynamic_space(object) || immobile_space_p(object);
 }
 static void lock_weak() { acquire_lock(&weak_lists_lock); }
 static void unlock_weak() { release_lock(&weak_lists_lock); }
@@ -860,6 +873,8 @@ void mr_preserve_ambiguous(uword_t address) {
   if (find_page_index(native_pointer(address)) > -1) {
     lispobj *obj = find_object(address, DYNAMIC_SPACE_START);
     if (obj) mark(compute_lispobj(obj));
+  } else if (immobile_space_p(address)) {
+    immobile_space_preserve_pointer(address);
   }
 }
 

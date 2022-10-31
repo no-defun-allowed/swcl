@@ -3993,25 +3993,27 @@ garbage_collect_generation(generation_index_t generation, int raise,
 #endif
         ) {
 
-#ifdef LISP_FEATURE_MARK_REGION_GC
-        from_space = -1;
-        new_space = generation;
-#else
         from_space = generation;
         if (raise)
             new_space = generation+1;
         else
             new_space = SCRATCH_GENERATION;
-#endif
 
     /* Change to a new space for allocation, resetting the alloc_start_page */
+#ifdef LISP_FEATURE_MARK_REGION_GC
+        gc_alloc_generation = generation;
+#else
         gc_alloc_generation = new_space;
+#endif
         RESET_ALLOC_START_PAGES();
 
 #ifdef LISP_FEATURE_MARK_REGION_GC
-        /* Don't try to allocate into pseudo-static, when we collect it */
-        if (generation == PSEUDO_STATIC_GENERATION)
+        if (generation == PSEUDO_STATIC_GENERATION) {
+          /* Don't try to allocate into pseudo-static, when we collect it */
           gc_alloc_generation = 0;
+          /* Don't promote immobile space objects to pseudo-static generation */
+          new_space = HIGHEST_NORMAL_GENERATION;
+        }
         mr_pre_gc(generation);
 #endif
 
@@ -4245,7 +4247,10 @@ garbage_collect_generation(generation_index_t generation, int raise,
     // SCRATCH_GENERATION is scavenged in immobile space
     // because pinned objects will already have had their generation
     // number reassigned to that generation if applicable.
-    scavenge_immobile_roots(generation+1, SCRATCH_GENERATION);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    if (generation != PSEUDO_STATIC_GENERATION)
+#endif
+      scavenge_immobile_roots(generation+1, SCRATCH_GENERATION);
 
     // When collecting gen0, ordinarily the roots would be gen1 and higher,
     // but if gen0 is getting raised to 1 on this cycle, then we skip roots in gen1
