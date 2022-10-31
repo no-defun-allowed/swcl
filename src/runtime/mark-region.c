@@ -138,7 +138,11 @@ boolean line_marked(void *pointer) {
 
 generation_index_t gc_gen_of(lispobj obj, int defaultval) {
   page_index_t p = find_page_index((void*)obj);
-  if (p < 0) return defaultval;
+  if (p < 0) {
+    if (immobile_space_p(obj))
+      return immobile_obj_generation(base_pointer(obj));
+    return defaultval;
+  }
   if (page_single_obj_p(p))
     return page_table[p].gen;
   char c = UNMARK_GEN(line_bytemap[address_line((void*)obj)]);
@@ -415,10 +419,12 @@ static void mark(lispobj object) {
   if (is_lisp_pointer(object)) {
     if (!in_dynamic_space(object)) {
       /* The object might be in immobile space; defer to that then. */
-      if (immobile_space_p(object) && immobile_obj_gen_bits(object) <= generation_to_collect) {
+      if (immobile_space_p(object)) {
         acquire_lock(&immobile_space_lock);
         lispobj *ptr = base_pointer(object);
-        enliven_immobile_obj(ptr, 1);
+        if (immobile_obj_gen_bits(ptr) <= generation_to_collect) {
+          enliven_immobile_obj(ptr, 1);
+        }
         release_lock(&immobile_space_lock);
       }
       return;
@@ -582,7 +588,13 @@ static boolean parallel_trace_step() {
 }
 
 static void __attribute__((noinline)) trace_everything() {
-  while (parallel_trace_step()) test_weak_triggers(pointer_survived_gc_yet, mark);
+  while (1) {
+    if (!parallel_trace_step() &&
+        !test_weak_triggers(pointer_survived_gc_yet, mark) &&
+        !immobile_scav_queue_count)
+      break;
+    scavenge_immobile_newspace();
+  }
 }
 
 /* Conservative pointer scanning */

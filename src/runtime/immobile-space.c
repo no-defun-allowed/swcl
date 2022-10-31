@@ -58,6 +58,7 @@
 #include "genesis/package.h"
 #include "genesis/vector.h"
 #include "immobile-space.h"
+#include "mark-region.h"
 #include "lispstring.h"
 #include "pseudo-atomic.h"
 #include "search.h"
@@ -442,9 +443,8 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
     gc_assert(widetag_of(ptr) != FILLER_WIDETAG);
     /* Doing a full GC using mark-region sets
      * from_space = PSEUDO_STATIC_GENERATION, violating this assertion. */
-#ifndef LISP_FEATURE_MARK_REGION_GC
-    gc_assert(immobile_obj_gen_bits(ptr) == from_space);
-#endif
+    if (from_space != PSEUDO_STATIC_GENERATION)
+        gc_assert(immobile_obj_gen_bits(ptr) == from_space);
     int pointerish = !leaf_obj_widetag_p(widetag_of(ptr));
     int bits = (pointerish ? 0 : IMMOBILE_OBJ_VISITED_FLAG);
     // enlivening makes the object appear as if written, so that
@@ -452,7 +452,6 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
     // scavenge + enliven newspace objects.
     if (widetag_of(ptr) == CODE_HEADER_WIDETAG)
         bits |= OBJ_WRITTEN_FLAG;
-    generation_index_t target_generation = new_space;
     assign_generation(ptr, bits | new_space);
     low_page_index_t page_index = find_fixedobj_page_index(ptr);
     boolean is_text = 0;
