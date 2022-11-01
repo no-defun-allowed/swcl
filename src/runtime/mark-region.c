@@ -418,13 +418,16 @@ static void mark_lines(lispobj *p) {
   add_words_used(p, word_count);
 }
 
+/* A lock ensuring mutual exclusion for enliven_immobile_obj, which
+ * doesn't handle concurrent calls. If this lock is too contended, I might
+ * make e_i_o lock-free, but would prefer to avoid having to engineer
+ * that. */
 static lock_t immobile_space_lock = LOCK_INITIALIZER;
 static void mark(lispobj object) {
   if (is_lisp_pointer(object)) {
     if (!in_dynamic_space(object)) {
-      /* The object might be in immobile space; defer to that then. */
+      /* The object might be in immobile space; defer to that if so. */
       if (immobile_space_p(object)) {
-        acquire_lock(&immobile_space_lock);
         lispobj *ptr = base_pointer(object);
         generation_index_t gen = immobile_obj_generation(ptr);
         /* enliven_immobile_obj updates the generation, so we may see
@@ -432,15 +435,22 @@ static void mark(lispobj object) {
          * SCRATCH_GENERATION or 1 + generation; we check for the former
          * case explicitly, and the source object is only really dirty
          * if the object is still in a lower generation after promotion,
-         * so reading the updated generation in that case is fine too. */
+         * so reading the updated generation in that case is fine too.
+         * It's also fine for multiple parallel GC threads to race here. */
         if (gen < dirty_generation_source || gen == SCRATCH_GENERATION)
           dirty = 1;
-        if (immobile_obj_gen_bits(ptr) <= generation_to_collect)
-          enliven_immobile_obj(ptr, 1);
-        release_lock(&immobile_space_lock);
+        /* Try to only lock and grey the object if the object was white
+         * to start with. */
+        if (gen <= generation_to_collect) {
+          acquire_lock(&immobile_space_lock);
+          if (immobile_obj_gen_bits(ptr) <= generation_to_collect)
+            enliven_immobile_obj(ptr, 1);
+          release_lock(&immobile_space_lock);
+        }
       }
       return;
     }
+    
 #ifdef DEBUG
     if (page_free_p(find_page_index(native_pointer(object))))
       lose("%lx is on a free page (#%ld)", object, find_page_index(native_pointer(object)));
