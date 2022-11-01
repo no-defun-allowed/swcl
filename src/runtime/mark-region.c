@@ -348,7 +348,11 @@ static boolean in_dynamic_space(lispobj object) {
 }
 
 static boolean pointer_survived_gc_yet(lispobj object) {
-  return !in_dynamic_space(object) || object_marked_p(object) || gc_gen_of(object, 0) > generation_to_collect;
+  if (in_dynamic_space(object))
+    return object_marked_p(object) || gc_gen_of(object, 0) > generation_to_collect;
+  if (immobile_space_p(object))
+    return immobile_obj_gen_bits(base_pointer(object)) > generation_to_collect;
+  return 1;
 }
 
 /* The number of blocks on the grey list and being processed.
@@ -499,8 +503,9 @@ static void trace_object(lispobj object) {
     struct cons *c = CONS(object);
     mark(c->car);
     lispobj next = c->cdr;
-    /* Tail-recurse on the cdr, unless we're recording dirty cards. */
-    if (!dirty_generation_source && is_lisp_pointer(next)) {
+    /* Tail-recurse on the cdr, unless we're recording dirty cards,
+     * or the cdr isn't in dynamic space (and thus not ours to trace). */
+    if (!dirty_generation_source && is_lisp_pointer(next) && in_dynamic_space(next)) {
       /* Fix up embedded simple-fun objects. */
       lispobj *np = native_pointer(next);
       if (functionp(next) && embedded_obj_p(widetag_of(np))) {
@@ -903,7 +908,7 @@ void mr_preserve_ambiguous(uword_t address) {
     lispobj *obj = find_object(address, DYNAMIC_SPACE_START);
     if (obj) mark(compute_lispobj(obj));
   } else if (immobile_space_p(address)) {
-    immobile_space_preserve_pointer(address);
+    immobile_space_preserve_pointer(native_pointer(address));
   }
 }
 

@@ -442,7 +442,8 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
     gc_assert(widetag_of(ptr) != SIMPLE_FUN_WIDETAG); // can't enliven interior pointer
     gc_assert(widetag_of(ptr) != FILLER_WIDETAG);
     /* Doing a full GC using mark-region sets
-     * from_space = PSEUDO_STATIC_GENERATION, violating this assertion. */
+     * from_space = PSEUDO_STATIC_GENERATION and traces everything,
+     * violating this assertion. */
     if (from_space != PSEUDO_STATIC_GENERATION)
         gc_assert(immobile_obj_gen_bits(ptr) == from_space);
     int pointerish = !leaf_obj_widetag_p(widetag_of(ptr));
@@ -563,7 +564,7 @@ boolean immobile_space_preserve_pointer(void* addr)
                 || properly_tagged_descriptor_p(addr, object_start);
     }
     if (valid && (!compacting_p() ||
-                  immobile_obj_gen_bits(object_start) == from_space)) {
+                  immobile_obj_gen_bits(object_start) <= from_space)) {
         dprintf((logfile,"immobile obj @ %p (<- %p) is conservatively live\n",
                  object_start, addr));
         if (compacting_p())
@@ -575,16 +576,7 @@ boolean immobile_space_preserve_pointer(void* addr)
     return 0;
 }
 
-/* Full GC traces every object, regardless of generation. */
-static boolean obj_relevant_p(lispobj *obj) {
-#ifdef LISP_FEATURE_MARK_REGION_GC
-  return from_space == PSEUDO_STATIC_GENERATION || immobile_obj_gen_bits(obj) == new_space;
-#else
-  return immobile_obj_gen_bits(obj) == new_space;
-#endif
-}
-
-// Loop over the newly-live objects, scavenging them for pointers.
+// Loop over the newly-live (grey) objects, scavenging them for pointers.
 // As with the ordinary gencgc algorithm, this uses almost no stack.
 static void full_scavenge_immobile_newspace()
 {
@@ -601,7 +593,7 @@ static void full_scavenge_immobile_newspace()
         lispobj* obj    = fixedobj_page_address(page);
         lispobj* limit  = compute_fixedobj_limit(obj, obj_spacing);
         do {
-            if (!fixnump(*obj) && obj_relevant_p(obj)) {
+            if (!fixnump(*obj) && immobile_obj_gen_bits(obj) == new_space) {
                 set_visited(obj);
 #ifdef LISP_FEATURE_MARK_REGION_GC
                 mr_trace_object(obj);
@@ -630,7 +622,7 @@ static void full_scavenge_immobile_newspace()
             int n_words;
             for ( ; obj < limit ; obj += n_words ) {
                 lispobj header = *obj;
-                if (obj_relevant_p(obj)) {
+                if (immobile_obj_gen_bits(obj) == new_space) {
                     set_visited(obj);
 #ifdef LISP_FEATURE_MARK_REGION_GC
                     mr_trace_object(obj);
@@ -951,8 +943,8 @@ static inline boolean can_wp_text_page(page_index_t page)
 */
 
 #define SETUP_GENS()                                                   \
-  /* Only care about pages with something in old or new space. */      \
-  int relevant_genmask = (1 << from_space) | (1 << new_space);         \
+  /* Only care about pages with something in old space or younger, or in new space. */      \
+  int relevant_genmask = ((1 << (from_space + 1)) - 1) | (1 << new_space); \
   /* Objects whose gen byte is 'keep_gen' are alive. */                \
   int keep_gen = IMMOBILE_OBJ_VISITED_FLAG | new_space;                \
   /* Objects whose gen byte is 'from_space' are trash. */              \
@@ -1029,7 +1021,7 @@ sweep_fixedobj_pages(int raise)
                   fixedobj_pages[page].free_index = (char*)obj - page_base;
                 hole = obj;
                 n_holes ++;
-            } else if ((gen = immobile_obj_gen_bits(obj)) == discard_gen) { // trash
+            } else if ((gen = immobile_obj_gen_bits(obj)) <= discard_gen) { // trash
                 memset(obj, 0, obj_spacing);
                 goto trash_it;
             } else if (gen == keep_gen) {
@@ -1075,7 +1067,7 @@ sweep_text_pages(int raise)
 {
     lispobj *freelist = 0, *freelist_tail = 0;
     SETUP_GENS();
-
+    
     low_page_index_t max_used_text_page = calc_max_used_text_page();
     lispobj* free_pointer = text_space_highwatermark;
     low_page_index_t page;
@@ -1105,7 +1097,7 @@ sweep_text_pages(int raise)
             lispobj word = *obj;
             size = object_size2(obj, word);
             if (header_widetag(word) == FILLER_WIDETAG) { // ignore
-            } else if ((gen = immobile_obj_gen_bits(obj)) == discard_gen) {
+            } else if ((gen = immobile_obj_gen_bits(obj)) <= discard_gen) {
                 gc_assert(header_widetag(word) == CODE_HEADER_WIDETAG);
                 assign_widetag(obj, FILLER_WIDETAG);
                 // ASSUMPTION: little-endian
@@ -1167,7 +1159,7 @@ sweep_immobile_space(int raise)
   sweep_fixedobj_pages(raise);
   sweep_text_pages(raise);
 #ifdef LISP_FEATURE_MARK_REGION_GC
-  if (new_space == PSEUDO_STATIC_GENERATION)
+  if (from_space == PSEUDO_STATIC_GENERATION)
     dirty_everything();
 #endif
 }

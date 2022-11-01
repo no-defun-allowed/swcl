@@ -4011,8 +4011,6 @@ garbage_collect_generation(generation_index_t generation, int raise,
         if (generation == PSEUDO_STATIC_GENERATION) {
           /* Don't try to allocate into pseudo-static, when we collect it */
           gc_alloc_generation = 0;
-          /* Don't promote immobile space objects to pseudo-static generation */
-          new_space = HIGHEST_NORMAL_GENERATION;
         }
         mr_pre_gc(generation);
 #endif
