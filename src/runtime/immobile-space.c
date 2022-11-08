@@ -67,6 +67,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "tlsf-bsd/tlsf/tlsf.h"
+#include "walk-heap.h"
 
 #define WORDS_PER_PAGE ((int)IMMOBILE_CARD_BYTES/N_WORD_BYTES)
 #define DOUBLEWORDS_PER_PAGE (WORDS_PER_PAGE/2)
@@ -883,7 +884,15 @@ fixedobj_points_to_younger_p(lispobj* obj, int n_words,
                 return 1;
         return 0;
     }
-    // FALLTHROUGH_INTENDED
+    break;
+#ifdef LISP_FEATURE_COMPACT_SYMBOL
+  case SYMBOL_WIDETAG:
+      struct symbol *s = (struct symbol*)obj;
+      /* The higher 16 bits of the symbol name contain a package ID, which will
+       * confuse pointee_gen, so decode it beforehand. */
+      if (younger_p(decode_symbol_name(s->name), gen, keep_gen, new_gen))
+          return 1;
+#endif
   }
   return range_points_to_younger_p(obj+1, obj+n_words, gen, keep_gen, new_gen);
 }
@@ -1067,7 +1076,7 @@ sweep_text_pages(int raise)
 {
     lispobj *freelist = 0, *freelist_tail = 0;
     SETUP_GENS();
-    
+
     low_page_index_t max_used_text_page = calc_max_used_text_page();
     lispobj* free_pointer = text_space_highwatermark;
     low_page_index_t page;
@@ -1595,7 +1604,7 @@ static void fixup_space(lispobj* where, size_t n_words)
     long size;
     struct code* code;
 
-    while (where < end) {
+    while ((where = next_object(where, 0, end))) {
         gc_assert(!forwarding_pointer_p(where));
         lispobj header_word = *where;
         if (!is_header(header_word)) {

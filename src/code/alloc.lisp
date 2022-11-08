@@ -274,6 +274,6 @@
         ;; Prevent GC from walking the text space at the exact same instant
         ;; the block coalescing algorithm alters block headers.
         (with-system-mutex (*allocator-mutex* :without-gcing t)
-          (alien-funcall tlsf-unalloc-codeblob tlsf-control addr)
+          ;(alien-funcall tlsf-unalloc-codeblob tlsf-control addr)
           (setf (car scratchpad) (pop-1)))))
     t))

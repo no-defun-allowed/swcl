@@ -92,7 +92,8 @@ static void allocate_bitmap(uword_t **bitmap, uword_t size,
 
 /* Initialisation */
 uword_t *allocation_bitmap, *mark_bitmap;
-unsigned char *line_bytemap;             /* 1 if line used, 0 if not used */
+/* 0 if not used, see MARK_GEN et al for encodings if used */
+unsigned char *line_bytemap;
 line_index_t line_count;
 uword_t mark_bitmap_size;
 
@@ -450,7 +451,7 @@ static void mark(lispobj object) {
       }
       return;
     }
-    
+
 #ifdef DEBUG
     if (page_free_p(find_page_index(native_pointer(object))))
       lose("%lx is on a free page (#%ld)", object, find_page_index(native_pointer(object)));
