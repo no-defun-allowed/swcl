@@ -87,10 +87,11 @@
   ;; above the high water mark.  If you store non-immediate data past
   ;; that mark, you're sure to have problems.
   (pairs nil :type simple-vector)
-  ;; A potential index into the k/v vector. It should be checked first
-  ;; when searching. There's no reason to allow NIL here,
-  ;; because worst case there won't be a hit at this index.
-  (cache 0 :type index)
+  ;; MRU physical index of a key in the k/v vector. If < (LENGTH PAIRS)
+  ;; the cell can be examined first in GETHASH and PUTHASH. The "unknown" value
+  ;; is not 0 because that would look valid but could accidentally return a
+  ;; false match if the user's key is EQ to element 0 in the pair vector.
+  (cache (- array-dimension-limit 2) :type index)
   ;; The index vector. This may be larger than the capacity to help
   ;; reduce collisions.
   (index-vector nil :type (simple-array hash-table-index (*)))
@@ -162,6 +163,12 @@
   ;; disable GC during rehash as a consequence of key movement.
   #+hash-table-metrics (n-rehash+find 0 :type word)
   #+hash-table-metrics (n-lsearch     0 :type word)
+  ;; this counter is incremented if we observe that GC marked the table invalid
+  ;; while already in the midst of being rehashed due to invalidation.
+  #+hash-table-metrics (n-rehash-again 0 :type word)
+  ;; this counter is incremented if the fast-read-lock (implicit in the
+  ;; 'stamp' field) implies that there was an inconsistent view of the table
+  #+hash-table-metrics (n-stamp-change 0 :type word)
 
   ;; only for debugging system bootstrap when hash-tables are completely
   ;; broken (which seems to be quite often as I optimize them)

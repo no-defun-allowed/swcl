@@ -449,7 +449,7 @@ unregister_thread(struct thread *th,
     int lock_ret;
 
     block_blockable_signals(0);
-    gc_close_thread_regions(th, LOCK_PAGE_TABLE);
+    gc_close_thread_regions(th, LOCK_PAGE_TABLE|CONSUME_REMAINDER);
 #ifdef LISP_FEATURE_SB_SAFEPOINT
     pop_gcing_safety(&scribble->safety);
 #else
@@ -970,10 +970,6 @@ alloc_thread_struct(void* spaces) {
     // Once allocated, the allocation profiling buffer sticks around.
     // If present and enabled, assign into the new thread.
     th->profile_data = (uword_t*)(alloc_profiling ? alloc_profile_buffer : 0);
-
-# ifdef LISP_FEATURE_WIN32
-    thread_extra_data(th)->carried_base_pointer = 0;
-# endif
 
     struct extra_thread_data *extra_data = thread_extra_data(th);
     memset(extra_data, 0, sizeof *extra_data);

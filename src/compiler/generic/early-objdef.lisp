@@ -96,6 +96,19 @@
     other-immediate-1-lowtag
     other-pointer-lowtag))
 
+#+sb-xc-host
+(defun lowtag-of (x)
+  (etypecase x
+    (symbol sb-vm:other-pointer-lowtag)
+    (structure-object sb-vm:instance-pointer-lowtag)
+    (list sb-vm:list-pointer-lowtag)
+    ((eql 0) 0)))
+
+#-sb-xc-host
+(progn
+(declaim (inline lowtag-of))
+(defun lowtag-of (x) (logand (get-lisp-obj-address x) sb-vm:lowtag-mask)))
+
 (defconstant-eqx fixnum-lowtags
     '#.(loop for i from 0 to lowtag-mask
              when (zerop (logand i fixnum-tag-mask)) collect i)
@@ -437,6 +450,14 @@
   ;; low half of a closure header to form the full header word.
   #-sb-thread
   (defglobal function-layout 0))        ; set by genesis
+
+;;; MIXED-REGION is at the beginning of static space
+;;; Be sure to update "#define main_thread_mixed_region" etc
+;;; if these get changed.
+#-sb-thread
+(progn (defconstant mixed-region static-space-start)
+       (defconstant cons-region (+ mixed-region (* 3 n-word-bytes)))
+       (defconstant boxed-region (+ cons-region (* 3 n-word-bytes))))
 
 #|
 ;; Run this in the SB-VM package once for each target feature combo.

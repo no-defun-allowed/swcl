@@ -235,7 +235,8 @@ static void compare_pointer(void *addr) {
 /* Figure out which thread's control stack contains 'pointer'
  * and the PC within the active function in the referencing frame  */
 static struct thread* NO_SANITIZE_MEMORY
-deduce_thread(void (*context_scanner)(), uword_t pointer, char** pc)
+deduce_thread(void (*context_scanner)(void*, os_context_t *),
+              uword_t pointer, char** pc)
 {
     struct thread *th;
 
@@ -307,7 +308,6 @@ static lispobj examine_threads(struct hopscotch_table* targets,
 
     for_each_thread(th) {
         lispobj *where, *end;
-#ifdef LISP_FEATURE_SB_THREAD
         // Examine thread-local storage
         *root_kind = TLS;
         where = &th->lisp_thread;
@@ -319,7 +319,6 @@ static lispobj examine_threads(struct hopscotch_table* targets,
                 *tls_index = (char*)where - (char*)th;
                 return *where;
             }
-#endif
         // Examine the binding stack
         *root_kind = BINDING_STACK;
         where = (lispobj*)th->binding_stack_start;

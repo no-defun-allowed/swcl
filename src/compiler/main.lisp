@@ -471,10 +471,17 @@ necessary, since type inference may take arbitrarily long to converge.")
      again
        (loop
         (ir1-optimize-until-done component)
-        (when (or (component-new-functionals component)
-                  (component-reanalyze-functionals component))
-          (maybe-mumble "Locall ")
-          (locall-analyze-component component))
+        (cond ((or (component-new-functionals component)
+                   (component-reanalyze-functionals component))
+               (maybe-mumble "Locall ")
+               (locall-analyze-component component))
+              ((and (>= loop-count 1)
+                    (not (or (component-reoptimize component)
+                             (component-reanalyze component))))
+               ;; Constraint propagation did something but that
+               ;; information didn't lead to any new optimizations.
+               ;; Don't run constraint-propagate again.
+               (return)))
         (eliminate-dead-code component)
         (dfo-as-needed component)
         (when *constraint-propagate*
@@ -609,13 +616,8 @@ necessary, since type inference may take arbitrarily long to converge.")
   (ir2-optimize component)
 
   (select-representations component)
-    ;; Try to combine consecutive uses of %INSTANCE-SET.
-    ;; This can't be done prior to selecting representations
-    ;; because SELECT-REPRESENTATIONS might insert some
-    ;; things like MOVE-FROM-DOUBLE which makes the
-    ;; "consecutive" vops no longer consecutive.
 
-  (ir2-optimize-stores component)
+  (ir2-optimize component 'select-representations)
 
   (when *check-consistency*
     (maybe-mumble "Check2 ")
@@ -641,7 +643,7 @@ necessary, since type inference may take arbitrarily long to converge.")
     (maybe-mumble "CheckP ")
     (check-pack-consistency component))
 
-  (ir2-optimize component 'after-regalloc)
+  (ir2-optimize component 'regalloc)
 
   (when *compiler-trace-output*
     (when (memq :ir1 *compile-trace-targets*)

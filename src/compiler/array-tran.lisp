@@ -1348,7 +1348,12 @@
          (dolist (type (cdr types) result)
            (unless (eq (conservative-array-type-complexp type) result)
              (return-from conservative-array-type-complexp :maybe))))))
-    ;; FIXME: intersection type
+    (intersection-type
+     (loop for type in (intersection-type-types type)
+           do (case (conservative-array-type-complexp type)
+                ((t) (return t))
+                ((nil) (return nil)))
+           finally (return :maybe)))
     (t :maybe)))
 
 ;; Let type derivation handle constant cases. We only do easy strength
@@ -1497,24 +1502,72 @@
   (let ((array-type (lvar-conservative-type vector))
         min-length
         max-length)
-    (when (and
-           (union-type-p array-type)
-           (loop for type in (union-type-types array-type)
-                 always (and (array-type-p type)
-                             (typep (array-type-dimensions type)
-                                    '(cons integer null)))
-                 do (let ((length (car (array-type-dimensions type))))
-                      (cond ((array-type-complexp type)
-                             ;; fill-pointer can start from 0
-                             (setf min-length 0))
-                            ((or (not min-length)
-                                 (< length min-length))
-                             (setf min-length length)))
-                      (when (or (not max-length)
-                                (> length max-length))
-                        (setf max-length length)))))
-      (specifier-type `(integer ,(or min-length 0)
-                                ,max-length)))))
+    (let ((type
+            (when (and (union-type-p array-type)
+                       (loop for type in (union-type-types array-type)
+                             for dim = (catch 'give-up-ir1-transform
+                                         (array-type-dimensions-or-give-up type))
+                             always (typep dim '(cons integer null))
+                             do (let ((length (car dim)))
+                                  (cond ((conservative-array-type-complexp type)
+                                         ;; fill-pointer can start from 0
+                                         (setf min-length 0))
+                                        ((or (not min-length)
+                                             (< length min-length))
+                                         (setf min-length length)))
+                                  (when (or (not max-length)
+                                            (> length max-length))
+                                    (setf max-length length)))))
+              (specifier-type `(integer ,(or min-length 0)
+                                        ,max-length)))))
+      (when (csubtypep array-type (specifier-type 'simple-array))
+        (let ((ref (lvar-uses vector)))
+          (when (ref-p ref)
+            (loop for con in (ref-constraints ref)
+                  for x = (constraint-x con)
+                  for y = (constraint-y con)
+                  when (equality-constraint-p con)
+                  do (let ((constant (and (constant-p y)
+                                          (constant-value y)))
+                           (not-p (constraint-not-p con))
+                           (operator (equality-constraint-operator con)))
+                       (cond (constant
+                              (case operator
+                                (eq
+                                 (unless not-p
+                                   (return-from vector-length-derive-type-optimizer
+                                     (specifier-type `(eql ,constant)))))
+                                (>
+                                 (let ((p (specifier-type (if not-p
+                                                              `(integer 0 ,constant)
+                                                              `(integer (,constant))))))
+                                   (setf type
+                                         (if type
+                                             (type-intersection type p)
+                                             p))))
+                                (<
+                                 (let ((p (specifier-type (if not-p
+                                                              `(integer ,constant)
+                                                              `(integer 0 (,constant))))))
+                                   (setf type
+                                         (if type
+                                             (type-intersection type p)
+                                             p))))))
+                             (t
+                              (multiple-value-bind (operator y-type)
+                                  (if (vector-length-constraint-p x)
+                                      (values operator y)
+                                      (values (case operator
+                                                (< '>)
+                                                (> '<)
+                                                (t operator))
+                                              x))
+                                (when (ctype-p y-type)
+                                  (setf type
+                                        (type-after-comparison operator not-p (or type
+                                                                                  (specifier-type 'index))
+                                                               y-type)))))))))))
+      type)))
 
 ;;; Again, if we can tell the results from the type, just use it.
 ;;; Otherwise, if we know the rank, convert into a computation based
@@ -1567,34 +1620,6 @@
                 (array-has-fill-pointer-p ,vector-sym))
            (%array-fill-pointer ,vector-sym)
            (sb-vm::fill-pointer-error ,vector-sym)))))
-
-(deftransform %check-bound ((array dimension index) ((simple-array * (*)) t t))
-  (let ((array-ref (lvar-uses array))
-        (index-ref (lvar-uses index)))
-    (unless (and
-             (ref-p array-ref)
-             (ref-p index-ref)
-             (or
-              (let* ((index-leaf (ref-leaf index-ref))
-                     (index-value (and (constant-p index-leaf)
-                                       (constant-value index-leaf)))
-                     (index-value (and (integerp index-value)
-                                       index-value)))
-                (loop for constraint in (ref-constraints array-ref)
-                      for y = (constraint-y constraint)
-                      thereis (and
-                               (eq (constraint-kind constraint) 'array-in-bounds-p)
-                               (if index-value
-                                   (and (constant-p y)
-                                        (<= index-value (constant-value y)))
-                                   (eq index-leaf y)))))
-              (loop for constraint in (ref-constraints index-ref)
-                    thereis (and (eq (constraint-kind constraint) 'array-in-bounds-p)
-                                 (eq (constraint-y constraint)
-                                     (ref-leaf array-ref))))))
-      (give-up-ir1-transform)))
-  ;; It's in bounds but it may be of the wrong type
-  `(the (and fixnum unsigned-byte) index))
 
 (deftransform check-bound ((array dimension index))
   ;; %CHECK-BOUND will perform both bound and type checking when

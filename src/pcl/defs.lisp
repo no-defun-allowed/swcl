@@ -353,8 +353,6 @@
 
 (defclass standard-reader-method (standard-accessor-method) ())
 (defclass standard-writer-method (standard-accessor-method) ())
-;;; an extension, apparently.
-(defclass standard-boundp-method (standard-accessor-method) ())
 
 ;;; for (SLOT-VALUE X 'FOO) / ACCESSOR-SLOT-VALUE optimization, which
 ;;; can't be STANDARD-READER-METHOD because there is no associated
@@ -366,6 +364,8 @@
 (defclass method-combination (metaobject)
   ((%documentation :initform nil :initarg :documentation)))
 
+;;; TODO: we can express MAKE-GF-HASHSET in terms of the robinhood hashset
+;;; using the same stable FSC-INSTANCE-HASH as this.
 (defun make-gf-hashset ()
   ;; Return what is logically a weak hashset, but physically a weak hash-table
   ;; because we don't implement hashsets.

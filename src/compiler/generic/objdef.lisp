@@ -439,7 +439,7 @@ during backtrace.
                           :widetag simd-pack-widetag)
   (tag :ref-trans %simd-pack-tag
        :attributes (movable flushable)
-       :type fixnum)
+       :type (unsigned-byte 4))
   (lo-value :c-type "long" :type (unsigned-byte 64))
   (hi-value :c-type "long" :type (unsigned-byte 64)))
 
@@ -449,7 +449,7 @@ during backtrace.
                           :widetag simd-pack-256-widetag)
   (tag :ref-trans %simd-pack-256-tag
        :attributes (movable flushable)
-       :type fixnum)
+       :type (unsigned-byte 4))
   (p0 :c-type "long" :type (unsigned-byte 64))
   (p1 :c-type "long" :type (unsigned-byte 64))
   (p2 :c-type "long" :type (unsigned-byte 64))
@@ -564,7 +564,6 @@ during backtrace.
   ;; Statistical CPU profiler data recording buffer
   (sprof-data)
   ;;
-  (arena-savearea :c-type "arena_state" :length 7)
   (arena)
 
   #+x86 (tls-cookie)                          ;  LDT index
@@ -671,13 +670,7 @@ during backtrace.
        (* 2 n-word-bytes)
        list-pointer-lowtag))
 
-;;; MIXED-REGION is at the beginning of static space
-;;; Be sure to update "#define main_thread_mixed_region" etc
-;;; if these get changed.
-#-sb-thread
-(progn (defconstant mixed-region static-space-start)
-       (defconstant cons-region (+ mixed-region (* 3 n-word-bytes)))
-       (defconstant boxed-region (+ cons-region (* 3 n-word-bytes))))
+#+sb-xc-host (defun get-nil-taggedptr () sb-vm:nil-value)
 
 ;;; Start of static objects:
 ;;;
@@ -730,8 +723,3 @@ during backtrace.
 ;;; size of NIL in bytes that we report for primitive-object-size.
 (defconstant static-space-objects-start
   (+ nil-symbol-slots-start (ash (1- sizeof-nil-in-words) word-shift)))
-
-#-sb-xc-host
-(progn
-(declaim (inline lowtag-of))
-(defun lowtag-of (x) (logand (get-lisp-obj-address x) sb-vm:lowtag-mask)))

@@ -3,6 +3,9 @@
 (export '(arena
           arena-p
           arena-bytes-used
+          arena-bytes-wasted
+          arena-length
+          arena-userdata
           new-arena
           destroy-arena
           switch-to-arena
@@ -10,62 +13,104 @@
           unuse-arena
           thread-current-arena
           in-same-arena
+          dump-arena-objects
           c-find-heap->arena
           show-heap->arena))
 
-;;; The arena structure has to be created in the arena,
-;;; but the constructor can't do it (chicken-and-egg problem).
-(defstruct (arena (:constructor nil))
-  (base-address 0 :type word)
-  (length 0 :type word)
-  (free-pointer 0 :type word)
-  ;; an opaque value which can be used by a threads in a thread pool to detect
-  ;; that this arena was reset, by comparing to a cached value in the thread.
-  (cookie (cons t t))
-  ;; Multiple (unrelated) arenas are allowed.
-  ;; also might want an extension concept - multiple backing ranges
-  ;; of memory for a single logical arena.
-  (next-arena 0))
-(defun arena-bytes-used (a)
-  (- (arena-free-pointer a) (arena-base-address a)))
+;;; A contiguous block is described by 'struct arena_memblk' in C.
+;;; There is no corresponding lisp defstruct.
+(defmacro arena-memblk-freeptr (memblk) `(sap-ref-sap ,memblk 0))
+(defmacro arena-memblk-limit (memblk) `(sap-ref-sap ,memblk ,(ash 1 word-shift)))
+(defmacro arena-memblk-next (memblk) `(sap-ref-sap ,memblk ,(ash 2 word-shift)))
+(defmacro arena-memblk-padword (memblk) `(sap-ref-sap ,memblk ,(ash 3 word-shift)))
+
+(defmacro do-arena-blocks ((blkvar arena) &body body)
+  ;; bind BLK to a SAP pointing to successive 'struct memblk' in arena
+  `(let ((,blkvar (int-sap (arena-first-block ,arena))))
+     (loop (progn ,@body)
+           (setq ,blkvar (arena-memblk-next ,blkvar))
+           (if (zerop (sap-int ,blkvar)) (return)))))
+
+;;; Not "just" define-alien-routine because we have to GET-LISP-OBJ-ADDRESS on the arg
+(defun arena-bytes-used (arena)
+  (alien-funcall (extern-alien "arena_bytes_used" (function unsigned unsigned))
+                 (get-lisp-obj-address arena)))
 
 (defun unuse-arena ()
   #+system-tlabs
   (when (arena-p (thread-current-arena))
     (switch-to-arena 0)))
 
-(defun rewind-arena (a)
+(define-load-time-global *arena-index-generator* 0)
+(declaim (fixnum *arena-index-generator*))
+(define-load-time-global *arena-lock* (sb-thread:make-mutex))
+
+;;; Release all memblks back to the OS, except the first one associated with this arena.
+(defun rewind-arena (arena)
   #+system-tlabs
-  (setf (arena-cookie a) (cons t t)
-        (arena-free-pointer a) (+ (arena-base-address a)
-                                  (sb-ext:primitive-object-size a)))
+  (cond ((= (arena-token arena) most-positive-word)
+         (bug "Arena token overflow. Need to implement double-precision count"))
+        ((eql (arena-link arena) 0)) ; never used - do nothing
+        (t
+         (alien-funcall (extern-alien "arena_release_memblks" (function void unsigned))
+                        (get-lisp-obj-address arena))
+         (setf (arena-bytes-wasted arena) 0)
+         (incf (arena-token arena))))
+  arena)
 
-  a)
-
-(defparameter default-arena-size (* 10 1024 1024 1024))
-
-(defun new-arena ()
+;;; The arena structure has to be created in the arena,
+;;; but the constructor can't do it (chicken-and-egg problem).
+;;; There are one or more large blocks of memory associated with
+;;; an arena, obtained via malloc(). Allocations within a block are
+;;; contiguous but the blocks can be discontiguous.
+(defun new-arena (size &optional (growth-amount size) (max-extensions 7))
+  (declare (ignorable growth-amount max-extensions))
+  (assert (>= size 65536))
+  "Create a new arena of SIZE bytes which can be grown additively by GROWTH-AMOUNT
+one or more times, not to exceed MAX-EXTENSIONS times"
   #-system-tlabs :placeholder
   #+system-tlabs
-  (let* ((size default-arena-size)
-         (mem (allocate-system-memory size))
-         (layout (find-layout 'arena)))
-    (setf (sap-ref-word mem 0) (compute-object-header (1+ (dd-length (wrapper-dd layout)))
-                                                      instance-widetag))
-    (let ((arena (%make-lisp-obj (sap-int (sap+ mem instance-pointer-lowtag)))))
-      (%set-instance-layout arena layout)
-      (setf (arena-base-address arena) (sap-int mem)
-            (arena-length arena) size
-            (arena-free-pointer arena)
-            (sap-int (sap+ mem (primitive-object-size arena))))
-      arena)))
+  (let ((layout (find-layout 'arena))
+        (index (with-system-mutex (*arena-lock*) (incf *arena-index-generator*)))
+        (arena (%make-lisp-obj
+                (alien-funcall (extern-alien "sbcl_new_arena" (function unsigned unsigned))
+                               size))))
+    (%set-instance-layout arena layout)
+    (setf (arena-max-extensions arena) max-extensions
+          (arena-growth-amount arena) growth-amount
+          (arena-max-extensions arena) max-extensions
+          (arena-index arena) index
+          (arena-token arena) 1
+          (arena-userdata arena) nil)
+    arena))
 
-;;; Once destroyed, it is not legal to access the structure
-;;; since the structure itself is in the arena.
-;;; BUG: must unlink from arena chain. Not safe to use this yet.
+(eval-when (:compile-toplevel)
+;;; Caution: this vop potentially clobbers all registers, but it doesn't declare them.
+;;; It's safe to use only from DESTROY-ARENA which, being an ordinary full call,
+;;; is presumed not to preserve registers.
+(define-vop (delete-arena)
+  (:args (x :scs (descriptor-reg)))
+  (:temporary (:sc unsigned-reg :offset rdi-offset :from (:argument 0)) rdi)
+  (:vop-var vop)
+  (:generator 1
+    (move rdi x)
+    #-immobile-space (inst break halt-trap)
+    #+immobile-space
+    (pseudo-atomic ()
+      (inst call (make-fixup "sbcl_delete_arena" :foreign))))))
+
+;;; Destroy memory associated with ARENA, unlinking it from the global chain.
+;;; Note that we do not recycle arena IDs. It would be dangerous to do so, because a thread
+;;; might believe it has a valid TLAB in the deleted arena if it randomly matched on the
+;;; ID and token. That's a valid argument for making arena tokens gobally unique
+;;; (the way it used to work before I made tokens arena-specific)
 (defun destroy-arena (arena)
-  (deallocate-system-memory (arena-base-address arena) (arena-length arena))
-  nil)
+  ;; C is responsible for most of the cleanup.
+  (%primitive delete-arena arena)
+  ;; It is illegal to access the structure now, since that was in the arena.
+  ;; So return an arbitrary success indicator. It might happen that you can accidentally
+  ;; refer to the structure, but technically that constitutes a use-after-free bug.
+  t)
 
 (defmacro with-arena ((arena) &body body)
   (declare (ignorable arena))
@@ -109,17 +154,23 @@
          (funcall #'thunk)
          (call-using-arena #'thunk .obj. ',reason)))))
 
-;;; TOOD: consider using balanced tree for multiple arenas
+;;; backward-compatibility assuming no extension blocks. DON'T USE THIS!
+(defun arena-base-address (arena) (arena-first-block arena))
+
+;;; Possible TOOD: if this needs to be efficient, then we would need
+;;; a balanced tree which maps each 'struct memblk' to an arena.
+;;; This would be complicated by the fact that extension occurs in C code,
+;;; so C would have to maintain the balanced tree structure.
+;;; It may not be terribly important to optimize.
 (defun find-containing-arena (addr)
   (declare (word addr))
   (let ((chain (sap-ref-lispobj (foreign-symbol-sap "arena_chain" t) 0)))
     (unless (eql chain 0)
-      (do ((arena chain (arena-next-arena arena)))
+      (do ((arena chain (arena-link arena)))
           ((not arena))
-        (when (< (arena-base-address arena) addr
-                 (sap-int (sap+ (int-sap (arena-base-address arena))
-                                (arena-length arena))))
-          (return arena))))))
+        (do-arena-blocks (memblk arena)
+          (when (< (sap-int memblk) addr (sap-int (arena-memblk-freeptr memblk)))
+            (return arena)))))))
 
 (defun maybe-show-arena-switch (direction reason)
   (declare (ignore direction reason)))
@@ -139,24 +190,61 @@
         (progn (switch-to-arena usable-arena)
                (multiple-value-prog1 (funcall thunk) (switch-to-arena 0))))))
 
-(defun c-find-heap->arena ()
+#+system-tlabs
+(defun c-find-heap->arena (&optional arena)
   (declare (notinline coerce)) ; "Proclaiming SB-KERNEL:COERCE-TO-LIST to be INLINE, but 1 call to it was..."
-  #+system-tlabs
-  (let* ((v (make-array 10000))
-         (n (with-pinned-objects (v)
-              (sb-alien:alien-funcall
-               (sb-alien:extern-alien "find_dynspace_to_arena_ptrs" (function sb-alien:int sb-alien:unsigned))
-               (get-lisp-obj-address v)))))
-    (coerce (subseq v 0 n) 'list)))
+  (let* ((result (make-array 10000))
+         (n (with-pinned-objects (arena result)
+              (alien-funcall
+               (extern-alien "find_dynspace_to_arena_ptrs" (function int unsigned unsigned))
+               (if arena (get-lisp-obj-address arena) 0)
+               (get-lisp-obj-address result)))))
+    ;; The AVL tree of threads is keyed by THREAD-PRIMITIVE-THREAD, which is the base
+    ;; of each thread's TLS and above its binding stack. Therefore we need two separate
+    ;; FIND operations, one >= and one <=. Perhaps it would make sense to key by control stack base.
+    ;; FIXME: These functions should probably acquire 'all_threads_lock'. Even so, the entire
+    ;; entire mechanism is still slightly unsafe because the finder returns raw addresses.
+    (flet ((find-tls-ref (addr)
+             (binding* ((node (sb-thread::avl-find<= addr sb-thread::*all-threads*) :exit-if-null)
+                        (thread-sap (sb-sys:int-sap
+                                     (sb-thread::thread-primitive-thread
+                                      (sb-thread::avlnode-data node)))))
+               (when (and (<= (sap-int thread-sap) addr)
+                          (< addr (sap-int (sap+ thread-sap (ash *free-tls-index* n-fixnum-tag-bits)))))
+                 (let* ((tlsindex (sap- (int-sap addr) thread-sap))
+                        (symbol (symbol-from-tls-index tlsindex)))
+                   (list (sap-ref-lispobj thread-sap (ash thread-lisp-thread-slot word-shift))
+                         :tls symbol)))))
+           (find-binding (addr)
+             (binding* ((node (sb-thread::avl-find>= addr sb-thread::*all-threads*) :exit-if-null)
+                        (thread-sap (sb-sys:int-sap
+                                     (sb-thread::thread-primitive-thread
+                                      (sb-thread::avlnode-data node))))
+                        (bindstack-base
+                         (sap-ref-word thread-sap (ash thread-binding-stack-start-slot word-shift)))
+                        (bindstack-ptr
+                         (sap-ref-word thread-sap (ash thread-binding-stack-pointer-slot word-shift))))
+               (when (and (>= addr bindstack-base) (< addr bindstack-ptr))
+                 (let* ((tlsindex (sap-ref-word (int-sap addr) (- n-word-bytes)))
+                        (symbol (symbol-from-tls-index tlsindex)))
+                   (list (sap-ref-lispobj thread-sap (ash thread-lisp-thread-slot word-shift))
+                         :binding symbol))))))
+      (dotimes (i n)
+        (let ((element (aref result i)))
+          (when (fixnump element) ; it's a thread memory address
+            (let ((word (ash element n-fixnum-tag-bits)))
+              (setf (aref result i) (or (find-tls-ref word) (find-binding word))))))))
+    (coerce (subseq result 0 n) 'list)))
 
 ;;; This global var is just for making 1 arena for testing purposes.
 ;;; It does not indicate about anything the current thread's arena usage.
 ;;; For that you have to examine THREAD-ARENA-SLOT.
 (sb-ext:define-load-time-global *my-arena* nil)
 
+(defparameter default-arena-size (* 10 1024 1024 1024))
 (defun create-arena ()
   (cond ((null *my-arena*)
-         (setq *my-arena* (new-arena))
+         (setq *my-arena* (new-arena default-arena-size))
          (format t "Arena memory @ ~x (struct @ ~x)~%"
                  (arena-base-address *my-arena*)
                  (sb-kernel:get-lisp-obj-address *my-arena*)))
@@ -175,3 +263,10 @@
       (dotimes (i 10) (sb-ext:atomic-push (cons 3 i) *foo*))
       (sb-thread:join-thread t1)
       (sb-thread:join-thread t2))))
+
+(defmethod print-object ((self arena) stream)
+  (print-unreadable-object (self stream :type t :identity t)
+    (format stream "id=~D used=~D waste=~D"
+            (arena-index self)
+            (arena-bytes-used self)
+            (arena-bytes-wasted self))))

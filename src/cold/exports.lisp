@@ -580,6 +580,7 @@ structure representations")
            "SYMBOL-HASH-SLOT" "SYMBOL-WIDETAG" "SYMBOL-NAME-SLOT"
            "SYMBOL-PACKAGE-ID-SLOT" "SYMBOL-INFO-SLOT" "SYMBOL-FDEFN-SLOT"
            "SYMBOL-SIZE" "SYMBOL-VALUE-SLOT" "SYMBOL-TLS-INDEX-SLOT"
+           "SYMBOL-FROM-TLS-INDEX"
            "*BINDING-STACK-START*"
            "*CONTROL-STACK-START*" "*CONTROL-STACK-END*"
            "CONTROL-STACK-POINTER-VALID-P"
@@ -2694,14 +2695,14 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "SIMD-PACK-DOUBLE"
            "SIMD-PACK-INT"
            "SIMD-PACK-TYPE"
-           "SIMD-PACK-TYPE-ELEMENT-TYPE"
-           "*SIMD-PACK-ELEMENT-TYPES*")
+           "SIMD-PACK-TYPE-TAG-MASK"
+           "+SIMD-PACK-ELEMENT-TYPES+")
   #+sb-simd-pack-256
   (:export "SIMD-PACK-256-SINGLE"
            "SIMD-PACK-256-DOUBLE"
            "SIMD-PACK-256-INT"
            "SIMD-PACK-256-TYPE"
-           "SIMD-PACK-256-TYPE-ELEMENT-TYPE")
+           "SIMD-PACK-256-TYPE-TAG-MASK")
   #+long-float
   (:export "LONG-FLOAT-EXPONENT" "LONG-FLOAT-EXP-BITS"
            "LONG-FLOAT-HIGH-BITS" "LONG-FLOAT-LOW-BITS"
@@ -2946,6 +2947,7 @@ possibly temporarily, because it might be used internally.")
            "MAP-XSET"
            "XSET"
            "XSET-COUNT"
+           "XSET-ELTS-HASH"
            "XSET-EMPTY-P"
            "XSET-INTERSECTION"
            "XSET-MEMBER-P"
@@ -2962,6 +2964,10 @@ possibly temporarily, because it might be used internally.")
            "SSET" "SSET-ELEMENT"
            "SSET-ADJOIN" "SSET-DELETE" "SSET-EMPTY" "SSET-COUNT"
            "SSET-MEMBER"
+
+           ;; key-only hash lookup which saves space over a hash-table
+           "MAKE-HASHSET" "HASHSET-INSERT" "HASHSET-REMOVE" "HASHSET-FIND"
+           "HASHSET-INSERT-IF-ABSENT"
 
             ;; communication between the runtime and Lisp
 

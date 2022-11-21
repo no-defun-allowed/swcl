@@ -251,7 +251,7 @@
                                `(cons (find-classoid ',super) ',guard)))
                            specs)) #-sb-xc-host t)))
        (,progn-oid
-        (let ((type-class (type-class-or-lose ',type-class-name)))
+        (let ((type-class (!type-class-or-lose ',type-class-name)))
          (setf (type-class-complex-subtypep-arg1 type-class) #',defun-name)
          (setf (type-class-complex-subtypep-arg2 type-class)
                #'delegate-complex-subtypep-arg2)
@@ -280,8 +280,8 @@
                :hash-bits 8
                :hash-function
                (lambda (req opt rest allowp)
-                 (logxor (type-list-cache-hash req)
-                         (type-list-cache-hash opt)
+                 (logxor (hash-ctype-list req)
+                         (hash-ctype-list opt)
                           (if rest
                               (type-hash-value rest)
                               42)
@@ -297,22 +297,16 @@
      (optional list-elts-eq)
      (rest eq)
      (allowp eq))
-  (%make-values-type :required required
-                     :optional optional
-                     :rest rest
-                     :allowp allowp))
+  (new-ctype values-type required optional rest allowp))
 
 (defun make-values-type (&key required optional rest allowp)
   (multiple-value-bind (required optional rest)
       (canonicalize-args-type-args required optional rest)
-    (cond ((and (null required)
-                (null optional)
-                (eq rest *universal-type*))
+    (cond ((and (null required) (null optional) (eq rest *universal-type*))
            *wild-type*)
           ((memq *empty-type* required)
            *empty-type*)
-          (t (make-values-type-cached required optional
-                                      rest allowp)))))
+          (t (make-values-type-cached required optional rest allowp)))))
 
 (define-type-method (values :simple-subtypep :complex-subtypep-arg1)
                      (type1 type2)
@@ -528,9 +522,9 @@
 #+sb-xc-host
 (defvar *interned-fun-types*
   (flet ((fun-type (n)
-           (!make-interned-fun-type (pack-interned-ctype-bits 'function)
-                                    (make-list n :initial-element *universal-type*)
-                                    nil nil nil nil nil nil *wild-type*)))
+           (!alloc-fun-type (pack-interned-ctype-bits 'function)
+                            (make-list n :initial-element *universal-type*)
+                            nil nil nil nil nil nil *wild-type*)))
     (vector (fun-type 0) (fun-type 1) (fun-type 2) (fun-type 3))))
 
 (defun make-fun-type (&key required optional rest
@@ -540,7 +534,7 @@
   (let ((rest (if (eq rest *empty-type*) nil rest))
         (n (length required)))
     (cond (designator
-           (make-fun-designator-type required optional rest keyp keywords
+           (new-ctype fun-designator-type required optional rest keyp keywords
                                      allowp wild-args returns))
           ((and
             (<= n 3)
@@ -550,7 +544,7 @@
             (not (find *universal-type* required :test #'neq)))
            (svref (literal-ctype-vector *interned-fun-types*) n))
           (t
-           (%make-fun-type required optional rest keyp keywords
+           (new-ctype fun-type required optional rest keyp keywords
                            allowp wild-args returns)))))
 
 ;; This seems to be used only by cltl2, and within 'cross-type',
@@ -573,7 +567,7 @@
   (type= (constant-type-type type1) (constant-type-type type2)))
 
 (def-type-translator constant-arg ((:context context) type)
-  (make-constant-type :type (single-value-specifier-type type context)))
+  (new-ctype constant-type (single-value-specifier-type type context)))
 
 (defun canonicalize-args-type-args (required optional rest &optional keyp)
   (when (eq rest *empty-type*)
@@ -641,9 +635,9 @@
                   (make-key-info
                    ;; MAKE-KEY-INFO will complain if KWD is not a symbol.
                    ;; That's good enough - we don't need an extra check here.
-                   :name kwd
-                   :type (single-value-specifier-type (second key) context)))))
-             (key-info))))
+                   kwd
+                   (single-value-specifier-type (second key) context)))))
+             (intern-key-infos (key-info)))))
       (multiple-value-bind (required optional rest)
           (canonicalize-args-type-args required optional rest
                                        (ll-kwds-keyp llks))
@@ -1429,6 +1423,14 @@
        (defun class-classoid (class)
          (wrapper-classoid (sb-pcl::class-wrapper class))))
 
+;;; HAIRY type-class has to be defined prior to defining %PARSE-TYPE.
+;; ENUMERABLE-P is T because a hairy type could be equivalent to a MEMBER type.
+;; e.g. any SATISFIES with a predicate returning T over a finite domain.
+;; But in practice there's nothing that can be done with this information,
+;; because we don't call random predicates when performing operations on types
+;; as objects, only when checking for inclusion of something in the type.
+(define-type-class hairy :enumerable t :might-contain-other-types t)
+
 ;;; Parsing of type specifiers comes in many variations:
 ;;;  SINGLE-VALUE-SPECIFIER-TYPE:
 ;;;    disallow VALUES even if single value, but allow *
@@ -1503,8 +1505,8 @@
                                (when cl:*compile-print*
                                  (format t "~&; NEW UNKNOWN-TYPE ~S~%" spec))
                                (setf (gethash spec table)
-                                     (make-unknown-type :specifier spec))))))
-                (make-unknown-type :specifier spec)))))
+                                     (new-ctype unknown-type spec))))))
+                (make-unknown-type spec)))))
 
 ;;; BASIC-PARSE-TYPESPEC can grok some simple cases that involve turning an object
 ;;; used as a type specifier into an internalized type object (which might be
@@ -1811,9 +1813,13 @@ expansion happened."
         union
         nil)))
 
+(define-type-class intersection
+                    :enumerable #'compound-type-enumerable
+                    :might-contain-other-types t)
+
 (defun type-intersection (&rest input-types)
   (%type-intersection input-types))
-(defun-cached (%type-intersection :hash-bits 10 :hash-function #'type-list-cache-hash)
+(defun-cached (%type-intersection :hash-bits 10 :hash-function #'hash-ctype-list)
     ((input-types equal))
   (let ((simplified-types (simplify-intersections input-types)))
     (declare (type list simplified-types))
@@ -1838,13 +1844,13 @@ expansion happened."
         (cond
           ((null simplified-types) *universal-type*)
           ((null (cdr simplified-types)) (car simplified-types))
-          (t (%make-intersection-type
+          (t (new-ctype intersection-type
               (some #'type-enumerable simplified-types)
               simplified-types))))))
 
 (defun type-union (&rest input-types)
   (%type-union input-types))
-(defun-cached (%type-union :hash-bits 8 :hash-function #'type-list-cache-hash)
+(defun-cached (%type-union :hash-bits 8 :hash-function #'hash-ctype-list)
     ((input-types equal))
   (let ((simplified-types (simplify-unions input-types)))
     (cond
@@ -2109,13 +2115,6 @@ expansion happened."
 
 ;;;; hairy and unknown types
 
-;; ENUMERABLE-P is T because a hairy type could be equivalent to a MEMBER type.
-;; e.g. any SATISFIES with a predicate returning T over a finite domain.
-;; But in practice there's nothing that can be done with this information,
-;; because we don't call random predicates when performing operations on types
-;; as objects, only when checking for inclusion of something in the type.
-(define-type-class hairy :enumerable t :might-contain-other-types t)
-
 ;;; Without some special HAIRY cases, we massively pollute the type caches
 ;;; with objects that are all equivalent to *EMPTY-TYPE*. e.g.
 ;;;  (AND (SATISFIES LEGAL-FUN-NAME-P) (SIMPLE-ARRAY CHARACTER (*))) and
@@ -2129,9 +2128,9 @@ expansion happened."
 #+sb-xc-host
 (progn
   (defvar *satisfies-keywordp-type*
-    (!make-interned-hairy-type '(satisfies keywordp)))
+    (!alloc-hairy-type (pack-interned-ctype-bits 'hairy) '(satisfies keywordp)))
   (defvar *fun-name-type*
-    (!make-interned-hairy-type '(satisfies legal-fun-name-p))))
+    (!alloc-hairy-type (pack-interned-ctype-bits 'hairy) '(satisfies legal-fun-name-p))))
 
 (define-type-method (hairy :negate) (x) (make-negation-type x))
 
@@ -2480,8 +2479,12 @@ expansion happened."
 (define-type-class number :enumerable #'numeric-type-enumerable :might-contain-other-types nil)
 
 (define-type-method (number :simple-=) (type1 type2)
-  ;; TODO: construct the hash bits for NUMBER types using a deterministic hash of
-  ;; the low + high bounds. Then TYPE= can be true only if the hashes are =.
+  ;; Note that EQUALP equates signed zeros of the same precision.
+  ;; In particular all the following are different, but TYPE= to each other:
+  ;;  (specifier-type '(single-float -0s0 -0s0))
+  ;;  (specifier-type '(single-float -0s0 +0s0))
+  ;;  (specifier-type '(single-float +0s0 -0s0))
+  ;;  (specifier-type '(single-float +0s0 +0s0))
   (values
    (and (numeric-type-equal type1 type2)
         (equalp (numeric-type-low type1) (numeric-type-low type2))
@@ -2580,12 +2583,11 @@ expansion happened."
         (values t low)
         (values nil nil))))
 
-(defun interned-numeric-type (specifier &rest args)
-  (apply '%make-numeric-type
-         :%bits (pack-interned-ctype-bits
-                 'number nil
-                 (when specifier (sb-vm::saetp-index-or-lose specifier)))
-         args))
+(defun interned-numeric-type (specifier &key enumerable class format (complexp :real) low high)
+  (!alloc-numeric-type
+   (pack-interned-ctype-bits 'number nil
+                             (when specifier (sb-vm::saetp-index-or-lose specifier)))
+   enumerable class format complexp low high))
 
 #+sb-xc-host
 (progn
@@ -2798,8 +2800,7 @@ expansion happened."
                 (not complexp)
                 (bounds-unbounded-p low high)
                 (literal-ctype (interned-numeric-type nil :complexp nil) number))))
-        (%make-numeric-type :class class :format format :complexp complexp
-                            :low low :high high :enumerable enumerable))))
+        (new-ctype numeric-type enumerable class format complexp low high))))
 
 (defun modified-numeric-type (base
                               &key
@@ -3537,7 +3538,7 @@ used for a COMPLEX component.~:@>"
     (unless (cdr pairs)
       (macrolet ((range (low high &optional saetp-index)
                    `(return-from make-character-set-type
-                      (literal-ctype (!make-interned-character-set-type
+                      (literal-ctype (!alloc-character-set-type
                                       (pack-interned-ctype-bits 'character-set nil ,saetp-index)
                                       '((,low . ,high)))
                                      (character-set ((,low . ,high)))))))
@@ -3568,8 +3569,8 @@ used for a COMPLEX component.~:@>"
 (defvar *interned-array-types*
   (labels ((make-1 (type-index dims complexp type)
              (aver (= (type-saetp-index type) type-index))
-             (!make-interned-array-type (pack-interned-ctype-bits 'array)
-                                        dims complexp type type))
+             (!alloc-array-type (pack-interned-ctype-bits 'array)
+                                dims complexp type type))
            (make-all (element-type type-index array)
              (replace array
                       (list (make-1 type-index '(*) nil    element-type)
@@ -4060,8 +4061,8 @@ used for a COMPLEX component.~:@>"
              (unless unpaired
                (macrolet ((member-type (&rest elts)
                             `(literal-ctype
-                              (!make-interned-member-type
-                               (pack-interned-ctype-bits 'member) (xset-from-list ',elts) nil)
+                              (!alloc-member-type (pack-interned-ctype-bits 'member)
+                                                  (xset-from-list ',elts) nil)
                               (member ,@elts))))
                  (let ((elts (xset-data xset)))
                    (when (singleton-p elts)
@@ -4077,11 +4078,14 @@ used for a COMPLEX component.~:@>"
                (%make-member-type xset unpaired)))))
       ;; The actual member-type contains the XSET (with no FP zeroes),
       ;; and a list of unpaired zeroes.
-      (if float-types
-          (make-union-type t (if member-type
-                                 (cons member-type float-types)
-                                 float-types))
-          (or member-type *empty-type*)))))
+      (if (not float-types)
+          (or member-type *empty-type*)
+          (let ((types (if member-type
+                           (cons member-type float-types)
+                           float-types)))
+            (if (cdr types)
+                (make-union-type t types)
+                (car types)))))))
 
 (defun member-type-size (type)
   (+ (length (member-type-fp-zeroes type))
@@ -4238,6 +4242,7 @@ used for a COMPLEX component.~:@>"
             (t (push m ms))))
         (apply #'type-union
                (member-type-from-list ms)
+               ;; Constructor asserts that pairs are properly sorted
                (make-character-set-type (mapcar (lambda (x) (cons x x))
                                                 (sort char-codes #'<)))
                (nreverse numbers)))
@@ -4261,10 +4266,6 @@ used for a COMPLEX component.~:@>"
 ;;;; We still follow the example of CMU CL to some extent, by punting
 ;;;; (to the opaque HAIRY-TYPE) on sufficiently complicated types
 ;;;; involving AND.
-
-(define-type-class intersection
-                    :enumerable #'compound-type-enumerable
-                    :might-contain-other-types t)
 
 (define-type-method (intersection :negate) (type)
   (%type-union
@@ -4821,12 +4822,11 @@ used for a COMPLEX component.~:@>"
         ;; but it improves the hit rate in the function caches.
         ((and (type= car-type *universal-type*)
               (type= cdr-type *universal-type*))
-         (literal-ctype (!make-interned-cons-type (pack-interned-ctype-bits 'cons)
-                                                  *universal-type*
-                                                  *universal-type*)
+         (literal-ctype (!alloc-cons-type (pack-interned-ctype-bits 'cons)
+                                          *universal-type* *universal-type*)
                         cons))
         (t
-         (%make-cons-type car-type cdr-type))))
+         (new-ctype cons-type car-type cdr-type))))
 
 ;;; Return TYPE converted to canonical form for a situation where the
 ;;; "type" '* (which SBCL still represents as a type even though ANSI
@@ -5004,6 +5004,13 @@ used for a COMPLEX component.~:@>"
 
 ;;;; CHARACTER-SET types
 
+;; FIXME:
+;; 1. (SPECIFIER-TYPE '(CHARACTER-SET ((20 . 19)))) stores pairs exactly as
+;;    given, and unparses to the rather bogus #<CHARACTER-SET-TYPE (MEMBER)>
+;; 2. (SPECIFIER-TYPE '(CHARACTER-SET ((20 . 20) (15 . 15)))) fails
+;;    because of the pre-sorting requirement.
+;; But since this is not standard syntax I don't think we can ever see those
+;; specifiers unless from an unparse of a valid internal representation.
 (def-type-translator character-set
     (&optional (pairs `((0 . ,(1- char-code-limit)))))
   (make-character-set-type pairs))
@@ -5183,44 +5190,32 @@ used for a COMPLEX component.~:@>"
 ;;;; SIMD-PACK types
 
 #+sb-simd-pack
-(defun make-simd-pack-type (element-type)
-  (aver (neq element-type *wild-type*))
-  (if (eq element-type *empty-type*)
-      *empty-type*
-      (%make-simd-pack-type
-       (do* ((i 0 (1+ i))
-             (pack-types *simd-pack-element-types* (cdr pack-types))
-             (pack-type (car pack-types) (car pack-types)))
-            ((null pack-types)
-             (error "~S element type must be a subtype of ~
-                         ~{~/sb-impl:print-type-specifier/~#[~;, or ~
-                         ~:;, ~]~}."
-                    'simd-pack *simd-pack-element-types*))
-         (when (csubtypep element-type (specifier-type pack-type))
-           (let ((bv (make-array (length *simd-pack-element-types*)
-                                 :element-type 'bit :initial-element 0)))
-             (setf (sbit bv i) 1)
-             (return bv)))))))
+(progn
+;;; FIXME: the pretty-print of this error message is just ghastly. How about:
+;;;  "must be a subtype of ({SIGNED-BYTE|UNSIGNED-BYTE} {8|16|32|64}) or {SINGLE|DOUBLE}-FLOAT"
+;;; Users sophisticated enough to code with simd-packs will understand what it means.
+(defun simd-type-parser-helper (element-type-spec type-name ctor)
+  (when (eq element-type-spec '*)
+    (return-from simd-type-parser-helper (funcall ctor +simd-pack-wild+)))
+  (let ((element-type (single-value-specifier-type element-type-spec)))
+    (when (eq element-type *empty-type*)
+      (return-from simd-type-parser-helper *empty-type*))
+    (dotimes (i (length +simd-pack-element-types+)
+                (error "~S element type must be a subtype of ~
+                        ~{~/sb-impl:print-type-specifier/~#[~;, or ~
+                        ~:;, ~]~}."
+                     type-name (coerce +simd-pack-element-types+ 'list)))
+      (when (csubtypep element-type (specifier-type (aref +simd-pack-element-types+ i)))
+        (return (funcall ctor (ash 1 i)))))))
 
-#+sb-simd-pack-256
-(defun make-simd-pack-256-type (element-type)
-  (aver (neq element-type *wild-type*))
-  (if (eq element-type *empty-type*)
-      *empty-type*
-      (%make-simd-pack-256-type
-       (do* ((i 0 (1+ i))
-             (pack-types *simd-pack-element-types* (cdr pack-types))
-             (pack-type (car pack-types) (car pack-types)))
-            ((null pack-types)
-             (error "~S element type must be a subtype of ~
-                         ~{~/sb-impl:print-type-specifier/~#[~;, or ~
-                         ~:;, ~]~}."
-                    'simd-pack-256 *simd-pack-element-types*))
-         (when (csubtypep element-type (specifier-type pack-type))
-           (let ((bv (make-array (length *simd-pack-element-types*)
-                                 :element-type 'bit :initial-element 0)))
-             (setf (sbit bv i) 1)
-             (return bv)))))))
+(defun simd-type-unparser-helper (base-type mask)
+  (cond ((= mask +simd-pack-wild+) base-type)
+        ((= (logcount mask) 1)
+         `(,base-type ,(elt +simd-pack-element-types+ (sb-vm::simd-pack-mask->tag mask))))
+        (t
+         `(or ,@(loop for et across +simd-pack-element-types+ for i from 0
+                      when (logbitp i mask)
+                      collect `(,base-type ,et)))))))
 
 #+sb-simd-pack
 (progn
@@ -5229,61 +5224,39 @@ used for a COMPLEX component.~:@>"
   ;; Though this involves a recursive call to parser, parsing context need not
   ;; be passed down, because an unknown-type condition is an immediate failure.
   (def-type-translator simd-pack (&optional (element-type-spec '*))
-    (if (eql element-type-spec '*)
-        (%make-simd-pack-type (make-array (length *simd-pack-element-types*)
-                                          :element-type 'bit :initial-element 1))
-        (make-simd-pack-type (single-value-specifier-type element-type-spec))))
+    (simd-type-parser-helper element-type-spec 'simd-pack #'%make-simd-pack-type))
 
   (define-type-method (simd-pack :negate) (type)
-    (let* ((element-type (simd-pack-type-element-type type))
-           (remaining (and (/= (count 0 element-type) 0) (bit-not element-type)))
-           (not-simd-pack (make-negation-type (specifier-type 'simd-pack))))
-      (if remaining
-          (type-union not-simd-pack (%make-simd-pack-type remaining))
-          not-simd-pack)))
+    (let ((not-pack (make-negation-type (specifier-type 'simd-pack)))
+          (mask (logxor (simd-pack-type-tag-mask type) +simd-pack-wild+)))
+      (if (eql mask 0)
+          not-pack
+          (type-union not-pack (%make-simd-pack-type mask)))))
 
   (define-type-method (simd-pack :unparse) (type)
-    (let* ((eltypes (simd-pack-type-element-type type)))
-      (cond
-        ((= (count 0 eltypes) 0) 'simd-pack)
-        ((= (count 1 eltypes) 1)
-         (let ((pos (position 1 eltypes)))
-           (if pos
-               `(simd-pack ,(elt *simd-pack-element-types* pos))
-               (bug "bad simd-pack"))))
-        (t
-         `(or
-           ,@(loop for x from 0
-                   for bit across eltypes
-                   if (= bit 1)
-                     collect `(simd-pack ,(elt *simd-pack-element-types* x))))))))
+    (simd-type-unparser-helper 'simd-pack (simd-pack-type-tag-mask type)))
 
   (define-type-method (simd-pack :simple-=) (type1 type2)
     (declare (type simd-pack-type type1 type2))
-    (values
-     (= 0 (count 1 (bit-xor (simd-pack-type-element-type type1)
-                            (simd-pack-type-element-type type2))))
-     t))
+    (values (= (simd-pack-type-tag-mask type1) (simd-pack-type-tag-mask type2))
+            t))
 
   (define-type-method (simd-pack :simple-subtypep) (type1 type2)
     (declare (type simd-pack-type type1 type2))
-    (values
-     (= 0 (count 1 (bit-andc2 (simd-pack-type-element-type type1)
-                              (simd-pack-type-element-type type2))))
-     t))
+    (values (zerop (logandc2 (simd-pack-type-tag-mask type1)
+                             (simd-pack-type-tag-mask type2)))
+            t))
 
   (define-type-method (simd-pack :simple-union2) (type1 type2)
     (declare (type simd-pack-type type1 type2))
-    (%make-simd-pack-type (bit-ior (simd-pack-type-element-type type1)
-                                   (simd-pack-type-element-type type2))))
+    (%make-simd-pack-type (logior (simd-pack-type-tag-mask type1)
+                                  (simd-pack-type-tag-mask type2))))
 
   (define-type-method (simd-pack :simple-intersection2) (type1 type2)
     (declare (type simd-pack-type type1 type2))
-    (let ((intersection (bit-and (simd-pack-type-element-type type1)
-                                 (simd-pack-type-element-type type2))))
-      (if (find 1 intersection)
-          (%make-simd-pack-type intersection)
-          *empty-type*)))
+    (let ((intersection (logand (simd-pack-type-tag-mask type1)
+                                (simd-pack-type-tag-mask type2))))
+      (if (eql intersection 0) *empty-type* (%make-simd-pack-type intersection))))
 
   (!define-superclasses simd-pack ((simd-pack)) !cold-init-forms))
 
@@ -5294,61 +5267,39 @@ used for a COMPLEX component.~:@>"
   ;; Though this involves a recursive call to parser, parsing context need not
   ;; be passed down, because an unknown-type condition is an immediate failure.
   (def-type-translator simd-pack-256 (&optional (element-type-spec '*))
-    (if (eql element-type-spec '*)
-        (%make-simd-pack-256-type (make-array (length *simd-pack-element-types*)
-                                              :element-type 'bit :initial-element 1))
-        (make-simd-pack-256-type (single-value-specifier-type element-type-spec))))
+    (simd-type-parser-helper element-type-spec 'simd-pack-256 #'%make-simd-pack-256-type))
 
   (define-type-method (simd-pack-256 :negate) (type)
-    (let* ((element-type (simd-pack-256-type-element-type type))
-           (remaining (and (/= (count 0 element-type) 0) (bit-not element-type)))
-           (not-simd-pack-256 (make-negation-type (specifier-type 'simd-pack-256))))
-      (if remaining
-          (type-union not-simd-pack-256 (%make-simd-pack-256-type remaining))
-          not-simd-pack-256)))
+    (let ((not-pack (make-negation-type (specifier-type 'simd-pack-256)))
+          (mask (logxor (simd-pack-256-type-tag-mask type) +simd-pack-wild+)))
+      (if (eql mask 0)
+          not-pack
+          (type-union not-pack (%make-simd-pack-256-type mask)))))
 
   (define-type-method (simd-pack-256 :unparse) (type)
-    (let* ((eltypes (simd-pack-256-type-element-type type)))
-      (cond
-        ((= (count 0 eltypes) 0) 'simd-pack-256)
-        ((= (count 1 eltypes) 1)
-         (let ((pos (position 1 eltypes)))
-           (if pos
-               `(simd-pack-256 ,(elt *simd-pack-element-types* pos))
-               (bug "bad simd-pack-256"))))
-        (t
-         `(or
-           ,@(loop for x from 0
-                   for bit across eltypes
-                   if (= bit 1)
-                   collect `(simd-pack-256 ,(elt *simd-pack-element-types* x))))))))
+    (simd-type-unparser-helper 'simd-pack-256 (simd-pack-256-type-tag-mask type)))
 
   (define-type-method (simd-pack-256 :simple-=) (type1 type2)
     (declare (type simd-pack-256-type type1 type2))
-    (values
-     (= 0 (count 1 (bit-xor (simd-pack-256-type-element-type type1)
-                            (simd-pack-256-type-element-type type2))))
-     t))
+    (values (= (simd-pack-256-type-tag-mask type1) (simd-pack-256-type-tag-mask type2))
+            t))
 
   (define-type-method (simd-pack-256 :simple-subtypep) (type1 type2)
     (declare (type simd-pack-256-type type1 type2))
-    (values
-     (= 0 (count 1 (bit-andc2 (simd-pack-256-type-element-type type1)
-                              (simd-pack-256-type-element-type type2))))
-     t))
+    (values (zerop (logandc2 (simd-pack-256-type-tag-mask type1)
+                             (simd-pack-256-type-tag-mask type2)))
+            t))
 
   (define-type-method (simd-pack-256 :simple-union2) (type1 type2)
     (declare (type simd-pack-256-type type1 type2))
-    (%make-simd-pack-256-type (bit-ior (simd-pack-256-type-element-type type1)
-                                       (simd-pack-256-type-element-type type2))))
+    (%make-simd-pack-256-type (logior (simd-pack-256-type-tag-mask type1)
+                                      (simd-pack-256-type-tag-mask type2))))
 
   (define-type-method (simd-pack-256 :simple-intersection2) (type1 type2)
     (declare (type simd-pack-256-type type1 type2))
-    (let ((intersection (bit-and (simd-pack-256-type-element-type type1)
-                                 (simd-pack-256-type-element-type type2))))
-      (if (find 1 intersection)
-          (%make-simd-pack-256-type intersection)
-          *empty-type*)))
+    (let ((intersection (logand (simd-pack-256-type-tag-mask type1)
+                                (simd-pack-256-type-tag-mask type2))))
+      (if (eql intersection 0) *empty-type* (%make-simd-pack-256-type intersection))))
 
   (!define-superclasses simd-pack-256 ((simd-pack-256)) !cold-init-forms))
 
@@ -5704,11 +5655,11 @@ used for a COMPLEX component.~:@>"
        (let ((tag (%simd-pack-tag x)))
          (svref (load-time-value
                  (coerce (cons (specifier-type 'simd-pack)
-                               (mapcar (lambda (x) (specifier-type `(simd-pack ,x)))
-                                       *simd-pack-element-types*))
+                               (map 'list (lambda (x) (specifier-type `(simd-pack ,x)))
+                                    +simd-pack-element-types+))
                          'vector)
                  t)
-                (if (<= 0 tag #.(1- (length *simd-pack-element-types*)))
+                (if (<= 0 tag (1- (length +simd-pack-element-types+)))
                     (1+ tag)
                     0))))
       #+sb-simd-pack-256
@@ -5716,11 +5667,11 @@ used for a COMPLEX component.~:@>"
        (let ((tag (%simd-pack-256-tag x)))
          (svref (load-time-value
                  (coerce (cons (specifier-type 'simd-pack-256)
-                               (mapcar (lambda (x) (specifier-type `(simd-pack-256 ,x)))
-                                       *simd-pack-element-types*))
+                               (map 'list (lambda (x) (specifier-type `(simd-pack-256 ,x)))
+                                    +simd-pack-element-types+))
                          'vector)
                  t)
-                (if (<= 0 tag #.(1- (length *simd-pack-element-types*)))
+                (if (<= 0 tag (1- (length +simd-pack-element-types+)))
                     (1+ tag)
                     0))))
       (t

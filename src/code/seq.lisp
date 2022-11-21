@@ -483,6 +483,8 @@
 ;;; Also, there should only be as many different ways to copy
 ;;; as there are different element sizes.
 (!define-array-dispatch :jump-table vector-subseq-dispatch (array start end)
+  ((declare (ignore array))
+   (make-array (- end start) :element-type nil))
   (declare (optimize speed (safety 0)))
   (declare (type index start end))
   (subseq array start end))
@@ -1372,6 +1374,10 @@ many elements are copied."
 ;;; seqtran can generate code which accesses the array of specialized
 ;;; functions, so we need the array for this, not a jump table.
 (!define-array-dispatch :call vector-map-into (data start end fun sequences)
+    ((declare (ignore fun sequences))
+     (unless (zerop (- end start))
+       (sb-c::%type-check-error/c data 'nil-array-accessed-error nil))
+     0)
   (declare (type index start end)
            (type function fun)
            (type list sequences))
@@ -1935,6 +1941,16 @@ many elements are copied."
     (apply #'sb-sequence:remove-if-not predicate sequence args)))
 
 ;;;; REMOVE-DUPLICATES
+
+(defun hash-table-test-p (fun)
+  (or (eq fun #'eq)
+      (eq fun #'eql)
+      (eq fun #'equal)
+      (eq fun #'equalp)
+      (eq fun 'eq)
+      (eq fun 'eql)
+      (eq fun 'equal)
+      (eq fun 'equalp)))
 
 ;;; Remove duplicates from a list. If from-end, remove the later duplicates,
 ;;; not the earlier ones. Thus if we check from-end we don't copy an item

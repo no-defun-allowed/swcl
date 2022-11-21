@@ -1278,6 +1278,16 @@ We could try a few things to mitigate this:
 ;;; this is a valid test that genesis separated code and data.
 (!ensure-genesis-code/data-separation)
 
+;;; Make sure that every KEY-INFO is in the hashset.
+;;; We don't dump any from genesis, which is a good thing.
+(let ((cache
+       (sb-impl::hss-cells
+        (sb-impl::hashset-storage sb-kernel::*key-info-hashset*)))
+      (list
+       (list-allocated-objects :all :type instance-widetag
+                                    :test #'sb-kernel:key-info-p)))
+  (dolist (x list) (aver (find x cache))))
+
 #+sb-thread
 (defun show-tls-map ()
   (let ((list
@@ -1388,6 +1398,24 @@ We could try a few things to mitigate this:
              (*print-array* nil))
         (format t "g~d ~a ~a~%" (sb-kernel:generation-of v) v code)))))
 
+#+sb-thread
+(defun symbol-from-tls-index (index)
+  ;; Possible TODO: a weak vector indexed by symbol would make this function
+  ;; more quick, more reliable, and also maybe make it easier to recycle TLS indices
+  (unless (zerop index)
+    ;; Search interned symbols first since that's probably enough
+    (do-all-symbols (symbol)
+      (when (= (symbol-tls-index symbol) index)
+        (return-from symbol-from-tls-index symbol)))
+    ;; A specially bound uninterned symbol? how awesome
+    (map-allocated-objects
+     (lambda (obj type size)
+       (declare (ignore size))
+       (when (and (= type symbol-widetag) (= (symbol-tls-index obj) index))
+         (return-from symbol-from-tls-index obj)))
+     :all))
+  0) ; Return a non-symbol as the failure indicator
+
 #+system-tlabs
 (progn
 (export 'find-arena-ptr)
@@ -1408,26 +1436,10 @@ We could try a few things to mitigate this:
 
 (defun show-heap->arena (l)
   (dolist (x l)
-    (cond ((fixnump x) ; it's an address in TLS
-           (aver (not (zerop x)))
-           ;; x is off by N-FIXNUM-TAG-BITS because it was written as a raw address
-           ;; but accessed as a lispobj
-           (let* ((addr (ash x n-fixnum-tag-bits))
-                  (pointee (sap-ref-lispobj (int-sap addr) 0))
-                  (avlnode (the (not null)
-                                (sb-thread::avl-find<= addr sb-thread::*all-threads*)))
-                  (thread-base
-                   (sb-thread::avlnode-key avlnode))
-                  (offset (- addr thread-base))
-                  ;; FIXME: put FIND-SYMBOL-FROM-TLS-INDEX somewhere reasonable
-                  (symbol (funcall 'sb-impl::find-symbol-from-tls-index offset))
-                  (thread (sb-thread::avlnode-data avlnode)))
-             (format t "~x -> ~x ~s (TLS: ~/sb-ext:print-symbol-with-prefix/ in ~S)~%"
-                     addr
-                     (get-lisp-obj-address pointee)
-                     (type-of pointee)
-                     symbol
-                     (sb-thread:thread-name thread))))
+    (cond ((typep x '(cons sb-thread:thread))
+           ;; It's tricky to figure out what a symbol in another thread pointed to,
+           ;; so just show the symbol and hope the user knows what it's for.
+           (format t "~&Symbol ~/sb-ext:print-symbol-with-prefix/~%" (third x)))
           (t
            (let ((pointee (nth-value 1 (find-arena-ptr x))))
              (format t "~x -> ~x ~s ~s~%"
@@ -1437,13 +1449,17 @@ We could try a few things to mitigate this:
                      (type-of pointee)))))))
 
 (defun dump-arena-objects (arena &aux (tot-size 0))
-  (map-objects-in-range
-   (lambda (obj type size)
-     (declare (ignore type))
-     (incf tot-size size)
-     (format t "~x ~s~%" (get-lisp-obj-address obj) (type-of obj)))
-   (make-lisp-obj (arena-base-address arena))
-   (make-lisp-obj (arena-free-pointer arena)))
+  (do-arena-blocks (memblk arena)
+    (let ((from (sap-int memblk) )
+          (to (sap-int (arena-memblk-freeptr memblk))))
+      (format t "~&Memory block ~X..~X~%" from to)
+      (map-objects-in-range
+       (lambda (obj type size)
+         (declare (ignore type))
+         (incf tot-size size)
+         (format t "~x ~s~%" (get-lisp-obj-address obj) (type-of obj)))
+       (make-lisp-obj from)
+       (make-lisp-obj to))))
   tot-size)
 )
 

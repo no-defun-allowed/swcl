@@ -865,8 +865,7 @@
                              ((or (eq class *the-class-standard-writer-method*)
                                   (eq class *the-class-global-writer-method*))
                               'writer)
-                             ((or (eq class *the-class-standard-boundp-method*)
-                                  (eq class *the-class-global-boundp-method*))
+                             ((eq class *the-class-global-boundp-method*)
                               'boundp)))))
             (when (and (gf-info-c-a-m-emf-std-p arg-info)
                        type
@@ -898,7 +897,12 @@
          (types1 `((eql ,class) (class-eq ,class) (eql ,slotd)))
          (types (if (eq type 'writer) `(t ,@types1) types1))
          (methods (compute-applicable-methods-using-types gf types))
-         (std-p (null (cdr methods))))
+         (std-p (and (null (cdr methods))
+                     (if (eq type 'boundp)
+                         (null (cdr (compute-applicable-methods-using-types
+                                     (load-time-value #'slot-makunbound-using-class t)
+                                     types)))
+                         t))))
     (values
      (if std-p
          (get-optimized-std-accessor-method-function class slotd type)
@@ -1587,6 +1591,9 @@
                ((eq gf (load-time-value #'slot-boundp-using-class t))
                 (update-slot-value-gf-info gf 'boundp)
                 #'slot-boundp-using-class-dfun)
+               ((and (eq gf (load-time-value #'slot-makunbound-using-class t))
+                     (update-slot-value-gf-info (load-time-value #'slot-boundp-using-class t) 'boundp)
+                     nil))
                ;; KLUDGE: PRINT-OBJECT is not a special-case in the sense
                ;; of having a desperately special discriminating function.
                ;; However, it is important that the machinery for printing

@@ -168,7 +168,7 @@
     (let ((string (namestring filename)))
       (when (or (find #\* (stem-of filename)) ; wild
                 (starts-with-p string "/dev/") ; dev/null and dev/random
-                (starts-with-p string "/proc/self")
+                (starts-with-p string "/proc/")
                 ;; Temp files created by test-util's scratch file routine
                 (starts-with-p (stem-of string) *scratch-file-prefix*)
                 ;; These have been accepted as okay for a while.  Test
@@ -204,9 +204,8 @@
       sb-impl::*token-buf-pool*
       sb-impl::*user-hash-table-tests*
       sb-impl::**finalizer-store**
-      sb-impl::*pn-dir-cache*
-      sb-impl::*pn-cache*
-      sb-impl::*pn-cache-force-recount*
+      sb-impl::*pn-dir-table*
+      sb-impl::*pn-table*
       sb-vm::*immobile-codeblob-tree*
       sb-vm::*dynspace-codeblob-tree*
       ,(maybe "SB-KERNEL" "*EVAL-CALLS*")
@@ -314,9 +313,9 @@
                                ignored-stream-classoids)
                 collect (sb-kernel:classoid-name key))
           (sort symbols-with-properties #'string<)
-          (sb-impl::info-env-count sb-int:*info-environment*)
-          (hash-table-count types-ht)
-          (hash-table-count setfs-ht))))
+          (loop for key being each hash-key of types-ht collect key)
+          (loop for key being each hash-key of setfs-ht collect key)
+          (list (sb-impl::info-env-count sb-int:*info-environment*)))))
 
 (defun structureish-classoid-ancestors (classoid)
   (map 'list 'sb-kernel:wrapper-classoid
@@ -350,21 +349,24 @@
       (unless (member package initial-packages)
         (push package delete)))
     ;; Do all UNUSE-PACKAGE operations first
-    (dolist (package delete )
+    (dolist (package delete)
       (unuse-package (package-use-list package) package))
     ;; Then all deletions
     (mapc 'delete-package delete))
   (loop for x in (cdr globaldb-summary) for y in (cdr (tersely-summarize-globaldb))
         for index from 0
         unless (equal x y)
-     do (let ((diff (list (set-difference x y)
-                          (set-difference y x))))
-          (if (equal diff '((sb-gray:fundamental-character-output-stream
-                             sb-gray:fundamental-character-input-stream) nil))
-              (warn "Ignoring mystery change to gray stream classoids")
-              (let ((*print-pretty* nil))
-                (error "Mismatch on element index ~D of globaldb snapshot: diffs=~S"
-                       index diff))))))
+          do (let ((diff (list (set-difference x y)
+                               (set-difference y x))))
+               (cond
+                 ((equal diff '(nil nil))) ; reordering only, from rehash?
+                 ((equal diff '((sb-gray:fundamental-character-output-stream
+                                 sb-gray:fundamental-character-input-stream) nil))
+                  (warn "Ignoring mystery change to gray stream classoids"))
+                 (t
+                  (let ((*print-pretty* nil))
+                    (error "Mismatch on element index ~D of globaldb snapshot: diffs=~S"
+                           index diff)))))))
 
 (defun pure-runner (files test-fun log)
   (unless files

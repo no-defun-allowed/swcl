@@ -49,6 +49,12 @@
          (*features* (append '(:sb-building-contrib) *features*
                              sb-impl:+internal-features+)))
     (ensure-directories-exist objdir)
+    ;; For source locations.
+    ;; Even though generated files are not shipped as sources it's
+    ;; better to hide the original pathnames.
+    (push (list "SYS:OBJ;**;*.*.*"
+                (merge-pathnames "**/*.*" (truename "../../obj/")))
+          (logical-pathname-translations "SYS"))
     (sb-int:collect ((alien-constants) (flattened-sources) (fasls))
       (with-open-file (f (merge-pathnames "module-setup.lisp" objdir)
                          :direction :output :if-exists :supersede)
@@ -94,20 +100,28 @@
                           (format nil "~A~A.lisp" objdir +genfile+)) ; file to generate
         ;; foreign-glue contains macros needed to compile the generated file
         (let ((*evaluator-mode* :compile)) (load "../sb-grovel/foreign-glue")))
-
-      (with-compilation-unit ()
-        (loop for (generated-p stem) in (flattened-sources)
-              do
-          (format t "Compile-File ~S~%" stem)
-          (multiple-value-bind (output warnings errors)
-              (compile-file  (if generated-p
-                                 (format nil "~A~A.lisp" objdir stem)
-                                 (format nil "~A.lisp" stem))
-                             :output-file (format nil "~A~A.fasl" objdir stem))
-            (declare (ignore warnings))
-            (when errors (sb-sys:os-exit 1))
-            (fasls output)
-            (load output))))
+      (flet ((logicalize (path generated)
+               (make-pathname :host "SYS"
+                              :directory
+                              (append '(:absolute)
+                                      (if generated
+                                          (list "OBJ" "FROM-SELF" "CONTRIB" *system*)
+                                          (list* "CONTRIB"
+                                                 (append (last (pathname-directory *default-pathname-defaults*))
+                                                         (cdr (pathname-directory path))))))
+                              :name (pathname-name path)
+                              :type (pathname-type path))))
+        (with-compilation-unit ()
+          (loop for (generated-p stem) in (flattened-sources)
+                do
+                (format t "Compile-File ~S~%" stem)
+                (multiple-value-bind (output warnings errors)
+                    (compile-file (logicalize stem generated-p)
+                                  :output-file (format nil "~A~A.fasl" objdir stem))
+                  (declare (ignore warnings))
+                  (when errors (sb-sys:os-exit 1))
+                  (fasls output)
+                  (load output)))))
       (let ((outputs (mapcar 'namestring (fasls)))
             (joined (format nil "../../obj/sbcl-home/contrib/~A.fasl" *system*)))
         (ensure-directories-exist joined)
@@ -117,9 +131,9 @@
           (format asd "(defsystem :~A :class require-system)~%" *system*))
         (sb-sys:os-exit
          (process-status
-          (run-program #+unix "/bin/cat" #-unix "cat" outputs
-                       ;; probably is /usr/bin/cat.exe but let's not assume that
-                       #-unix :search #-unix t
+          ;; for #+win32 it's probably /usr/bin/cat.exe,
+          ;; for #+unix it's supposed to be /bin/cat, but lp#1995224 says otherwise
+          (run-program "cat" outputs :search t
                        :output joined :if-output-exists :supersede)))))))
 
 (compile 'perform)

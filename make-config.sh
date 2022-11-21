@@ -661,7 +661,7 @@ case "$sbcl_arch" in
     fi
 
     case "$sbcl_os" in
-    linux | darwin | *bsd)
+    linux | darwin | *bsd | win32)
       printf ' :mark-region-gc' >> $ltf
 #        printf ' :immobile-space' >> $ltf
     esac

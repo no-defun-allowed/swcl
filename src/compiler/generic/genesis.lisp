@@ -1194,7 +1194,7 @@ core and return a descriptor to it."
                          (descriptor-fixnum (read-slot cold-package :id))
                          sb-impl::+package-id-none+))
              (hash (make-fixnum-descriptor
-                    (if core-file-name (sb-c::symbol-name-hash name) 0))))
+                    (if core-file-name (sb-impl::symbol-name-hash name) 0))))
         (write-wordindexed symbol sb-vm:symbol-value-slot *unbound-marker*)
         (write-wordindexed symbol sb-vm:symbol-hash-slot hash)
         (write-wordindexed symbol sb-vm:symbol-info-slot *nil-descriptor*)
@@ -4179,9 +4179,8 @@ III. initially undefined function references (alphabetically):
           (write-structure-object (wrapper-info (find-layout 'sb-impl::general-hash-table))
                                   stream "hash_table"))
         (dolist (class '(defstruct-description defstruct-slot-description
-                         classoid
-                         package
-                         sb-thread::avlnode sb-thread::mutex
+                         classoid package
+                         sb-vm::arena sb-thread::avlnode sb-thread::mutex
                          sb-c::compiled-debug-info sb-c::compiled-debug-fun))
           (out-to (string-downcase class)
             (write-structure-object (wrapper-info (find-layout class))

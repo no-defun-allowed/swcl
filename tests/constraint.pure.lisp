@@ -374,3 +374,43 @@
                        a
                        (error "")))))))
            `(values (integer 30 30) &optional))))
+
+(with-test (:name :vector-length-constraints)
+  (assert
+   (ctype= (caddr
+            (sb-kernel:%simple-fun-type
+             (checked-compile
+              `(lambda (x y)
+                 (declare (simple-vector x))
+                 (when (< (length x) y)
+                   (> (length x) y))))))
+           `(values null &optional)))
+  (assert
+   (ctype= (caddr
+            (sb-kernel:%simple-fun-type
+             (checked-compile
+              `(lambda (x y)
+                 (declare (vector x))
+                 (when (< (length x) y)
+                   (> (length x) y))))))
+           `(values boolean &optional))))
+
+(with-test (:name :non-commutative-invert)
+  (assert
+   (ctype= (caddr
+            (sb-kernel:%simple-fun-type
+             (checked-compile
+              `(lambda (x y)
+                 (if (< x y)
+                     (> y x)
+                     (error ""))))))
+            `(values (member t) &optional)))
+  (assert
+   (ctype= (caddr
+            (sb-kernel:%simple-fun-type
+             (checked-compile
+              `(lambda (x y)
+                 (if (< x y)
+                     (< y x)
+                     (error ""))))))
+            `(values null &optional))))

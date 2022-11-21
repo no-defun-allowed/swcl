@@ -118,9 +118,9 @@
   (let ((sxhash-crosscheck
           '#.(let (pairs)
                ;; De-duplicate, which reduces the list from ~8000 entries to ~1000 entries.
-               ;; But make sure that any key which isolated repeated has the same value
+               ;; But make sure that any key which is repeated has the same value
                ;; at each repetition.
-               (dolist (pair sb-c::*sxhash-crosscheck* (coerce pairs 'simple-vector))
+               (dolist (pair *sxhash-crosscheck* (coerce pairs 'simple-vector))
                  (let ((found (assoc (car pair) pairs)))
                    (if found
                        (aver (= (cdr found) (cdr pair)))
@@ -128,7 +128,8 @@
     (loop for (object . hash) across sxhash-crosscheck
           unless (= (sxhash object) hash)
             do (error "SXHASH computed wrong answer for ~S. Got ~x should be ~x"
-                      object hash (sxhash object)))))
+                      object hash (sxhash object))))
+  (format t "~&cross-compiler SXHASH tests passed~%"))
 
 ;;; called when a cold system starts up
 (defun !cold-init ()
@@ -169,6 +170,7 @@
   (/show0 "about to SHOW-AND-CALL !GLOBALDB-COLD-INIT")
   (show-and-call !globaldb-cold-init)
   (show-and-call !function-names-init)
+  (show-and-call !pathname-cold-init)
 
   ;; And now *CURRENT-THREAD*
   (sb-thread::init-main-thread)
@@ -281,7 +283,7 @@
   (makunbound 'sb-c::*queued-proclaims*)
 
   (show-and-call os-cold-init-or-reinit)
-  (show-and-call !pathname-cold-init)
+  (show-and-call !lpn-cold-init)
 
   (show-and-call stream-cold-init-or-reset)
   (/show "Enabled buffered streams")
@@ -403,12 +405,12 @@ process to continue normally."
     (when total ; newly started process, and not a failed save attempt
       (sb-thread::init-main-thread)
       #+x86-64 (sb-vm::validate-asm-routine-vector)
-      (rebuild-package-vector)
-      (rebuild-pathname-cache))
+      (rebuild-package-vector))
     ;; Initializing the standard streams calls ALLOC-BUFFER which calls FINALIZE
     (finalizers-reinit)
     ;; Initialize streams next, so that any errors can be printed
     (stream-reinit t)
+    (rebuild-pathname-cache)
     (os-cold-init-or-reinit)
     #-(and win32 (not sb-thread))
     (signal-cold-init-or-reinit)

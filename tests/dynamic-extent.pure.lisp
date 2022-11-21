@@ -1709,3 +1709,21 @@
         (declare (dynamic-extent x))
         (aref x 0)))
    :allow-notes nil))
+
+(with-test (:name :dx-multi-use-with-cast)
+  (checked-compile '(lambda (bar)
+                     (declare (inline make-foo1))
+                     (let ((a (if bar
+                                  (make-foo1 :x 2)
+                                  (cons 1 2))))
+                       (declare (dynamic-extent a))
+                       (print a)))))
+
+(with-test (:name :dx-propagation-dx-already-exists)
+  (checked-compile '(lambda ()
+                     (let ((x (let ((m (make-array 3)))
+                                (declare (dynamic-extent m))
+                                (fill m 0)
+                                m)))
+                       (declare (dynamic-extent x))
+                       (print x)))))

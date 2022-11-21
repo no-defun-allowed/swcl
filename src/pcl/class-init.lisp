@@ -32,7 +32,7 @@
 
 (defconstant-eqx +standard-method-class-names+
   '(standard-method standard-reader-method
-    standard-writer-method standard-boundp-method
+    standard-writer-method
     global-reader-method global-writer-method
     global-boundp-method)
   #'equal)
@@ -67,7 +67,7 @@
   (let* ((hash (if name
                    ;; Named functions have a predictable hash
                    (mix (sxhash name) (sxhash :generic-function)) ; arb. constant
-                   (sb-impl::quasi-random-address-based-hash
+                   (sb-kernel::quasi-random-address-based-hash
                     (load-time-value (make-array 1 :element-type '(and fixnum unsigned-byte)))
                     most-positive-fixnum)))
          (slots (make-array (wrapper-length wrapper) :initial-element +slot-unbound+))

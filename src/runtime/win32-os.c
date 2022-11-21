@@ -115,8 +115,6 @@ static void set_seh_frame(void *frame)
 }
 #endif
 
-#if defined(LISP_FEATURE_SB_THREAD)
-
 void alloc_gc_page()
 {
     gc_assert(VirtualAlloc(GC_SAFEPOINT_PAGE_ADDR, BACKEND_PAGE_BYTES,
@@ -157,8 +155,6 @@ void unmap_gc_page()
     gc_assert(VirtualProtect((void*) GC_SAFEPOINT_PAGE_ADDR, BACKEND_PAGE_BYTES,
                              PAGE_NOACCESS, &oldProt));
 }
-
-#endif
 
 /* This feature has already saved me more development time than it
  * took to implement.  In its current state, ``dynamic RT<->core
@@ -445,7 +441,6 @@ void* os_dlsym_default(char* name)
     return result;
 }
 
-#if defined(LISP_FEATURE_SB_THREAD)
 /* We want to get a slot in TIB that (1) is available at constant
    offset, (2) is our private property, so libraries wouldn't legally
    override it, (3) contains something predefined for threads created
@@ -552,7 +547,6 @@ int os_preinit(char *argv[], char *envp[])
 #endif
     return 0;
 }
-#endif  /* LISP_FEATURE_SB_THREAD */
 
 int os_number_of_processors = 1;
 
@@ -967,7 +961,6 @@ handle_breakpoint_trap(os_context_t *ctx, struct thread* self)
      * 'kind' value (eg trap_Cerror). */
     unsigned trap = *(unsigned char *)OS_CONTEXT_PC(ctx);
 
-#ifdef LISP_FEATURE_SB_THREAD
     /* Before any other trap handler: gc_safepoint ensures that
        inner alloc_sap for passing the context won't trap on
        pseudo-atomic. */
@@ -979,7 +972,6 @@ handle_breakpoint_trap(os_context_t *ctx, struct thread* self)
         thread_interrupted(ctx);
         return 0;
     }
-#endif
 
     /* This is just for info in case the monitor wants to print an
      * approximation. */
@@ -987,13 +979,23 @@ handle_breakpoint_trap(os_context_t *ctx, struct thread* self)
         (lispobj *)*os_context_sp_addr(ctx);
 
     WITH_GC_AT_SAFEPOINTS_ONLY() {
-#if defined(LISP_FEATURE_SB_THREAD)
         block_blockable_signals(&ctx->sigmask);
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+        if (trap == trap_UndefinedFunction) {
+            lispobj* fdefn = (lispobj*)(OS_CONTEXT_PC(ctx) & ~LOWTAG_MASK);
+            if (fdefn && widetag_of(fdefn) == FDEFN_WIDETAG) {
+                // Return to undefined-tramp
+                OS_CONTEXT_PC(ctx) = (uword_t)((struct fdefn*)fdefn)->raw_addr;
+                // with RAX containing the FDEFN
+                *os_context_register_addr(ctx,reg_RAX) =
+                    make_lispobj(fdefn, OTHER_POINTER_LOWTAG);
+            }
+        } else
 #endif
-        handle_trap(ctx, trap);
-#if defined(LISP_FEATURE_SB_THREAD)
+        {
+            handle_trap(ctx, trap);
+        }
         thread_sigmask(SIG_SETMASK,&ctx->sigmask,NULL);
-#endif
     }
 
     /* Done, we're good to go! */
@@ -1091,18 +1093,13 @@ signal_internal_error_or_lose(os_context_t *ctx,
          * aren't supposed to happen during cold init or reinit
          * anyway. */
 
-#if defined(LISP_FEATURE_SB_THREAD)
         block_blockable_signals(&ctx->sigmask);
-#endif
         fake_foreign_function_call(ctx);
 
         WITH_GC_AT_SAFEPOINTS_ONLY() {
             DX_ALLOC_SAP(context_sap, ctx);
             DX_ALLOC_SAP(exception_record_sap, exception_record);
-
-#if defined(LISP_FEATURE_SB_THREAD)
             thread_sigmask(SIG_SETMASK, &ctx->sigmask, NULL);
-#endif
 
             /* The exception system doesn't automatically clear pending
              * exceptions, so we lose as soon as we execute any FP
@@ -1114,9 +1111,7 @@ signal_internal_error_or_lose(os_context_t *ctx,
         }
         /* If Lisp doesn't nlx, we need to put things back. */
         undo_fake_foreign_function_call(ctx);
-#if defined(LISP_FEATURE_SB_THREAD)
         thread_sigmask(SIG_SETMASK, &ctx->sigmask, NULL);
-#endif
         /* FIXME: HANDLE-WIN32-EXCEPTION should be allowed to decline */
         return;
     }
@@ -1309,6 +1304,7 @@ veh(EXCEPTION_POINTERS *ep)
     BOOL from_lisp =
         (rip >= DYNAMIC_SPACE_START && rip < DYNAMIC_SPACE_START+dynamic_space_size) ||
         (rip >= READ_ONLY_SPACE_START && rip < READ_ONLY_SPACE_END) ||
+        immobile_space_p(rip) ||
         (rip >= STATIC_SPACE_START && rip < (uword_t)static_space_free_pointer);
 
     if (code == EXCEPTION_ACCESS_VIOLATION ||
@@ -1411,7 +1407,6 @@ socket_input_available(HANDLE socket, long time, long utime)
         return 0;
 }
 
-#ifdef LISP_FEATURE_SB_THREAD
 /* Atomically mark current thread as (probably) doing synchronous I/O
  * on handle, if no cancellation is requested yet (and return TRUE),
  * otherwise clear thread's I/O cancellation flag and return false.
@@ -1453,9 +1448,6 @@ io_end_interruptible(HANDLE handle)
       return -1;                           \
     }                                      \
     RUN_BODY_ONCE(xx, io_end_interruptible(handle))
-#else
-#define WITH_INTERRUPTIBLE_IO(handle)
-#endif
 
 int console_handle_p(HANDLE handle)
 {
@@ -1463,7 +1455,7 @@ int console_handle_p(HANDLE handle)
     return GetFileType(handle) == FILE_TYPE_CHAR &&
         GetConsoleMode(handle, &mode);
 }
-#ifdef LISP_FEATURE_SB_THREAD
+
 /*
  * (AK writes:)
  *
@@ -1714,7 +1706,6 @@ win32_maybe_interrupt_io(void* thread)
     }
     return done;
 }
-#endif
 
 static const LARGE_INTEGER zero_large_offset = {.QuadPart = 0LL};
 
@@ -1960,31 +1951,21 @@ char *os_get_runtime_executable_path()
 DWORD
 win32_wait_object_or_signal(HANDLE waitFor)
 {
-#ifdef LISP_FEATURE_SB_THREAD
     struct thread *self = get_sb_vm_thread();
     HANDLE handles[] = {waitFor, thread_private_events(self,1)};
     return
         WaitForMultipleObjects(2,handles, FALSE, INFINITE);
-#else
-    return WaitForSingleObject(waitFor, INFINITE);
-#endif
 }
 
 DWORD
 win32_wait_for_multiple_objects_or_signal(HANDLE *handles, DWORD count)
 {
-#ifdef LISP_FEATURE_SB_THREAD
     struct thread *self = get_sb_vm_thread();
     handles[count] = thread_private_events(self,1);
     return
         WaitForMultipleObjects(count + 1, handles, FALSE, INFINITE);
-#else
-    return
-        WaitForMultipleObjects(count, handles, FALSE, INFINITE);
-#endif
 }
 
-#ifdef LISP_FEATURE_SB_THREAD
 /*
  * Portability glue for win32 waitable timers.
  *
@@ -2027,7 +2008,6 @@ os_cancel_wtimer(HANDLE handle)
 {
     CancelWaitableTimer(handle);
 }
-#endif
 
 #ifdef LISP_FEATURE_SB_FUTEX
 int

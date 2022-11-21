@@ -91,8 +91,16 @@ Examples:
     (oops)) ; GC causes re-entry to #'oops due to the finalizer
             ; -> ERROR, caught, WARNING signalled"
   (declare (sb-c::tlab :system))
-  (unless object
-    (error "Cannot finalize NIL."))
+  (let ((space (heap-allocated-p object)))
+    ;; Rule out immediate, stack, arena, readonly, and static objects.
+    ;; (Is it really an error for a readonly? Maybe a warning? I'll leave it this way unless
+    ;; users complain. Surely DX and arena are errors, and NIL was always an error.)
+    (unless (member space '(:dynamic :immobile))
+      (if (eq space :static)
+          (error "Cannot finalize ~S." object)
+          ;; silently discard finalizers on file streams in arenas I guess
+          (progn ; (warn "Will not finalize ~S." object)
+            (return-from finalize object)))))
   (let ((item (if dont-save (list function) function)))
     (with-finalizer-store (store)
       (let ((id (gethash object (finalizer-id-map store))))
@@ -243,7 +251,10 @@ Examples:
 (defvar *in-a-finalizer* nil)
 #+sb-thread (define-alien-variable finalizer-thread-runflag int)
 
+(define-load-time-global *bg-compiler-function* nil)
+
 (defun run-pending-finalizers (&aux (hashtable (finalizer-id-map **finalizer-store**))
+                                    (ran-bg-compile)
                                     (ran-a-system-finalizer)
                                     (system-finalizer-scratchpad (list 0))
                                     (ran-a-user-finalizer))
@@ -252,6 +263,8 @@ Examples:
   (loop
    ;; Perform no further work if trying to stop the thread, even if there is work.
    #+sb-thread (when (zerop finalizer-thread-runflag) (return))
+   ;; Try to run a background compilation task
+   (when *bg-compiler-function* (setq ran-bg-compile (funcall *bg-compiler-function*)))
    ;; Try to run 1 system finalizer
    (setq ran-a-system-finalizer (sb-vm::immobile-code-dealloc-1 system-finalizer-scratchpad))
    ;; Try to run 1 user finalizer
@@ -311,8 +324,10 @@ Examples:
          (cond ((simple-vector-p finalizers) (fill finalizers 0))
                ((consp finalizers) (rplaca finalizers 0))))))
    ;; Did this iteration do anything at all?
-   (unless (or ran-a-system-finalizer ran-a-user-finalizer) (return))
-   (setq ran-a-system-finalizer nil
+   (unless (or ran-bg-compile ran-a-system-finalizer ran-a-user-finalizer)
+     (return))
+   (setq ran-bg-compile nil
+         ran-a-system-finalizer nil
          ran-a-user-finalizer nil)))
 
 (define-load-time-global *finalizer-thread* nil)

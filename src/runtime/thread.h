@@ -31,13 +31,6 @@ struct thread_state_word {
 // (DEFCONSTANT +N-SMALL-BUCKETS+ 32)
 typedef lispobj size_histogram[32+N_WORD_BITS];
 
-/* This state lets the thread remember where it was allocating in an arena
- * when switching the user TLABs to the dynamic space and then back to the
- * arena. It should avoid wasting an arena chunk, but it's not working yet.
- * Technically this is two occurrences of 'struct alloc_region'
- * and one opaque word. */
-typedef lispobj arena_state[7];
-
 #include "genesis/thread.h"
 #include "genesis/thread-instance.h"
 #include "genesis/fdefn.h"
@@ -123,6 +116,8 @@ struct extra_thread_data
     HANDLE synchronous_io_handle_and_flag;
     void* waiting_on_address; // used only if #+sb-futex
 #endif
+    int arena_count; // number of structures in arena_saveareas
+    arena_state* arena_savearea;
 };
 #define thread_extra_data(thread) \
   ((struct extra_thread_data*)((char*)(thread) + dynamic_values_bytes))
