@@ -5493,6 +5493,7 @@ static void sync_close_regions(int block_signals, int options,
          * With that test in, I still see heap exhaustions, but without the test
          * - so using up the remainder of the TLAB always - we do NOT get exhaustions.
          * It can't be a race, because we're holding the mutex */
+#ifndef LISP_FEATURE_MARK_REGION_GC
         if ((options & CONSUME_REMAINDER) /* && p < get_alloc_start_page(a[i].type) */ ) {
             char* freeptr = a[i].r->free_pointer;
             char* new_end =
@@ -5503,6 +5504,7 @@ static void sync_close_regions(int block_signals, int options,
             deposit_filler(freeptr, new_end);
             a[i].r->free_pointer = new_end;
         }
+#endif
         ensure_region_closed(a[i].r, a[i].type);
     }
     if (options & LOCK_PAGE_TABLE) {
