@@ -2466,7 +2466,8 @@
 
 (with-test (:name :derive-array-rank-negation.2)
   (assert
-   (equal (sb-kernel:%simple-fun-type
+   (type-specifiers-equal
+          (sb-kernel:%simple-fun-type
            (checked-compile
             '(lambda (x)
               (declare ((and simple-array
@@ -3429,7 +3430,8 @@
 
 (with-test (:name :division-by-multiplication-type-derivation)
   (assert
-   (equal (caddr
+   (type-specifiers-equal
+          (caddr
            (sb-kernel:%simple-fun-type
             (checked-compile
              `(lambda (c)
@@ -3443,7 +3445,8 @@
                  39)))))
           '(values (or (integer -21 -20) bit) (integer -38 0) &optional)))
   (assert
-   (equal (caddr
+   (type-specifiers-equal
+          (caddr
            (sb-kernel:%simple-fun-type
             (checked-compile
              `(lambda (c)
@@ -3815,3 +3818,11 @@
       `(lambda (a)
          (boole boole-set (the rational a) a))
     ((1) -1)))
+(with-test (:name set-slot-old-p-optionals)
+  (checked-compile-and-assert
+      ()
+      `(lambda (x &key)
+         (let ((list (list 1)))
+           (setf (car list) x)
+           list))
+    ((2) '(2) :test #'equal)))

@@ -499,6 +499,7 @@
 ;;;; the INTEGER type
 
 (define-alien-type-class (integer)
+  ;; -SIGNED is mutable because of redefined ENUMs.
   (signed t :type (member t nil)))
 
 (define-alien-type-translator signed (&optional (bits sb-vm:n-word-bits))
@@ -606,32 +607,62 @@
                                :include-args (signed))
   name          ; name of this enum (if any)
   from          ; alist from symbols to integers
+  hash          ; for hash-consing
   to            ; alist or vector from integers to symbols
   kind          ; kind of from mapping, :VECTOR or :ALIST
   offset)       ; offset to add to value for :VECTOR from mapping
+
+(define-alien-type-method (enum :type=) (type1 type2)
+  (and (eq (alien-enum-type-name type1) (alien-enum-type-name type2))
+       (= (alien-enum-type-hash type1) (alien-enum-type-hash type2))
+       (equal (alien-enum-type-from type1)
+              (alien-enum-type-from type2))))
+
+;;; Anonymous enums are hash-consed. Named ones don't need to be hash-consed,
+;;; because there is at most one instance of the named enum in any environment.
+(define-load-time-global *enum-type-cache*
+  (make-hashset 32 #'enum-type=-method #'alien-enum-type-hash
+                :weakness t :synchronized t))
 
 (define-alien-type-translator enum (&whole
                                  type name
                                  &rest mappings
                                  &environment env)
+  (declare (inline make-alien-enum-type))
   (cond (mappings
-         (let ((result (parse-enum name mappings)))
-           (when name
-             (multiple-value-bind (old old-p)
-                 (auxiliary-alien-type :enum name env)
-               (when old-p
-                 (unless (alien-type-= result old)
+         (dx-let ((result (make-alien-enum-type :name name)))
+           (%parse-enum mappings result)
+           ;; Slots which are pure functions of the mapping need not be mixed in:
+           ;; * KIND is based on density of the numeric range
+           ;; * SIGNED is true if and only if the minimum value is negative
+           ;; * OFFSET is based on the minimum value if and only if the
+           ;;   inverse map is stored as is a vector
+           (let ((h (sb-xc:sxhash name)))
+             (dolist (elt (alien-enum-type-from result))
+               ;; Mix by hand since our SXHASH has a cutoff on length, not to
+               ;; mention that this potentially runs on either the host or the target,
+               ;; and the host does't emulate the target's hashing of lists.
+               (setf h (mix (mix (sb-xc:sxhash (car elt)) (sb-xc:sxhash (cdr elt)))
+                            h)))
+             (setf (alien-enum-type-hash result) h))
+           (unless name
+             (return-from alien-enum-type-translator
+               (hashset-insert-if-absent *enum-type-cache* result #'copy-structure)))
+           (multiple-value-bind (old old-p) (auxiliary-alien-type :enum name env)
+             (cond
+               (old-p
+                (unless (alien-type-= result old)
                    (cerror "Continue, clobbering the old definition"
                            "Incompatible alien enum type definition: ~S" name)
                    (setf (alien-enum-type-from old) (alien-enum-type-from result)
+                         (alien-enum-type-hash old) (alien-enum-type-hash result)
                          (alien-enum-type-to old) (alien-enum-type-to result)
                          (alien-enum-type-kind old) (alien-enum-type-kind result)
                          (alien-enum-type-offset old) (alien-enum-type-offset result)
                          (alien-enum-type-signed old) (alien-enum-type-signed result)))
-                 (setf result old))
-               (unless old-p
-                 (setf (auxiliary-alien-type :enum name env) result))))
-           result))
+                old)
+               (t
+                (setf (auxiliary-alien-type :enum name env) (copy-structure result)))))))
         (name
          (multiple-value-bind (result found)
              (auxiliary-alien-type :enum name env)
@@ -641,7 +672,7 @@
         (t
          (error "empty enum type: ~S" type))))
 
-(defun parse-enum (name elements)
+(defun %parse-enum (elements result)
   (when (null elements)
     (error "An enumeration must contain at least one element."))
   (let ((min nil)
@@ -673,6 +704,7 @@
                          (integer-length max))))
       (when (> min-bits 32)
         (error "can't represent enums needing more than 32 bits"))
+      (setf (alien-enum-type-signed result) signed)
       (setf from-alist (sort from-alist #'< :key #'cdr))
       (cond
        ;; If range is at least 20% dense, use vector mapping. Crossover
@@ -684,15 +716,15 @@
         (let ((to (make-array (1+ (- max min)))))
           (dolist (el from-alist)
             (setf (svref to (- (cdr el) min)) (car el)))
-          (make-alien-enum-type :name name :signed signed
-                                :from from-alist :to to :kind
-                                :vector :offset (- min))))
+          (setf (alien-enum-type-to result) to))
+        (setf (alien-enum-type-offset result) (- min)
+              (alien-enum-type-kind result) :vector))
        (t
-        (make-alien-enum-type :name name :signed signed
-                              :from from-alist
-                              :to (mapcar (lambda (x) (cons (cdr x) (car x)))
-                                          from-alist)
-                              :kind :alist))))))
+        (setf (alien-enum-type-to result) (mapcar (lambda (x) (cons (cdr x) (car x)))
+                                                  from-alist)
+              (alien-enum-type-offset result) nil
+              (alien-enum-type-kind result) :alist)))
+      (setf (alien-enum-type-from result) from-alist))))
 
 (define-alien-type-method (enum :unparse) (type)
   `(enum ,(alien-enum-type-name type)
@@ -706,12 +738,6 @@
                                  `(,sym ,value))
                            (setf prev value))))
                      (alien-enum-type-from type)))))
-
-(define-alien-type-method (enum :type=) (type1 type2)
-  (and (eq (alien-enum-type-name type1)
-           (alien-enum-type-name type2))
-       (equal (alien-enum-type-from type1)
-              (alien-enum-type-from type2))))
 
 (define-alien-type-method (enum :lisp-rep) (type)
   `(member ,@(mapcar #'car (alien-enum-type-from type))))
@@ -736,7 +762,7 @@
 ;;;; the FLOAT types
 
 (define-alien-type-class (float)
-  (type (missing-arg) :type symbol))
+  (type (missing-arg) :type symbol :read-only t))
 
 (define-alien-type-method (float :unparse) (type)
   (alien-float-type-type type))
@@ -759,18 +785,12 @@
 (define-alien-type-class (single-float :include (float (bits 32))
                                        :include-args (type)))
 
-(define-alien-type-translator single-float ()
-  (make-alien-single-float-type :type 'single-float))
-
 (define-alien-type-method (single-float :extract-gen) (type sap offset)
   (declare (ignore type))
   `(sap-ref-single ,sap (/ ,offset sb-vm:n-byte-bits)))
 
 (define-alien-type-class (double-float :include (float (bits 64))
                                        :include-args (type)))
-
-(define-alien-type-translator double-float ()
-  (make-alien-double-float-type :type 'double-float))
 
 (define-alien-type-method (double-float :extract-gen) (type sap offset)
   (declare (ignore type))
@@ -780,10 +800,6 @@
 ;;;; the SAP type
 
 (define-alien-type-class (system-area-pointer))
-
-(define-alien-type-translator system-area-pointer ()
-  (make-alien-system-area-pointer-type
-   :bits sb-vm:n-machine-word-bits))
 
 (define-alien-type-method (system-area-pointer :unparse) (type)
   (declare (ignore type))
@@ -810,6 +826,19 @@
   (declare (ignore type))
   `(sap-ref-sap ,sap (/ ,offset sb-vm:n-byte-bits)))
 
+;; CMUCL (sometimes/always?) does not permit using a structure constructor from
+;; earlier in this file within a LOAD-TIME-VALUE form later in the file.
+(macrolet ((def-singleton-type (type ctor)
+             #+sb-xc-host
+             (let ((pseudo-const (symbolicate "*" type "-TYPE*")))
+               `(progn (defvar ,pseudo-const ,ctor)
+                       (define-alien-type-translator ,type () ,pseudo-const)))
+             #-sb-xc-host
+             `(define-alien-type-translator ,type () (load-time-value ,ctor t))))
+  (def-singleton-type single-float (make-alien-single-float-type :type 'single-float))
+  (def-singleton-type double-float (make-alien-double-float-type :type 'double-float))
+  (def-singleton-type system-area-pointer
+      (make-alien-system-area-pointer-type :bits sb-vm:n-machine-word-bits)))
 
 ;;;; the ALIEN-VALUE type
 
@@ -832,7 +861,7 @@
 
 (define-alien-type-class (pointer :include (alien-value (bits
                                                          sb-vm:n-machine-word-bits)))
-  (to nil :type (or alien-type null)))
+  (to nil :type (or alien-type null) :read-only t))
 
 (define-alien-type-translator * (to &environment env)
   (make-alien-pointer-type :to (if (eq to t) nil (parse-alien-type to env))))
@@ -903,8 +932,8 @@
 ;;;; the ARRAY type
 
 (define-alien-type-class (array :include mem-block)
-  (element-type (missing-arg) :type alien-type)
-  (dimensions (missing-arg) :type list))
+  (element-type (missing-arg) :type alien-type :read-only t)
+  (dimensions (missing-arg) :type list :read-only t))
 
 (define-alien-type-translator array (ele-type &rest dims &environment env)
 
@@ -955,21 +984,19 @@
 (def!struct (alien-record-field (:copier nil))
   (name (missing-arg) :type symbol)
   (type (missing-arg) :type alien-type)
-  (bits nil :type (or unsigned-byte null))
   (offset 0 :type unsigned-byte))
 (defmethod print-object ((field alien-record-field) stream)
   (print-unreadable-object (field stream :type t)
     (format stream
-            "~S ~S~@[:~D~]"
+            "~S ~S"
             (alien-record-field-type field)
-            (alien-record-field-name field)
-            (alien-record-field-bits field))))
+            (alien-record-field-name field))))
 (!set-load-form-method alien-record-field (:xc :target))
 
 (define-alien-type-class (record :include mem-block)
-  (kind :struct :type (member :struct :union))
-  (name nil :type (or symbol null))
-  (fields nil :type list))
+  (kind :struct :type (member :struct :union) :read-only t)
+  (name nil :type (or symbol null) :read-only t)
+  (fields nil :type list)) ; mutable because of structural recursion and parser
 
 (define-alien-type-translator struct (name &rest fields &environment env)
   (parse-alien-record-type :struct name fields env))
@@ -1072,8 +1099,6 @@
 (defun unparse-alien-record-field (field)
   `(,(alien-record-field-name field)
      ,(%unparse-alien-type (alien-record-field-type field))
-     ,@(when (alien-record-field-bits field)
-             (list :bits (alien-record-field-bits field)))
      ,@(when (alien-record-field-offset field)
              (list :offset (alien-record-field-offset field)))))
 
@@ -1082,8 +1107,6 @@
 (defun record-fields-match-p (field1 field2)
   (and (eq (alien-record-field-name field1)
            (alien-record-field-name field2))
-       (eql (alien-record-field-bits field1)
-            (alien-record-field-bits field2))
        (eql (alien-record-field-offset field1)
             (alien-record-field-offset field2))
        (alien-type-= (alien-record-field-type field1)
@@ -1145,13 +1168,13 @@
 ;;; translation as well.
 
 (define-alien-type-class (fun :include mem-block)
-  (result-type (missing-arg) :type alien-type)
-  (arg-types (missing-arg) :type list)
+  (result-type (missing-arg) :type alien-type :read-only t)
+  (arg-types (missing-arg) :type list :read-only t)
   ;; The 3rd-party CFFI library uses presence of &REST in an argument list
   ;; as indicative of "..." in the C prototype. We can record that too.
-  (varargs nil :type (or boolean fixnum (eql :unspecified)))
+  (varargs nil :type (or boolean fixnum (eql :unspecified)) :read-only t)
   (stub nil :type (or null function))
-  (convention nil :type calling-convention))
+  (convention nil :type calling-convention :read-only t))
 ;;; The safe default is to assume that everything is varargs.
 ;;; On x86-64 we have to emit a spurious instruction because of it.
 ;;; So until all users fix their lambda lists to be explicit about &REST
@@ -1214,7 +1237,7 @@
               (alien-fun-type-arg-types type2))))
 
 (define-alien-type-class (values)
-  (values (missing-arg) :type list))
+  (values (missing-arg) :type list :read-only t))
 
 (define-alien-type-translator values (&rest values &environment env)
   (unless *values-type-okay*

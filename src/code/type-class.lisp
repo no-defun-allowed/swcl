@@ -665,14 +665,9 @@
                        (:copier nil))
   (name nil :type symbol :read-only t))
 
-;;; A HAIRY-TYPE represents anything too weird to be described
-;;; reasonably or to be useful, such as NOT, SATISFIES, unknown types,
-;;; and unreasonably complicated types involving AND. We just remember
-;;; the original type spec.
-;;; A possible improvement would be for HAIRY-TYPE to have a subtype
-;;; named SATISFIES-TYPE for the hairy types which are specifically
-;;; of the form (SATISFIES pred) so that we don't have to examine
-;;; the sexpr repeatedly to decide whether it takes that form.
+;;; A HAIRY-TYPE represents a SATISFIES type or UNKNOWN type.
+;;; FIXME: those should be two distinct things (in HAIRY type-class)
+;;; so that we don't have to examine the sexpr repeatedly to decide its form.
 ;;; And as a further improvement, we might want a table that maps
 ;;; predicates to their exactly recognized type when possible.
 ;;; We have such a table in fact - *BACKEND-PREDICATE-TYPES*
@@ -682,7 +677,13 @@
 ;;; user-visible ramifications, though it seems unlikely.
 (def-type-model (hairy-type (:constructor* %make-hairy-type (specifier)))
   ;; the Common Lisp type-specifier of the type we represent.
+  ;; In UNKNOWN types this can only be a symbol.
   ;; For other than an unknown type, this must be a (SATISFIES f) expression.
+  ;; Unfortunately, this can not currently be constrained to
+  ;;  (OR SYMBOL (CONS (EQL SATISFIES) (CONS SYMBOL NULL)))
+  ;; because somewhere in cold-init there is an UNKNOWN-TYPE constructed
+  ;; which has (UNSIGNED-BYTE 8) as the expression, and I  haven't sifted through
+  ;; that logic enough yet to understand why.
   (specifier nil :type t :test equal))
 
 ;;; A MEMBER-TYPE represent a use of the MEMBER type specifier. We
@@ -822,18 +823,17 @@
 
 ;;; ARGS-TYPE objects are used both to represent VALUES types and
 ;;; to represent FUNCTION types.
+;;; This used to contain slots for KEYP,KEYWORDS,ALLOWP which could never
+;;; be useful in a VALUES-TYPE.
+;;; CMUCL rev 2e8488e0ace2d21a3d7af217037bcb445cc93496 said
+;;; "(values) <type translator>: Disallow &key and &allow-other-keys"
+;;; but they kept all the slots in ARGS-TYPE.
 (def-type-model (args-type) ; no direct instances
   ;; Lists of the type for each required and optional argument.
   (required nil :type list :hasher hash-ctype-list :test list-elts-eq)
   (optional nil :type list :hasher hash-ctype-list :test list-elts-eq)
   ;; The type for the rest arg. NIL if there is no &REST arg.
-  (rest nil :type (or ctype null) :hasher hash-ctype-or-null :test eq)
-  ;; true if &KEY arguments are specified
-  (keyp nil :type boolean)
-  ;; list of KEY-INFO structures describing the &KEY arguments
-  (keywords nil :type list :hasher key-info-list-hash :test eq) ; hash-consed already
-  ;; true if other &KEY arguments are allowed
-  (allowp nil :type boolean))
+  (rest nil :type (or ctype null) :hasher hash-ctype-or-null :test eq))
 
 ;;; the description of a &KEY argument
 (declaim (inline !make-key-info))
@@ -875,7 +875,7 @@
   (when list
     (hashset-insert-if-absent *key-info-list-hashset* list #'identity)))
 
-(def-type-model (values-type (:constructor* nil (required optional rest allowp))
+(def-type-model (values-type (:constructor* nil (required optional rest))
                              (:include args-type)))
 (declaim (freeze-type values-type))
 
@@ -884,11 +884,22 @@
                  (:constructor* nil (required optional rest keyp keywords allowp
                                      wild-args returns))
                  (:include args-type))
+  ;; true if &KEY arguments are specified
+  (keyp nil :type boolean)
+  ;; list of KEY-INFO structures describing the &KEY arguments
+  (keywords nil :type list :hasher key-info-list-hash :test eq) ; hash-consed already
+  ;; true if other &KEY arguments are allowed
+  (allowp nil :type boolean)
   ;; true if the arguments are unrestrictive, i.e. *
   (wild-args nil :type boolean)
   ;; type describing the return values. This is a values type
   ;; when multiple values were specified for the return.
   (returns (missing-arg) :type ctype))
+
+(declaim (inline args-type-keyp args-type-keywords args-type-allowp))
+(defun args-type-keyp (type) (and (fun-type-p type) (fun-type-keyp type)))
+(defun args-type-keywords (type) (and (fun-type-p type) (fun-type-keywords type)))
+(defun args-type-allowp (type) (and (fun-type-p type) (fun-type-allowp type)))
 
 (def-type-model (fun-designator-type
                  (:constructor* nil (required optional rest keyp keywords allowp

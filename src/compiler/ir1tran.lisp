@@ -164,7 +164,13 @@
               ;; FIXME: this seems to omit FUNCTIONAL
               (when (defined-fun-p fun)
                 (return-from fun-lexically-notinline-p
-                  (eq (defined-fun-inlinep fun) 'notinline))))))))
+                  (eq (defined-fun-inlinep fun) 'notinline)))
+              (loop for data in (lexenv-user-data env)
+                    when (and (eq (car data) 'no-compiler-macro)
+                              (eq (cdr data) name))
+                    do
+                    (return-from fun-lexically-notinline-p
+                      t)))))))
     ;; If ANSWER is NIL, go for the global value
     (eq (or answer (info :function :inlinep name)) 'notinline)))
 
@@ -543,7 +549,10 @@
       (declare (fixnum pos))
       (macrolet ((frob ()
                    `(progn
-                      (when (atom subform) (return))
+                      (when (comma-p subform)
+                        (setf subform (comma-expr subform)))
+                      (when (atom subform)
+                        (return))
                       (let ((fm (car subform)))
                         (when (comma-p fm)
                           (setf fm (comma-expr fm)))
@@ -567,6 +576,8 @@
         (loop
          (frob)
          (frob)
+         (when (comma-p trail)
+           (return))
          (setq trail (cdr trail)))))))
 
 
@@ -1461,7 +1472,7 @@ the stack without triggering overflow protection.")
 (defun process-extent-decl (names vars fvars kind)
   (let ((extent
           (ecase kind
-            (dynamic-extent
+            ((dynamic-extent dynamic-extent-no-note)
              (when *stack-allocate-dynamic-extent*
                kind))
             ((indefinite-extent truly-dynamic-extent)
@@ -1552,6 +1563,11 @@ the stack without triggering overflow protection.")
         (process-ftype-decl (second spec) res (cddr spec) fvars context))
        ((inline notinline maybe-inline)
         (process-inline-decl spec res fvars))
+       (no-compiler-macro
+        (make-lexenv :default res
+                     :user-data (list*
+                                 (cons 'no-compiler-macro (second spec))
+                                 (lexenv-user-data res))))
        (optimize
         (multiple-value-bind (new-policy specified-qualities)
             (process-optimize-decl spec (lexenv-policy res))
@@ -1567,7 +1583,7 @@ the stack without triggering overflow protection.")
          :default res
          :handled-conditions (process-unmuffle-conditions-decl
                               spec (lexenv-handled-conditions res))))
-       ((dynamic-extent truly-dynamic-extent indefinite-extent)
+       ((dynamic-extent truly-dynamic-extent indefinite-extent dynamic-extent-no-note)
         (process-extent-decl (cdr spec) vars fvars (first spec))
         res)
        ((disable-package-locks enable-package-locks)

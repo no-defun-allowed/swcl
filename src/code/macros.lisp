@@ -278,7 +278,7 @@ tree structure resulting from the evaluation of EXPRESSION."
   ;; value is used when cross-compiling for :COMPILE-TOPLEVEL contexts
   ;; which reference the constant.
   #+sb-xc-host
-  (eval `(defconstant ,name ',value))
+  (eval `(unless (boundp ',name) (defconstant ,name ',value)))
   (setf (info :variable :kind name) :constant)
   name)
 
@@ -1897,26 +1897,26 @@ symbol-case giving up: case=((V U) (F))
   ;; This is simpler than trying to arrange transforms that cause
   ;; MAKE-STRING-OUTPUT-STREAM to be DXable. While that might be awesome,
   ;; this macro exists for a reason.
-  (let ((initial-buffer '#:buf)
-        (dummy '#:stream)
-        (string-let (or #+c-stack-is-control-stack 'dx-let 'let))
-        (string-ctor
-          (if (and (sb-xc:constantp element-type)
-                   (let ((ctype (sb-c::careful-specifier-type
-                                 (constant-form-value element-type))))
-                     (and ctype
-                          (csubtypep ctype (specifier-type 'character))
-                          (neq ctype *empty-type*))))
-              ;; Using MAKE-ARRAY avoids a style-warning if et is 'STANDARD-CHAR:
-              ;; "The default initial element #\Nul is not a STANDARD-CHAR."
-              'make-array ; hooray! it's known be a valid string type
-              ;; Force a runtime STRINGP check unless futher transforms
-              ;; deduce a known type. You'll get "could not stack allocate"
-              ;; perhaps, but that's acceptable.
-              'make-string)))
+  (let* ((initial-buffer '#:buf)
+         (dummy '#:stream)
+         (string-ctor
+           (if (and (sb-xc:constantp element-type)
+                    (let ((ctype (sb-c::careful-specifier-type
+                                  (constant-form-value element-type))))
+                      (and ctype
+                           (csubtypep ctype (specifier-type 'character))
+                           (neq ctype *empty-type*))))
+               ;; Using MAKE-ARRAY avoids a style-warning if et is 'STANDARD-CHAR:
+               ;; "The default initial element #\Nul is not a STANDARD-CHAR."
+               'make-array ; hooray! it's known be a valid string type
+               ;; Force a runtime STRINGP check unless futher transforms
+               ;; deduce a known type.
+               'make-string)))
     ;; A full call to MAKE-STRING-OUTPUT-STREAM uses a larger initial buffer
     ;; if BASE-CHAR but I really don't care to think about that here.
-    `(,string-let ((,initial-buffer (,string-ctor 31 :element-type ,element-type)))
+    `(let ((,initial-buffer (,string-ctor 31 :element-type ,element-type)))
+       #+c-stack-is-control-stack
+       (declare (sb-c::dynamic-extent-no-note ,initial-buffer))
        (dx-let ((,dummy (%allocate-string-ostream)))
          (let ((,var (%init-string-output-stream ,dummy ,initial-buffer
                                                  ,wild-result-type)))

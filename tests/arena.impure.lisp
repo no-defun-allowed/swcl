@@ -1,5 +1,6 @@
 #-system-tlabs (invoke-restart 'run-tests::skip-file)
 #+parallel-test-runner (invoke-restart 'run-tests::skip-file) ; crashes and hangs
+#+interpreter (invoke-restart 'run-tests::skip-file)
 (in-package sb-vm)
 
 (defvar *many-arenas*
@@ -229,6 +230,24 @@
               (unuse-arena)))))
       (sb-thread:join-thread thread))))
 
+(defvar *newpkg* (make-package "PACKAGE-GROWTH-TEST"))
+(defun addalottasymbols ()
+  (sb-vm:with-arena (*arena*)
+    (dotimes (i 200)
+      (let ((str (concatenate 'string "S" (write-to-string i))))
+        (assert (not (heap-allocated-p str)))
+        (let ((sym (intern str *newpkg*)))
+          (assert (heap-allocated-p sym))
+          (assert (heap-allocated-p (symbol-name sym))))))))
+(test-util:with-test (:name :intern-a-bunch)
+  (let ((old-n-cells
+         (length (sb-impl::package-hashtable-cells
+                  (sb-impl::package-internal-symbols *newpkg*)))))
+    (addalottasymbols)
+    (let* ((cells (sb-impl::package-hashtable-cells
+                   (sb-impl::package-internal-symbols *newpkg*))))
+      (assert (> (length cells) old-n-cells)))))
+
 (defun all-arenas ()
   (let ((head (sb-kernel:%make-lisp-obj (extern-alien "arena_chain" unsigned))))
     (cond ((eql head 0) nil)
@@ -236,7 +255,9 @@
            (assert (typep (arena-link head) '(or null arena)))
            (collect ((output))
              (do ((a head (arena-link a)))
-                 ((null a) (output))
+                 ((null a)
+                  ;; (format t "CHAIN: ~X~%" (output))
+                  (output))
                (output (get-lisp-obj-address a))))))))
 
 (test-util:with-test (:name destroy-arena)
@@ -271,3 +292,28 @@
           (assert (equal (all-arenas) (butlast chain))))
         (exit-if-no-arenas))
       (assert (= n-deleted n-arenas)))))
+
+(test-util:with-test (:name :disassemble-pcl-stuff)
+  (let ((stream (make-string-output-stream)))
+    (with-package-iterator (iter "SB-PCL" :internal :external)
+      (loop
+        (multiple-value-bind (got symbol) (iter)
+          (unless got (return))
+          (when (and (fboundp symbol)
+                     (not (closurep (symbol-function symbol)))
+                     (not (sb-pcl::generic-function-p
+                           (symbol-function symbol))))
+            (disassemble (sb-kernel:fun-code-header
+                          (or (macro-function symbol)
+                              (symbol-function symbol)))
+                         :stream stream)
+            (let ((lines (test-util:split-string
+                          (get-output-stream-string stream)
+                          #\newline)))
+              (dolist (line lines)
+                (cond ((search "LIST-ALLOC-TRAMP" line)
+                       (assert (search "SYS-LIST-ALLOC-TRAMP" line)))
+                      ((search "ALLOC-TRAMP" line)
+                       (assert (search "SYS-ALLOC-TRAMP" line)))
+                      ((search "LISTIFY-&REST" line)
+                       (assert (search "SYS-LISTIFY-&REST" line))))))))))))

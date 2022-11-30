@@ -11,7 +11,8 @@
 ;;;; absolutely no warranty. See the COPYING and CREDITS files for
 ;;;; more information.
 
-#+sb-devel (invoke-restart 'run-tests::skip-file) ; packages are not locked for devs
+#+(and sb-devel (not sb-devel-lock-packages))
+(invoke-restart 'run-tests::skip-file) ; packages are not locked for devs
 
 (load "compiler-test-util.lisp")
 

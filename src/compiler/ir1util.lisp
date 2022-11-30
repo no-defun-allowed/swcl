@@ -451,7 +451,7 @@
                   (when (member (functional-kind home) '(:external :optional))
                     (return-from set-slot-old-p
                       (eq (lambda-environment (if (eq (functional-kind home) :external)
-                                                  (functional-entry-fun home)
+                                                  (main-entry (functional-entry-fun home))
                                                   home))
                           (node-environment allocator)))))
                 (setf uses (principal-lvar-ref-use value-lvar)))))
@@ -773,6 +773,8 @@
                                   (principal-lvar-use (cast-value use))
                                   use)))
       (unless (or
+               (eq (cleanup-dx-kind  (lvar-dynamic-extent lvar))
+                   'dynamic-extent-no-note)
                ;; If we're flushing, don't complain if we can flush the combination.
                (and flush
                     (or

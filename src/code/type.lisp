@@ -279,34 +279,25 @@
 (defun-cached (make-values-type-cached
                :hash-bits 8
                :hash-function
-               (lambda (req opt rest allowp)
+               (lambda (req opt rest)
                  (logxor (hash-ctype-list req)
                          (hash-ctype-list opt)
                           (if rest
                               (type-hash-value rest)
-                              42)
-                          ;; Results (logand #xFF (sxhash t/nil))
-                          ;; hardcoded to avoid relying on the xc host.
-                          ;; [but (logand (sxhash nil) #xff) => 2
-                          ;;  for me, so the code and comment disagree,
-                          ;;  but not in a way that matters.]
-                          (if allowp
-                              194
-                              11))))
+                              42))))
     ((required list-elts-eq) ; always compare ctype instances by EQ
      (optional list-elts-eq)
-     (rest eq)
-     (allowp eq))
-  (new-ctype values-type required optional rest allowp))
+     (rest eq))
+  (new-ctype values-type required optional rest))
 
-(defun make-values-type (&key required optional rest allowp)
+(defun make-values-type (required &optional optional rest)
   (multiple-value-bind (required optional rest)
       (canonicalize-args-type-args required optional rest)
     (cond ((and (null required) (null optional) (eq rest *universal-type*))
            *wild-type*)
           ((memq *empty-type* required)
            *empty-type*)
-          (t (make-values-type-cached required optional rest allowp)))))
+          (t (make-values-type-cached required optional rest)))))
 
 (define-type-method (values :simple-subtypep :complex-subtypep-arg1)
                      (type1 type2)
@@ -326,8 +317,7 @@
   (cons 'values
         (let ((unparsed (unparse-args-types type)))
           (if (or (values-type-optional type)
-                  (values-type-rest type)
-                  (values-type-allowp type))
+                  (values-type-rest type))
               unparsed
               (nconc unparsed '(&optional))))))
 
@@ -713,10 +703,14 @@
   (translate-fun-type context args result :designator t))
 
 (def-type-translator values :list ((:context context) &rest values)
+  ;; comment from CMUCL:
+  ;; "Signal an error if the spec has &KEY or &ALLOW-OTHER-KEYS.
+  ;;  Actually, CLHS lists &ALLOW-OTHER-KEYS without listing &KEYS,
+  ;;  but keys clearly don't make any sense."
   (multiple-value-bind (llks required optional rest)
       (parse-args-types context values :values-type)
     (if (plusp llks)
-        (make-values-type :required required :optional optional :rest rest)
+        (make-values-type required optional rest)
         (make-short-values-type required))))
 
 ;;;; VALUES types interfaces
@@ -886,9 +880,9 @@
              (csubtypep (specifier-type 'null) type)
            (and (not res) sure))
          ;; FIXME: What should we do with (NOT SURE)?
-         (make-values-type :required (list type) :rest *universal-type*))
+         (make-values-type (list type) nil *universal-type*))
         (t
-         (make-values-type :optional (list type) :rest *universal-type*))))
+         (make-values-type nil (list type) *universal-type*))))
 
 (defun coerce-to-values (type)
   (declare (type ctype type))
@@ -909,13 +903,13 @@
                         types
                         :from-end t)))
     (if last-required
-        (make-values-type :required (subseq types 0 (1+ last-required))
-                          :optional (subseq types (1+ last-required))
-                          :rest *universal-type*)
-        (make-values-type :optional types :rest *universal-type*))))
+        (make-values-type (subseq types 0 (1+ last-required))
+                          (subseq types (1+ last-required))
+                          *universal-type*)
+        (make-values-type nil types *universal-type*))))
 
 (defun make-single-value-type (type)
-  (make-values-type :required (list type)))
+  (make-values-type (list type)))
 
 ;;; Do the specified OPERATION on TYPE1 and TYPE2, which may be any
 ;;; type, including VALUES types. With VALUES types such as:
@@ -966,9 +960,7 @@
 (defun values-type-op (type1 type2 operation nreq)
   (multiple-value-bind (required optional rest exactp)
       (args-type-op type1 type2 operation nreq)
-    (values (make-values-type :required required
-                              :optional optional
-                              :rest rest)
+    (values (make-values-type required optional rest)
             exactp)))
 
 (defun compare-key-args (type1 type2)
@@ -1031,11 +1023,9 @@
         ((and (not (values-type-p type2))
               (values-type-required type1))
          (let ((req1 (values-type-required type1)))
-           (make-values-type :required (cons (type-intersection (first req1) type2)
-                                             (rest req1))
-                             :optional (values-type-optional type1)
-                             :rest (values-type-rest type1)
-                             :allowp (values-type-allowp type1))))
+           (make-values-type (cons (type-intersection (first req1) type2) (rest req1))
+                             (values-type-optional type1)
+                             (values-type-rest type1))))
         (t
          (values (values-type-op type1 (coerce-to-values type2)
                                  #'type-intersection
@@ -1839,8 +1829,10 @@ expansion happened."
                                                         other-types)))
           (if distributed
               (%type-union distributed)
+              #+nil
               (%make-hairy-type `(and ,@(map 'list #'type-specifier
-                                             simplified-types)))))
+                                             simplified-types)))
+              (bug "Unexpected %MAKE-HAIRY-TYPE")))
         (cond
           ((null simplified-types) *universal-type*)
           ((null (cdr simplified-types)) (car simplified-types))
@@ -2433,6 +2425,17 @@ expansion happened."
                        :specialized-element-type (array-type-specialized-element-type type1)
                        :element-type (array-type-element-type type1)))))
 
+(defun remove-integer-bounds (type)
+  (let ((low (numeric-type-low type))
+        (high (numeric-type-high type)))
+    (make-numeric-type
+     :class (numeric-type-class type)
+     :format (numeric-type-format type)
+     :complexp (numeric-type-complexp type)
+     :low (if (integerp low) (list low) low)
+     :high (if (integerp high) (list high) high)
+     :enumerable (numeric-type-enumerable type))))
+
 (define-type-method (negation :complex-intersection2) (type1 type2)
   (cond
     ((csubtypep type1 (negation-type-type type2)) *empty-type*)
@@ -2440,6 +2443,11 @@ expansion happened."
      type1)
     ((and (array-type-p type1) (array-type-p (negation-type-type type2)))
      (maybe-complex-array-refinement type1 type2))
+    ((and (numeric-type-p type1)
+          (eql (numeric-type-class type1) 'rational)
+          (csubtypep (sb-kernel:specifier-type 'integer) (negation-type-type type2))
+          (or (integerp (numeric-type-low type1)) (integerp (numeric-type-high type1))))
+     (type-intersection (remove-integer-bounds type1) type2))
     (t nil)))
 
 (define-type-method (negation :simple-union2) (type1 type2)
@@ -4398,7 +4406,7 @@ used for a COMPLEX component.~:@>"
               (csubtypep type2
                          (make-numeric-type
                           :class 'rational
-                          :complexp nil
+                          :complexp :real
                           :low (if (null (numeric-type-low type1))
                                    nil
                                    (list (1- (numeric-type-low type1))))
