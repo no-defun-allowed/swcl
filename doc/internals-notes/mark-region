@@ -8,20 +8,37 @@ Heap layout
 
 The collector retains the page-orientation of gencgc, but introduces a
 second layer of "lines" as used in the Immix collector for small
-objects. Line metadata, including the generation number and a mark
-bit, is stored in a "bytemap". Memory used for small objects is
-reclaimed at the line level, rather than the page level, in order to
+objects. Line metadata, including the generation number, freshness
+and a mark bit, is stored in a "bytemap". Memory used for small objects
+is reclaimed at the line level, rather than the page level, in order to
 reclaim most memory without having to move objects. Each line is
 assigned its own generation, to allow memory from older generations to
 be reused for newer generations. Line size is fixed to 16 words
 (i.e. 8 possible places an object could be allocated) to make bitwise
 operations simpler.
 
-The starts of objects are recorded in an allocation bitmap. Lisp uses
-a BTS instruction; as threads still claim whole pages at a time, there
-is no need for writing to the bitmap to be atomic. Ambiguous pointers
-can be checked by consulting the bitmap; it is also possible to scan
-the bitmap if support for interior pointers is desired.
+The starts of objects are recorded in an allocation bitmap. While it
+is possible for Lisp to eagerly update the allocation bitmap (such as
+in "Fast conservative garbage collection"), we instead have the
+garbage collector lazily update the allocation bitmap. The starts of
+objects can be determined lazily by exploiting that the allocator
+still uses bump-allocation, but in less structured "runs" of lines
+rather than entire pages. The allocator records which lines it just
+allocated into (which we call "fresh"); and when the collector needs
+to check if a conservative pointer in such a fresh line is valid, it
+searches for the start and end of the run enclosing the pointer, and
+marks the starts of objects while walking that run. This approach
+experimentally reduces the time overhead in maintaining the allocation
+bitmap, as theoretically "most objects die young", and so only small
+portions of the allocation bitmap need to be maintained. It also
+requires less platform-specific code, as it is not necessary to write
+inline code to update the bitmap. Such code is also tricky to write on
+non-x86 platforms; the x86 instruction set includes a BTS instruction
+to set a bit in a bitmap in memory*, but setting a bit requires the
+computation to be done by the user on e.g. ARM.
+
+(* Though, per compiler/x86-64/array.lisp, BTS m,r is really slow and
+   so the best performance would still require some finessing.)
 
 Marking
 -------
@@ -169,3 +186,4 @@ Useful references
 Immix: https://www.cs.utexas.edu/users/speedway/DaCapo/papers/immix-pldi-2008.pdf
 Grey packets: https://dl.acm.org/doi/10.1145/1108970.1108972
 Sticky marks in generational collection: https://dl.acm.org/doi/pdf/10.1145/96709.96735
+Fast conservative garbage collection: https://users.cecs.anu.edu.au/~steveb/pubs/papers/consrc-oopsla-2014.pdf
