@@ -54,8 +54,9 @@ static struct {
   uword_t consider; uword_t scavenge;
   uword_t trace; uword_t trace_alive; uword_t trace_running;
   uword_t sweep; uword_t sweep_lines; uword_t sweep_pages;
-  uword_t compact; uword_t raise; }
-  meters = { 0 };
+  uword_t compact; uword_t raise;
+  uword_t fresh_pointers;
+} meters = { 0 };
 static unsigned int collection = 0;
 #define METER(name, action) \
   { uword_t before = get_time(); \
@@ -64,12 +65,12 @@ static unsigned int collection = 0;
 
 void mr_print_meters() {
 #define NORM(x) (collection ? meters.x / collection : 0)
-  fprintf(stderr, "collection %d: %ldus consider %ld scavenge %ld trace (%ld alive %ld running) %ld sweep (%ld lines %ld pages) %ld compact %ld raise\n",
+  fprintf(stderr, "collection %d: %ldus consider %ld scavenge %ld trace (%ld alive %ld running) %ld sweep (%ld lines %ld pages) %ld compact %ld raise; %ldB fresh\n",
           collection,
           NORM(consider), NORM(scavenge),
           NORM(trace), NORM(trace_alive), NORM(trace_running),
           NORM(sweep), NORM(sweep_lines), NORM(sweep_pages),
-          NORM(compact), NORM(raise));
+          NORM(compact), NORM(raise), NORM(fresh_pointers));
 #undef NORM
 }
 
@@ -128,11 +129,14 @@ boolean line_marked(void *pointer) {
  * necessary in order to allow reclaimed memory to be reused,
  * without having to compact old pages. */
 #define MARK_GEN(l) ((l) | 16)
+#define FRESHEN_GEN(l) ((l) | 32)
 #define UNMARK_GEN(l) ((l) & 15)
+#define UNFRESHEN_GEN(l) ((l) & 31)
 #define ENCODE_GEN(g) ((g) + 1)
 #define DECODE_GEN(l) (UNMARK_GEN(l) - 1)
 #define IS_MARKED(l) ((l) & 16)
-#define COPY_MARK(from, to) (((from) & 16) | (to))
+#define IS_FRESH(l) ((l) & 32)
+#define COPY_MARK(from, to) (((from) & 0x30) | (to))
 
 generation_index_t gc_gen_of(lispobj obj, int defaultval) {
   page_index_t p = find_page_index((void*)obj);
@@ -173,6 +177,8 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
       region->start_addr = line_address(chunk_start);
       region->free_pointer = line_address(chunk_start) + nbytes;
       region->end_addr = line_address(chunk_end);
+      for (line_index_t c = chunk_start; c < chunk_end; c++)
+        line_bytemap[c] = FRESHEN_GEN(0);
       return 1;
     }
     if (chunk_end == end) return 0;
@@ -285,7 +291,6 @@ inline char *also_page_address(page_index_t page_num) {
 #define CPU_SPLIT __attribute__((target_clones("default,avx2")))
 
 void mr_update_closed_region(struct alloc_region *region, generation_index_t gen) {
-  extern boolean gc_active_p;
   /* alloc_regions never span multiple pages. */
   page_index_t the_page = find_page_index(region->start_addr);
   if (!(page_table[the_page].type & OPEN_REGION_PAGE_FLAG))
@@ -294,17 +299,11 @@ void mr_update_closed_region(struct alloc_region *region, generation_index_t gen
 
   /* Mark the lines as allocated. */
   unsigned char *lines = line_bytemap;
-  if (gc_active_p) {
-    for_lines_in_page (l, the_page) {
-      /* GC might have allocated in here and marked lines already, so
-       * remember to copy the mark bit. */
-      unsigned char copied = COPY_MARK(lines[l], ENCODE_GEN(gen));
-      lines[l] = UNMARK_GEN(lines[l]) ? lines[l] : copied;
-    }
-  } else {
-    for_lines_in_page (l, the_page) {
-      lines[l] = lines[l] ? lines[l] : ENCODE_GEN(gen);
-    }
+  for_lines_in_page (l, the_page) {
+    /* Remember to copy mark bits set by GC and fresh bits set
+     * by allocator. */
+    unsigned char copied = COPY_MARK(lines[l], ENCODE_GEN(gen));
+    lines[l] = UNMARK_GEN(lines[l]) ? lines[l] : copied;
   }
   page_table[the_page].type &= ~(OPEN_REGION_PAGE_FLAG);
   gc_set_region_empty(region);
@@ -610,17 +609,50 @@ void clear_allocation_bit_mark(void *address) {
   allocation_bitmap[first_word_index] &= ~((uword_t)(1) << (first_bit_index % N_WORD_BITS));
 }
 
+void compute_allocations(void *address) {
+  line_index_t l = address_line(address), start, end;
+  page_index_t this_page = find_page_index(address);
+  line_index_t first_line = address_line(page_address(this_page)), last_line = address_line(page_address(this_page + 1));
+  /* Find the last previous unfresh line. */
+  for (start = l; start != first_line - 1 && IS_FRESH(line_bytemap[start]); start--)
+    line_bytemap[start] = UNFRESHEN_GEN(line_bytemap[start]);
+  start++;                       /* Go back to first fresh line. */
+  /* Find the first subsequent unfresh line. */
+  for (end = l + 1; end != last_line && IS_FRESH(line_bytemap[end]); end++)
+    line_bytemap[end] = UNFRESHEN_GEN(line_bytemap[end]);
+  /* The run of contiguous allocation exists between those. */
+  meters.fresh_pointers += (end - start) * LINE_SIZE;
+  unsigned char *allocations = (unsigned char*)allocation_bitmap;
+  if (page_table[this_page].type == PAGE_TYPE_CONS) {
+    /* Just fill with 1s. Worst we can do is create a (0 . 0) cell out
+     * of nowhere, as the allocator pre-zeroes memory. */
+    for (line_index_t l = start; l < end; l++) allocations[l] = 0xFF;
+  } else {
+    /* Walk the span to find object starts. */
+    lispobj *where = (lispobj*)line_address(start), *limit = (lispobj*)line_address(end);
+    //fprintf(stderr, "scanning %p to %p to find %p\n", where, limit, address);
+    /* If we encounter a zero word on a non-cons page, we've hit
+     * the end of some sequence of allocations. */
+    while (where < limit && *where != 0) {
+      //fprintf(stderr, "looking at %p word %lx\n", where, *where);
+      where += headerobj_size(where);
+    }
+  }
+}
+
 static lispobj *find_object(uword_t address, uword_t start) {
-  page_index_t p = find_page_index((void*)address);
+  lispobj *np = native_pointer(address);
+  page_index_t p = find_page_index(np);
+  if (p == -1) return 0;
+  boolean fresh = IS_FRESH(line_bytemap[address_line(np)]);
   if (page_free_p(p)) return 0;
   if (page_table[p].type == PAGE_TYPE_CONS) {
+    if (fresh) return np;
     /* CONS cells are always aligned, and the mutator is allowed to be lazy
      * w.r.t putting down allocation bits, so just use alignment. */
-    if (allocation_bit_marked(native_pointer(address)))
-      return (lispobj*)(address & ~LOWTAG_MASK);
-    else
-      return 0;
+    return allocation_bit_marked(np) ? np : 0;
   } else {
+    if (fresh) compute_allocations(np);
     /* Go scanning for the object. */
     uword_t first_bit_index = (address - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
     uword_t first_word_index = first_bit_index / N_WORD_BITS;
@@ -708,7 +740,7 @@ static page_bytes_t count_dead_bytes(page_index_t p) {
   page_bytes_t n = 0;
   unsigned char *lines = line_bytemap;
   for_lines_in_page(l, p)
-    if (lines[l] == dead) n++;
+    if (UNFRESHEN_GEN(lines[l]) == dead) n++;
   return n * LINE_SIZE;
 }
 
@@ -725,8 +757,10 @@ static void sweep_small_page(page_index_t p) {
     unsigned char new = marks[l], old = allocs[l];
     allocs[l] = (UNMARK_GEN(lines[l]) == unmarked) ? new : old;
   }
-  for_lines_in_page(l, p)
-    lines[l] = (lines[l] == unmarked) ? 0 : (lines[l] == marked) ? unmarked : lines[l];
+  for_lines_in_page(l, p) {
+    unsigned char line = UNFRESHEN_GEN(lines[l]);
+    lines[l] = (line == unmarked) ? 0 : (line == marked) ? unmarked : line;
+  }
   for_lines_in_page(l, p)
     marks[l] = 0;
 }
