@@ -245,6 +245,7 @@ DEF_FINDER(find_used_page, page_index_t, !page_free_p(where), end);
 page_index_t try_allocate_large(sword_t nbytes,
                                 int page_type, generation_index_t gen,
                                 page_index_t *start, page_index_t end) {
+  void set_allocation_bit_mark(void *address);
   gc_assert(gen != SCRATCH_GENERATION);
   // printf("try_allocate_large(%lu, %d, %d, %ld, %ld)\n", nbytes, page_type, gen, *start, end);
   int pages_needed = ALIGN_UP(nbytes, GENCGC_PAGE_BYTES) / GENCGC_PAGE_BYTES;
@@ -267,6 +268,7 @@ page_index_t try_allocate_large(sword_t nbytes,
       }
       *start = chunk_start + pages_needed;
       // printf(" => %ld\n", chunk_start);
+      set_allocation_bit_mark(page_address(chunk_start));
       bytes_allocated += nbytes;
       generations[gen].bytes_allocated += nbytes;
       return chunk_start;
@@ -322,12 +324,18 @@ static boolean object_marked_p(lispobj object) {
   uword_t bit_index = index % N_WORD_BITS, word_index = index / N_WORD_BITS;
   return ANY(mark_bitmap[word_index] & ((uword_t)(1) << bit_index));
 }
-static boolean set_mark_bit(lispobj object) {
+static boolean set_mark_bit(lispobj object, boolean mark_allocation) {
   uword_t index = (uword_t)((object - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS);
   uword_t bit_index = index % N_WORD_BITS, word_index = index / N_WORD_BITS;
   uword_t bit = ((uword_t)(1) << bit_index);
   /* Avoid doing an atomic op if we're obviously not going to win it. */
   if (mark_bitmap[word_index] & bit) return 0;
+  /* If the mark bit was set, someone else must have already updated
+   * the allocation bitmap; updating the allocation bitmap happens before
+   * updating the mark bitmap in set_mark_bit, and happens long before
+   * anything else in compute_allocations. */
+  if (mark_allocation)
+    atomic_fetch_or(allocation_bitmap + word_index, bit);
   /* Return if we claimed successfully i.e. the bit was 0 before. */
   return !ANY(atomic_fetch_or(mark_bitmap + word_index, bit) & bit);
 }
@@ -431,8 +439,9 @@ static void mark(lispobj object) {
       lose("No allocation bit for 0x%lx", object);
 #endif
 
+    boolean set_allocation = IS_FRESH(line_bytemap[address_line(np)]);
     /* Enqueue onto mark queue */
-    if (set_mark_bit(object)) {
+    if (set_mark_bit(object, set_allocation)) {
       if (!output_block || output_block->count == QBLOCK_CAPACITY) {
         struct Qblock *next = grab_qblock();
         if (output_block) {
@@ -481,13 +490,16 @@ static void trace_object(lispobj object) {
         np = base;
       }
       /* Inlined logic from mark() */
-      if (!pointer_survived_gc_yet(next) && set_mark_bit(next)) {
-        if (listp(next))
-          mark_cons_line(CONS(next));
-        else
-          mark_lines(np);
-        object = next;
-        goto again;
+      if (!pointer_survived_gc_yet(next)) {
+        boolean set_allocation = IS_FRESH(line_bytemap[address_line(np)]);
+        if (set_mark_bit(next, set_allocation)) {
+          if (listp(next))
+            mark_cons_line(CONS(next));
+          else
+            mark_lines(np);
+          object = next;
+          goto again;
+        }
       }
     }
     mark(next);
@@ -596,17 +608,10 @@ boolean allocation_bit_marked(void *address) {
   return ANY(masked_out);
 }
 
-/* TODO: make these two functions into set_allocation_bit_mark(address, value) */
 void set_allocation_bit_mark(void *address) {
   uword_t first_bit_index = ((uword_t)(address) - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
   uword_t first_word_index = first_bit_index / N_WORD_BITS;
   allocation_bitmap[first_word_index] |= ((uword_t)(1) << (first_bit_index % N_WORD_BITS));
-}
-
-void clear_allocation_bit_mark(void *address) {
-  uword_t first_bit_index = ((uword_t)(address) - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
-  uword_t first_word_index = first_bit_index / N_WORD_BITS;
-  allocation_bitmap[first_word_index] &= ~((uword_t)(1) << (first_bit_index % N_WORD_BITS));
 }
 
 void compute_allocations(void *address) {
@@ -630,12 +635,13 @@ void compute_allocations(void *address) {
   } else {
     /* Walk the span to find object starts. */
     lispobj *where = (lispobj*)line_address(start), *limit = (lispobj*)line_address(end);
-    //fprintf(stderr, "scanning %p to %p to find %p\n", where, limit, address);
-    /* If we encounter a zero word on a non-cons page, we've hit
-     * the end of some sequence of allocations. */
-    while (where < limit && *where != 0) {
-      //fprintf(stderr, "looking at %p word %lx\n", where, *where);
-      where += headerobj_size(where);
+    while (where < limit) {
+      /* The first word can only be zero if we are looking at a cons
+       * cell, and we don't have cons cells on non-cons pages, so just
+       * skip it. */
+      if (*where != 0)
+        set_allocation_bit_mark(where);
+      where += object_size(where);
     }
   }
 }
@@ -909,7 +915,7 @@ void mr_preserve_range(lispobj *from, sword_t nwords) {
  * Used by weak hash table culling, for the list of culled values. */
 void mr_preserve_leaf(lispobj obj) {
   if (is_lisp_pointer(obj) && in_dynamic_space(obj)) {
-    set_mark_bit(obj);
+    set_mark_bit(obj, 1);
     lispobj *n = native_pointer(obj);
     mark_lines(n);
   }

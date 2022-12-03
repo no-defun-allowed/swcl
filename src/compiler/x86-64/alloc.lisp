@@ -189,11 +189,6 @@
 ;;; the allocator to use cons_tlab.
 (defconstant +cons-primtype+ list-pointer-lowtag)
 
-;;; A kludge to save writing another #+mark-region-gc in every call site
-;;; of ALLOCATION. My apologies.
-#-mark-region-gc
-(define-symbol-macro another-temp nil)
-
 ;;; Emit code to allocate an object with a size in bytes given by
 ;;; SIZE into ALLOC-TN. The size may be an integer of a TN.
 ;;; NODE may be used to make policy-based decisions.
@@ -207,9 +202,9 @@
 ;;; 2. where to put the result
 ;;; 3. node (for determining immobile-space-p) and a scratch register or two
 (defun allocation (type size lowtag alloc-tn node temp thread-temp
-                   &key overflow (cells 1) another-temp
+                   &key overflow
                    &aux (systemp (system-tlab-p type node)))
-  (declare (ignorable thread-temp another-temp cells))
+  (declare (ignorable thread-temp))
   (flet ((fallback (size)
            ;; Call an allocator trampoline and get the result in the proper register.
            ;; There are 2 choices of trampoline to invoke alloc() or alloc_list()
@@ -300,40 +295,6 @@
                       (when (and (/= lowtag 0) (not temp) (not (tn-p size)))
                         (inst or :byte alloc-tn lowtag))
                       (inst jmp DONE))))))))
-  ;; Mark into the allocation bitmap. This is no fun to try to pretend
-  ;; to be a register allocator with, so I don't try. We can still clobber
-  ;; TEMP if we were given one, which minimizes the damage a bit.
-  ;; Note that ALLOCATE can be called to allocate multiple objects at once,
-  ;; but this is (currently) only done with cons cells.
-  #+mark-region-gc
-  (unless (or systemp (zerop cells))
-    (binding* (((bitmap-temp clobbered-bitmap)
-                (if temp
-                    (values temp nil)
-                    (values (if (location= alloc-tn rax-tn) rbx-tn rax-tn) t)))
-               ((offset-temp clobbered-offset)
-                (if another-temp
-                    (values another-temp nil)
-                    (values alloc-tn t))))
-      (when clobbered-bitmap (inst push bitmap-temp))
-      (inst mov bitmap-temp
-            (thread-slot-ea thread-allocation-bitmap-base-slot
-                            #+gs-seg thread-temp))
-      (unless clobbered-offset (inst mov offset-temp alloc-tn))
-      (inst shr :qword offset-temp n-lowtag-bits)
-      ;; Mark all the cons cells, if the caller wants that.
-      (dotimes (n cells)
-        (inst bts :qword (ea bitmap-temp) offset-temp)
-        (unless (= n (1- cells))
-          (inst inc offset-temp)))
-      (when clobbered-offset
-        ;; Undo the decrements, if there were any.
-        (when (> cells 1)
-          (inst sub alloc-tn (1- cells)))
-        ;; Undo the shift.
-        (inst shl :qword alloc-tn n-lowtag-bits))
-      (when clobbered-bitmap (inst pop bitmap-temp))))
-  (unless (zerop lowtag) (inst or :byte alloc-tn lowtag))
   t)
 
 ;;; Allocate an other-pointer object of fixed NWORDS with a single-word
@@ -403,7 +364,6 @@
   (:temporary (:sc unsigned-reg :to (:result 0)) temp)
   (:results (result :scs (descriptor-reg)))
   #+gs-seg (:temporary (:sc unsigned-reg :offset 15) thread-tn)
-  #+mark-region-gc (:temporary (:sc unsigned-reg) another-temp)
   (:node-var node)
   (:generator 10
     (let ((stack-allocate-p (node-stack-allocate-p node))
@@ -414,7 +374,7 @@
       (pseudo-atomic (:elide-if stack-allocate-p :thread-tn thread-tn)
         (if stack-allocate-p
             (stack-allocation nbytes 0 alloc)
-            (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn :another-temp another-temp))
+            (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn))
         (store-slot car alloc cons-car-slot 0)
         (store-slot cdr alloc cons-cdr-slot 0)
         (if (location= alloc result)
@@ -429,7 +389,6 @@
   (:temporary (:sc unsigned-reg :to (:result 0) :target result) temp)
   (:results (result :scs (descriptor-reg)))
   #+gs-seg (:temporary (:sc unsigned-reg :offset 15) thread-tn)
-  #+mark-region-gc (:temporary (:sc unsigned-reg) another-temp)
   (:node-var node)
   (:translate acons)
   (:policy :fast-safe)
@@ -438,9 +397,7 @@
           (prev-constant temp))
       (instrument-alloc +cons-primtype+ nbytes node (list temp alloc) thread-tn)
       (pseudo-atomic (:thread-tn thread-tn)
-        (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn
-                    :cells 2
-                    :another-temp another-temp)
+        (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn)
         (store-slot tail alloc cons-cdr-slot 0)
         (inst lea temp (ea (+ 16 list-pointer-lowtag) alloc))
         (store-slot temp alloc cons-car-slot 0)
@@ -464,7 +421,6 @@
   (:temporary (:sc unsigned-reg :to (:result 0)) temp)
   (:results (result :scs (descriptor-reg)))
   #+gs-seg (:temporary (:sc unsigned-reg :offset 15) thread-tn)
-  #+mark-region-gc (:temporary (:sc unsigned-reg) another-temp)
   (:node-var node)
   (:generator 10
     (let ((stack-allocate-p (node-stack-allocate-p node))
@@ -475,9 +431,7 @@
       (pseudo-atomic (:elide-if stack-allocate-p :thread-tn thread-tn)
         (if stack-allocate-p
             (stack-allocation nbytes 0 alloc)
-            (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn
-                        :cells 2
-                        :another-temp another-temp))
+            (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn))
         (store-slot car alloc cons-car-slot 0)
         (store-slot cadr alloc (+ 2 cons-car-slot) 0)
         (store-slot cddr alloc (+ 2 cons-cdr-slot) 0)
@@ -492,7 +446,6 @@
   (:temporary (:sc unsigned-reg) ptr temp)
   (:temporary (:sc unsigned-reg :to (:result 0) :target result) res)
   #+gs-seg (:temporary (:sc unsigned-reg :offset 15) thread-tn)
-  #+mark-region-gc (:temporary (:sc unsigned-reg) another-temp)
   (:info star cons-cells)
   (:results (result :scs (descriptor-reg)))
   (:node-var node)
@@ -506,9 +459,7 @@
       (pseudo-atomic (:elide-if stack-allocate-p :thread-tn thread-tn)
         (if stack-allocate-p
             (stack-allocation size list-pointer-lowtag res)
-            (allocation +cons-primtype+ size list-pointer-lowtag res node temp thread-tn
-                        :cells cons-cells
-                        :another-temp another-temp))
+            (allocation +cons-primtype+ size list-pointer-lowtag res node temp thread-tn))
         (move ptr res)
         (dotimes (i (1- cons-cells))
           (store-slot (tn-ref-tn things) ptr)
@@ -648,7 +599,6 @@
                 positive-fixnum positive-fixnum positive-fixnum)
     (:temporary (:sc unsigned-reg) temp)
     #+gs-seg (:temporary (:sc unsigned-reg :offset 15) thread-tn)
-    #+mark-region-gc (:temporary (:sc unsigned-reg) another-temp)
     (:policy :fast-safe)
     (:node-var node)
     (:generator 100
@@ -703,7 +653,7 @@
                               type)
                           size-tn node instrumentation-temp thread-tn)
         (pseudo-atomic (:thread-tn thread-tn)
-         (allocation nil size-tn 0 result node alloc-temp thread-tn :another-temp another-temp)
+         (allocation nil size-tn 0 result node alloc-temp thread-tn)
          (put-header result 0 type length t alloc-temp)
          (inst or :byte result other-pointer-lowtag)))
       #+ubsan
@@ -856,7 +806,6 @@
     (:node-var node)
     (:temporary (:sc descriptor-reg) tail next limit)
     #+gs-seg (:temporary (:sc unsigned-reg :offset 15) thread-tn)
-    #+mark-region-gc (:temporary (:sc descriptor-reg) bitmap-base bitmap-index)
     (:generator 20
       (let ((size (calc-size-in-bytes length tail))
             (entry (gen-label))
@@ -873,17 +822,9 @@
                        (invoke-asm-routine
                         'call (if (system-tlab-p 0 node) 'sys-make-list 'make-list) node)
                        (inst pop result)
-                       (inst jmp leave-pa))
-                     :cells 0)
+                       (inst jmp leave-pa)))
          (compute-end)
          (inst mov next result)
-         #+mark-region-gc
-         (unless (system-tlab-p 0 node)
-           (inst mov bitmap-base
-                 (thread-slot-ea thread-allocation-bitmap-base-slot
-                                 #+gs-seg thread-tn))
-           (inst mov bitmap-index result)
-           (inst shr :qword bitmap-index n-lowtag-bits))
          (inst jmp entry)
          (emit-label LOOP)
          (storew next tail cons-cdr-slot list-pointer-lowtag)
@@ -891,10 +832,6 @@
          (inst mov tail next)
          (inst add next (* 2 n-word-bytes))
          (storew element tail cons-car-slot list-pointer-lowtag)
-         #+mark-region-gc
-         (unless (system-tlab-p 0 node)
-           (inst bts :qword (ea bitmap-base) bitmap-index)
-           (inst inc bitmap-index))
          (inst cmp next limit)
          (inst jmp :ne loop)
          ;; still pseudo-atomic
@@ -985,7 +922,7 @@
 
 (flet
   ((alloc (name words type lowtag stack-allocate-p result
-                    &optional alloc-temp node vop another-temp
+                    &optional alloc-temp node vop
                     &aux (bytes (pad-data-block words)))
     (declare (ignorable vop))
     #+bignum-assertions
@@ -1004,8 +941,7 @@
              (invoke-asm-routine 'call 'alloc-funinstance vop)
              (inst pop result))
             (t
-             (allocation type bytes (if type 0 lowtag) result node alloc-temp thread-tn
-                         :another-temp another-temp)))
+             (allocation type bytes (if type 0 lowtag) result node alloc-temp thread-tn)))
       (let ((header (compute-object-header words type)))
         (cond #+compact-instance-header
               ((and (eq name '%make-structure-instance) stack-allocate-p)
@@ -1029,10 +965,9 @@
     (:results (result :scs (descriptor-reg)))
     (:temporary (:sc unsigned-reg) alloc-temp)
     #+gs-seg (:temporary (:sc unsigned-reg :offset 15) thread-tn)
-    #+mark-region-gc (:temporary (:sc descriptor-reg) another-temp)
     (:vop-var vop)
     (:node-var node)
-    (:generator 50 (alloc name words type lowtag dx result alloc-temp node vop another-temp)))
+    (:generator 50 (alloc name words type lowtag dx result alloc-temp node vop)))
   (define-vop (sb-c::fixed-alloc-to-stack)
     (:info name words type lowtag dx)
     (:results (result :scs (descriptor-reg)))
@@ -1057,7 +992,6 @@
   ;; KLUDGE: wire to RAX so that it doesn't get R12
   (:temporary (:sc unsigned-reg :offset 0) alloc-temp)
   #+gs-seg (:temporary (:sc unsigned-reg :offset 15) thread-tn)
-  #+mark-region-gc (:temporary (:sc unsigned-reg) another-temp)
   (:node-var node)
   (:generator 50
    ;; With the exception of bignums, these objects have effectively
@@ -1082,8 +1016,7 @@
           ;; Yup, the lifetime specs in this vop are pretty confusing.
           (instrument-alloc type bytes node alloc-temp thread-tn)
           (pseudo-atomic (:thread-tn thread-tn)
-            (allocation nil bytes lowtag result node alloc-temp thread-tn
-                        :another-temp another-temp)
+            (allocation nil bytes lowtag result node alloc-temp thread-tn)
             (storew header result 0 lowtag))))))
 
 #+immobile-space

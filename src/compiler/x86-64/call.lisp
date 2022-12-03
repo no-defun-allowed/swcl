@@ -1288,7 +1288,6 @@
   ;; Note that DST conflicts with RESULT because we use both as temps
   (:temporary (:sc unsigned-reg) value dst)
   #+gs-seg (:temporary (:sc unsigned-reg :offset 15) thread-tn)
-  #+mark-region-gc (:temporary (:sc descriptor-reg) bitmap-base bitmap-index)
   (:results (result :scs (descriptor-reg)))
   (:node-var node)
   (:generator 20
@@ -1319,18 +1318,10 @@
                           'call (if (system-tlab-p 0 node) 'sys-listify-&rest 'listify-&rest)
                           node)
                          (inst pop result)
-                         (inst jmp leave-pa))
-                       :cells 0))
+                         (inst jmp leave-pa))))
        ;; Recalculate DST as a tagged pointer to the last cons
        (inst lea dst (ea (- list-pointer-lowtag (* cons-size n-word-bytes)) dst rcx))
        (inst shr :dword rcx (1+ word-shift)) ; convert bytes to number of cells
-       #+mark-region-gc
-       (unless stack-allocate-p
-         (inst mov bitmap-base
-               (thread-slot-ea thread-allocation-bitmap-base-slot
-                               #+gs-seg thread-tn))
-         (inst mov bitmap-index dst)
-         (inst shr :qword bitmap-index n-lowtag-bits))
        ;; The rightmost arguments are at lower addresses.
        ;; Start by indexing the last argument
        (inst neg rcx) ; :QWORD because it's a signed number
@@ -1347,10 +1338,6 @@
        (storew value dst cons-car-slot list-pointer-lowtag)
        (inst mov result dst) ; preserve the value to put in the CDR of the preceding cons
        (inst sub dst (* cons-size n-word-bytes)) ; get the preceding cons
-       #+mark-region-gc
-       (unless stack-allocate-p
-         (inst bts :qword (ea bitmap-base) bitmap-index)
-         (inst dec bitmap-index))
        (inst inc rcx) ; :QWORD because it's a signed number
        (inst jmp :nz loop)
        (emit-label leave-pa))
