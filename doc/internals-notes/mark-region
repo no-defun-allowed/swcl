@@ -1,7 +1,7 @@
 A mark-region collector is being developed for SBCL. The intention is
 that avoiding compaction/copying should allow for better performance,
-and should make implementing parallel and concurrent collection easier
-(but neither has been implemented just yet).
+should lead to a simpler parallel implementation, and should
+make implementing concurrent collection easier.
 
 Heap layout
 -----------
@@ -17,6 +17,9 @@ be reused for newer generations. Line size is fixed to 16 words
 (i.e. 8 possible places an object could be allocated) to make bitwise
 operations simpler.
 
+Ambiguous references
+--------------------
+
 The starts of objects are recorded in an allocation bitmap. While it
 is possible for Lisp to eagerly update the allocation bitmap (such as
 in "Fast conservative garbage collection"), we instead have the
@@ -26,8 +29,8 @@ still uses bump-allocation, but in less structured "runs" of lines
 rather than entire pages. The allocator records which lines it just
 allocated into (which we call "fresh"); and when the collector needs
 to check if a conservative pointer in such a fresh line is valid, it
-searches for the start and end of the run enclosing the pointer, and
-marks the starts of objects while walking that run. This approach
+searches for the start and end of the run enclosing the pointer,
+and materialises the object bitmap for that run only then. This approach
 experimentally reduces the time overhead in maintaining the allocation
 bitmap, as theoretically "most objects die young", and so only small
 portions of the allocation bitmap need to be maintained. It also
