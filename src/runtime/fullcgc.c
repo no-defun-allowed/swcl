@@ -233,7 +233,13 @@ void gc_mark_range(lispobj* where, long count) {
     for(i=0; i<count; ++i) gc_mark_obj(where[i]);
 }
 
-#define ACTION __mark_obj
+static void wrap_mark(lispobj obj,
+                      __attribute__((unused)) lispobj *where,
+                      __attribute__((unused)) enum source source) {
+  __mark_obj(obj);
+}
+
+#define ACTION wrap_mark
 #define TRACE_NAME trace_object
 #define HT_ENTRY_LIVENESS_FUN_ARRAY_NAME alivep_funs
 #define DO_WEAKNESS_P !stray_pointer_detector_fn

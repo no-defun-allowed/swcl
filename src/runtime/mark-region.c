@@ -55,7 +55,8 @@ static struct {
   uword_t trace; uword_t trace_alive; uword_t trace_running;
   uword_t sweep; uword_t sweep_lines; uword_t sweep_pages;
   uword_t compact; uword_t raise;
-  uword_t fresh_pointers;
+  uword_t fresh_pointers; uword_t pinned_pages;
+  uword_t compacts;
 } meters = { 0 };
 static unsigned int collection = 0;
 #define METER(name, action) \
@@ -65,12 +66,13 @@ static unsigned int collection = 0;
 
 void mr_print_meters() {
 #define NORM(x) (collection ? meters.x / collection : 0)
-  fprintf(stderr, "collection %d: %ldus consider %ld scavenge %ld trace (%ld alive %ld running) %ld sweep (%ld lines %ld pages) %ld compact %ld raise; %ldB fresh\n",
+  fprintf(stderr, "collection %d (%.0f%% compacting): %ldus consider %ld scavenge %ld trace (%ld alive %ld running) %ld sweep (%ld lines %ld pages) %ld compact %ld raise; %ldB fresh %ldpg pinned\n",
           collection,
+          collection ? 100.0 *  (float)meters.compacts / collection : 0.0,
           NORM(consider), NORM(scavenge),
           NORM(trace), NORM(trace_alive), NORM(trace_running),
           NORM(sweep), NORM(sweep_lines), NORM(sweep_pages),
-          NORM(compact), NORM(raise), NORM(fresh_pointers));
+          NORM(compact), NORM(raise), NORM(fresh_pointers), NORM(pinned_pages));
 #undef NORM
 }
 
@@ -210,6 +212,7 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
  again:
   for (page_index_t where = *start; where < end; where++) {
     if (page_bytes_used(where) <= GENCGC_PAGE_BYTES - nbytes &&
+        !target_pages[where] &&
         ((allow_free_pages[page_type & PAGE_TYPE_MASK] && page_free_p(where)) ||
          (page_table[where].type == page_type &&
           page_table[where].gen != PSEUDO_STATIC_GENERATION)) &&
@@ -415,7 +418,8 @@ static void mark_lines(lispobj *p) {
   add_words_used(p, word_count);
 }
 
-static void mark(lispobj object) {
+static void mark(lispobj object, lispobj *where, enum source source) {
+  (void)where; (void)source;
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
 #ifdef DEBUG
     if (page_free_p(find_page_index(native_pointer(object))))
@@ -464,11 +468,9 @@ static lock_t weak_lists_lock = LOCK_INITIALIZER;
 static boolean interesting_pointer_p(lispobj object) {
   return in_dynamic_space(object);
 }
-static void lock_weak() { acquire_lock(&weak_lists_lock); }
-static void unlock_weak() { release_lock(&weak_lists_lock); }
 
-#define LOCK lock_weak
-#define UNLOCK unlock_weak
+#define LOCK acquire_lock(&weak_lists_lock)
+#define UNLOCK release_lock(&weak_lists_lock)
 #define ACTION mark
 #define TRACE_NAME trace_other_object
 #define HT_ENTRY_LIVENESS_FUN_ARRAY_NAME mr_alivep_funs
@@ -478,7 +480,7 @@ static void trace_object(lispobj object) {
  again:
   if (listp(object)) {
     struct cons *c = CONS(object);
-    mark(c->car);
+    mark(c->car, &c->car, SOURCE_NORMAL);
     lispobj next = c->cdr;
     /* Tail-recurse on the cdr, unless we're recording dirty cards. */
     if (!dirty_generation_source && is_lisp_pointer(next)) {
@@ -502,7 +504,7 @@ static void trace_object(lispobj object) {
         }
       }
     }
-    mark(next);
+    mark(next, &c->cdr, SOURCE_NORMAL);
   } else {
     lispobj *p = native_pointer(object);
     trace_other_object(p);
@@ -579,8 +581,12 @@ static boolean parallel_trace_step() {
   return threads_did_any_work;
 }
 
+/* We logged interesting pointers already, when tracing weak objects.
+ * So not having a source is okay here. */
+static void mark_weak(lispobj obj) { mark(obj, NULL, SOURCE_NORMAL); }
+
 static void __attribute__((noinline)) trace_everything() {
-  while (parallel_trace_step()) test_weak_triggers(pointer_survived_gc_yet, mark);
+  while (parallel_trace_step()) test_weak_triggers(pointer_survived_gc_yet, mark_weak);
 }
 
 /* Conservative pointer scanning */
@@ -847,6 +853,14 @@ static void __attribute__((noinline)) sweep_pages() {
   }
 }
 
+static void reset_pinned_pages() {
+  uword_t pinned_pages = 0;
+  for (page_index_t p = 0; p < page_table_pages; p++)
+    if (gc_page_pins[p]) pinned_pages++;
+  meters.pinned_pages += pinned_pages;
+  memset(gc_page_pins, 0, page_table_pages);
+}
+
 static void __attribute__((noinline)) sweep() {
   local_smash_weak_pointers();
   gc_dispose_private_pages();
@@ -865,6 +879,7 @@ static void __attribute__((noinline)) sweep() {
   else
     METER(sweep_lines, run_on_thread_pool(sweep_lines));
   METER(sweep_pages, sweep_pages());
+  reset_pinned_pages();
 }
 
 /* Trace a bump-allocated range, e.g. static space or an arena. */
@@ -886,20 +901,26 @@ static void trace_static_roots() {
   extern void gc_scavenge_arenas();
   gc_scavenge_arenas();
 #endif
-  mark(lisp_package_vector);
-  if (lisp_init_function) mark(lisp_init_function);
-  if (gc_object_watcher) mark(gc_object_watcher);
-  if (alloc_profile_data) mark(alloc_profile_data);
+#define MARK(x) if (x) mark(x, &x, SOURCE_NORMAL)
+  MARK(lisp_package_vector);
+  MARK(lisp_init_function);
+  MARK(gc_object_watcher);
+  MARK(alloc_profile_data);
+#undef MARK
 }
 
 /* Entry points to convince the GC of different liveness */
 
-/* Preserve an ambiguous pointer.
+/* Preserve an ambiguous pointer, pinning it.
  * Used for pointers in registers and the stack. */
 void mr_preserve_ambiguous(uword_t address) {
-  if (find_page_index(native_pointer(address)) > -1) {
+  page_index_t p = find_page_index(native_pointer(address));
+  if (p > -1) {
     lispobj *obj = find_object(address, DYNAMIC_SPACE_START);
-    if (obj) mark(compute_lispobj(obj));
+    if (obj) {
+      mark(compute_lispobj(obj), NULL, SOURCE_NORMAL);
+      gc_page_pins[p] = 0xFF;
+    }
   }
 }
 
@@ -907,12 +928,14 @@ void mr_preserve_ambiguous(uword_t address) {
  * Used for scanning thread-local storage for roots. */
 void mr_preserve_range(lispobj *from, sword_t nwords) {
   for (sword_t n = 0; n < nwords; n++) {
-    mark(from[n]);
+    mark(from[n], from + n, SOURCE_NORMAL);
   }
 }
 
 /* Preserve an exact pointer, without attempting to trace it.
- * Used by weak hash table culling, for the list of culled values. */
+ * Used by weak hash table culling, for the list of culled values.
+ * We never have to deal with fixing pointers here, as we don't
+ * allocate into pages we intend to evacuate. */
 void mr_preserve_leaf(lispobj obj) {
   if (is_lisp_pointer(obj) && in_dynamic_space(obj)) {
     set_mark_bit(obj, 1);
@@ -927,9 +950,13 @@ void mr_trace_object(lispobj *obj) {
   trace_object(compute_lispobj(obj));
 }
 
-/* Preserve an exact pointer, and trace it.
- * Used by pin_exact_root (but this doesn't pin, as we don't move...yet). */
-void mr_preserve_object(lispobj obj) { mark(obj); }
+/* Preserve an exact pointer, trace and pin it.
+ * Used by pin_exact_root. */
+void mr_preserve_object(lispobj obj) {
+  page_index_t p = find_page_index(native_pointer(obj));
+  mark(obj, NULL, SOURCE_NORMAL);
+  gc_page_pins[p] = 0xFF;
+}
 
 /* Scavenging older generations */
 
@@ -1012,7 +1039,7 @@ static void scavenge_root_gens_worker() {
               // fprintf(stderr, "Scavenging large page %ld from %p to %p: ", i, start, end);
               dirty_generation_source = gen, dirty = 0;
               for (lispobj *p = start; p < end; p++)
-                mark(*p);
+                mark(*p, p, SOURCE_NORMAL);
               // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
               update_card_mark(card, dirty);
             }
@@ -1087,6 +1114,7 @@ static void raise_survivors() {
 void mrgc_init() {
   allocate_bitmaps();
   thread_pool_init();
+  compactor_init();
 }
 
 void mr_pre_gc(generation_index_t generation) {
@@ -1108,6 +1136,7 @@ void mr_collect_garbage(boolean raise) {
   trace_static_roots();
   METER(trace, trace_everything());
   METER(sweep, sweep());
+  if (compacting) meters.compacts++;
   METER(compact, run_compaction());
   if (raise) {
     METER(raise, raise_survivors());

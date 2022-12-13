@@ -165,4 +165,13 @@ extern lispobj decode_fdefn_rawfun(struct fdefn *fdefn);
 extern void gc_close_thread_regions(struct thread*, int);
 extern void gc_close_collector_regions(int);
 
+/* The various sorts of pointer swizzling in SBCL. */
+enum source {
+  SOURCE_NORMAL,
+  SOURCE_ZERO_TAG,               /* lflist, code */
+  SOURCE_CLOSURE,
+  SOURCE_SYMBOL_NAME,
+  SOURCE_FDEFN_RAW
+};
+
 #endif /* _GC_INTERNAL_H_ */
