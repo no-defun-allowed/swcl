@@ -19,6 +19,8 @@ uword_t bytes_to_copy = 2000000;
 /* Minimum generation to consider compacting when collecting. */
 generation_index_t minimum_compact_gen = 1;
 
+uword_t target_pointers;
+
 boolean compacting = 1;
 /* A queue of sources and pointers to interesting slots. */
 static struct Qblock *remset = NULL;
@@ -41,6 +43,8 @@ static boolean should_compact() {
     }
   }
   float ratio = (float)(pages * GENCGC_PAGE_BYTES) / bytes;
+  if (ratio > page_overhead_threshold)
+    fprintf(stderr, "Triggering compaction, ratio = %.2f\n", ratio);
   return ratio > page_overhead_threshold;
 }
 
@@ -54,12 +58,14 @@ static void pick_targets() {
         (float)(page_bytes_used(p)) / GENCGC_PAGE_BYTES < page_utilisation_threshold) {
       bytes_moving += page_bytes_used(p);
       pages_moving++;
+      target_pages[p] = 1;
     }
     if (p == 0) break;
     p--;
   }
   fprintf(stderr, "Moving %ld pages with %ld/%ld bytes used\n",
           pages_moving, bytes_moving, bytes_to_copy);
+  target_pointers = 0;
 }
 
 void consider_compaction(generation_index_t gen) {
@@ -73,6 +79,9 @@ void consider_compaction(generation_index_t gen) {
 
 void run_compaction() {
   if (compacting) {
+    fprintf(stderr, "Saw %ld pointers\n", target_pointers);
+    target_pointers = 0;
+    memset(target_pages, 0, page_table_pages);
   }
   compacting = 0;
 }

@@ -419,7 +419,6 @@ static void mark_lines(lispobj *p) {
 }
 
 static void mark(lispobj object, lispobj *where, enum source source) {
-  (void)where; (void)source;
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
 #ifdef DEBUG
     if (page_free_p(find_page_index(native_pointer(object))))
@@ -442,7 +441,7 @@ static void mark(lispobj object, lispobj *where, enum source source) {
     if (!allocation_bit_marked(native_pointer(object)))
       lose("No allocation bit for 0x%lx", object);
 #endif
-
+    log_slot(object, where, source);
     boolean set_allocation = IS_FRESH(line_bytemap[address_line(np)]);
     /* Enqueue onto mark queue */
     if (set_mark_bit(object, set_allocation)) {
@@ -469,9 +468,11 @@ static boolean interesting_pointer_p(lispobj object) {
   return in_dynamic_space(object);
 }
 
+static void watch_deferred(lispobj *where, uword_t start, uword_t end);
 #define LOCK acquire_lock(&weak_lists_lock)
 #define UNLOCK release_lock(&weak_lists_lock)
 #define ACTION mark
+#define WATCH_DEFERRED watch_deferred
 #define TRACE_NAME trace_other_object
 #define HT_ENTRY_LIVENESS_FUN_ARRAY_NAME mr_alivep_funs
 #include "trace-object.inc"
@@ -969,37 +970,25 @@ static void update_card_mark(int card, boolean dirty) {
  * This happens specifically with weak vectors and weak values, as we
  * don't actually trace those when "tracing" them. We only record dirtyness
  * without tracing, however, in order to allow weak values to be culled
- * without a (more) major GC. We still treat large weak vectors as non-weak
- * though - I'm not sure if that's for the better. */
-static void check_otherwise_dirty(lispobj *where) {
-  uword_t header = *where;
-  int widetag = header_widetag(header);
-  generation_index_t gen = gc_gen_of((lispobj)where, 0);
-  switch (widetag) {
-  case SIMPLE_VECTOR_WIDETAG:
-    if (vector_flagp(header, VectorWeak)) {
-      for (sword_t i = 1; i < headerobj_size2(where, header); i++)
-        if (is_lisp_pointer(where[i]) && gc_gen_of(where[i], 0) < gen) {
-          dirty = 1;
-          return;
-        }
+ * without a (more) major GC, and to update the remembered set for
+ * compaction. We still treat large weak vectors as non-weak though -
+ * I'm not sure if that's for the better. */
+static void watch_deferred(lispobj *where, uword_t start, uword_t end) {
+  generation_index_t gen = dirty_generation_source;
+  for (uword_t i = start; i < end; i++) {
+    if (is_lisp_pointer(where[i])) {
+      log_slot(where[i], where + i, SOURCE_NORMAL);
+      if (gc_gen_of(where[i], 0) < gen) {
+        dirty = 1;
+        return;
+      }
     }
-    break;
-  case WEAK_POINTER_WIDETAG: {
-    struct weak_pointer *weakptr = (struct weak_pointer*)where;
-    if (is_lisp_pointer(weakptr->value) && gc_gen_of(weakptr->value, 0) < gen) {
-      dirty = 1;
-      return;
-    }
-    break;
-  }
   }
 }
 
 static void scavenge_root_object(generation_index_t gen, lispobj *where) {
   dirty_generation_source = gen;
   trace_object(compute_lispobj(where));
-  check_otherwise_dirty(where);
 }
 
 #define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)

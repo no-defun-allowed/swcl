@@ -8,10 +8,12 @@ extern void compactor_init();
 extern void consider_compaction(generation_index_t gen);
 extern void run_compaction();
 extern void log_for_compacter(lispobj source, lispobj *where, enum source type);
+extern uword_t target_pointers;
 
 extern unsigned char *target_pages;
-static boolean should_log_slot(lispobj *where) {
-  return target_pages[find_page_index(where)];
+static void log_slot(lispobj target, lispobj *where, enum source source) {
+  if (target_pages[find_page_index(native_pointer(target))])
+    target_pointers++;
 }
 
 #endif

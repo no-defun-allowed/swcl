@@ -91,6 +91,7 @@ static void TRACE_NAME(lispobj* where)
         // Ergo, those may be treated just like ordinary simple vectors.
         // However, weakness remains as a special case.
         if (DO_WEAKNESS_P && vector_flagp(header, VectorWeak)) {
+            WATCH_DEFERRED(where, 1, scan_to);
             if (!vector_flagp(header, VectorHashing)) {
                 LOCK;
                 add_to_weak_vector_list(where, header);
@@ -115,7 +116,6 @@ static void TRACE_NAME(lispobj* where)
                 defer = scan_weak_hashtable(hash_table, HT_ENTRY_LIVENESS_FUN_ARRAY_NAME[weakness],
                                             TRACE_PAIR);
             if (defer) {
-                WATCH_DEFERRED(where, 1, scan_to1);
                 hash_table->next_weak_hash_table = (lispobj)weak_hash_tables;
                 weak_hash_tables = hash_table;
             }
