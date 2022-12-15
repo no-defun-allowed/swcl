@@ -106,7 +106,7 @@ void log_relevant_slot(lispobj *where, enum source source) {
     commit_thread_local_remset();
     remset_block = suballoc_allocate(&remset_suballocator);
   }
-  remset_block->elements[remset_block->count++] = 42; // tag_source(where, source);
+  remset_block->elements[remset_block->count++] = tag_source(where, source);
 }
 
 /* Compacting */

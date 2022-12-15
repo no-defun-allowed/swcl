@@ -104,16 +104,6 @@ static void allocate_bitmaps() {
   allocate_bitmap((uword_t**)&line_bytemap, line_count, "line bytemap");
 }
 
-/* Line arithmetic */
-
-static inline char *line_address(line_index_t line) {
-  return (char*)(DYNAMIC_SPACE_START + (line * LINE_SIZE));
-}
-
-static inline line_index_t address_line(void *address) {
-  return ((uintptr_t)address - DYNAMIC_SPACE_START) / LINE_SIZE;
-}
-
 uword_t lines_used() {
   uword_t count = 0;
   for (line_index_t line = 0; line < line_count; line++)
@@ -130,15 +120,6 @@ boolean line_marked(void *pointer) {
 /* Lines have generations in small pages, rather than pages. This is
  * necessary in order to allow reclaimed memory to be reused,
  * without having to compact old pages. */
-#define MARK_GEN(l) ((l) | 16)
-#define FRESHEN_GEN(l) ((l) | 32)
-#define UNMARK_GEN(l) ((l) & 15)
-#define UNFRESHEN_GEN(l) ((l) & 31)
-#define ENCODE_GEN(g) ((g) + 1)
-#define DECODE_GEN(l) (UNMARK_GEN(l) - 1)
-#define IS_MARKED(l) ((l) & 16)
-#define IS_FRESH(l) ((l) & 32)
-#define COPY_MARK(from, to) (((from) & 0x30) | (to))
 
 generation_index_t gc_gen_of(lispobj obj, int defaultval) {
   page_index_t p = find_page_index((void*)obj);
@@ -282,19 +263,14 @@ page_index_t try_allocate_large(sword_t nbytes,
   return -1;
 }
 
-/* Eugh, shouldn't copy this but I need it inlined here, for
- * vectorisation to work. */
-inline char *also_page_address(page_index_t page_num) {
-    return (void*)(DYNAMIC_SPACE_START + (page_num * GENCGC_PAGE_BYTES));
-}
 #define for_lines_in_page(l, p) \
-  for (line_index_t l = address_line(also_page_address(p)); \
-       l < address_line(also_page_address(p + 1)); \
-       l++)
+  for (line_index_t l = address_line(page_address(p)), limit = address_line(page_address(p + 1)); \
+       l < limit; l++)
 /* Use AVX2 versions of code when we can, since blasting bytes faster
  * is always nice */
 #define CPU_SPLIT __attribute__((target_clones("default,avx2")))
 
+CPU_SPLIT
 void mr_update_closed_region(struct alloc_region *region, generation_index_t gen) {
   /* alloc_regions never span multiple pages. */
   page_index_t the_page = find_page_index(region->start_addr);
