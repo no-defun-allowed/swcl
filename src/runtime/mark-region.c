@@ -360,6 +360,7 @@ static boolean pointer_survived_gc_yet(lispobj object) {
 static sword_t blocks_in_flight = 0;
 static lock_t grey_list_lock = LOCK_INITIALIZER;
 static struct Qblock *grey_list = NULL;
+static struct suballocator grey_suballocator = SUBALLOCATOR_INITIALIZER;
 
 /* Thanks to Larry Masinter for suggesting that I use per-thread
  * free lists, rather than hurting my head on lock-free free lists.
@@ -374,10 +375,10 @@ static struct Qblock *grab_qblock() {
   if (recycle_list) {
     block = recycle_list;
     recycle_list = recycle_list->next;
+    block->count = 0;
   } else {
-    block = suballoc_allocate();
+    block = suballoc_allocate(&grey_suballocator);
   }
-  block->count = 0;
   atomic_fetch_add(&blocks_in_flight, 1);
   return block;
 }
@@ -572,13 +573,14 @@ static void trace_step() {
   atomic_fetch_add(&traced, local_traced);
   atomic_fetch_add(&meters.trace_alive, get_time() - start_time);
   atomic_fetch_add(&meters.trace_running, running_time);
+  commit_thread_local_remset();
   recycle_list = NULL;
 }
 
 static boolean parallel_trace_step() {
   threads_did_any_work = 0;
   run_on_thread_pool(trace_step);
-  suballoc_release();
+  suballoc_release(&grey_suballocator);
   return threads_did_any_work;
 }
 

@@ -346,6 +346,8 @@ static int verify_range(lispobj* start, lispobj* end, struct verify_state* state
         if (state->flags & VERIFYING_GENERATIONAL) {
             page_index_t pg = find_page_index(where);
             state->object_gen = gc_gen_of((lispobj)where, ARTIFICIALLY_HIGH_GEN);
+            if (state->object_gen == ARTIFICIALLY_HIGH_GEN)
+              lose("object @ %p has no generation", where);
 #ifdef LISP_FEATURE_PPC64
             // Cons fillers (two words of all 1s) cause failure of
             // the default verification logic, so brute-force skip them

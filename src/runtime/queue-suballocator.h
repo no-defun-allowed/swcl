@@ -16,42 +16,46 @@ struct suballocator_chunk {
 };
 /* suballoc_allocate is lazily written and skips over the first chunk, so
  * add one here to make CHUNKS make sense. No big loss. */
-static struct suballocator_chunk chunks[CHUNKS + 1] = { 0 };
-static unsigned int current_chunk = 0;
-static lock_t suballocator_lock = LOCK_INITIALIZER;
+struct suballocator {
+  struct suballocator_chunk chunks[CHUNKS + 1];
+  unsigned int current_chunk;
+  lock_t suballocator_lock;
+};
+/* Zero-initialising structs in an array in a struct - hooray */
+#define SUBALLOCATOR_INITIALIZER { { { 0 } }, 0, LOCK_INITIALIZER }
 
-static boolean chunk_has_space(int index) {
-  return chunks[index].free < chunks[index].start + chunks[index].size;
+static boolean chunk_has_space(struct suballocator *s, int index) {
+  return s->chunks[index].free < s->chunks[index].start + s->chunks[index].size;
 }
 
 /* Free all memory used by the mark stack, giving back to the OS. */
-static void suballoc_release() {
+static void suballoc_release(struct suballocator *s) {
   for (int i = 0; i < CHUNKS; i++) {
-    if (chunks[i].start) {
-      if (chunks[i].age >= AGE_LIMIT) {
-        os_deallocate((void*)chunks[i].start, chunks[i].size);
-        chunks[i].start = chunks[i].free = chunks[i].size = 0;
+    if (s->chunks[i].start) {
+      if (s->chunks[i].age >= AGE_LIMIT) {
+        os_deallocate((void*)s->chunks[i].start, s->chunks[i].size);
+        s->chunks[i].start = s->chunks[i].free = s->chunks[i].size = 0;
       } else {
-        chunks[i].age++;
-        chunks[i].free = chunks[i].start;
+        s->chunks[i].age++;
+        s->chunks[i].free = s->chunks[i].start;
       }
     }
   }
-  current_chunk = 0;
+  s->current_chunk = 0;
 }
 
-static struct Qblock *suballoc_allocate() {
-  acquire_lock(&suballocator_lock);
-  struct suballocator_chunk *chunk = chunks + current_chunk;
+static struct Qblock *suballoc_allocate(struct suballocator *s) {
+  acquire_lock(&s->suballocator_lock);
+  struct suballocator_chunk *chunk = s->chunks + s->current_chunk;
   /* Check if we need to make a new chunk first. */
-  if (!chunk_has_space(current_chunk)) {
+  if (!chunk_has_space(s, s->current_chunk)) {
     /* This skips over chunk[0]. Oh well. */
-    if (current_chunk == CHUNKS) lose("Ran out of suballocator chunks.");
-    current_chunk++;
-    chunk = chunks + current_chunk;
+    if (s->current_chunk == CHUNKS) lose("Ran out of suballocator chunks.");
+    s->current_chunk++;
+    chunk = s->chunks + s->current_chunk;
     /* Check if we can reuse a chunk which was allocated before. */
-    if (!chunk_has_space(current_chunk)) {
-      uword_t size = INITIAL_SIZE << current_chunk;
+    if (!chunk_has_space(s, s->current_chunk)) {
+      uword_t size = INITIAL_SIZE << s->current_chunk;
       uword_t address = (uword_t)os_allocate(size);
       if (!address) lose("Failed to allocate suballocator chunk with %ld bytes.", size);
       // fprintf(stderr, "alloc #%d: %ld at %ld\n", current_chunk, size, address);
@@ -60,11 +64,11 @@ static struct Qblock *suballoc_allocate() {
     }
     chunk->age = 0;
   }
-
   /* Now get another block from the current chunk. */
   struct Qblock *where = (struct Qblock*)chunk->free;
   gc_assert(where != NULL);
+  where->count = 0;
   chunk->free += QBLOCK_BYTES;
-  release_lock(&suballocator_lock);
+  release_lock(&s->suballocator_lock);
   return where;
 }

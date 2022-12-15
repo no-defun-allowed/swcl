@@ -8,7 +8,10 @@
 #include "gencgc-internal.h"
 #include "gencgc-private.h"
 #include "queue.h"
+#include "tiny-lock.h"
+#include "queue-suballocator.h"
 #include "incremental-compact.h"
+#include "walk-heap.h"
 
 /* Maximum ratio between pages used and pages "needed" to compact. */
 float page_overhead_threshold = 1.3;
@@ -19,11 +22,12 @@ uword_t bytes_to_copy = 2000000;
 /* Minimum generation to consider compacting when collecting. */
 generation_index_t minimum_compact_gen = 1;
 
-uword_t target_pointers;
-
-boolean compacting = 1;
-/* A queue of sources and pointers to interesting slots. */
-static struct Qblock *remset = NULL;
+static generation_index_t target_generation;
+/* A queue of interesting slots. */
+static struct Qblock *remset;
+static lock_t remset_lock;
+static struct suballocator remset_suballocator = SUBALLOCATOR_INITIALIZER;
+boolean compacting;
 unsigned char *target_pages;
 
 void compactor_init() {
@@ -31,6 +35,8 @@ void compactor_init() {
   if (!target_pages)
     lose("Failed to allocate target pages table");
 }
+
+/* Deciding how to compact */
 
 static boolean should_compact() {
   /* If there are many more small-object pages than there could
@@ -63,33 +69,74 @@ static void pick_targets() {
     if (p == 0) break;
     p--;
   }
-  fprintf(stderr, "Moving %ld pages with %ld/%ld bytes used\n",
-          pages_moving, bytes_moving, bytes_to_copy);
-  target_pointers = 0;
 }
+
 
 void consider_compaction(generation_index_t gen) {
   if (gen >= minimum_compact_gen && should_compact()) {
     compacting = 1;
+    target_generation = gen;
     pick_targets();
   } else {
     compacting = 0;
   }
 }
 
+/* Remset */
+
+static lispobj tag_source(lispobj *where, enum source s) {
+  return make_lispobj(where, (int)s);
+}
+
+static _Thread_local struct Qblock *remset_block = NULL;
+
+void commit_thread_local_remset() {
+  if (remset_block && remset_block->count) {
+    acquire_lock(&remset_lock);
+    remset_block->next = remset;
+    remset = remset_block;
+    remset_block = NULL;
+    release_lock(&remset_lock);
+  }
+}
+
+void log_relevant_slot(lispobj *where, enum source source) {
+  if (!remset_block) remset_block = suballoc_allocate(&remset_suballocator);
+  if (remset_block->count == QBLOCK_CAPACITY) {
+    commit_thread_local_remset();
+    remset_block = suballoc_allocate(&remset_suballocator);
+  }
+  remset_block->elements[remset_block->count++] = 42; // tag_source(where, source);
+}
+
+/* Compacting */
+
+static void count_pages() {
+  uword_t bytes = 0, objects = 0;
+  for (page_index_t p = 0; p < page_table_pages; p++)
+    if (target_pages[p]) {
+      lispobj *limit = (lispobj*)page_address(p + 1);
+      for (lispobj *where = next_object((lispobj*)page_address(p), 0, limit);
+           where;
+           where = next_object(where, object_size(where), limit))
+        if (gc_gen_of((lispobj)where, 0) <= target_generation) {
+          bytes += N_WORD_BYTES * object_size(where);
+          objects++;
+        }
+    }
+  uword_t pointers = 0;
+  for (struct Qblock *b = remset; b; b = b->next)
+    pointers += b->count;
+  fprintf(stderr, "gen %d: Saw %ld pointers, copied %ld bytes %ld objects, %.1f pointers/object\n",
+          target_generation, pointers, bytes, objects, (float)pointers/objects);
+}
+
 void run_compaction() {
   if (compacting) {
-    fprintf(stderr, "Saw %ld pointers\n", target_pointers);
-    target_pointers = 0;
+    count_pages();
     memset(target_pages, 0, page_table_pages);
+    remset = NULL;
+    suballoc_release(&remset_suballocator);
   }
   compacting = 0;
-}
-
-static lispobj tag_source(lispobj *base, enum source s) {
-  return make_lispobj(base, (int)s);
-}
-
-void log_for_compactor(lispobj source, lispobj *where, enum source type) {
-  (void)source; (void)where; (void)type;
 }
