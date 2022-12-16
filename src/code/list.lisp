@@ -262,6 +262,16 @@
               (fast-nthcdr (mod n i) r-i))
            (declare (type fixnum i))))))))
 
+;;; For [n]butlast
+(defun dotted-nthcdr (n list)
+  (declare (fixnum n))
+  (do ((i n (1- i))
+       (result list (cdr result)))
+      ((not (plusp i)) result)
+    (declare (type fixnum i))
+    (when (atom result)
+      (return))))
+
 ;;; LAST
 ;;;
 ;;; Transforms in src/compiler/srctran.lisp pick the most specific
@@ -427,6 +437,15 @@
 (defun copy-list (list)
   "Return a new list which is EQUAL to LIST. LIST may be improper."
   (copy-list-macro list))
+
+(defun ensure-heap-list (list)
+  (declare (sb-c::tlab :system))
+  ;; If some cons is not on the heap then copy the whole list
+  (if (do ((cons list (cdr cons)))
+          ((null cons) nil)
+        (unless (dynamic-space-obj-p cons) (return t)))
+      (copy-list-macro list)
+      list))
 
 (defun copy-alist (alist)
   "Return a new association list which is EQUAL to ALIST."

@@ -285,8 +285,6 @@
 
 (defun prepare-alu-operands (x y vop const-tn-xform commutative)
   (let ((arg (vop-args vop)))
-    (when (tn-ref-load-tn arg)
-      (bug "Shouldn't have a load TN for arg0"))
     (let ((arg (tn-ref-across arg)))
       (when (and arg (tn-ref-load-tn arg))
         (bug "Shouldn't have a load TN for arg1"))))
@@ -514,7 +512,7 @@
   (:save-p :compute-only)
   (:generator 6
     (move eax x)
-    (inst mul eax y)
+    (inst mul y)
     (move r eax)))
 
 (define-vop (fast-*-c/unsigned=>unsigned fast-safe-arith-op)
@@ -534,7 +532,7 @@
   (:save-p :compute-only)
   (:generator 6
     (move eax x)
-    (inst mul eax (register-inline-constant :qword y))
+    (inst mul :qword (register-inline-constant :qword y))
     (move r eax)))
 
 (define-vop ()
@@ -847,7 +845,7 @@
       (inst jmp :eq (generate-error-code vop 'division-by-zero-error x y)))
     (move eax x)
     (inst cqo)
-    (inst idiv eax y)
+    (inst idiv y)
     (if (location= quo eax)
         (inst shl eax n-fixnum-tag-bits)
         (if (= n-fixnum-tag-bits 1)
@@ -875,7 +873,7 @@
     (move eax x)
     (inst cqo)
     (inst mov y-arg (fixnumize y))
-    (inst idiv eax y-arg)
+    (inst idiv y-arg)
     (if (location= quo eax)
         (inst shl eax n-fixnum-tag-bits)
         (if (= n-fixnum-tag-bits 1)
@@ -908,7 +906,7 @@
       (inst jmp :eq (generate-error-code vop 'division-by-zero-error x y)))
     (move eax x)
     (zeroize edx)
-    (inst div eax y)
+    (inst div y)
     (move quo eax)
     (move rem edx)))
 
@@ -932,7 +930,7 @@
     (move eax x)
     (zeroize edx)
     (inst mov y-arg y)
-    (inst div eax y-arg)
+    (inst div y-arg)
     (move quo eax)
     (move rem edx)))
 
@@ -961,7 +959,7 @@
       (inst jmp :eq (generate-error-code vop 'division-by-zero-error x y)))
     (move eax x)
     (inst cqo)
-    (inst idiv eax y)
+    (inst idiv y)
     (move quo eax)
     (move rem edx)))
 
@@ -985,7 +983,7 @@
     (move eax x)
     (inst cqo)
     (inst mov y-arg y)
-    (inst idiv eax y-arg)
+    (inst idiv y-arg)
     (move quo eax)
     (move rem edx)))
 
@@ -1333,6 +1331,119 @@
   (:result-types unsigned-num)
   (:variant t t)
   (:translate ash-mod64))
+
+;;; Given an unsigned 32-bit dividend and magic numbers, compute the truncated quotient.
+;;; The 2nd through 4th args are 'magic', 'add', 'shift'.
+(defknown udiv32-via-multiply ((unsigned-byte 32)
+                               (unsigned-byte 32) bit (integer 0 31))
+  (unsigned-byte 32)
+  (flushable))
+(define-vop ()
+  (:translate udiv32-via-multiply)
+  (:policy :fast-safe)
+  (:args (dividend :scs (unsigned-reg))
+         (magic :scs (unsigned-reg))
+         (add :scs (unsigned-reg))
+         (shift :scs (unsigned-reg)))
+  (:arg-types unsigned-num unsigned-num unsigned-num unsigned-num)
+  (:results (quotient :scs (unsigned-reg)))
+  (:result-types unsigned-num)
+  (:temporary (:sc unsigned-reg :offset rcx-offset) rcx)
+  (:temporary (:sc unsigned-reg) temp)
+  (:generator 6
+    (inst mov :dword temp dividend)
+    (inst imul temp magic)
+    (inst test :byte add add)
+    (inst jmp :z no-add)
+    (inst shr temp 32) ; temp is now the quotient 'q'
+    (inst mov :dword rcx dividend)
+    (inst sub :dword rcx temp) ; compute (n - quotient)
+    (inst shr :dword rcx 1)
+    (inst lea :dword temp (ea rcx temp)) ; add 'q'
+    (inst lea :dword rcx (ea -1 shift))
+    (inst shr :dword temp :cl) ; shift by s-1
+    (inst jmp OUT)
+    NO-ADD
+    (inst lea :dword rcx (ea 32 shift))
+    (inst shr temp :cl)
+    OUT
+    (inst mov :dword quotient temp)))
+
+;;; Given an unsigned 32-bit dividend and divisor, compute the remainder
+;;; using the Granlund & Montgomery approach.
+;;; The inputs to this vop are the dividend, the divisor, and the <m,a,s>
+;;; components of the magic.
+(defknown urem32-via-multiply ((unsigned-byte 32) (unsigned-byte 32)
+                               (unsigned-byte 32) bit (integer 0 31))
+  (unsigned-byte 32)
+  (flushable))
+(define-vop ()
+  (:translate urem32-via-multiply)
+  (:policy :fast-safe)
+  (:args (dividend :scs (unsigned-reg))
+         (divisor :scs (unsigned-reg))
+         (magic :scs (unsigned-reg))
+         (add :scs (unsigned-reg immediate))
+         (shift :scs (unsigned-reg)))
+  (:arg-types unsigned-num unsigned-num unsigned-num unsigned-num unsigned-num)
+  (:results (remainder :scs (unsigned-reg)))
+  (:result-types unsigned-num)
+  (:temporary (:sc unsigned-reg :offset rcx-offset) rcx)
+  (:temporary (:sc unsigned-reg :offset rax-offset) rax)
+  (:temporary (:sc unsigned-reg :offset rdx-offset) rdx)
+  (:ignore rdx)
+  (:generator 10
+    (inst mov :dword rax dividend)
+    (inst imul rax magic)
+    (cond ((sc-is add immediate)
+           (aver (= (tn-value add) 0))) ; for now I only need add=0
+          (t
+           (inst test :byte add add)
+           (inst jmp :z no-add)
+           (inst shr rax 32) ; rax is now the quotient 'q'
+           (inst mov :dword rcx dividend)
+           (inst sub :dword rcx rax) ; compute (n - quotient)
+           (inst shr :dword rcx 1)
+           (inst lea :dword rax (ea rcx rax)) ; add 'q'
+           (inst lea :dword rcx (ea -1 shift))
+           (inst shr :dword rax :cl) ; shift by s-1
+           (inst jmp CALC-REMAINDER)))
+    NO-ADD
+    (inst lea :dword rcx (ea 32 shift))
+    (inst shr rax :cl)
+    CALC-REMAINDER
+    ;; EAX is the quotient. Multiply it by the divisor, and then take
+    ;; the difference of that and the divisor.
+    (inst mul :dword divisor) ; clobbers EDX too
+    (inst neg rax)
+    (inst lea remainder (ea dividend rax))))
+
+;;; Given a dividend, scaled reciprocal-of-divisor, and divisor (in that order)
+;;; compute a remainder using the approach of Lemire, Kaser, Kurz.
+;;;
+(macrolet
+    ((define-fastrem (bits opsize
+                           &aux (name (symbolicate "FASTREM-" (write-to-string bits))))
+       `(define-vop (,name)
+          (:translate ,name)
+          (:policy :fast-safe)
+          (:args (dividend :scs (unsigned-reg) :target rax)
+                 (c :scs (unsigned-reg))
+                 (divisor :scs (unsigned-reg)))
+          (:arg-types unsigned-num unsigned-num unsigned-num)
+          (:results (remainder :scs (unsigned-reg)))
+          (:result-types unsigned-num)
+          (:temporary (:sc unsigned-reg :offset rax-offset
+                       :from (:argument 0) :to (:result 0)) rax)
+          (:temporary (:sc unsigned-reg :offset rdx-offset
+                       :from (:argument 0) :to (:result 0)) rdx)
+          (:generator 10
+            (move rax dividend ,opsize)
+            (inst mul ,opsize c) ; result to rDX:rAX (but we expressly drop all bits from rDX)
+            (inst mul ,opsize divisor) ; new we want _only_ bits from rDX
+            (move remainder rdx ,opsize)))))
+  (define-fastrem 32 :dword)
+  (define-fastrem 64 :qword))
 
 (in-package "SB-C")
 
@@ -2390,7 +2501,7 @@
   (:result-types unsigned-num unsigned-num)
   (:generator 20
     (move eax x)
-    (inst mul eax y)
+    (inst mul y)
     (inst add eax carry-in)
     (inst adc edx 0)
     (move hi edx)
@@ -2413,7 +2524,7 @@
   (:result-types unsigned-num unsigned-num)
   (:generator 20
     (move eax x)
-    (inst mul eax y)
+    (inst mul y)
     (inst add eax prev)
     (inst adc edx 0)
     (inst add eax carry-in)
@@ -2437,7 +2548,7 @@
   (:result-types unsigned-num unsigned-num)
   (:generator 20
     (move eax x)
-    (inst mul eax y)
+    (inst mul y)
     (move hi edx)
     (move lo eax)))
 
@@ -2455,7 +2566,7 @@
   (:result-types unsigned-num)
   (:generator 20
     (move eax x)
-    (inst mul eax y)
+    (inst mul y)
     (move hi edx)))
 
 (define-vop (mulhi/fx)
@@ -2471,7 +2582,7 @@
   (:result-types positive-fixnum)
   (:generator 15
     (move eax x)
-    (inst mul eax y)
+    (inst mul y)
     (move hi edx)
     (inst and hi (lognot fixnum-tag-mask))))
 
@@ -2526,7 +2637,7 @@
   (:generator 300
     (move edx div-high)
     (move eax div-low)
-    (inst div eax divisor)
+    (inst div divisor)
     (move quo eax)
     (move rem edx)))
 

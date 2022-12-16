@@ -1026,6 +1026,37 @@
       `(if (string=* str1 str2 start1 end1 start2 end2) nil 0)
       (give-up-ir1-transform)))
 
+(defun check-sequence-test (item sequence test key node)
+  (let ((item (lvar-type item)))
+    (when (or (not test)
+              (lvar-fun-is test '(eq eql equal equalp two-arg-=)))
+      (labels ((sequence-element-type (type)
+                 (cond ((array-type-p type)
+                        (let ((elt-type (array-type-element-type type)))
+                          (if (eq elt-type *wild-type*)
+                              *universal-type*
+                              elt-type)))
+                       ((csubtypep type (specifier-type 'string))
+                        (specifier-type 'character))
+                       (t
+                        *universal-type*))))
+        (multiple-value-bind (key-type key) (and key
+                                                 (lvar-fun-type key))
+          (let ((*compiler-error-context* node))
+            (when (and (or (not key)
+                           (eq key 'identity))
+                       (not (types-equal-or-intersect item (sequence-element-type (lvar-type sequence)))))
+              (compiler-style-warn "Item of type ~s can't be found in a sequence of type ~s."
+                                   (type-specifier item)
+                                   (type-specifier (lvar-type sequence))))
+            (when (fun-type-p key-type)
+              (let ((returns (single-value-type (fun-type-returns key-type))))
+                (unless (types-equal-or-intersect item returns)
+                  (compiler-style-warn "Item of type ~s can't be found using :key ~s which returns ~s."
+                                       (type-specifier item)
+                                       key
+                                       (type-specifier returns)))))))))))
+
 (defun check-sequence-ranges (string start end node &optional (suffix "") sequence-name)
   (let* ((type (lvar-type string))
          (length (vector-type-length type))
@@ -1090,12 +1121,20 @@
   (check-sequence-ranges string start end node))
 
 (defoptimizers ir2-hook
-    (find find-if find-if-not position position-if position-if-not
-     remove remove-if remove-if-not delete delete-if delete-if-not
-     count count-if count-if-not reduce
-     remove-duplicates delete-duplicates)
+    (find-if find-if-not position-if position-if-not
+     remove-if remove-if-not delete-if delete-if-not
+     count-if count-if-not
+     reduce remove-duplicates delete-duplicates)
     ((x sequence &key start end &allow-other-keys) node)
   (check-sequence-ranges sequence start end node))
+
+(defoptimizers ir2-hook
+    (find position
+     remove delete
+     count)
+    ((item sequence &key key test start end &allow-other-keys) node)
+  (check-sequence-ranges sequence start end node)
+  (check-sequence-test item sequence test key node))
 
 (defoptimizers ir2-hook
     (remove-duplicates delete-duplicates)
@@ -1103,7 +1142,8 @@
   (check-sequence-ranges sequence start end node))
 
 (defoptimizer (%find-position ir2-hook) ((item sequence from-end start end key test) node)
-  (check-sequence-ranges sequence start end node))
+  (check-sequence-ranges sequence start end node)
+  (check-sequence-test item sequence test key node))
 
 (defoptimizers ir2-hook
     (%find-position-if %find-position-if-not)

@@ -392,6 +392,7 @@ structure representations")
            "CONTEXT-FLOATING-POINT-MODES" "CONTEXT-FLOAT-REGISTER"
            "CONTEXT-PC" "CONTEXT-REGISTER" "BOXED-CONTEXT-REGISTER"
            "CONTROL-STACK-SC-NUMBER"
+           "COPY-NUMBER-TO-HEAP"
            #+sb-safepoint "CSP-SAFEPOINT-TRAP"
            "*CURRENT-CATCH-BLOCK*"
            "CURRENT-FLOAT-TRAP"
@@ -1297,6 +1298,8 @@ like *STACK-TOP-HINT* and unsupported stuff like *TRACED-FUN-LIST*.")
            "COMPONENT-INFO" "COMPONENT-LIVE-TN"
            "COMPONENT-N-JUMP-TABLE-ENTRIES"
            "COMPUTE-FUN" "COMPUTE-OLD-NFP" "COPY-MORE-ARG"
+           "COMPUTE-UDIV32-MAGIC"
+           "COMPUTE-FASTREM-COEFFICIENT"
            "CURRENT-BINDING-POINTER" "CURRENT-NFP-TN"
            "CURRENT-STACK-POINTER"
            "*ALIEN-STACK-POINTER*"
@@ -2175,7 +2178,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "NON-NULL-SYMBOL-P"
            "NUMERIC-CONTAGION" "NUMERIC-TYPE"
            "NUMERIC-TYPE-CLASS" "NUMERIC-TYPE-COMPLEXP"
-           "NUMERIC-TYPE-EQUAL" "NUMERIC-TYPE-FORMAT"
+           "NUMTYPE-ASPECTS-EQ" "NUMERIC-TYPE-FORMAT"
            "NUMERIC-TYPE-HIGH" "NUMERIC-TYPE-LOW" "NUMERIC-TYPE-P"
            "OBJECT-NOT-ARRAY-ERROR" "OBJECT-NOT-CHARACTER-ERROR"
            "OBJECT-NOT-BASE-STRING-ERROR" "OBJECT-NOT-BIGNUM-ERROR"
@@ -2260,7 +2263,6 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "OBJECT-NOT-WEAK-POINTER-ERROR"
            "ODD-KEY-ARGS-ERROR" "OUTPUT-OBJECT" "OUTPUT-UGLY-OBJECT"
            "PACKAGE-DESIGNATOR" "PACKAGE-DOC-STRING"
-           "PACKAGE-HASHTABLE-SIZE" "PACKAGE-HASHTABLE-FREE"
            "PACKAGE-INTERNAL-SYMBOLS" "PACKAGE-EXTERNAL-SYMBOLS"
            "PARSE-UNKNOWN-TYPE"
            "PARSE-UNKNOWN-TYPE-SPECIFIER"
@@ -2951,6 +2953,7 @@ possibly temporarily, because it might be used internally.")
            "XSET-COUNT"
            "XSET-ELTS-HASH"
            "XSET-EMPTY-P"
+           "XSET-EVERY"
            "XSET-INTERSECTION"
            "XSET-MEMBER-P"
            "XSET-MEMBERS"
@@ -2969,7 +2972,10 @@ possibly temporarily, because it might be used internally.")
 
            ;; key-only hash lookup which saves space over a hash-table
            "MAKE-HASHSET" "HASHSET-INSERT" "HASHSET-REMOVE" "HASHSET-FIND"
-           "HASHSET-INSERT-IF-ABSENT"
+           "HASHSET-INSERT-IF-ABSENT" "HASHSET-COUNT"
+           ;; useful for DX keys that should persist to the heap
+           "SYS-COPY-STRUCT"
+           "ENSURE-HEAP-LIST"
 
             ;; communication between the runtime and Lisp
 
@@ -3196,7 +3202,6 @@ possibly temporarily, because it might be used internally.")
            "COMMA-EXPR"
            "COMMA-KIND"
            "UNQUOTE"
-           "PACKAGE-HASHTABLE"
            "PACKAGE-ITER-STEP"
            "WITH-REBOUND-IO-SYNTAX"
            "WITH-SANE-IO-SYNTAX"

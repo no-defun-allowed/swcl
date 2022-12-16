@@ -113,6 +113,8 @@
                  *info-types*
                  :start (length *info-priority-order*))))))))
 
+(defvar *globaldb-defaulting-exprs* nil)
+(defvar *globaldb-validate-exprs* nil)
 (eval-when (:compile-toplevel :execute) ; no load-time definition
 (#+sb-xc-host cl:defmacro
  #-sb-xc-host sb-xc:defmacro
@@ -126,6 +128,16 @@
        #+sb-xc-host ; don't mess up the *INFO-TYPES* in make-host-2
        (eval-when (:compile-toplevel)
          (setf (aref *info-types* ,num) (cons ,category ,kind)))
+       #-sb-xc-host
+       ,@(append
+          (when (consp default)
+            `((setf *globaldb-defaulting-exprs*
+                    (cons '(,num . ,default)
+                          (remove ,num *globaldb-defaulting-exprs* :key 'car)))))
+          (when validate-function
+            `((setf *globaldb-validate-exprs*
+                    (cons '(,num . ,validate-function)
+                          (remove ,num *globaldb-validate-exprs* :key 'car))))))
        (!cold-init-forms
         (!%define-info-type
          ,num ,category ,kind ',type-spec
@@ -445,6 +457,18 @@
 ;;; the macro-expansion for symbol-macros
 (define-info-type (:variable :macro-expansion) :type-spec t)
 
+(in-package "SB-ALIEN")
+;;; Information describing a heap-allocated alien.
+(defstruct (heap-alien-info (:copier nil))
+  ;; The type of this alien.
+  (type (missing-arg) :type alien-type)
+  ;; Its name.
+  (alien-name (missing-arg) :type simple-string)
+  ;; Data or code?
+  (datap (missing-arg) :type boolean))
+(!set-load-form-method heap-alien-info (:xc :target))
+
+(in-package "SB-IMPL")
 (define-info-type (:variable :alien-info)
   :type-spec (or null sb-alien-internals:heap-alien-info))
 
@@ -637,3 +661,27 @@
                      (list (meta-info-category type) (meta-info-kind type))))
          (write val :level 2)))
      sym)))
+
+#-sb-xc-host
+(defun !recompile-globaldb-checkfuns ()
+  ;; Recompiling these expressions allows GCing of the single code component (~11KB)
+  ;; dumped by the cross-compiler containing 50 toplevel forms plus all the fragments
+  ;; of code for the various type checks. And consolidate the type-check functions
+  ;; because often 1 function can be reused for several pieces of info.
+  (loop for (id . lexpr) in *globaldb-defaulting-exprs*
+        do (setf (%instance-ref (aref *info-types* id) (get-dsd-index meta-info default))
+                 (compile nil lexpr)))
+  (loop for (id . lexpr) in *globaldb-validate-exprs*
+        do (setf (%instance-ref (aref *info-types* id)
+                                (get-dsd-index meta-info validate-function))
+                 (compile nil lexpr)))
+  (let (checkfuns)
+    (dovector (meta-info *info-types*)
+      (when (and meta-info (neq t (meta-info-type-spec meta-info)))
+        (let* ((spec (meta-info-type-spec meta-info))
+               (cell (assoc spec checkfuns :test 'equal)))
+          (unless cell
+            (let ((f (compile nil `(named-lambda "check-type" (x) (the ,spec x)))))
+              (push (setf cell (cons spec f)) checkfuns)))
+          (setf (%instance-ref meta-info (get-dsd-index meta-info type-checker))
+                (cdr cell)))))))

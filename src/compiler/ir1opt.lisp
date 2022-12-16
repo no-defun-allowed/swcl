@@ -398,7 +398,6 @@
 ;;; we are done, then another iteration would be beneficial.
 (defun ir1-optimize (component fastp)
   (declare (type component component))
-  (setf (component-reoptimize component) nil)
   (loop with block = (block-next (component-head component))
         with tail = (component-tail component)
         for last-block = block
@@ -1433,8 +1432,8 @@
                                (info :function :info name))))
 
                     ;; Allow backward references to this function from following
-                    ;; forms. (Reused only if policy matches.)
-                    (push res (defined-fun-functionals leaf))
+                    ;; forms.
+                    (setf (defined-fun-functional leaf) res)
                     (change-ref-leaf ref res)
                     (unless ir1-converting-not-optimizing-p
                       (locall-analyze-component *current-component*))))
@@ -1757,8 +1756,7 @@
       (let* ((*transforming* (1+ *transforming*))
              (new-fun (ir1-convert-inline-lambda
                        res
-                       :debug-name (debug-name 'lambda-inlined source-name)
-                       :system-lambda t))
+                       :debug-name (debug-name 'lambda-inlined source-name)))
              (type (node-derived-type call))
              (ref (lvar-use (combination-fun call))))
         (change-ref-leaf ref new-fun)
@@ -1777,8 +1775,7 @@
     ;; This is mainly to call PROPAGATE-LET-ARGS so that the
     ;; newly converted code gets to better types sooner.
     (setf (node-reoptimize call) nil)
-    (ir1-optimize-combination call))
-  (values))
+    (ir1-optimize-combination call)))
 
 (defun constant-fold-arg-p (name)
   (typecase name
@@ -1987,7 +1984,7 @@
             ;; In ({+,-} VAR STEP), the type of STEP must be a numeric
             ;; type matching INITIAL-TYPE.
             (unless (and (numeric-type-p step-type)
-                         (or (numeric-type-equal initial-type step-type)
+                         (or (numtype-aspects-eq initial-type step-type)
                              ;; Detect cases like (LOOP FOR 1.0 to 5.0
                              ;; ...), where the initial and the step
                              ;; are of different types, and the step
@@ -1995,7 +1992,7 @@
                              (let ((contagion-type (numeric-contagion initial-type
                                                                       step-type)))
                                (and (numeric-type-p contagion-type)
-                                    (numeric-type-equal initial-type contagion-type)))))
+                                    (numtype-aspects-eq initial-type contagion-type)))))
               (return-from %analyze-set-uses nil))
             ;; Track the directions of the increments/decrements.
             (let ((non-negative-p (csubtypep step-type (specifier-type '(real 0 *))))
@@ -2011,7 +2008,7 @@
             ;; Ultimately, the derived types of the sets must match
             ;; INITIAL-TYPE if we are going to derive new bounds.
             (unless (and (numeric-type-p set-type)
-                         (numeric-type-equal set-type initial-type))
+                         (numtype-aspects-eq set-type initial-type))
               (setf every-set-type-suitable-p nil))
             (push set-type set-types)))))
     (values (cond ((and some-plusp (not some-minusp)) '+)
@@ -2058,8 +2055,7 @@
             (*
              (values nil nil)))
         (modified-numeric-type initial-type :low low
-                                            :high high
-                                            :enumerable nil)))))
+                                            :high high)))))
 
 (deftransform + ((x y) * * :result result)
   "check for iteration variable reoptimization"
@@ -2235,22 +2231,22 @@
 ;;; any unreferenced variables. Note that FLUSH-DEAD-CODE will come
 ;;; along right away and delete the REF and then the lambda, since we
 ;;; flush the FUN lvar.
-(defun delete-let (clambda)
-  (declare (type clambda clambda))
-  (aver (functional-letlike-p clambda))
-  (note-unreferenced-fun-vars clambda)
-  (let ((call (let-combination clambda))
-        (bind (lambda-bind clambda)))
+(defun delete-let (fun)
+  (declare (type clambda fun))
+  (aver (functional-letlike-p fun))
+  (note-unreferenced-fun-vars fun)
+  (let ((call (let-combination fun))
+        (bind (lambda-bind fun)))
     (flush-dest (basic-combination-fun call))
     (when (eq (car (node-source-path bind)) 'original-source-start)
-      (setf (ctran-source-path (node-prev (car (leaf-refs clambda))))
+      (setf (ctran-source-path (node-prev (car (leaf-refs fun))))
             (node-source-path bind)))
     (unlink-node call)
     (unlink-node bind)
-    (setf (lambda-bind clambda) nil))
-  (setf (functional-kind clambda) :zombie)
-  (let ((home (lambda-home clambda)))
-    (setf (lambda-lets home) (delq1 clambda (lambda-lets home))))
+    (setf (lambda-bind fun) nil))
+  (setf (functional-kind fun) :zombie)
+  (let ((home (lambda-home fun)))
+    (setf (lambda-lets home) (delq1 fun (lambda-lets home))))
   (values))
 
 ;;; This function is called when one of the arguments to a LET

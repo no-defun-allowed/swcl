@@ -1785,15 +1785,6 @@
     (:printer reg/mem ((op '(#b1111111 #b001))))
     (:emitter (emit* segment prefix dst #b1111111 #b001))))
 
-(define-instruction mul (segment dst src)
-  (:printer accum-reg/mem ((op '(#b1111011 #b100))))
-  (:emitter
-   (let ((size (matching-operand-size dst src)))
-     (aver (accumulator-p dst))
-     (emit-prefixes segment src nil size)
-     (emit-byte segment (opcode+size-bit #xF6 size))
-     (emit-ea segment src #b100))))
-
 (define-instruction-format (imul-3-operand 16 :include reg-reg/mem)
   (op    :fields (list (byte 6 2) (byte 1 0)) :value '(#b011010 1))
   (width :field (byte 1 1)
@@ -1808,17 +1799,19 @@
                       (min 4 (size-nbyte (inst-operand-size dstate))))))
              (read-signed-suffix (* nbytes 8) dstate)))))
 
-(define-instruction imul (segment dst &optional src imm)
-  ;; default accum-reg/mem printer is wrong here because 1-operand imul
-  ;; is very different from 2-operand, not merely a shorter syntax for it.
-  (:printer accum-reg/mem ((op '(#b1111011 #b101))) '(:name :tab reg/mem))
+(define-instruction imul (segment &prefix prefix dst &optional src imm)
+  ;; 1-operand form of IMUL produces a double-precision result in rDX:rAX.
+  ;; The default accum-reg/mem printer would be very misleading, as it would print
+  ;; something like "IMUL EAX, [mem]" which implies a 32-bit result.
+  (:printer accum-reg/mem ((op '(#b1111011 #b101)))
+            '(:name :tab (:using #'print-sized-reg/mem reg/mem)))
   (:printer ext-reg-reg/mem-no-width ((op #xAF))) ; 2-operand
   (:printer imul-3-operand () '(:name :tab reg ", " reg/mem ", " imm))
   (:emitter
-   (let ((operand-size (matching-operand-size dst src)))
+   (let ((operand-size (pick-operand-size prefix dst src)))
      (cond ((not src) ; 1-operand form affects RDX:RAX or subregisters thereof
             (aver (not imm))
-            (emit-prefixes segment dst nil operand-size)
+            (emit-prefixes segment dst nil (or operand-size :qword))
             (emit-byte segment (opcode+size-bit #xF6 operand-size))
             (emit-ea segment dst #b101))
            (t
@@ -1836,18 +1829,24 @@
               (if imm
                   (emit-imm-operand segment imm imm-size))))))))
 
-(flet ((emit* (segment dst src subcode)
-         (let ((size (matching-operand-size dst src)))
-           (aver (accumulator-p dst))
+(flet ((emit* (segment subcode prefix src junk)
+         (when junk
+           (warn "Do not supply 2 operands to 1-operand MUL,DIV")
+           (aver (accumulator-p src))
+           (setq src junk))
+         (let ((size (pick-operand-size prefix src)))
            (emit-prefixes segment src nil size)
            (emit-byte segment (opcode+size-bit #xF6 size))
            (emit-ea segment src subcode))))
-  (define-instruction div (segment dst src)
+  (define-instruction mul (segment &prefix prefix src &optional junk)
+    (:printer accum-reg/mem ((op '(#b1111011 #b100))))
+    (:emitter (emit* segment #b100 prefix src junk)))
+  (define-instruction div (segment &prefix prefix src &optional junk)
     (:printer accum-reg/mem ((op '(#b1111011 #b110))))
-    (:emitter (emit* segment dst src #b110)))
-  (define-instruction idiv (segment dst src)
+    (:emitter (emit* segment #b110 prefix src junk)))
+  (define-instruction idiv (segment &prefix prefix src &optional junk)
     (:printer accum-reg/mem ((op '(#b1111011 #b111))))
-    (:emitter (emit* segment dst src #b111))))
+    (:emitter (emit* segment #b111 prefix src junk))))
 
 (define-instruction bswap (segment &prefix prefix dst)
   (:printer ext-reg-no-width ((op #b11001)))
@@ -3423,7 +3422,9 @@
                (location= dst2 dst1)
                (eq size1 :qword)
                (eq size2 :dword))
-      (setf (stmt-operands stmt) `(,+dword-size-prefix+ ,dst1 ,src1))
+      (setf (stmt-operands stmt) `(,+dword-size-prefix+ ,dst1 ,(if (integerp src1)
+                                                                   (ldb (byte 32 0) src1)
+                                                                   src1)))
       next)))
 
 ;;; "AND r, imm1" + "AND r, imm2" -> "AND r, (imm1 & imm2)"

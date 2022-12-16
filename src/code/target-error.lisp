@@ -899,15 +899,15 @@ with that condition (or with no condition) will be returned."
   (typecase context
     (cons
      (case (car context)
-       (:struct
+       (struct-context
         (format nil "when setting slot ~s of structure ~s"
                 (cddr context) (cadr context)))
        (t context)))
-    ((eql :aref)
+    ((eql sb-c::aref-context)
      (let (*print-circle*)
        (format nil "when setting an element of (ARRAY ~s)"
                type)))
-    ((eql :ftype)
+    ((eql sb-c::ftype-context)
      "from the function type declaration.")
     ((and symbol
           (not null))
@@ -1455,15 +1455,18 @@ SB-EXT:PACKAGE-LOCKED-ERROR-SYMBOL."))
    (axis :initarg :axis :reader invalid-array-index-error-axis))
   (:report
    (lambda (condition stream)
-     (let ((array (invalid-array-index-error-array condition)))
-       (format stream "Invalid index ~W for ~@[axis ~W of ~]~S, ~
-                       should be a non-negative integer below ~W."
-               (type-error-datum condition)
-               (when (> (array-rank array) 1)
-                 (invalid-array-index-error-axis condition))
-               (type-of array)
-               ;; Extract the bound from (INTEGER 0 (BOUND))
-               (caaddr (type-error-expected-type condition)))))))
+     (let ((array (invalid-array-index-error-array condition))
+           (index (type-error-datum condition)))
+       (if (integerp index)
+           (format stream "Invalid index ~S for ~@[axis ~W of ~]~S, ~
+                           should be a non-negative integer below ~W."
+                   (type-error-datum condition)
+                   (when (> (array-rank array) 1)
+                     (invalid-array-index-error-axis condition))
+                   (type-of array)
+                   ;; Extract the bound from (INTEGER 0 (BOUND))
+                   (caaddr (type-error-expected-type condition)))
+           (format stream "~s is not of type INTEGER." index))))))
 
 (define-condition invalid-array-error (reference-condition type-error) ()
   (:report

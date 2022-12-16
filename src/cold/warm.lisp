@@ -13,6 +13,8 @@
 
 ;;;; general warm init compilation policy
 
+(defvar *objfile-prefix* "obj/from-self/")
+
 ;;; First things first, bootstrap the WARNING handler.
 sb-kernel::
 (setq **initial-handler-clusters**
@@ -51,7 +53,7 @@ sb-kernel::(rplaca (last *handler-clusters*) (car **initial-handler-clusters**))
   (assert (= (logand byte sb-vm:lowtag-mask) sb-vm:list-pointer-lowtag)))
 (gc :full t)
 
-;;; Verify that all defstructs except for one were compiled in a null lexical
+;;; Verify that all defstructs with a few exceptions were compiled in a null lexical
 ;;; environment. Compiling any call to a structure constructor would like to
 ;;; know whether some slots get their default value especially if the default
 ;;; is incompatible with the slot type (consider MISSING-ARG, e.g).
@@ -62,7 +64,13 @@ sb-kernel::(rplaca (last *handler-clusters*) (car **initial-handler-clusters**))
     (let ((dd (sb-kernel:find-defstruct-description s nil)))
       (when (and dd (not (sb-kernel::dd-null-lexenv-p dd)))
         (push (sb-kernel:dd-name dd) result))))
-  (assert (equal result '(sb-c::conset))))
+  (assert (null (set-difference
+                 result
+                 '(sb-c::conset sb-kernel:args-type
+                   sb-kernel:array-type
+                   sb-kernel:character-set-type
+                   sb-kernel:numeric-type
+                   sb-kernel:member-type)))))
 
 ;;; Assert that genesis preserved shadowing symbols.
 (let ((p sb-assem::*backend-instruction-set-package*))
@@ -157,8 +165,7 @@ sb-kernel::(rplaca (last *handler-clusters*) (car **initial-handler-clusters**))
                    (concatenate 'string *sbclroot* stem)
                    :output-file
                    (merge-pathnames
-                    (concatenate
-                     'string sb-fasl::*!target-obj-prefix*
+                    (concatenate 'string *objfile-prefix*
                      (subseq stem 0 (1+ (position #\/ stem :from-end t))))))))
            (flet ((report-recompile-restart (stream)
                     (format stream "Recompile file ~S" stem))

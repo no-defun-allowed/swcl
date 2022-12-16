@@ -1,5 +1,4 @@
 #-system-tlabs (invoke-restart 'run-tests::skip-file)
-#+parallel-test-runner (invoke-restart 'run-tests::skip-file) ; crashes and hangs
 #+interpreter (invoke-restart 'run-tests::skip-file)
 (in-package sb-vm)
 
@@ -32,6 +31,70 @@
 
 ;;;
 
+(test-util:with-test (:name :copy-numbers-to-heap)
+  (let (list1 list2)
+    (with-arena (*arena*)
+      (setq list1 (let ((r (ash #xf00 (+ 60 (random 10)))))
+                    (list r
+                          (coerce r 'double-float)
+                          (coerce r '(complex single-float))
+                          (coerce r '(complex double-float))
+                          (complex 1 (1+ (random 40)))
+                          (/ 1 r)))
+            ;; still inside the WITH-ARENA or else the test is not useful!
+            list2 (mapcar 'copy-number-to-heap list1)))
+    (assert (not (heap-allocated-p list1)))
+    (assert (notany #'heap-allocated-p list1))
+    (assert (every #'heap-allocated-p list2))))
+
+(test-util:with-test (:name :points-to-arena)
+  (let (tests)
+    (dotimes (i 20)
+      (let ((randomly-arena-thing (if (evenp i)
+                                      (with-arena (*arena*) (cons 1 2))
+                                      (cons 3 4))))
+        (push (make-array 1 :initial-element randomly-arena-thing) tests)))
+    (setq tests (nreverse tests))
+    (dolist (x tests)
+      (let* ((arena-ref-p (points-to-arena x))
+             (item (aref x 0)))
+        (if (find-containing-arena (get-lisp-obj-address item))
+            (assert arena-ref-p)
+            (assert (not arena-ref-p)))))))
+
+(defvar *foo-storage*)
+(test-util:with-test (:name :ctype-cache-force-to-heap)
+  (drop-all-hash-caches)
+  (test-util:opaque-identity
+   (with-arena (*arena*)
+     ;; finder-result will assert that this goes to the heap
+     (setq *foo-storage* (sb-impl::allocate-hashset-storage 128 t))
+     ;; for each test, the type specifier itself can not be cached because
+     ;; it is a list in the arena. And the internal representation has to
+     ;; take care to copy arena-allocated numbers back to dynamic space.
+     (list (let* ((n (- (test-util:opaque-identity 0d0)))
+                  (spec `(member ,n)))
+             (assert (not (heap-allocated-p (second spec)))) ; -0d0 is off-heap
+             (typep (random 2) spec))
+           (let* ((n (+ 5.0d0 (random 10)))
+                  (bound (list n))
+                  (spec `(or (double-float ,bound) (integer ,(random 4)))))
+             ;; should not cache the type specifier
+             (typep 'foo spec)))))
+  (dolist (symbol sb-impl::*cache-vector-symbols*)
+    (let ((cache (symbol-value symbol)))
+      ; (format t "~&Checking cache ~S~%" symbol)
+      (when cache
+        (assert (heap-allocated-p cache))
+        (dovector (line cache)
+          (unless (eql line 0)
+            (unless (and (heap-allocated-p line) (not (points-to-arena line)))
+              (hexdump line 2 nil)
+              (error "~S has ~S" symbol line)))))))
+  #-win32 ; finder crashes (same reason for the :skipped-on below I guess)
+  (let ((finder-result (c-find-heap->arena)))
+    (assert (null finder-result))))
+
 (defun test-with-open-file ()
   (with-open-file (stream (format nil "/proc/~A/stat" (sb-unix:unix-getpid))
                           :if-does-not-exist nil)
@@ -39,46 +102,32 @@
         (let ((pn (pathname stream)))
           (values pn (namestring pn) (read-line stream nil)))
         (values nil nil nil))))
-(defun pathname-parts-heap-p (pathname)
-  (labels ((scan (piece)
-             (etypecase piece
-               (fixnum t) ; pathname-version
-               ((or string symbol bignum) (heap-allocated-p piece))
-               (sb-impl::pattern (every #'scan (sb-impl::pattern-pieces piece)))
-               (cons (and (scan (car piece)) (scan (cdr piece)))))))
-    ;; just access the slots, don't "coerce" the arg to a pathname
-    (and (scan (sb-impl::%pathname-namestring pathname))
-         (scan (sb-impl::%pathname-device pathname))
-         (scan (sb-impl::%pathname-dir+hash pathname))
-         (scan (sb-impl::%pathname-name pathname))
-         (scan (sb-impl::%pathname-type pathname))
-         (scan (sb-impl::%pathname-version pathname)))))
 
 (defvar *answerstring*)
 (test-util:with-test (:name :with-open-stream :skipped-on (:not :linux))
   (multiple-value-bind (pathname namestring answer)
-      (sb-vm:with-arena (*arena*) (test-with-open-file))
+      (with-arena (*arena*) (test-with-open-file))
     (when pathname
       (assert (heap-allocated-p pathname))
       (assert (heap-allocated-p namestring))
-      (assert (pathname-parts-heap-p pathname))
+      (assert (not (points-to-arena pathname)))
       (assert (not (heap-allocated-p answer)))
       ;; 1. check that a global symbol value can be found
       (unwind-protect
            (progn
              (setq *answerstring* answer)
              ;; user's string went to the arena, and detector finds the source object
-             (let ((finder-result (sb-vm:c-find-heap->arena)))
+             (let ((finder-result (c-find-heap->arena)))
                (assert (equal finder-result '(*answerstring*)))))
         (makunbound '*answerstring*))
       ;; 2. check that a thread-local binding can be found
       (let ((*answerstring* answer))
-        (let ((finder-result (sb-vm:c-find-heap->arena)))
+        (let ((finder-result (c-find-heap->arena)))
           (assert (equal (first finder-result)
                          `(,sb-thread:*current-thread* :tls *answerstring*))))
         ;; 3. check that a shadowed binding can be found
         (let ((*answerstring* "hi"))
-          (let ((finder-result (sb-vm:c-find-heap->arena)))
+          (let ((finder-result (c-find-heap->arena)))
             (assert (equal (first finder-result)
                            `(,sb-thread:*current-thread* :binding *answerstring*)))))))))
 
@@ -194,7 +243,7 @@
   (dotimes (k n)
     (let* ((i (mod k (length arenas)))
            (arena (aref arenas i)))
-      (sb-vm:with-arena (arena)
+      (with-arena (arena)
         (let ((object (make-array (+ 100 (random 100)))))
           (incf (aref bytes-used i) (primitive-object-size object)))))
     #+nil
@@ -202,8 +251,8 @@
       (let ((i (random (length arenas))))
         (let ((arena (aref arenas i)))
           (format t "~&REWINDING ~D~%" (arena-index arena))
-          (sb-vm:rewind-arena arena)
-          (sb-vm:with-arena (arena)
+          (rewind-arena arena)
+          (with-arena (arena)
             (test-util:opaque-identity (make-array 5)))))))
   bytes-used)
 (test-util:with-test (:name :allocator-resumption)
@@ -219,7 +268,7 @@
       (assert (< frac 1))))))
 
 (test-util:with-test (:name :thread-arena-inheritance)
-  (sb-vm:with-arena (*arena*)
+  (with-arena (*arena*)
     (let ((thread
            (sb-thread:make-thread
             (lambda ()
@@ -232,7 +281,7 @@
 
 (defvar *newpkg* (make-package "PACKAGE-GROWTH-TEST"))
 (defun addalottasymbols ()
-  (sb-vm:with-arena (*arena*)
+  (with-arena (*arena*)
     (dotimes (i 200)
       (let ((str (concatenate 'string "S" (write-to-string i))))
         (assert (not (heap-allocated-p str)))
@@ -241,10 +290,10 @@
           (assert (heap-allocated-p (symbol-name sym))))))))
 (test-util:with-test (:name :intern-a-bunch)
   (let ((old-n-cells
-         (length (sb-impl::package-hashtable-cells
+         (length (sb-impl::symtbl-cells
                   (sb-impl::package-internal-symbols *newpkg*)))))
     (addalottasymbols)
-    (let* ((cells (sb-impl::package-hashtable-cells
+    (let* ((cells (sb-impl::symtbl-cells
                    (sb-impl::package-internal-symbols *newpkg*))))
       (assert (> (length cells) old-n-cells)))))
 
@@ -293,6 +342,10 @@
         (exit-if-no-arenas))
       (assert (= n-deleted n-arenas)))))
 
+;; #+sb-devel preserves some symbols that the test doesn't care about
+;; as the associated function will never be called.
+(defvar *ignore* '("!EARLY-LOAD-METHOD"))
+
 (test-util:with-test (:name :disassemble-pcl-stuff)
   (let ((stream (make-string-output-stream)))
     (with-package-iterator (iter "SB-PCL" :internal :external)
@@ -300,6 +353,7 @@
         (multiple-value-bind (got symbol) (iter)
           (unless got (return))
           (when (and (fboundp symbol)
+                     (not (member (string symbol) *ignore* :test 'string=))
                      (not (closurep (symbol-function symbol)))
                      (not (sb-pcl::generic-function-p
                            (symbol-function symbol))))
@@ -310,10 +364,15 @@
             (let ((lines (test-util:split-string
                           (get-output-stream-string stream)
                           #\newline)))
-              (dolist (line lines)
-                (cond ((search "LIST-ALLOC-TRAMP" line)
-                       (assert (search "SYS-LIST-ALLOC-TRAMP" line)))
-                      ((search "ALLOC-TRAMP" line)
-                       (assert (search "SYS-ALLOC-TRAMP" line)))
-                      ((search "LISTIFY-&REST" line)
-                       (assert (search "SYS-LISTIFY-&REST" line))))))))))))
+              ;; Each alloc-tramp call should be the SYS- variant
+              (flet ((line-ok (line)
+                       (cond ((search "LIST-ALLOC-TRAMP" line)
+                              (search "SYS-LIST-ALLOC-TRAMP" line))
+                             ((search "ALLOC-TRAMP" line)
+                              (search "SYS-ALLOC-TRAMP" line))
+                             ((search "LISTIFY-&REST" line)
+                              (search "SYS-LISTIFY-&REST" line))
+                             (t t))))
+                (unless (every #'line-ok lines)
+                  (format *error-output* "Failure:~{~%~A~}~%" lines)
+                  (error  "Bad result for ~S" symbol))))))))))

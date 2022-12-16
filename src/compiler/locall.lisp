@@ -44,7 +44,9 @@
   (loop with policy = (lexenv-policy (node-lexenv call))
         for args on (basic-combination-args call)
         for var in (lambda-vars fun)
-        for name = (lambda-var-%source-name var)
+        for name = (or (and (lambda-var-arg-info var )
+                            (arg-info-key (lambda-var-arg-info var )))
+                       (lambda-var-%source-name var))
         do (assert-lvar-type (car args) (leaf-type var) policy
                              (if (eq (functional-kind fun) :optional)
                                  (make-local-call-context fun name)
@@ -94,6 +96,11 @@
           (setf (node-lexenv call)
                 (make-lexenv :default (node-lexenv call)
                              :cleanup cleanup))
+          (setf (ctran-next (node-prev call)) nil)
+          (let ((ctran (make-ctran)))
+            (with-ir1-environment-from-node call
+              (ir1-convert (node-prev call) ctran nil '(%cleanup-point))
+              (link-node-to-previous-ctran call ctran)))
           ;; Make CALL end its block, so that we have a place to
           ;; insert cleanup code.
           (node-ends-block call)
@@ -305,8 +312,7 @@
                          *lexenv*))
            (xep (ir1-convert-lambda (make-xep-lambda-expression fun)
                                     :debug-name (debug-name
-                                                 'xep (leaf-debug-name fun))
-                                    :system-lambda t)))
+                                                 'xep (leaf-debug-name fun)))))
       (setf (functional-kind xep) :external
             (leaf-ever-used xep) t
             (functional-entry-fun xep) fun
@@ -459,7 +465,18 @@
               (with-ir1-environment-from-node call
                 (let* ((*inline-expansions*
                          (register-inline-expansion original-functional call))
-                       (*lexenv* (functional-lexenv original-functional)))
+                       (functional-lexenv (functional-lexenv original-functional))
+                       (call-policy (lexenv-policy (node-lexenv call)))
+                       ;; The inline expansion should be converted
+                       ;; with the policy in effect at this call site,
+                       ;; not the policy saved in the original
+                       ;; functional.
+                       (*lexenv*
+                         (if (eq (lexenv-policy functional-lexenv)
+                                  call-policy)
+                             functional-lexenv
+                             (make-lexenv :default functional-lexenv
+                                          :policy call-policy))))
                   (values nil
                           (ir1-convert-lambda
                            (functional-inline-expansion original-functional)
@@ -706,8 +723,7 @@
                (%funcall ,entry ,@args))
             :debug-name (debug-name 'hairy-function-entry
                                     (lvar-fun-debug-name
-                                     (basic-combination-fun call)))
-            :system-lambda t))))
+                                     (basic-combination-fun call)))))))
     (convert-call ref call new-fun)
     (dolist (ref (leaf-refs entry))
       (convert-call-if-possible ref (lvar-dest (node-lvar ref))))))
@@ -1296,8 +1312,7 @@
 (defun maybe-let-convert (clambda &optional component)
   (declare (type clambda clambda)
            (type (or null component) component))
-  (unless (or (declarations-suppress-let-conversion-p clambda)
-              (functional-has-external-references-p clambda))
+  (unless (declarations-suppress-let-conversion-p clambda)
     ;; We only convert to a LET when the function is a normal local
     ;; function, has no XEP, and is referenced in exactly one local
     ;; call. Conversion is also inhibited if the only reference is in
@@ -1355,7 +1370,7 @@
   (declare (type cblock block1 block2))
   (or (eq block1 block2)
       (let ((cleanup2 (block-start-cleanup block2)))
-        (do-nested-cleanups (cleanup (block-end-lexenv block1) t)
+        (do-nested-cleanups (cleanup block1 t)
           (when (eq cleanup cleanup2)
             (return t))
           (case (cleanup-kind cleanup)
@@ -1425,7 +1440,6 @@
   (declare (type clambda fun))
   (when (and (not (functional-kind fun))
              (not (functional-entry-fun fun))
-             (not (functional-has-external-references-p fun))
              ;; If a functional is explicitly inlined, we don't want
              ;; to assignment convert it, as more call-site
              ;; specialization can be done with inlining.

@@ -180,6 +180,21 @@
             (sb-cold::exit-process 1))))
       (values))))
 
+(sb-kernel::show-ctype-ctor-cache-metrics)
+
+(defun write-sxhash-xcheck-data (pathname)
+  (with-open-file (stream pathname :direction :output
+                                   :if-exists :supersede :if-does-not-exist :create)
+    (format stream ";;; SXHASH test data~%(~%")
+    (let ((seen (make-hash-table)))
+      (dolist (pair sb-impl::*sxhash-crosscheck*)
+        (let ((prev (gethash (car pair) seen)))
+          (if prev
+              (assert (= prev (cdr pair))) ; be self-consistent at least
+              (format stream "(~S #x~X)~%" (car pair) (cdr pair))))
+        (setf (gethash (car pair) seen) (cdr pair))))
+    (format stream ")~%")))
+
 ;;; See whether we're in individual file mode
 (cond
   ((boundp 'cl-user::*compile-files*)
@@ -211,25 +226,57 @@
             (do-stems-and-flags (stem flags 2)
               (unless (position :not-target flags)
                 (format t "~&[~3D/~3D] ~40A" (incf n) total-files (stem-remap-target stem))
-                (let ((sb-c::*force-system-tlab*
-                       (or (search "src/pcl" stem)
-                           (search "src/code/arena" stem)
-                           (search "src/code/debug-int" stem)
-                           (search "src/code/early-defmethod" stem)
-                           (search "src/code/format" stem)
-                           (search "src/code/brothertree" stem)
-                           (search "src/code/avltree" stem)))
-                      (start (get-internal-real-time)))
+                (let ((start (get-internal-real-time)))
                   (target-compile-stem stem flags)
                   (let ((elapsed (/ (- (get-internal-real-time) start)
                                     internal-time-units-per-second)))
                     (format t " (~f sec)~%" elapsed)
                     (incf total-time elapsed)))
+                ;(sb-kernel::show-ctype-ctor-cache-metrics)
                 ;; The specialized array registry has file-wide scope. Hacking that aspect
                 ;; into the xc build scaffold seemed slightly easier than hacking the
                 ;; compiler (i.e. making the registry a slot of the fasl-output struct)
                 (clear-specialized-array-registry)))
              (format t "~&~50t ~f~%" total-time))
            (sb-c::dump/restore-interesting-types 'write)))
+     (write-sxhash-xcheck-data
+      (sb-cold:find-bootstrap-file "output/sxhash-calls.lisp-expr" t))
      (sb-kernel::write-structure-definitions-as-text
       (sb-cold:find-bootstrap-file "output/defstructs.lisp-expr" t)))))
+(sb-kernel::show-ctype-ctor-cache-metrics)
+
+(defun dump-some-ctype-hashsets ()
+  (flet ((cells (hs) (sb-impl::hss-cells (sb-impl::hashset-storage hs))))
+    ;; It might warrant looking into that we print a lot of unknown types.
+    ;; Some of those might have resulted in suboptimal code.
+    (format t "~2&UNKNOWN~%=======")
+    (sb-int:dovector (x (cells sb-kernel::*unknown-type-hashset*) (terpri))
+      (when (sb-kernel:ctype-p x)
+        (print (sb-kernel::hairy-type-specifier x))))
+    (format t "~2&HAIRY~%=====")
+    (sb-int:dovector (x (cells sb-kernel::*hairy-type-hashset*) (terpri))
+      (when (sb-kernel:ctype-p x)
+        (print (sb-kernel::hairy-type-specifier x))))
+    ;; Out of curiosity, why are there 35 character-set-type instances?
+    ;; I suppose it's because the unicode processing logic contains all different
+    ;; manner of tests about the range of code points.
+    #+nil
+    (sb-int:dovector (x (cells sb-kernel::*character-set-type-hashset*) (terpri))
+      (when (sb-kernel:ctype-p x)
+        (print (sb-kernel::character-set-type-pairs x))))
+    #+nil ; we see > 350 distinct simd-pack types. wow!
+    (let (list)
+      (sb-int:dovector (x (cells sb-kernel::*simd-pack-type-hashset*))
+        (when (sb-kernel:ctype-p x)
+          (push (sb-kernel::simd-pack-type-element-type x) list)))
+      (flet ((int (x) (logand (host-sb-kernel:%vector-raw-bits (reverse x) 0) #b1111111111)))
+        (dolist (bv (sort list (lambda (a b) (< (int a) (int b)))) (terpri))
+          (print bv))))
+    ;; There are an astoundingly high number of MEMBER types.
+    ;; Most contain symbols. A few contain conses and proxy floating-point values.
+    ;; So we must operate on sets that contain unpaired signed zeros.
+    (format t "~2&MEMBER~%======")
+    (sb-int:dovector (x (cells sb-kernel::*member-type-hashset*) (terpri))
+      (when (sb-kernel:ctype-p x)
+        (unless (every #'symbolp (sb-kernel:member-type-members x))
+          (print (sb-kernel:member-type-members x)))))))

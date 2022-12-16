@@ -29,7 +29,10 @@
 
 (in-package "SB-KERNEL")
 
-(defstruct (xset (:constructor alloc-xset) (:copier nil) (:predicate nil))
+(defstruct (xset (:constructor alloc-xset)
+                 (:constructor !copy-xset (list-size data))
+                 (:copier nil)
+                 (:predicate nil))
   (list-size 0 :type index)
   (data nil :type (or list hash-table)))
 (declaim (freeze-type xset))
@@ -158,6 +161,13 @@
 (defun xset-empty-p (xset)
   (not (xset-data xset)))
 
+(defun xset-every (predicate xset)
+  (map-xset (lambda (elt)
+              (unless (funcall predicate elt)
+                (return-from xset-every nil)))
+            xset)
+  t)
+
 ;;; Produce a hash that helps decide whether two xsets could be considered equivalent
 ;;; as order-insensitive sets comparing elements by EQL. This shouldn't use EQL-HASH
 ;;; because the intent is that it be useful for both host and target. SXHASH is fine
@@ -168,8 +178,11 @@
 (defun xset-elts-hash (xset)
   (let ((h 0))
     (map-xset (lambda (x)
-                (when (typep x '(or symbol number character
-                                 #-sb-xc-host structure-object))
-                  (setq h (logxor (cl:sxhash x) h))))
+                (when (typep x '(or symbol number character #-sb-xc-host instance))
+                  ;; Addition is commutative and associative, and the low bits come out
+                  ;; the same no matter the order of operations. XORing would also work
+                  ;; but I think adding has a greater degree of randomness.
+                  (setq h (logand (+ h (sb-xc:sxhash x))
+                                  sb-xc:most-positive-fixnum))))
               xset)
     h))

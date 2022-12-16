@@ -12,7 +12,7 @@
 
 (in-package "SB-IMPL")
 
-;;;; the PACKAGE-HASHTABLE structure
+;;;; the SYMBOL-HASHSET structure
 
 ;;; Packages are implemented using a special kind of hashtable -
 ;;; the storage is a single vector in which each cell is both key and value.
@@ -52,18 +52,21 @@
 (defconstant +package-id-user+     3)
 (defconstant +package-id-kernel+   4)
 
-(sb-xc:defstruct (package-hashtable
-                  (:constructor %make-package-hashtable
-                                (cells size &aux (free size)))
+(sb-xc:defstruct (symbol-hashset
+                  (:conc-name "SYMTBL-")
+                  (:predicate nil)
+                  (:constructor %make-symbol-hashset
+                                (%cells size &aux (free size)))
                   (:copier nil))
-  ;; The general-vector of symbols
-  (cells (missing-arg) :type simple-vector)
+  ;; An extra indirection to the symbol vector allows atomically changing the symbols
+  ;; and the division magic parameters.
+  (%cells (missing-arg) :type (cons t simple-vector))
   (modified nil :type boolean)
-  ;; The total number of entries allowed before resizing.
-  ;;
-  ;; FIXME: CAPACITY would be a more descriptive name. (This is
-  ;; related to but not quite the same as HASH-TABLE-SIZE, so calling
-  ;; it SIZE seems somewhat misleading.)
+  ;; SIZE is roughly related to the number of symbols the client code asked to be
+  ;; able to store. We increase that to a prime number, then scale it down to compute
+  ;; a rehash trigger level. The only reason we need to remember this number is that
+  ;; computing the count of things in the table has to be done by subtracting FREE
+  ;; and DELETED from the originally computed size.
   (size (missing-arg) :type index)
   ;; The remaining number of entries that can be made before we have to rehash.
   (free (missing-arg) :type index)
@@ -95,11 +98,11 @@
   (mru-table-index 0 :type index)
   ;; packages that use this package
   (%used-by-list () :type list)
-  ;; PACKAGE-HASHTABLEs of internal & external symbols
-  (internal-symbols nil :type package-hashtable)
-  (external-symbols nil :type package-hashtable)
+  ;; SYMBOL-HASHSETs of internal & external symbols
+  (internal-symbols nil :type symbol-hashset)
+  (external-symbols nil :type symbol-hashset)
   ;; shadowing symbols
-  ;; Todo: dynamically changeover to a PACKAGE-HASHTABLE if list gets long
+  ;; Todo: dynamically changeover to a SYMBOL-HASHSET if list gets long
   (%shadowing-symbols () :type list)
   ;; documentation string for this package
   (doc-string nil :type (or simple-string null))
@@ -112,7 +115,7 @@
   (%local-nicknames nil :type (or null (cons simple-vector simple-vector)))
   ;; Definition source location
   (source-location nil :type (or null sb-c:definition-source-location)))
-(proclaim '(freeze-type package-hashtable package))
+(proclaim '(freeze-type symbol-hashset package))
 
 (defconstant +initial-package-bits+ 2) ; for genesis
 

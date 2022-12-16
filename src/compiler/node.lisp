@@ -80,9 +80,12 @@
   ;; be able to affect it from :WITH-COMPILATION-UNIT.) NIL here also
   ;; works as a convenient null-lexenv identifier.
   (%policy nil :type (or null policy))
-  ;; A list associating extra user info to symbols.  The entries
-  ;; are of the form (:declare name . value),
+  ;; A list associating extra user info to symbols.
+  ;; sb-cltl2 entries are of the form (:declare name . value),
   ;; (:variable name key . value), or (:function name key . value)
+  ;; The NO-COMPILER-MACRO declartion is also stored here (because it
+  ;; can't be attached to a function, as compiler macros can be
+  ;; defined on macros).
   (user-data nil :type list)
   (parent nil)
   ;; Cache of all visible variables, including the ones coming from
@@ -948,15 +951,13 @@
   ;; was semi-inline, or because it was defined in this block). If
   ;; this function is not an entry point, then this may be deleted or
   ;; LET-converted. NULL if we haven't converted the expansion yet.
-  ;; Note: We need separate functionals for each policy in which
-  ;; the function is used.
-  (functionals nil :type list))
+  (functional nil :type (or functional null)))
 (defprinter (defined-fun :identity t
              :pretty-ir-printer (pretty-print-global-var structure stream))
   %source-name
   inlinep
   same-block-p
-  (functionals :test functionals))
+  (functional :test functional))
 
 ;;;; function stuff
 
@@ -1237,11 +1238,7 @@
   ;; we will still have caller's lexenv to figure out which cleanup is
   ;; in effect.
   (call-lexenv nil :type (or lexenv null))
-  (allow-instrumenting *allow-instrumenting* :type boolean)
-  ;; True if this is a system introduced lambda: it may contain user code, but
-  ;; the lambda itself is not, and the bindings introduced by it are considered
-  ;; transparent by the nested DX analysis.
-  (system-lambda-p nil :type boolean))
+  (allow-instrumenting *allow-instrumenting* :type boolean))
 (defprinter (clambda :conc-name lambda- :identity t
              :pretty-ir-printer (pretty-print-functional structure stream))
   %source-name

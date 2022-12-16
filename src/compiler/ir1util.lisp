@@ -22,24 +22,20 @@
     (when (lexenv-cleanup lexenv2)
       (setf (lexenv-cleanup lexenv2) nil))))
 
-(defun lexenv-enclosing-cleanup (lexenv)
-  (declare (type lexenv lexenv))
-  (do ((lexenv2 lexenv
-                (lambda-call-lexenv (lexenv-lambda lexenv2))))
-      ((null lexenv2) nil)
-    (awhen (lexenv-cleanup lexenv2)
-      (return it))))
-
 ;;; Return the innermost cleanup enclosing NODE, or NIL if there is
 ;;; none in its function. If NODE has no cleanup, but is in a LET,
 ;;; then we must still check the environment that the call is in.
 (defun node-enclosing-cleanup (node)
   (declare (type node node))
-  (lexenv-enclosing-cleanup (node-lexenv node)))
+  (do ((lexenv (node-lexenv node)
+               (lambda-call-lexenv (lexenv-lambda lexenv))))
+      ((null lexenv) nil)
+    (let ((cup (lexenv-cleanup lexenv)))
+      (when cup (return cup)))))
 
-(defun map-nested-cleanups (function lexenv &optional return-value)
-  (declare (type lexenv lexenv))
-  (do ((cleanup (lexenv-enclosing-cleanup lexenv)
+(defun map-nested-cleanups (function block &optional return-value)
+  (declare (type cblock block))
+  (do ((cleanup (block-end-cleanup block)
                 (node-enclosing-cleanup (cleanup-mess-up cleanup))))
       ((not cleanup) return-value)
     (funcall function cleanup)))
@@ -315,9 +311,6 @@
 (defun block-end-cleanup (block)
   (node-enclosing-cleanup (block-last block)))
 
-;;; Return the lexenv of the last node in BLOCK.
-(defun block-end-lexenv (block)
-  (node-lexenv (block-last block)))
 
 ;;;; lvar substitution
 
@@ -395,7 +388,7 @@
         thereis
         (loop for parent = lexenv then (lexenv-parent parent)
               while parent
-              thereis (and (eq parent parent-lexenv)))))
+              thereis (eq parent parent-lexenv))))
 
 ;;; Handle
 ;;; (dx-let ((x (let ((m (make-array)))
@@ -876,8 +869,7 @@
              ;; bound by a non-XEP lambda, no other REFS that aren't
              ;; DX-SAFE, or are result-args when the result is discarded.
              (when (and (neq :external (lambda-kind home))
-                        (or (lambda-system-lambda-p home)
-                            (lexenv-contains-lambda home *dx-lexenv*))
+                        (lexenv-contains-lambda home *dx-lexenv*)
                         (dolist (ref refs t)
                           (unless (or (eq use ref)
                                       (ref-good-for-dx-p ref))
@@ -2299,67 +2291,32 @@ is :ANY, the function name is not checked."
         (sb-xc:typep object '(or (unboxed-array (*)) number)))))
 
 ;;; Return a LEAF which represents the specified constant object.
-;;;
-;;; We are allowed to coalesce things like EQUAL strings and bit-vectors
-;;; when file-compiling, but not when using COMPILE.
-;;; FIXME:
-;;;  - EQUAL (the comparator in the similarity hash-table) is both too strict
-;;;    and not strict enough. Too strict because it won't compare simple-vector;
-;;;    not strict enough because base-string and character-string can't coalesce.
-;;;    We deal with this fine, but a real SIMILAR kind of hash-table would be nice.
-;;;  - arrays other than the handled kinds can be similar.
-(defun find-constant (object &optional name
-                             &aux (namespace (if (boundp '*ir1-namespace*) *ir1-namespace*)))
-  (cond
-    ((not (producing-fasl-file))
-     ;;  "The consequences are undefined if literal objects are destructively modified
-     ;;   For this purpose, the following operations are considered destructive:
-     ;;   array - Storing a new value into some element of the array ..."
-     ;; so a string, once used as a literal in source, becomes logically immutable.
-     #-sb-xc-host
-     (when (sb-xc:typep object '(simple-array * (*)))
-       (logically-readonlyize object nil))
-     ;;  "The functions eval and compile are required to ensure that literal objects
-     ;;   referenced within the resulting interpreted or compiled code objects are
-     ;;   the _same_ as the corresponding objects in the source code.
-     ;;   ...
-     ;;   The constraints on literal objects described in this section apply only to
-     ;;   compile-file; eval and compile do not copy or coalesce constants."
-     ;;   (http://www.lispworks.com/documentation/HyperSpec/Body/03_bd.htm)
-     ;; The preceding notwithstanding, numbers are always freely copyable and coalescible.
-     (if namespace
-         (values (ensure-gethash object (eql-constants namespace) (make-constant object)))
-         (make-constant object)))
-    ((if name
-         ;; Git rev eded4f76 added an assertion that a named non-fixnum is referenced
-         ;; via its name at (defconstant +share-me-4+ (* 2 most-positive-fixnum))
-         ;; I'm not sure that test makes any sense, but whatever...
-         (sb-xc:typep object '(or fixnum character symbol))
-         (sb-xc:typep object '(or number character symbol)))
-     (values (ensure-gethash object (eql-constants namespace) (make-constant object))))
-    (t
-     ;; CLHS 3.2.4.2.2: We are allowed to coalesce by similarity when
-     ;; file-compiling.
-     (let ((coalescep (coalescible-object-p object)))
-       ;; When COALESCEP is true, the similarity table is "useful" for
-       ;; this object.
-       (if name
-           ;; If the constant is named, always look in the named-constants table first.
-           ;; This ensure that there is no chance of referring to the constant at load-time
-           ;; through an access path other than `(SYMBOL-GLOBAL-VALUE ,name).
-           (ensure-gethash name
-                           (named-constants namespace)
-                           (make-constant object (ctype-of object) name))
-           ;; If the constant is anonymous, just make a new constant
-           ;; unless it is EQL or similar to an existing leaf.
-           (or (gethash object (eql-constants namespace))
-               (and coalescep
-                    (get-similar object (similar-constants namespace)))
-               (let ((new (make-constant object)))
-                 (setf (gethash object (eql-constants namespace)) new)
-                 (when coalescep
-                   (setf (get-similar object (similar-constants namespace)) new))
-                 new)))))))
+(defun find-constant (object)
+  (let* ((namespace *ir1-namespace*)
+         (eql-constants (eql-constants namespace))
+         (file-compile-p (producing-fasl-file)))
+    (cond
+      ;; CLHS 3.2.4.2.2: We are allowed to coalesce by similarity when
+      ;; file-compiling.
+      ((and file-compile-p (coalescible-object-p object))
+       (let ((similar-constants (similar-constants namespace)))
+         (or (gethash object eql-constants)
+             (get-similar object similar-constants)
+             (let ((new (make-constant object)))
+               (setf (gethash object eql-constants) new)
+               (setf (gethash object similar-constants) new)))))
+      (t
+       ;;  "The consequences are undefined if literal objects are destructively modified
+       ;;   For this purpose, the following operations are considered destructive:
+       ;;   array - Storing a new value into some element of the array ..."
+       ;; so a string, once used as a literal in source, becomes logically immutable.
+       #-sb-xc-host
+       (when (and (not file-compile-p)
+                  (sb-xc:typep object '(simple-array * (*))))
+         (logically-readonlyize object nil))
+       (or (gethash object eql-constants)
+           (setf (gethash object eql-constants)
+                 (make-constant object)))))))
 
 ;;; Return true if X and Y are lvars whose only use is a
 ;;; reference to the same leaf, and the value of the leaf cannot
@@ -2810,14 +2767,15 @@ is :ANY, the function name is not checked."
       (when (eq :rest kind)
         (return t)))))
 
-;;; Don't substitute single-ref variables on high-debug / low speed, to
-;;; improve the debugging experience. ...but don't bother keeping those
-;;; from system lambdas.
-(defun preserve-single-use-debug-var-p (call var)
-  (and (policy call (eql preserve-single-use-debug-variables 3))
+;;; Don't substitute single-ref variables on high-debug / low speed,
+;;; to improve the debugging experience, unless it is a special
+;;; variable or a temporary variable used for hairy function entries.
+(defun preserve-single-use-debug-var-p (node var)
+  (and (policy node (eql preserve-single-use-debug-variables 3))
        (not (lambda-var-specvar var))
-       (or (not (lambda-var-p var))
-           (not (lambda-system-lambda-p (lambda-var-home var))))))
+       (not (and (combination-p node)
+                 (typep (leaf-debug-name (combination-lambda node))
+                        '(cons (member hairy-function-entry) t))))))
 
 ;;; Call (lambda (arg lambda-var type)), for a mv-combination ARG can
 ;;; be NIL when it produces multiple values.
@@ -3196,44 +3154,3 @@ is :ANY, the function name is not checked."
                  (node-lexenv (lvar-dest lvar)))
                 *lexenv*)))
     t))
-
-;;; Return functional for DEFINED-FUN which has been converted in policy
-;;; corresponding to the current one, or NIL if no such functional exists.
-;;;
-;;; Also check that the parent of the functional is visible in the current
-;;; environment and is in the current component.
-(defun defined-fun-functional (defined-fun)
-  (let ((functionals (defined-fun-functionals defined-fun)))
-    ;; FIXME: If we are block compiling, forget about finding the
-    ;; right functional. Just pick the first one we see and hope
-    ;; people don't mix inlined functions and policy with block
-    ;; compiling. (For now)
-    (when (block-compile *compilation*)
-      (return-from defined-fun-functional (first functionals)))
-    (when functionals
-      (let* ((sample (car functionals))
-             (there (lambda-parent (if (lambda-p sample)
-                                       sample
-                                       (optional-dispatch-main-entry sample)))))
-        (when there
-          (labels ((lookup (here)
-                     (unless (eq here there)
-                       (if here
-                           (lookup (lambda-parent here))
-                           ;; We looked up all the way up, and didn't find the parent
-                           ;; of the functional -- therefore it is nested in a lambda
-                           ;; we don't see, so return nil.
-                           (return-from defined-fun-functional nil)))))
-            (lookup (lexenv-lambda *lexenv*)))))
-      ;; Now find a functional whose policy matches the current one, if we already
-      ;; have one.
-      (let ((policy (lexenv-%policy *lexenv*)))
-        (dolist (functional functionals)
-          (when (and (not (memq (functional-kind functional) '(:deleted :zombie)))
-                     (policy= policy (lexenv-%policy (functional-lexenv functional)))
-                     ;; Is it in the same component
-                     (let ((home-lambda (lambda-home (main-entry functional))))
-                       (and (not (memq (functional-kind home-lambda) '(:deleted :zombie)))
-                            (eq (lambda-component home-lambda)
-                                *current-component*))))
-            (return functional)))))))

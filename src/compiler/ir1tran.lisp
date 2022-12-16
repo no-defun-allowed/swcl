@@ -316,7 +316,13 @@
                        (type (type-specifier (info :variable :type name))))
                    `(macro . (the ,type ,expansion))))
                 (:constant
-                 (find-constant (symbol-value name) name))
+                 (let ((value (symbol-value name)))
+                   ;; Objects that are freely coalescible become
+                   ;; anonymous since we aren't interested in
+                   ;; accessing them through their name.
+                   (if (sb-xc:typep value '(or number character symbol))
+                       (find-constant value)
+                       (make-constant value (ctype-of value) name))))
                 (t
                  (make-global-var :kind kind
                                   :%source-name name
@@ -549,11 +555,12 @@
       (declare (fixnum pos))
       (macrolet ((frob ()
                    `(progn
-                      (when (comma-p subform)
-                        (setf subform (comma-expr subform)))
-                      (when (atom subform)
-                        (return))
-                      (let ((fm (car subform)))
+                      (let ((fm (cond ((comma-p subform)
+                                       (comma-expr subform))
+                                      ((atom subform)
+                                       (return))
+                                      (t
+                                       (car subform)))))
                         (when (comma-p fm)
                           (setf fm (comma-expr fm)))
                         (cond ((consp fm)
@@ -571,13 +578,13 @@
                                ;; perfect, but better than nothing.
                                (note-source-path subform pos path)))
                         (incf pos))
+                      (when (comma-p subform)
+                        (return))
                       (setq subform (cdr subform))
                       (when (eq subform trail) (return)))))
         (loop
          (frob)
          (frob)
-         (when (comma-p trail)
-           (return))
          (setq trail (cdr trail)))))))
 
 
@@ -1350,8 +1357,8 @@
     (when (defined-fun-p var)
       (setf (defined-fun-inline-expansion res)
             (defined-fun-inline-expansion var))
-      (setf (defined-fun-functionals res)
-            (defined-fun-functionals var))
+      (setf (defined-fun-functional res)
+            (defined-fun-functional var))
       (setf (defined-fun-same-block-p res)
             (defined-fun-same-block-p var)))
     ;; FIXME: Is this really right? Needs we not set the FUNCTIONAL
@@ -1829,7 +1836,7 @@ the stack without triggering overflow protection.")
                     :inlinep (defined-fun-inlinep var)
                     :inline-expansion (defined-fun-inline-expansion var)
                     :same-block-p (defined-fun-same-block-p var)
-                    :functionals (defined-fun-functionals var))
+                    :functional (defined-fun-functional var))
                    (make-global-var :%source-name name :type type
                                     :where-from :declared :kind kind))))
        (when (defined-fun-p var)
