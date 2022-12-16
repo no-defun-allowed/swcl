@@ -41,7 +41,6 @@
 #include "interr.h"             /* for lose() */
 #include "alloc.h"
 #include "gc-internal.h"
-#include "mark-region.h"
 #include "pseudo-atomic.h"
 #include "interrupt.h"
 #include "lispregs.h"
@@ -1012,11 +1011,6 @@ alloc_thread_struct(void* spaces) {
 #endif
 
     INIT_THREAD_REGIONS(th);
-#ifdef LISP_FEATURE_MARK_REGION_GC
-    int bitmap_bits_per_heap_byte = 8 /* bits/byte */ << N_LOWTAG_BITS;
-    th->allocation_bitmap_base =
-      (char*)((uintptr_t)(allocation_bitmap) - ((uintptr_t)(DYNAMIC_SPACE_START) / bitmap_bits_per_heap_byte));
-#endif
 #ifdef LISP_FEATURE_SB_THREAD
     /* This parallels the same logic in globals.c for the
      * single-threaded foreign_function_call_active, KLUDGE and

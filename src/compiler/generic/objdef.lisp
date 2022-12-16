@@ -523,8 +523,6 @@ during backtrace.
   (boxed-tlab :c-type "struct alloc_region" :length 3)
   (cons-tlab :c-type "struct alloc_region" :length 3)
   (mixed-tlab :c-type "struct alloc_region" :length 3)
-  #+mark-region-gc
-  (allocation-bitmap-base :c-type "char *" :pointer t)
   ;; END of slots to keep near the beginning.
 
   ;; This is the original address at which the memory was allocated,

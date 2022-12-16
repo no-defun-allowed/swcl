@@ -411,10 +411,6 @@ static void mark(lispobj object, lispobj *where, enum source source) {
       lispobj *base = fun_code_header(np);
       object = make_lispobj(base, OTHER_POINTER_LOWTAG);
     }
-#ifdef DEBUG
-    if (!allocation_bit_marked(native_pointer(object)))
-      lose("No allocation bit for 0x%lx", object);
-#endif
     log_slot(object, where, source);
     boolean set_allocation = IS_FRESH(line_bytemap[address_line(np)]);
     /* Enqueue onto mark queue */
@@ -1125,8 +1121,11 @@ void zero_all_free_ranges() {
 }
 
 void prepare_lines_for_final_gc() {
-  for (line_index_t l = 0; l < line_count; l++)
-    line_bytemap[l] = line_bytemap[l] == 0 ? 0 : ENCODE_GEN(0);
+  for (line_index_t l = 0; l < line_count; l++) {
+    unsigned char line = line_bytemap[l];
+    /* Line might still be fresh here. */
+    line_bytemap[l] = line == 0 ? 0 : COPY_MARK(line, ENCODE_GEN(0));
+  }
 
   // Now that we've unleashed pseudo-static pages onto GC, recompute
   // everything (as we would during a full GC).
