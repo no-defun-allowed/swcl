@@ -9,7 +9,9 @@
 #include "mark-region.h"
 
 static lispobj *next_object(lispobj *previous, uword_t size, lispobj *end) {
-  /* Dynamic space is non-contiguous, static space is contiguous */
+  /* Dynamic space is non-contiguous, static space is contiguous.
+   * TODO: This really should whiz along by words like find_object
+   * does. */
   if (find_page_index(previous) != -1) {
     for (lispobj *where = previous + size; where < end; where += 2)
       if (allocation_bit_marked(where))

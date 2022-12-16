@@ -21,7 +21,15 @@ static inline line_index_t address_line(void *address) {
   return ((uintptr_t)address - DYNAMIC_SPACE_START) / LINE_SIZE;
 }
 
+#define for_lines_in_page(l, p) \
+  for (line_index_t l = address_line(page_address(p)), limit = address_line(page_address(p + 1)); \
+       l < limit; l++)
+
 /* Line metadata */
+/* Two highest bits are unused, then a bit for "fresh" lines which need
+ * the allocation bitmap to be materialised, then a bit for line
+ * marking, then four lowest bits hold (generation + 1). A 0 means a
+ * free line. */
 #define MARK_GEN(l) ((l) | 16)
 #define FRESHEN_GEN(l) ((l) | 32)
 #define UNMARK_GEN(l) ((l) & 15)
@@ -54,7 +62,6 @@ extern void mr_update_closed_region(struct alloc_region *region, generation_inde
 extern boolean allocation_bit_marked(void *pointer);
 extern void set_allocation_bit_mark(void *pointer);
 extern boolean line_marked(void *pointer);
-
 extern lispobj *search_dynamic_space(void *pointer);
 
 /* Liveness */

@@ -18,7 +18,7 @@ float page_overhead_threshold = 1.3;
 /* Minimum fraction of bytes used on a page to compact it. */
 float page_utilisation_threshold = 0.5;
 /* Maximum number of bytes to copy in one collection. */
-uword_t bytes_to_copy = 2000000;
+uword_t bytes_to_copy = 20000000;
 /* Minimum generation to consider compacting when collecting. */
 generation_index_t minimum_compact_gen = 1;
 
@@ -112,7 +112,7 @@ void log_relevant_slot(lispobj *where, enum source source) {
 /* Compacting */
 
 static void count_pages() {
-  uword_t bytes = 0, objects = 0;
+  uword_t bytes = 0, objects = 0, tags[16] = { 0 };
   for (page_index_t p = 0; p < page_table_pages; p++)
     if (target_pages[p]) {
       lispobj *limit = (lispobj*)page_address(p + 1);
@@ -125,10 +125,16 @@ static void count_pages() {
         }
     }
   uword_t pointers = 0;
-  for (struct Qblock *b = remset; b; b = b->next)
+  for (struct Qblock *b = remset; b; b = b->next) {
     pointers += b->count;
+    for (int i = 0; i < b->count; i++)
+      tags[b->elements[i] & 7]++;
+  }
   fprintf(stderr, "gen %d: Saw %ld pointers, copied %ld bytes %ld objects, %.1f pointers/object\n",
-          target_generation, pointers, bytes, objects, (float)pointers/objects);
+          target_generation, pointers, bytes, objects, objects ? (float)pointers/objects : 0);
+  for (uword_t tag = 0; tag < 16; tag++)
+    if (tags[tag])
+      fprintf(stderr, "tag #%ld on %ld pointers\n", tag, tags[tag]);
 }
 
 void run_compaction() {

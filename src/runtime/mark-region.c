@@ -263,9 +263,6 @@ page_index_t try_allocate_large(sword_t nbytes,
   return -1;
 }
 
-#define for_lines_in_page(l, p) \
-  for (line_index_t l = address_line(page_address(p)), limit = address_line(page_address(p + 1)); \
-       l < limit; l++)
 /* Use AVX2 versions of code when we can, since blasting bytes faster
  * is always nice */
 #define CPU_SPLIT __attribute__((target_clones("default,avx2")))
@@ -880,7 +877,7 @@ static void trace_static_roots() {
   extern void gc_scavenge_arenas();
   gc_scavenge_arenas();
 #endif
-#define MARK(x) if (x) mark(x, &x, SOURCE_NORMAL)
+#define MARK(x) mark(x, &x, SOURCE_NORMAL)
   MARK(lisp_package_vector);
   MARK(lisp_init_function);
   MARK(gc_object_watcher);
