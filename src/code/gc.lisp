@@ -528,7 +528,7 @@ Experimental: interface subject to change."
 
 (macrolet ((cases ()
              `(cond ((< sb-vm:dynamic-space-start addr
-                        (sap-int (dynamic-space-free-pointer)))
+                        (sap-int (dynamic-space-free-pointer))
                      :dynamic)
                     ((immobile-space-addr-p addr) :immobile)
                     ((< sb-vm:read-only-space-start addr

@@ -5855,6 +5855,12 @@ gc_and_save(char *filename, boolean prepend_runtime, boolean purify,
     // Flush regions to ensure heap scan in copy_rospace doesn't miss anything
     gc_close_thread_regions(thread, 0);
     gc_close_collector_regions(0);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    /* Do a minor GC to instate allocation bitmap for new objects.
+     * This is needed to make heap walking in move_rospace_to_dynamic
+     * work. */
+    collect_garbage(0);
+#endif
     move_rospace_to_dynamic(0);
     pre_verify_gen_0 = 1;
     prepare_immobile_space_for_final_gc(); // once is enough

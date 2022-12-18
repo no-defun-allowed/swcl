@@ -210,6 +210,7 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
       bytes_allocated += claimed;
       generations[gen].bytes_allocated += claimed;
       set_page_bytes_used(where, GENCGC_PAGE_BYTES);
+      if (where + 1 > next_free_page) next_free_page = where + 1;
       return 1;
     }
   }
@@ -255,6 +256,7 @@ page_index_t try_allocate_large(sword_t nbytes,
       set_allocation_bit_mark(page_address(chunk_start));
       bytes_allocated += nbytes;
       generations[gen].bytes_allocated += nbytes;
+      if (chunk_end + 1 > next_free_page) next_free_page = chunk_end + 1;
       return chunk_start;
     }
     if (chunk_end == end) return -1;
