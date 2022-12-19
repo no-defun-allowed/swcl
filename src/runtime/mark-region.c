@@ -794,6 +794,14 @@ static void sweep_lines() {
   atomic_fetch_add(&generations[generation_to_collect].bytes_allocated, -total_decrement);
 }
 
+static void reset_pinned_pages() {
+  uword_t pinned_pages = 0;
+  for (page_index_t p = 0; p < page_table_pages; p++)
+    if (gc_page_pins[p]) pinned_pages++;
+  meters.pinned_pages += pinned_pages;
+  memset(gc_page_pins, 0, page_table_pages);
+}
+
 #define LINES_PER_PAGE (GENCGC_PAGE_BYTES / LINE_SIZE)
 static void __attribute__((noinline)) sweep_pages() {
   /* next_free_page is only maintained for page walking - we
@@ -817,6 +825,7 @@ static void __attribute__((noinline)) sweep_pages() {
       /* Why is reset_page_flags(p) much slower here? It does other stuff
        * for gencgc, sure, but not that much more stuff. */
       page_table[p].type = FREE_PAGE_FLAG;
+      page_table[p].scan_start_offset_ = 0;
     } else {
       bytes_allocated += page_bytes_used(p);
       if (page_single_obj_p(p) &&
@@ -825,14 +834,7 @@ static void __attribute__((noinline)) sweep_pages() {
       next_free_page = p + 1;
     }
   }
-}
-
-static void reset_pinned_pages() {
-  uword_t pinned_pages = 0;
-  for (page_index_t p = 0; p < page_table_pages; p++)
-    if (gc_page_pins[p]) pinned_pages++;
-  meters.pinned_pages += pinned_pages;
-  memset(gc_page_pins, 0, page_table_pages);
+  reset_pinned_pages();
 }
 
 static void __attribute__((noinline)) sweep() {

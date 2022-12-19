@@ -18,7 +18,7 @@ float page_overhead_threshold = 1.3;
 /* Minimum fraction of bytes used on a page to compact it. */
 float page_utilisation_threshold = 0.5;
 /* Maximum number of bytes to copy in one collection. */
-uword_t bytes_to_copy = 20000000;
+uword_t bytes_to_copy = 2000000;
 /* Minimum generation to consider compacting when collecting. */
 generation_index_t minimum_compact_gen = 1;
 
