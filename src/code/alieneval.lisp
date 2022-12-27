@@ -1471,6 +1471,11 @@
 ;;; Each alien-type gets its own hashset. The comparator function is universal.
 ;;; Because of that, the hashset aren't defined until all classes are defined,
 ;;; or else the accessors would use inefficient full calls.
+;;; KLUDGE: ALIEN-FUN-TYPE can memoize an object of type COMPILED-FUNCTION,
+;;; which means that if the compiler picks up a hash-consed instance
+;;; that was used in a not-compile-time-optimized ALIEN-FUNCALL
+;;; (see target-alieneval), the STUB slot will contain an undumpable object,
+;;; and the compiler will croak on it.
 (macrolet
   ((define-caching-constructors ()
      (flet
@@ -1495,7 +1500,7 @@
                (values '(hash-alien-type-list values))))))
        (collect ((forms) (globals))
          (dolist (list *hashset-defining-forms*
-                       `(progn (defglobal *alien-type-hashsets*
+                       `(progn (setq *alien-type-hashsets*
                                    '(*struct-type-cache* *union-type-cache*
                                      *enum-type-cache* ,@(globals)))
                                ,@(forms)))
@@ -1519,6 +1524,68 @@
                                                #'sys-copy-struct)))))
              (globals hashset-var)))))))
   (define-caching-constructors))
+
+(defun acyclic-type-p (type)
+  (named-let visit ((x type) (stack nil))
+    (aver type)
+    (when (member x stack) (return-from acyclic-type-p nil))
+    (let ((stack (cons x stack)))
+      (typecase x
+        (alien-pointer-type
+         (awhen (alien-pointer-type-to x) (visit it stack)))
+        (alien-array-type
+         (visit (alien-array-type-element-type x) stack))
+        (alien-record-type
+         (mapc (lambda (field) (visit (alien-record-field-type field) stack))
+               (alien-record-type-fields x)))
+        (alien-fun-type
+         (visit (alien-fun-type-result-type x) stack)
+         (dolist (x (alien-fun-type-arg-types x)) (visit x stack)))
+        (alien-values-type
+         (dolist (x (alien-values-type-values x)) (visit x stack))))))
+  t)
+
+;;; TODO: all alien-types loaded from fasl need to be hash-consed.
+;;; That's tricky (or impossible) if structural recursion is involved.
+;;; We can always punt to MAKE-LOAD-FORM-SAVING-SLOTS which handles circularity,
+;;; but then it doesn't know about hash-consing.
+#-sb-xc-host
+(defun make-type-load-form (x env)
+  ;; For now this deals with only a few categories of types:
+  ;; 1) Atoms INTEGER, BOOLEAN, SYSTEM-AREA-POINTER, C-STRING, FLOAT
+  ;;    but without whacky redefining behavior - so no ENUM.
+  ;; 2) FUN-TYPE
+  (cond
+    ((and (alien-integer-type-p x) (not (alien-enum-type-p x)))
+     (if (alien-boolean-type-p x)
+         `(make-alien-boolean-type :bits ,(alien-boolean-type-bits x)
+                                   :signed nil)
+         `(make-alien-integer-type :bits ,(alien-integer-type-bits x)
+                                   :signed ,(alien-integer-type-signed x))))
+    ((alien-float-type-p x)
+     (ecase (alien-float-type-type x)
+       (single-float `(parse-alien-type 'single-float nil))
+       (double-float `(parse-alien-type 'double-float nil))))
+    ((eq (sb-kernel:%instance-layout x)
+         #.(sb-kernel:find-layout 'alien-system-area-pointer-type)) ; not its subtypes
+     `(parse-alien-type 'system-area-pointer nil))
+    ((alien-c-string-type-p x)
+     `(load-alien-c-string-type ',(alien-c-string-type-element-type x)
+                                ',(alien-c-string-type-external-format x)
+                                ',(alien-c-string-type-not-null x)))
+    ((alien-fun-type-p x)
+     (if (acyclic-type-p x)
+         ;; hash-cons it
+         `(make-alien-fun-type :convention ',(alien-fun-type-convention x)
+                               :result-type ,(alien-fun-type-result-type x)
+                               :arg-types ',(alien-fun-type-arg-types x)
+                               :varargs ,(alien-fun-type-varargs x))
+         ;; there is some cycle involving this type
+         (make-load-form-saving-slots
+          x
+          :slot-names '(hash bits alignment result-type arg-types varargs convention)
+          :environment env)))))
+
 (defun show-alien-type-caches ()
   (dolist (var *alien-type-hashsets*)
     (let ((hs (symbol-value var)))

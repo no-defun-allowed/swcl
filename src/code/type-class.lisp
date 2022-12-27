@@ -258,19 +258,13 @@
   ;; bits  0..19: 20 bits for opaque hash
   ;; bit      20: 1 if interned: specifier -> object is guaranteed unique
   ;; bit      21: 1 if admits type= optimization: NEQ implies (NOT TYPE=)
-  ;; bits 22..26: 5 bits for specialized-array-element-type-properties index.
-  ;;   also usable as hash bits if this ctype is not a character-set
-  ;;   or numeric type or named-type T or NIL
+  ;; bits 22..26: more bits of hash
   ;; bits 27..31: 5 bits for type-class index
   ;; We'll never return the upper 5 bits from a hash mixer, so it's fine
   ;; that this uses all 32 bits for a 32-bit word.
   ;; No more than 32 bits are used, even for 64-bit words.
   ;; But it's consistent for genesis to treat it always as a raw slot.
   (%bits (missing-arg) :type sb-vm:word :read-only t))
-
-(defmethod print-object ((ctype ctype) stream)
-  (print-unreadable-object (ctype stream :type t)
-    (prin1 (type-specifier ctype) stream)))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defconstant ctype-hash-nbits 27))
@@ -291,7 +285,7 @@
 (defmacro type-bits-internedp (bits) `(logbitp 20 ,bits))
 (defmacro type-bits-admit-type=-optimization (bits) `(logbitp 21 ,bits))
 
-(defvar *ctype-hashsets* nil)
+(defglobal *ctype-hashsets* nil)
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defconstant +type-internedp+ (ash 1 20))
   (defconstant +type-admits-type=-optimization+ (ash 1 21))
@@ -406,8 +400,10 @@
          (rebind
           (unless more-methods
             (case method
-              ((:complex-subtypep-arg1 :unparse :negate :singleton-p)
+              ((:complex-subtypep-arg1 :negate :singleton-p)
                `((,first (,operator ,arg-type ,first))))
+              ((:unparse)
+               `((,second (,operator ,arg-type ,second))))
               ((:complex-subtypep-arg2)
                `((,first ,first) ; because there might be a DECLARE IGNORE on it
                  (,second (,operator ,arg-type ,second))))
@@ -421,7 +417,9 @@
          ;; both an ancestor and its descendants on some method.
          ;; Too bad for you- this throws the baby out with the bathwater.
          (error "Can't define-type-method for class ~s: already inherited" ',class))
-       (defun ,name ,lambda-list ,@(if rebind `((let ,rebind ,@body)) body))
+       (defun ,name ,lambda-list
+         ,@(if (eq method :unparse) `((declare (ignorable ,(first lambda-list)))))
+         ,@(if rebind `((let ,rebind ,@body)) body))
        (!cold-init-forms
         ,@(mapcar (lambda (method)
                     `(setf (,(type-class-fun-slot method)
@@ -561,23 +559,6 @@
         (let ((*invoked-complex-=-other-method* t))
           (funcall (the function method-fun) type2 type1))
         (values nil t))))
-
-;; The following macros expand into either constructor calls,
-;; if building the cross-compiler, or forms which reference
-;; previously constructed objects, if running the cross-compiler.
-#+sb-xc-host
-(defmacro literal-ctype (constructor &optional specifier)
-  (declare (ignore specifier))
-  `(load-time-value ,constructor))
-
-;; Omitting the specifier works only if the unparser method has been
-;; defined in time to use it, and you're sure that constructor's result
-;; can be unparsed - some unparsers may be confused if called on a
-;; non-canonical object, such as an instance of (CONS T T) that is
-;; not EQ to the interned instance.
-#-sb-xc-host
-(defmacro literal-ctype (constructor &optional (specifier nil specifier-p))
-  (if specifier-p (specifier-type specifier) (symbol-value constructor)))
 
 ;;;; miscellany
 
@@ -727,22 +708,23 @@
              (defun ,(second public-ctor) ,public-ctor-args
                (new-ctype ,name ,@(cdr private-ctor-args))))))))
 
-;;; The "clipped hash" is just the host's SXHASH but ensuring that the result
-;;; is an unsigned fixnum for the target. This ensures that it is legal to use MIX
-;;; on the value. We don't really care what the hash is, so we don't need to use
-;;; SB-XC:SXHASH. It's needlyly tedious to fully emulate our SXHASH on BIGNUM
-;;; and RATIONAL (which can appear in numeric bounds)
+;;; The "clipped hash" is just some stable hash that may rely on the host's SXHASH
+;;; but always ensuring that the result is an unsigned fixnum for the target,
+;;; so that we can call our MIX on the value. It's needlessly tedious to fully
+;;; replicate our SXHASH on BIGNUM and RATIO which can appear in numeric bounds.
 #+sb-xc-host
 (defun clipped-sxhash (x)
   (typecase x
-    ((or bignum rational) ; numeric-type high,low bound
+    (rational ; numeric-type high,low bound; array dimensions, etc
+     ;; All integers can fall through to the host because it would be silly to restrict
+     ;; this case to exactly (OR (AND INTEGER (NOT SB-XC:FIXNUM)) RATIO).
      (logand (cl:sxhash x) sb-xc:most-positive-fixnum))
     (cons
      (if (eq (car x) 'satisfies)
          (sb-xc:sxhash (cadr x)) ; it's good enough
          (error "please no: ~S" x)))
     (t
-     (sb-xc:sxhash x)))) ; FLOAT representation as struct, or FIXNUM or SYMBOL
+     (sb-xc:sxhash x)))) ; FLOAT representation as struct, or SYMBOL
 #-sb-xc-host (defmacro clipped-sxhash (x) `(sxhash ,x))
 
 (defmacro type-hash-mix (&rest args) (reduce (lambda (a b) `(mix ,a ,b)) args))
@@ -878,11 +860,11 @@
   ;; the Common Lisp type-specifier of the type we represent.
   ;; In UNKNOWN types this can only be a symbol.
   ;; For other than an unknown type, this must be a (SATISFIES f) expression.
-  ;; Unfortunately, this can not currently be constrained to
-  ;;  (OR SYMBOL (CONS (EQL SATISFIES) (CONS SYMBOL NULL)))
-  ;; because somewhere in cold-init there is an UNKNOWN-TYPE constructed
-  ;; which has (UNSIGNED-BYTE 8) as the expression, and I  haven't sifted through
-  ;; that logic enough yet to understand why.
+  ;; The reason we can't constrain this to
+  ;;    (OR SYMBOL (CONS (EQL SATISFIES) (CONS SYMBOL NULL)))
+  ;; is that apparently we'll store _illegal_ type specifiers in a hairy-type.
+  ;; There's an example in the regression test named
+  ;;  :single-warning-for-single-undefined-type
   (specifier nil :type t :test equal))
 
 (macrolet ((hash-fp-zeros (x) ; order-insensitive
@@ -1088,7 +1070,7 @@
 (macrolet ((numbound-hash (b)
              ;; It doesn't matter what the hash of a number is, as long as it's stable.
              ;; Use the host's SXHASH for convenience.
-             ;; We aren't obliged to fully emulate own behavior on RATIONAL and BIGNUM,
+             ;; We aren't obliged to fully emulate own behavior on numbers,
              ;; but we can't trust the host to do the right thing on our proxy floats.
              `(let ((x ,b))
                 (block nil
@@ -1280,6 +1262,7 @@
                               `',(symbolicate "*" instance-type "-HASHSET*")))))))))
     (generate)))
 
+(defglobal *alien-type-hashsets* nil)
 (export 'show-ctype-ctor-cache-metrics)
 ;;; The minimum hashset storage size is 64 elements, so a bunch of the caches
 ;;; start out with too-low load-factor, being somewhat oversized.
@@ -1289,50 +1272,63 @@
 ;;; So it's extremely unexpected that List starts out with a load-factor of 12%.
 ;;; Probably should investigate, though it's harmless.
 (defun show-ctype-ctor-cache-metrics ()
-  (let (caches (total 0))
-    (push (list "List" *ctype-list-hashset*) caches)
-    (push (list "Set" *ctype-set-hashset*) caches)
-    (push (list "Key-Info" *key-info-hashset*) caches)
-    (push (list "Key-Info-List" *key-info-list-hashset*) caches)
-    (push (list "EQL" *eql-type-cache*) caches)
-    (dolist (symbol *ctype-hashsets*)
-      (push (list (subseq (string symbol) 1
-                          (- (length (string symbol)) (length "-TYPE-HASHSET*")))
-                  (symbol-value symbol))
-            caches))
-    (flet ((tablecount (x)
-             (if (hash-table-p x) (hash-table-count x) (sb-impl::hashset-count x))))
+  (labels
+      ((tablecount (x)
+         (if (hash-table-p x) (hash-table-count x) (sb-impl::hashset-count x)))
+       (display (caches &aux (total 0))
+         (dolist (cache (sort caches #'> ; decreasing cout
+                              :key (lambda (x) (tablecount (second x)))))
+           (binding*
+               ((name (first cache))
+                (table (second cache))
+                (count (tablecount table))
+                ((load seeks hit psl mask)
+                 (if (hash-table-p table)
+                     (values #+sb-xc-host nil
+                             #-sb-xc-host
+                             (/ count
+                                (ash (length (sb-impl::hash-table-pairs table)) -1))
+                             nil nil nil nil nil) ; FIXME: compute PSL and mask
+                     (let* ((cells (sb-impl::hss-cells (sb-impl::hashset-storage table)))
+                            (psl (sb-impl::hs-cells-max-psl cells))
+                            (mask (sb-impl::hs-cells-mask cells))
+                            (lf (/ count (1+ mask))))
+                       #-hashset-metrics (values lf nil nil psl mask)
+                       #+hashset-metrics
+                       (let ((seeks (sb-impl::hashset-count-finds table)))
+                         (values lf seeks
+                                 (when (plusp seeks)
+                                   (/ (sb-impl::hashset-count-find-hits table) seeks))
+                                 psl mask))))))
+               (incf total count)
+               (apply #'format t
+                      "  ~16a: ~7D ~5,1,2F%~#[~:; ~:[        ~;~:*~8D~]  ~:[     ~;~:*~4,1,2f%~]~
+ ~6D ~6X~]~%"
+                      name count load
+                      (unless (hash-table-p table) (list seeks hit psl mask)))))
+         (format t "  ~16A: ~7D~%" "Total" total)))
+    (let (caches)
+      (push (list "List" *ctype-list-hashset*) caches)
+      (push (list "Set" *ctype-set-hashset*) caches)
+      (push (list "Key-Info" *key-info-hashset*) caches)
+      (push (list "Key-Info-List" *key-info-list-hashset*) caches)
+      (push (list "EQL" *eql-type-cache*) caches)
+      (dolist (symbol *ctype-hashsets*)
+        (push (list (subseq (string symbol) 1
+                            (- (length (string symbol)) (length "-TYPE-HASHSET*")))
+                    (symbol-value symbol))
+              caches))
       (format t "~&ctype cache metrics:  Count     LF     Seek    Hit maxPSL  Mask~%")
-      (dolist (cache (sort caches #'> ; decreasing cout
-                           :key (lambda (x) (tablecount (second x)))))
-        (binding*
-            ((name (first cache))
-             (table (second cache))
-             (count (tablecount table))
-             ((load seeks hit psl mask)
-              (if (hash-table-p table)
-                  (values #+sb-xc-host nil
-                          #-sb-xc-host
-                          (/ count
-                             (ash (length (sb-impl::hash-table-pairs table)) -1))
-                          nil nil nil nil nil) ; FIXME: compute PSL and mask
-                  (let* ((cells (sb-impl::hss-cells (sb-impl::hashset-storage table)))
-                         (psl (sb-impl::hs-cells-max-psl cells))
-                         (mask (sb-impl::hs-cells-mask cells))
-                         (lf (/ count (1+ mask))))
-                    #-hashset-metrics (values lf nil nil psl mask)
-                    #+hashset-metrics
-                    (let ((seeks (sb-impl::hashset-count-finds table)))
-                      (values lf seeks
-                              (when (plusp seeks)
-                                (/ (sb-impl::hashset-count-find-hits table) seeks))
-                              psl mask))))))
-          (incf total count)
-          (apply #'format t
-                 "  ~16a: ~7D ~5,1,2F%~#[~:; ~:[        ~;~:*~8D~]  ~:[     ~;~:*~4,1,2f%~]~
- ~6D ~6X~]~%" name count load
-              (unless (hash-table-p table) (list seeks hit psl mask))))))
-    (format t "  ~16A: ~7D~%" "Total" total)))
+      (display caches))
+    (let (caches)
+      (format t "~&Alien:~%")
+      (dolist (symbol *alien-type-hashsets*)
+        (let ((name (subseq (string symbol) 1
+                            (- (length (string symbol)) (length "-TYPE-CACHE*")))))
+          (push (list (if (char= (char name 0) #\A) (subseq name 6) name)
+                      (symbol-value symbol))
+              caches)))
+      (display caches))))
 
 #-sb-xc-host
 (progn
@@ -1344,10 +1340,9 @@
       (cond ((not hashset-symbol)
              ;; There are very few which aren't in a hashset:
              ;; - (6) NAMED-TYPEs
+             ;; - (1) MEMBER-TYPE NULL
              ;; - (3) BASE-CHAR, EXTENDED-CHAR, CHARACTER
              ;; - (1) CONS
-             ;; - (1) NUMBER
-             ;; - (2) SATISFIES
              (push instance permtypes))
             ;; Mandatory special-case for singleton MEMBER types
             ((and (member-type-p instance) (not (cdr (member-type-members instance))))
@@ -1394,7 +1389,7 @@
            (ensure-interned-list (compound-type-types instance) *ctype-set-hashset*))
           (negation-type
            (check (negation-type-type instance)))))))
-  (aver (= (length permtypes) (+ 13 #-sb-unicode -2)))
+  (aver (= (length permtypes) (+ 11 #-sb-unicode -2)))
   #+sb-devel (setq *hashsets-preloaded* t))
 (preload-ctype-hashsets))
 
@@ -1630,3 +1625,23 @@
   (dolist (sym (list* '*key-info-hashset* '*key-info-list-hashset*
                       *ctype-hashsets*))
     (sb-impl::hashset-rehash (symbol-value sym) nil)))
+
+;;; a flag that causes TYPE-SPECIFIER to represent UNKNOWN-TYPE
+;;; as itself rather than the symbol naming the type so that the printed
+;;; representation is not confusable for a good type of the same name.
+(defconstant +ctype-unparse-disambiguate+ 1)
+;;; a flag that causes all function types to unparse as FUNCTION.
+;;; This is useful when we want a specifier that we can pass to TYPEP.
+(defconstant +unparse-fun-type-simplify+  2)
+
+(defmethod print-object ((ctype ctype) stream)
+  (let ((expr
+         (if (unknown-type-p ctype)
+             ;; Don't call the unparse method - it returns the instance itself
+             ;; which would infinitely recurse back into print-object
+             (unknown-type-specifier ctype)
+             (funcall (type-class-unparse (type-class ctype))
+                      +ctype-unparse-disambiguate+
+                      ctype))))
+    (print-unreadable-object (ctype stream :type t)
+      (prin1 expr stream))))

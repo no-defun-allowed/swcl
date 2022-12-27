@@ -2669,23 +2669,20 @@ static void sticky_preserve_pointer(os_context_register_t register_word)
 #endif
             && lowtag_ok_for_page_type(word, page_table[page].type)
             && plausible_tag_p(word)) { // "plausible" is good enough
-            if (page_single_obj_p(page)) {
+            if (lowtag_of(word) == OTHER_POINTER_LOWTAG &&
+                widetag_of(native_pointer(word)) == SIMPLE_VECTOR_WIDETAG) {
                 /* if 'word' is the correctly-tagged pointer to the base of a SIMPLE-VECTOR,
                  * then set the sticky mark on every marked page. The only other large
                  * objects are CODE (writes to which are pseudo-atomic),
                  * and BIGNUM (which aren't on boxed pages) */
-                lispobj* scan_start = page_scan_start(page);
-                if  (widetag_of(scan_start) == SIMPLE_VECTOR_WIDETAG
-                     && (uword_t)word == make_lispobj(scan_start, OTHER_POINTER_LOWTAG)) {
-                    generation_index_t gen = page_table[page].gen;
-                    while (1) {
-                        long card = page_to_card_index(page);
-                        int i;
-                        for(i=0; i<CARDS_PER_PAGE; ++i)
-                            if (gc_card_mark[card+i]==CARD_MARKED) gc_card_mark[card+i]=STICKY_MARK;
-                        if (page_ends_contiguous_block_p(page, gen)) break;
-                        ++page;
-                    }
+                generation_index_t gen = page_table[page].gen;
+                while (1) {
+                    long card = page_to_card_index(page);
+                    int i;
+                    for(i=0; i<CARDS_PER_PAGE; ++i)
+                        if (gc_card_mark[card+i]==CARD_MARKED) gc_card_mark[card+i]=STICKY_MARK;
+                    if (page_ends_contiguous_block_p(page, gen)) break;
+                    ++page;
                 }
             } else if (gc_card_mark[addr_to_card_index((void*)word)] == CARD_MARKED) {
                 gc_card_mark[addr_to_card_index((void*)word)] = STICKY_MARK;
@@ -2971,8 +2968,14 @@ update_code_writeprotection(page_index_t first_page, page_index_t last_page,
 {
     if (!ENABLE_PAGE_PROTECTION) return;
     page_index_t i;
-    for (i=first_page+1; i <= last_page; ++i) // last_page is inclusive
+    for (i=first_page; i <= last_page; ++i) {// last_page is inclusive
         gc_assert(is_code(page_table[i].type));
+#ifdef LISP_FEATURE_SOFT_CARD_MARKS
+        if (cardseq_any_sticky_mark(page_to_card_index(i))) {
+            return;
+        }
+#endif
+    }
 
     lispobj* where = start;
     for (; where < limit; where += headerobj_size(where)) {

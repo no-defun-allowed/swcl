@@ -275,11 +275,11 @@
 
 ;; Leakage from the host could result in wrong values for truncation.
 (with-test (:name :truncate)
-  (assert (plusp (sb-kernel:%unary-truncate/single-float (expt 2f0 33))))
-  (assert (plusp (sb-kernel:%unary-truncate/double-float (expt 2d0 33))))
+  (assert (plusp (sb-kernel:%unary-truncate (expt 2f0 33))))
+  (assert (plusp (sb-kernel:%unary-truncate (expt 2d0 33))))
   ;; That'd be one strange host, but just in case
-  (assert (plusp (sb-kernel:%unary-truncate/single-float (expt 2f0 65))))
-  (assert (plusp (sb-kernel:%unary-truncate/double-float (expt 2d0 65)))))
+  (assert (plusp (sb-kernel:%unary-truncate (expt 2f0 65))))
+  (assert (plusp (sb-kernel:%unary-truncate (expt 2d0 65)))))
 
 ;; On x86-64, we sometimes forgot to clear the higher order bits of the
 ;; destination register before using it with an instruction that doesn't
@@ -751,3 +751,7 @@
                                  (declare ((double-float 10d0 30d0) f))
                                  (values (truncate f)))))))
              '(integer 10 30))))
+
+(with-test (:name :rational-not-bignum)
+  (assert (equal (type-of (eval '(rational -4.3973217e12)))
+                 (type-of -4397321682944))))

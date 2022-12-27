@@ -302,9 +302,40 @@
 (define-type-method (values :negate) (type)
   (error "NOT VALUES too confusing on ~S" (type-specifier type)))
 
-(define-type-method (values :unparse) (type)
+(defun type-unparse (flags thing)
+  (if (listp thing)
+      (mapcar (lambda (x) (funcall (type-class-unparse (type-class x)) flags x))
+              thing)
+      (funcall (type-class-unparse (type-class thing)) flags thing)))
+
+;;; Return the lambda-list-like type specification corresponding
+;;; to an ARGS-TYPE.
+(defun unparse-args-types (flags type)
+  (collect ((result))
+    (when (args-type-optional type)
+      (result '&optional)
+      (dolist (arg (args-type-optional type))
+        (result (type-unparse flags arg))))
+
+    (when (args-type-rest type)
+      (result '&rest)
+      (result (type-unparse flags (args-type-rest type))))
+
+    (when (args-type-keyp type)
+      (result '&key)
+      (dolist (key (args-type-keywords type))
+        (result (list (key-info-name key)
+                      (type-unparse flags (key-info-type key))))))
+
+    (when (args-type-allowp type)
+      (result '&allow-other-keys))
+
+    (nconc (type-unparse flags (args-type-required type))
+           (result))))
+
+(define-type-method (values :unparse) (flags type)
   (cons 'values
-        (let ((unparsed (unparse-args-types type)))
+        (let ((unparsed (unparse-args-types flags type)))
           (if (or (values-type-optional type)
                   (values-type-rest type))
               unparsed
@@ -331,28 +362,22 @@
 (define-type-method (values :simple-=) (type1 type2)
   (type=-args type1 type2))
 
-;;; a flag that we can bind to cause complex function types to be
-;;; unparsed as FUNCTION. This is useful when we want a type that we
-;;; can pass to TYPEP.
-(defvar *unparse-fun-type-simplify* nil)
-
 (define-type-class function :enumerable nil :might-contain-other-types nil)
 
 (define-type-method (function :negate) (type) (make-negation-type type))
 
-(define-type-method (function :unparse) (type)
+(define-type-method (function :unparse) (flags type)
   (let ((name (if (fun-designator-type-p type)
                   'function-designator
                   'function)))
-    (cond (*unparse-fun-type-simplify*
+    (cond ((logtest flags +unparse-fun-type-simplify+)
            name)
           (t
            (list name
                  (if (fun-type-wild-args type)
                      '*
-                     (unparse-args-types type))
-                 (type-specifier
-                  (fun-type-returns type)))))))
+                     (unparse-args-types flags type))
+                 (type-unparse flags (fun-type-returns type)))))))
 
 ;;; The meaning of this is a little confused. On the one hand, all
 ;;; function objects are represented the same way regardless of the
@@ -524,8 +549,8 @@
 (define-type-method (constant :negate) (type)
   (error "NOT CONSTANT too confusing on ~S" (type-specifier type)))
 
-(define-type-method (constant :unparse) (type)
-  `(constant-arg ,(type-specifier (constant-type-type type))))
+(define-type-method (constant :unparse) (flags type)
+  `(constant-arg ,(type-unparse flags (constant-type-type type))))
 
 (define-type-method (constant :simple-=) (type1 type2)
   (type= (constant-type-type type1) (constant-type-type type2)))
@@ -606,35 +631,6 @@
           (canonicalize-args-type-args required optional rest
                                        (ll-kwds-keyp llks))
         (values llks required optional rest keywords))))))
-
-;;; Return the lambda-list-like type specification corresponding
-;;; to an ARGS-TYPE.
-(declaim (ftype (function (args-type) list) unparse-args-types))
-(defun unparse-args-types (type)
-  (collect ((result))
-
-    (dolist (arg (args-type-required type))
-      (result (type-specifier arg)))
-
-    (when (args-type-optional type)
-      (result '&optional)
-      (dolist (arg (args-type-optional type))
-        (result (type-specifier arg))))
-
-    (when (args-type-rest type)
-      (result '&rest)
-      (result (type-specifier (args-type-rest type))))
-
-    (when (args-type-keyp type)
-      (result '&key)
-      (dolist (key (args-type-keywords type))
-        (result (list (key-info-name key)
-                      (type-specifier (key-info-type key))))))
-
-    (when (args-type-allowp type)
-      (result '&allow-other-keys))
-
-    (result)))
 
 (defun translate-fun-type (context args result
                            &key designator)
@@ -1306,10 +1302,11 @@
 
 ;;; Return a Common Lisp type specifier corresponding to the TYPE
 ;;; object.
-(defun type-specifier (type)
+(defun type-specifier (type &optional simplify-fun-types)
   (declare (type ctype type))
-  (funcall (type-class-unparse (type-class type)) type))
-
+  (funcall (type-class-unparse (type-class type))
+           (if simplify-fun-types +unparse-fun-type-simplify+ 0)
+           type))
 
 ;;; Return the type structure corresponding to a type specifier.
 ;;;
@@ -1853,15 +1850,36 @@ expansion happened."
          (t (values min :maybe))))
     ()))
 
+;;; This macro aids in producing a constant ctype instance with less worry about
+;;; execution order of LOAD-TIME-VALUE with respect to toplevel forms.
+;;; In make-host-1, the answer is computed just-in-time and memoized,
+;;; and in make-host-2 it's a literal object at macroexpansion time.
+(defmacro inline-cache-ctype (constructor specifier)
+  (declare (ignorable constructor specifier))
+  ;; CLISP incorrectly coalesces LOAD-TIME-VALUE expressions that are EQUAL,
+  ;; so provide some assurance that they aren't.
+  #+sb-xc-host `(let ((cell (load-time-value (list nil ',specifier))))
+                  (or (car cell) (setf (car cell) ,constructor)))
+  #-sb-xc-host (specifier-type specifier))
+
+;;; Return T if TYPE is one defined in the language spec, and whose representation
+;;; in SBCL's type-class taxonomy entails that of an INTERSECTION-TYPE.
+;;; This function can be called no sooner than 'deftypes-for-targets' gets loaded,
+;;; so that we don't see undefined types.
+(macrolet ((specifier-type-once-only (spec)
+             `(inline-cache-ctype (the intersection-type (specifier-type ',spec))
+                                  ,spec)))
+(defun cl-std-intersection-type-p (type)
+  (cond ((eq type (specifier-type-once-only keyword)) 'keyword)
+        ((eq type (specifier-type-once-only compiled-function)) 'compiled-function)
+        ((eq type (specifier-type-once-only ratio)) 'ratio))))
+
 (define-type-method (named :complex-=) (type1 type2)
   (cond
     ((and (eq type2 *empty-type*)
           (or (and (intersection-type-p type1)
-                   ;; not allowed to be unsure on these... FIXME: keep
-                   ;; the list of CL types that are intersection types
-                   ;; once and only once.
-                   (not (or (type= type1 (specifier-type 'ratio))
-                            (type= type1 (specifier-type 'keyword)))))
+                   ;; not allowed to be unsure on these...
+                   (not (cl-std-intersection-type-p type1)))
               (and (cons-type-p type1)
                    (cons-type-might-be-empty-type type1))))
      ;; things like (AND (EQL 0) (SATISFIES ODDP)) or (AND FUNCTION
@@ -2062,32 +2080,17 @@ expansion happened."
      (make-negation-type x))
     (t (bug "NAMED type unexpected: ~S" x))))
 
-(define-type-method (named :unparse) (x)
+(define-type-method (named :unparse) (flags x)
   (named-type-name x))
 
 ;;;; hairy and unknown types
 
-;;; Without some special HAIRY cases, we massively pollute the type caches
-;;; with objects that are all equivalent to *EMPTY-TYPE*. e.g.
-;;;  (AND (SATISFIES LEGAL-FUN-NAME-P) (SIMPLE-ARRAY CHARACTER (*))) and
-;;;  (AND (SATISFIES KEYWORDP) CONS). Since the compiler doesn't know
-;;; that they're just *EMPTY-TYPE*, its keeps building more and more complex
-;;; expressions involving them. I'm not sure why those two are so prevalent
-;;; but they definitely seem to be.  We can improve performance by reducing
-;;; them to *EMPTY-TYPE* which means we need a way to recognize those hairy
-;;; types in order reason about them. Interning them is how we recognize
-;;; them, as they can be compared by EQ.
-#+sb-xc-host
-(progn
-  (defvar *satisfies-keywordp-type*
-    (!alloc-hairy-type (pack-interned-ctype-bits 'hairy) '(satisfies keywordp)))
-  (defvar *fun-name-type*
-    (!alloc-hairy-type (pack-interned-ctype-bits 'hairy) '(satisfies legal-fun-name-p))))
-
 (define-type-method (hairy :negate) (x) (make-negation-type x))
 
-(define-type-method (hairy :unparse) (x)
-  (hairy-type-specifier x))
+(define-type-method (hairy :unparse) (flags x)
+  (if (and (logtest flags +ctype-unparse-disambiguate+) (unknown-type-p x))
+      x
+      (hairy-type-specifier x)))
 
 (define-type-method (hairy :simple-subtypep) (type1 type2)
   (let ((hairy-spec1 (hairy-type-specifier type1))
@@ -2124,11 +2127,19 @@ expansion happened."
       (type= type1 type2)
       (values nil nil)))
 
+;;; Without some special HAIRY cases, we massively pollute the type caches
+;;; with objects that are all equivalent to *EMPTY-TYPE*. e.g.
+;;;  (AND (SATISFIES LEGAL-FUN-NAME-P) (SIMPLE-ARRAY CHARACTER (*))) and
+;;;  (AND (SATISFIES KEYWORDP) CONS). Since the compiler doesn't know
+;;; that they're just *EMPTY-TYPE*, its keeps building more and more complex
+;;; expressions involving them. I'm not sure why those two are so prevalent
+;;; but they definitely seem to be.  We can improve performance by reducing
+;;; them to *EMPTY-TYPE*.
 (define-type-method (hairy :simple-intersection2 :complex-intersection2)
                      (type1 type2)
  (acond ((type= type1 type2)
          type1)
-        ((eq type2 (literal-ctype *satisfies-keywordp-type*))
+        ((eq type2 (specifier-type '(satisfies keywordp)))
          ;; (AND (MEMBER A) (SATISFIES KEYWORDP)) is possibly non-empty
          ;; if A is re-homed as :A. However as a special case that really
          ;; does occur, (AND (MEMBER NIL) (SATISFIES KEYWORDP))
@@ -2138,7 +2149,7 @@ expansion happened."
              (multiple-value-bind (answer certain)
                  (types-equal-or-intersect type1 (specifier-type 'symbol))
                (and (not answer) certain *empty-type*))))
-        ((eq type2 (literal-ctype *fun-name-type*))
+        ((eq type2 (specifier-type '(satisfies legal-fun-name-p)))
          (multiple-value-bind (answer certain)
              (types-equal-or-intersect type1 (specifier-type 'symbol))
            (and (not answer)
@@ -2177,7 +2188,9 @@ expansion happened."
                 (atom atom)
                 (bit-vector-p bit-vector)
                 (characterp character)
-                (compiled-function-p compiled-function)
+                ;; can't turn (SATISFIES COMPILED-FUNCTION-P) into COMPILED-FUNCTION
+                ;; because COMPILED-FUNCTION is defined in terms of SATISFIES.
+                ;; (compiled-function-p compiled-function)
                 (complexp complex)
                 (consp cons)
                 (floatp float)
@@ -2214,8 +2227,6 @@ expansion happened."
            :format-control "The SATISFIES predicate name is not a symbol: ~S"
            :format-arguments (list predicate-name)))
   (case predicate-name
-   (keywordp (literal-ctype *satisfies-keywordp-type*))
-   (legal-fun-name-p (literal-ctype *fun-name-type*))
    (adjustable-array-p (specifier-type '(and array (not simple-array))))
    (t (let ((type (info :function :predicate-for predicate-name)))
         (if type
@@ -2233,10 +2244,10 @@ expansion happened."
 (define-type-method (negation :negate) (x)
   (negation-type-type x))
 
-(define-type-method (negation :unparse) (x)
+(define-type-method (negation :unparse) (flags x)
   (if (type= (negation-type-type x) (specifier-type 'cons))
       'atom
-      `(not ,(type-specifier (negation-type-type x)))))
+      `(not ,(type-unparse flags (negation-type-type x)))))
 
 (define-type-method (negation :simple-subtypep) (type1 type2)
   (csubtypep (negation-type-type type2) (negation-type-type type1)))
@@ -2498,7 +2509,7 @@ expansion happened."
                 :low (if (consp high) (car high) (list high))
                 :high nil))))))))
 
-(define-type-method (number :unparse) (type)
+(define-type-method (number :unparse) (flags type)
   (let* ((complexp (numeric-type-complexp type))
          (low (numeric-type-low type))
          (high (numeric-type-high type))
@@ -2667,14 +2678,6 @@ expansion happened."
                    (sb-xc:>= (type-bound-number low) (type-bound-number high))
                    (sb-xc:> low high)))
       (return-from make-numeric-type *empty-type*))
-    ;; Just about all NUMERIC-TYPES are in the hashset except NUMBER itself.
-    ;; Cold-init fails without this hardwired case and I don't know why.
-    (unless class
-      (return-from make-numeric-type
-        (literal-ctype (!alloc-numeric-type (pack-interned-ctype-bits 'number)
-                                            (get-numtype-aspects nil nil nil)
-                                            nil nil)
-                       number)))
     (when (and (eq class 'rational) (integerp low) (eql low high))
       (setf class 'integer))
     (new-ctype numeric-type (get-numtype-aspects complexp class format) low high)))
@@ -2951,10 +2954,15 @@ expansion happened."
              (t nil))))))
 
 
-(!cold-init-forms ;; is !PRECOMPUTE-TYPES not doing the right thing?
+(!cold-init-forms
   (setf (info :type :kind 'number) :primitive)
   (setf (info :type :builtin 'number)
-        (make-numeric-type :complexp nil)))
+        #+sb-xc-host
+        (hashset-insert *numeric-type-hashset*
+                        (!alloc-numeric-type #.(pack-interned-ctype-bits 'number)
+                                             (get-numtype-aspects nil nil nil)
+                                             nil nil))
+        #-sb-xc-host (specifier-type 'number)))
 
 (def-type-translator complex ((:context context) &optional (typespec '*))
   (if (eq typespec '*)
@@ -3376,11 +3384,7 @@ used for a COMPLEX component.~:@>"
 ;; clear already ENUMERABLE-P does not mean "possibly a MEMBER type in
 ;; the Lisp-theoretic sense", but means "could be implemented in SBCL
 ;; as a MEMBER type".
-(eval-when (#+sb-xc-host :compile-toplevel :load-toplevel :execute)
-  ;; may not get executed before LITERAL-CTYPE = LOAD-TIME-VALUE on
-  ;; host, since LOAD-TIME-VALUE execution order with respect to top
-  ;; level forms is unspecified.
-  (define-type-class character-set :enumerable nil :might-contain-other-types nil))
+(define-type-class character-set :enumerable nil :might-contain-other-types nil)
 
 (defun make-character-set-type (pairs)
   ; (aver (equal (mapcar #'car pairs)
@@ -3410,10 +3414,10 @@ used for a COMPLEX component.~:@>"
     (unless (cdr pairs)
       (macrolet ((range (low high)
                    `(return-from make-character-set-type
-                      (literal-ctype (!alloc-character-set-type
-                                      (pack-interned-ctype-bits 'character-set)
-                                      '((,low . ,high)))
-                                     (character-set ((,low . ,high)))))))
+                      (inline-cache-ctype
+                       (!alloc-character-set-type (pack-interned-ctype-bits 'character-set)
+                                                  '((,low . ,high)))
+                       (character-set ((,low . ,high)))))))
         (let* ((pair (car pairs))
                (low (car pair))
                (high (cdr pair)))
@@ -3474,7 +3478,7 @@ used for a COMPLEX component.~:@>"
                          (make-array-type '* :element-type *wild-type*)))
       (make-negation-type type)))
 
-(define-type-method (array :unparse) (type)
+(define-type-method (array :unparse) (flags type)
   (let* ((dims (array-type-dimensions type))
          ;; Compare the specialised element type and the
          ;; derived element type.  If the derived type
@@ -3489,7 +3493,8 @@ used for a COMPLEX component.~:@>"
          (stype (array-type-specialized-element-type type))
          (dtype (array-type-element-type type))
          (utype (%upgraded-array-element-type dtype))
-         (eltype (type-specifier (if (type= stype utype)
+         (eltype (type-unparse flags
+                                (if (type= stype utype)
                                      dtype
                                      stype)))
          (complexp (array-type-complexp type)))
@@ -3833,7 +3838,8 @@ used for a COMPLEX component.~:@>"
   (let ((presence 0)
         (unpaired nil)
         (float-types nil))
-    (when fp-zeroes ; avoid doing two passes of nothing
+    (cond
+     (fp-zeroes ; avoid doing two passes of nothing
       (dotimes (pass 2)
         (dolist (z fp-zeroes)
           (let ((sign (float-sign-bit z))
@@ -3852,6 +3858,14 @@ used for a COMPLEX component.~:@>"
                       ;; in your cache lookup so you can cache while you cache.)
                       (push (ctype-of z) float-types))
                     (push z unpaired)))))))
+     ((and (= (xset-count xset) 1)
+           (eq (car (xset-members xset)) nil))
+      ;; Bypass the hashset for type NULL because it's so important
+      (return-from make-member-type
+        (inline-cache-ctype (!alloc-member-type (pack-interned-ctype-bits 'member)
+                                                (xset-from-list '(nil))
+                                                '())
+                            null))))
     (let ((member-type
            (case (+ (length unpaired) (xset-count xset))
              (0 nil) ; nil
@@ -3925,7 +3939,7 @@ used for a COMPLEX component.~:@>"
         ;; Easy case
         (make-negation-type type))))
 
-(define-type-method (member :unparse) (type)
+(define-type-method (member :unparse) (flags type)
   (cond ((eq type (specifier-type 'null)) 'null) ; NULL type is EQ-comparable
         ((eq type (specifier-type 'boolean)) 'boolean) ; so is BOOLEAN
         (t `(member ,@(member-type-members type)))))
@@ -4058,18 +4072,9 @@ used for a COMPLEX component.~:@>"
 
 ;;; A few intersection types have special names. The others just get
 ;;; mechanically unparsed.
-(define-type-method (intersection :unparse) (type)
-  (declare (type ctype type))
-  ;; If magic intersection types were interned, then
-  ;; we could compare by EQ here instead of calling TYPE=
-  (cond ((type= type (literal-ctype (specifier-type 'keyword) keyword))
-         'keyword)
-        ((type= type (literal-ctype (specifier-type 'ratio) ratio))
-         'ratio)
-        ((type= type (literal-ctype (specifier-type 'compiled-function) compiled-function))
-         'compiled-function)
-        (t
-         `(and ,@(mapcar #'type-specifier (intersection-type-types type))))))
+(define-type-method (intersection :unparse) (flags type)
+  (or (cl-std-intersection-type-p type)
+      `(and ,@(type-unparse flags (intersection-type-types type)))))
 
 (define-type-method (intersection :singleton-p) (type)
   (loop for constituent in (intersection-type-types type)
@@ -4310,7 +4315,7 @@ used for a COMPLEX component.~:@>"
     ;; before considering LIST and extracting 2, etc.
     '(sequence list real float complex bignum)))
 
-(define-type-method (union :unparse) (type)
+(define-type-method (union :unparse) (flags type)
   ;; This logic diverges between +/- sb-xc-host because the machinery
   ;; to parse types is obviously not usable here during make-host-1,
   ;; so the macro has to generate code that is lazier about parsing.
@@ -4391,7 +4396,7 @@ used for a COMPLEX component.~:@>"
                    (rplaca tail nil) ; We'll delete these list elements later
                    (rplaca peer nil))))
       (let ((list (nconc (recognized)
-                         (mapcar #'type-specifier (delete nil remainder)))))
+                         (type-unparse flags (delete nil remainder)))))
         (if (cdr list) `(or ,@list) (car list))))))
 
 ;;; Two union types are equal if they are each subtypes of each
@@ -4552,7 +4557,7 @@ used for a COMPLEX component.~:@>"
 
 (define-type-method (alien :negate) (type) (make-negation-type type))
 
-(define-type-method (alien :unparse) (type)
+(define-type-method (alien :unparse) (flags type)
   `(alien ,(unparse-alien-type (alien-type-type-alien-type type))))
 
 (define-type-method (alien :simple-subtypep) (type1 type2)
@@ -4603,13 +4608,11 @@ used for a COMPLEX component.~:@>"
   (cond ((or (eq car-type *empty-type*)
              (eq cdr-type *empty-type*))
          *empty-type*)
-        ;; It's not a requirement that (CONS T T) be interned,
-        ;; but it improves the hit rate in the function caches.
-        ((and (type= car-type *universal-type*)
-              (type= cdr-type *universal-type*))
-         (literal-ctype (!alloc-cons-type (pack-interned-ctype-bits 'cons)
-                                          *universal-type* *universal-type*)
-                        cons))
+        ;; Bypass the hashset for plain CONS
+        ((and (eq car-type *universal-type*) (eq cdr-type *universal-type*))
+         (inline-cache-ctype (!alloc-cons-type (pack-interned-ctype-bits 'cons)
+                                               *universal-type* *universal-type*)
+                             cons))
         (t
          (new-ctype cons-type car-type cdr-type))))
 
@@ -4648,11 +4651,11 @@ used for a COMPLEX component.~:@>"
            (type-negation (cons-type-cdr-type type))))
          (t (bug "Weird CONS type ~S" type))))))
 
-(define-type-method (cons :unparse) (type)
+(define-type-method (cons :unparse) (flags type)
   (if (eq type (specifier-type 'cons))
       'cons
-      `(cons ,(type-specifier (cons-type-car-type type))
-             ,(type-specifier (cons-type-cdr-type type)))))
+      `(cons ,(type-unparse flags (cons-type-car-type type))
+             ,(type-unparse flags (cons-type-cdr-type type)))))
 
 (define-type-method (cons :simple-=) (type1 type2)
   (declare (type cons-type type1 type2))
@@ -4827,13 +4830,17 @@ used for a COMPLEX component.~:@>"
                            (nreverse not-pairs))
                        (push (cons (1+ high1) (1- low2)) not-pairs)))))))))
 
-(define-type-method (character-set :unparse) (type)
+(define-type-method (character-set :unparse) (flags type)
   (cond
+    ;; TODO: can we improve unparsing of (OR STANDARD-CHAR (MEMBER #\Tab))
+    ;; to restore it back into itself rather than
+    ;;  #<CHARACTER-SET-TYPE (CHARACTER-SET ((9 . 10) (32 . 126)))> ?
+    ;; Probably need to take TYPE-DIFFERENCE of TYPE with each known
+    ;; character-set type to see if any result is simpler.
     ((eq type (specifier-type 'character)) 'character)
     ((eq type (specifier-type 'base-char)) 'base-char)
     ((eq type (specifier-type 'extended-char)) 'extended-char)
-    ;; standard-char is not an interned type
-    ((type= type (specifier-type 'standard-char)) 'standard-char)
+    ((eq type (specifier-type 'standard-char)) 'standard-char)
     (t
      ;; Unparse into either MEMBER or CHARACTER-SET. We use MEMBER if there
      ;; are at most as many characters as there are character code ranges.
@@ -4978,6 +4985,17 @@ used for a COMPLEX component.~:@>"
 ;;;; SIMD-PACK types
 
 #+sb-simd-pack
+(defmacro parsed-simd-pack-element-type (index)
+  ;; For make-host-1, delay parsing until after 'deftypes-for-target' is loaded,
+  ;; as it contains the needed definitions for SIGNED-BYTE and UNSIGNED-BYTE.
+  ;; make-host-2 can splice in a constant vector.
+  #+sb-xc-host `(specifier-type (aref +simd-pack-element-types+ ,index))
+  #-sb-xc-host `(aref ,(coerce (loop for x across +simd-pack-element-types+
+                                     collect (specifier-type x))
+                               'simple-vector)
+                      ,index))
+
+#+sb-simd-pack
 (progn
 ;;; FIXME: the pretty-print of this error message is just ghastly. How about:
 ;;;  "must be a subtype of ({SIGNED-BYTE|UNSIGNED-BYTE} {8|16|32|64}) or {SINGLE|DOUBLE}-FLOAT"
@@ -4993,7 +5011,7 @@ used for a COMPLEX component.~:@>"
                         ~{~/sb-impl:print-type-specifier/~#[~;, or ~
                         ~:;, ~]~}."
                      type-name (coerce +simd-pack-element-types+ 'list)))
-      (when (csubtypep element-type (specifier-type (aref +simd-pack-element-types+ i)))
+      (when (csubtypep element-type (parsed-simd-pack-element-type i))
         (return (funcall ctor (ash 1 i)))))))
 
 (defun simd-type-unparser-helper (base-type mask)
@@ -5021,7 +5039,7 @@ used for a COMPLEX component.~:@>"
           not-pack
           (type-union not-pack (%make-simd-pack-type mask)))))
 
-  (define-type-method (simd-pack :unparse) (type)
+  (define-type-method (simd-pack :unparse) (flags type)
     (simd-type-unparser-helper 'simd-pack (simd-pack-type-tag-mask type)))
 
   (define-type-method (simd-pack :simple-=) (type1 type2)
@@ -5064,7 +5082,7 @@ used for a COMPLEX component.~:@>"
           not-pack
           (type-union not-pack (%make-simd-pack-256-type mask)))))
 
-  (define-type-method (simd-pack-256 :unparse) (type)
+  (define-type-method (simd-pack-256 :unparse) (flags type)
     (simd-type-unparser-helper 'simd-pack-256 (simd-pack-256-type-tag-mask type)))
 
   (define-type-method (simd-pack-256 :simple-=) (type1 type2)
@@ -5441,24 +5459,20 @@ used for a COMPLEX component.~:@>"
       #+sb-simd-pack
       (simd-pack
        (let ((tag (%simd-pack-tag x)))
-         (svref (load-time-value
-                 (coerce (cons (specifier-type 'simd-pack)
+         (svref #.(coerce (cons (specifier-type 'simd-pack)
                                (map 'list (lambda (x) (specifier-type `(simd-pack ,x)))
                                     +simd-pack-element-types+))
                          'vector)
-                 t)
                 (if (<= 0 tag (1- (length +simd-pack-element-types+)))
                     (1+ tag)
                     0))))
       #+sb-simd-pack-256
       (simd-pack-256
        (let ((tag (%simd-pack-256-tag x)))
-         (svref (load-time-value
-                 (coerce (cons (specifier-type 'simd-pack-256)
+         (svref #.(coerce (cons (specifier-type 'simd-pack-256)
                                (map 'list (lambda (x) (specifier-type `(simd-pack-256 ,x)))
                                     +simd-pack-element-types+))
                          'vector)
-                 t)
                 (if (<= 0 tag (1- (length +simd-pack-element-types+)))
                     (1+ tag)
                     0))))

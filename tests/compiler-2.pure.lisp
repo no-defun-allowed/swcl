@@ -2875,41 +2875,54 @@
 
 (with-test (:name :dce-more-often)
   (checked-compile-and-assert
-      ()
-      `(lambda (a)
-         (+ 1
-            (if t
-                0
-                (progn
+   ()
+   `(lambda (a)
+      (+ 1
+         (if t
+             0
+             (progn
+               (tagbody
+                p
                   (tagbody
-                   p
-                     (tagbody
-                        (let ((a (lambda () (go o))))
-                          (declare (special a)))
-                      o)
-                     (when (< a 1)
-                       (go p)))
-                  2))))
-    ((1) 1)))
+                     (let ((a (lambda () (go o))))
+                       (declare (special a)))
+                   o)
+                  (when (< a 1)
+                    (go p)))
+               2))))
+    ((1) 1)
+    (:return-type (values (integer 1 1) &optional))))
+
+(with-test (:name :dce-more-often.2)
+  (checked-compile-and-assert
+   ()
+   `(lambda (b)
+      (declare (fixnum b))
+      (- (case 0
+           (1
+            (dotimes (i 1 b) (ignore-errors)))
+           (t 0))))
+    ((3) 0)
+    (:return-type (values (integer 0 0) &optional))))
 
 (with-test (:name :ir1-optimize-constant-fold-before-giving-up)
   (checked-compile-and-assert
-      ()
-      `(lambda (a)
-         (+ 2 (- (let ((sum 0))
-                   (declare (type fixnum sum))
-                   (block nil
-                     (tagbody
-                      next
-                        (cond ((>= sum '0)
-                               (go end))
-                              (a
-                               (ceiling 1 (unwind-protect 2))
-                               (incf sum)))
-                        (go next)
-                      end))
-                   sum))))
-    ((1) 2)))
+   ()
+   `(lambda (a)
+      (+ 2 (- (let ((sum 0))
+                (declare (type fixnum sum))
+                (block nil
+                  (tagbody
+                   next
+                     (cond ((>= sum '0)
+                            (go end))
+                           (a
+                            (ceiling 1 (unwind-protect 2))
+                            (incf sum)))
+                     (go next)
+                   end))
+                sum))))
+   ((1) 2)))
 
 (with-test (:name :position-case-otherwise)
   (checked-compile-and-assert
@@ -3426,34 +3439,34 @@
 (with-test (:name :division-by-multiplication-type-derivation)
   (assert
    (type-specifiers-equal
-          (caddr
-           (sb-kernel:%simple-fun-type
-            (checked-compile
-             `(lambda (c)
-                (declare (optimize speed))
-                (ceiling
-                 (truncate 65527
-                           (min -78
-                                (if c
-                                    -913097464
-                                    5)))
-                 39)))))
-          '(values (or (integer -21 -20) bit) (integer -38 0) &optional)))
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda (c)
+          (declare (optimize speed))
+          (ceiling
+           (truncate 65527
+                     (min -78
+                          (if c
+                              -913097464
+                              5)))
+           39)))))
+    '(values (or (integer -21 -20) bit) (integer -38 0) &optional)))
   (assert
    (type-specifiers-equal
-          (caddr
-           (sb-kernel:%simple-fun-type
-            (checked-compile
-             `(lambda (c)
-                (declare (optimize speed))
-                (ceiling
-                 (truncate 65527
-                           (min 78
-                                (if c
-                                    913097464
-                                    5)))
-                 39)))))
-          '(values (or (integer 21 22) (integer 336 337)) (integer -38 0) &optional))))
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda (c)
+          (declare (optimize speed))
+          (ceiling
+           (truncate 65527
+                     (min 78
+                          (if c
+                              913097464
+                              5)))
+           39)))))
+    '(values (or (integer 21 22) (integer 336 337)) (integer -38 0) &optional))))
 
 (with-test (:name :boundp-ir2-optimizer)
   (checked-compile-and-assert
@@ -3842,18 +3855,21 @@
        (the (integer -504635362412860905 -99686857090873309) (lognand b 11))))))
 
 (with-test (:name :not-folded-vops)
-  (checked-compile-and-assert
-   ()
-   `(lambda ()
-      (floor
-       (dpb 42
-            (byte 15 7)
-            (block b
-              (loop for lv below 1 count
-                    (floor
-                     (flet ((%f (f1)
-                              (- (floor f1 f1) (return-from b -9))))
-                       (multiple-value-call #'%f (values (block b3 lv))))
-                     42))))
-       42))
-   (() (values -99734 19))))
+  (assert
+   (type-specifiers-equal
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda ()
+          (floor
+           (dpb 42
+                (byte 15 7)
+                (block b
+                  (loop for lv below 1 count
+                        (floor
+                         (flet ((%f (f1)
+                                  (- (floor f1 f1) (return-from b -9))))
+                           (multiple-value-call #'%f (values (block b3 lv))))
+                         42))))
+           42)))))
+    '(values (integer -99734 -99734) (integer 19 19) &optional))))
