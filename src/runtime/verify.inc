@@ -1,5 +1,17 @@
 /* -*- Mode: C -*- */
 
+#ifdef LISP_FEATURE_MARK_REGION_GC
+#include <stdatomic.h>
+#include "tiny-lock.h"
+#include "gc-thread-pool.h"
+lock_t failure_lock = LOCK_INITIALIZER;
+#define lock() acquire_lock(&failure_lock)
+#define unlock() release_lock(&failure_lock)
+#else
+#define lock() (void)(0)
+#define unlock() (void)(0)
+#endif
+
 static int
 is_in_stack_space(lispobj ptr)
 {
@@ -67,6 +79,7 @@ char *page_card_mark_string(page_index_t page, char *result)
 static void note_failure(lispobj thing, lispobj *where, struct verify_state *state,
                          char *str)
 {
+    lock();
     if (state->flags & PRINT_HEADER_ON_FAILURE) {
         if (state->flags & VERIFY_PRE_GC) fprintf(stderr, "pre-GC failure\n");
         if (state->flags & VERIFY_POST_GC) fprintf(stderr, "post-GC failure\n");
@@ -87,6 +100,7 @@ static void note_failure(lispobj thing, lispobj *where, struct verify_state *sta
     } else {
         fprintf(stderr, "Ptr %p @ %"OBJ_FMTX" sees %s\n", (void*)thing, (uword_t)where, str);
     }
+    unlock();
 }
 
 static int
@@ -416,6 +430,51 @@ static int verify(lispobj start, lispobj* end, struct verify_state* state, int f
     return result;
 }
 
+#ifdef LISP_FEATURE_MARK_REGION_GC
+static uword_t walk_halted;
+static uword_t walk_cursor;
+static uword_t parallel_walk_extra;
+struct span { lispobj *start; lispobj *end; };
+static uword_t table_spans;
+static struct span *span_table;
+static uword_t (*parallel_proc)(lispobj*,lispobj*,uword_t);
+
+static uword_t fill_table(lispobj *start, lispobj *end, uword_t unused) {
+    span_table[table_spans++] = (struct span){start, end};
+}
+
+static void parallel_walk_worker() {
+    /* Copy the verifier state. */
+    struct verify_state *original = (struct verify_state*)parallel_walk_extra, copy = *original;
+    uword_t index;
+    while ((index = atomic_fetch_add(&walk_cursor, 1)) < table_spans && !atomic_load(&walk_halted)) {
+        uword_t ret = parallel_proc(span_table[index].start, span_table[index].end, (uword_t)&copy);
+        if (ret) atomic_store(&walk_halted, ret);
+    }
+    atomic_fetch_add(&original->nerrors, copy.nerrors);
+}
+
+static void parallel_walk_generation(uword_t (*proc)(lispobj*,lispobj*,uword_t),
+                                     generation_index_t generation, uword_t extra)
+{
+    walk_halted = 0;
+    walk_cursor = 0;
+    parallel_walk_extra = extra;
+    parallel_proc = proc;
+    /* Compute a table of spans for the thread pool to walk.
+     * There can't be more spans than pages, but there can be
+     * fewer due to large objects. */
+    table_spans = 0;
+    uword_t table_size = sizeof(struct span) * next_free_page;
+    span_table = (struct span*)os_allocate(table_size);
+    walk_generation(fill_table, generation, 0);
+    run_on_thread_pool(parallel_walk_worker);
+    os_deallocate((char*)span_table, table_size);
+}
+#else
+#define parallel_walk_generation walk_generation
+#endif
+
 extern void save_gc_crashdump(char *, lispobj*);
 /* Return the number of verification errors found.
  * You might want to use that as a deciding factor for dump the heap
@@ -485,8 +544,8 @@ int verify_heap(__attribute__((unused)) lispobj* cur_thread_approx_stackptr,
     if (verbose)
         fprintf(stderr, " [dynamic]");
     state.flags |= VERIFYING_GENERATIONAL;
-    walk_generation((uword_t(*)(lispobj*,lispobj*,uword_t))verify_range,
-                    -1, (uword_t)&state);
+    parallel_walk_generation((uword_t(*)(lispobj*,lispobj*,uword_t))verify_range,
+                             -1, (uword_t)&state);
     if (verbose && state.nerrors==0) fprintf(stderr, " passed\n");
  out:
     if (state.nerrors && !(flags & VERIFY_DONT_LOSE)) {
