@@ -598,13 +598,17 @@ void compute_allocations(void *address) {
   line_index_t l = address_line(address), start, end;
   page_index_t this_page = find_page_index(address);
   line_index_t first_line = address_line(page_address(this_page)), last_line = address_line(page_address(this_page + 1));
+  /* Don't unfreshen lines when the mutator could still be
+   * allocating into them. Forgetting this causes
+   * brothertree.impure.lisp to fail. */
+  boolean unfreshen = gc_active_p;
   /* Find the last previous unfresh line. */
   for (start = l; start != first_line - 1 && IS_FRESH(line_bytemap[start]); start--)
-    line_bytemap[start] = UNFRESHEN_GEN(line_bytemap[start]);
+    if (unfreshen) line_bytemap[start] = UNFRESHEN_GEN(line_bytemap[start]);
   start++;                       /* Go back to first fresh line. */
   /* Find the first subsequent unfresh line. */
   for (end = l + 1; end != last_line && IS_FRESH(line_bytemap[end]); end++)
-    line_bytemap[end] = UNFRESHEN_GEN(line_bytemap[end]);
+    if (unfreshen) line_bytemap[end] = UNFRESHEN_GEN(line_bytemap[end]);
   /* The run of contiguous allocation exists between those. */
   meters.fresh_pointers += (end - start) * LINE_SIZE;
   unsigned char *allocations = (unsigned char*)allocation_bitmap;
