@@ -16,7 +16,8 @@ extern unsigned char *target_pages;
 static inline void log_slot(lispobj target, lispobj *where, enum source source) {
   /* mark() can provide NULL when there is no easy way to pass
    * around the source. */
-  if (where && target_pages[find_page_index(native_pointer(target))])
+  page_index_t p = find_page_index(native_pointer(target));
+  if (where && p != -1 && target_pages[p])
     log_relevant_slot(where, source);
 }
 extern void commit_thread_local_remset();
