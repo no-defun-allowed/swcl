@@ -21,7 +21,7 @@ SBCL_PAXCTL ?= :
 # Defaults which might be overridden or modified by values in the
 # Config file. Most of them are same on most systems right now.
 # If you need to override one of these, do it in Config.
-LINKFLAGS += -g
+LINKFLAGS += -g -fsanitize=address
 DEPEND_FLAGS = -MM
 GREP = grep
 LD = ld
@@ -33,7 +33,7 @@ __LDFLAGS__ =
 
 include ../../output/prefix.def
 
-CFLAGS += -g -Wall -Wundef -Wsign-compare -Wpointer-arith -O3
+CFLAGS += -g -Wall -Wundef -Wsign-compare -Wpointer-arith -O3 -fsanitize=address -DADDRESS_SANITIZER
 ASFLAGS += $(CFLAGS)
 CPPFLAGS += -I. -I../../
 
