@@ -256,7 +256,7 @@ page_index_t try_allocate_large(sword_t nbytes,
       set_allocation_bit_mark(page_address(chunk_start));
       bytes_allocated += nbytes;
       generations[gen].bytes_allocated += nbytes;
-      if (chunk_end + 1 > next_free_page) next_free_page = chunk_end + 1;
+      if (last_page + 1 > next_free_page) next_free_page = last_page + 1;
       return chunk_start;
     }
     if (chunk_end == end) return -1;
@@ -859,7 +859,6 @@ static void __attribute__((noinline)) sweep() {
   else
     METER(sweep_lines, run_on_thread_pool(sweep_lines));
   METER(sweep_pages, sweep_pages());
-  reset_pinned_pages();
 }
 
 /* Trace a bump-allocated range, e.g. static space or an arena. */
@@ -934,8 +933,10 @@ void mr_trace_object(lispobj *obj) {
  * Used by pin_exact_root. */
 void mr_preserve_object(lispobj obj) {
   page_index_t p = find_page_index(native_pointer(obj));
-  mark(obj, NULL, SOURCE_NORMAL);
-  gc_page_pins[p] = 0xFF;
+  if (p != -1) {
+    mark(obj, NULL, SOURCE_NORMAL);
+    gc_page_pins[p] = 0xFF;
+  }
 }
 
 /* Scavenging older generations */
