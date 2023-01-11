@@ -52,11 +52,11 @@ static void USING_LAYOUT(lispobj layout, lispobj* where, int nslots)
     ACTION(layout, &layout_of(where), SOURCE_NORMAL);
 #endif
     if (lockfree_list_node_layout_p(LAYOUT(layout))) { // allow untagged 'next'
-        struct instance* node = (struct instance*)where;
-        lispobj *next = &node->slots[INSTANCE_DATA_START];
+        struct list_node* node = (void*)where;
+        lispobj next = node->_node_next;
         // ignore if 0
-        if (fixnump(*next) && *next)
-            ACTION(*next|INSTANCE_POINTER_LOWTAG, next, SOURCE_ZERO_TAG);
+        if (fixnump(next) && next)
+            ACTION(next|INSTANCE_POINTER_LOWTAG, &node->_node_next, SOURCE_ZERO_TAG);
     }
     struct bitmap bitmap = get_layout_bitmap(LAYOUT(layout));
     int i;

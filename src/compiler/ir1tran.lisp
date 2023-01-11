@@ -347,7 +347,8 @@
       (cl:typep obj 'package)
       ;; The cross-compiler wants to dump CTYPE instances as leaves,
       ;; but CLASSOIDs are excluded since they have a MAKE-LOAD-FORM method.
-      #+sb-xc-host (cl:typep obj '(and ctype (not classoid)))))
+      #+sb-xc-host (cl:typep obj '(and ctype (not classoid)))
+      (eq obj sb-lockless:+tail+)))
 
 ;;; Grovel over CONSTANT checking for any sub-parts that need to be
 ;;; processed with MAKE-LOAD-FORM. We have to be careful, because
@@ -708,9 +709,6 @@
     (etypecase var
       (leaf
        (when (lambda-var-p var)
-         (let ((home (ctran-home-lambda-or-null start)))
-           (when (and home (neq (lambda-var-home var) home))
-             (sset-adjoin var (lambda-calls-or-closes home))))
          (when (lambda-var-ignorep var)
            ;; (ANSI's specification for the IGNORE declaration requires
            ;; that this be a STYLE-WARNING, not a full WARNING.)

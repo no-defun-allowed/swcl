@@ -1134,8 +1134,7 @@ if a restart was invoked."
               :external))
   (delete-package "FOO-NEW"))
 
-(with-test (:name :defpackage-delete-package-redefpackage-fasloader
-            :fails-on :sbcl)
+(with-test (:name :defpackage-delete-package-redefpackage-fasloader)
   (with-scratch-file (fasl5 "fasl")
     (compile-file "package-test-5.lisp" :output-file fasl5)
     (load fasl5)
@@ -1145,3 +1144,14 @@ if a restart was invoked."
       (load fasl6)
       (load fasl6))
     (delete-package "BAR-DRRFL")))
+
+;;; We were not creating fasls correctly when a file defining a
+;;; package was compiled twice, since we were relying on the compile
+;;; time effect of that happening to change the behavior of what code
+;;; to put in the same component.
+(with-test (:name :make-package-compile-twice)
+  (with-scratch-file (fasl7 "fasl")
+    (compile-file "package-test-7.lisp" :output-file fasl7)
+    (compile-file "package-test-7.lisp" :output-file fasl7)
+    (load fasl7)
+    (delete-package "COMPILE-TWICE")))

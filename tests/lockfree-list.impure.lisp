@@ -181,13 +181,7 @@
 
 (test-util:with-test (:name :lockfree-list-performance
                       :skipped-on :sbcl)
-  (let ((cpus
-          (max 1
-               #-win32 (sb-alien:alien-funcall
-                        (sb-alien:extern-alien "sysconf"
-                                               (function sb-alien:long sb-alien:int))
-                        sb-unix::sc-nprocessors-onln)
-               #+win32 (sb-alien:extern-alien "os_number_of_processors" sb-alien:int))))
+  (let ((cpus test-util:*n-cpus*))
     (assert (> (primitive-benchmark) (min 2 (log cpus 2))))))
 
 (test-util:with-test (:name :lfl-next-implicit-pin-one-more-time)
@@ -258,7 +252,7 @@
 (defun scan-lfl-gens (deletep &aux page-indices)
   (do ((node (get-next (list-head *l*)) ; can't delete the dummy node (list head)
              (get-next node)))
-      ((eq node *tail-atom*))
+      ((eq node +tail+))
     (when (eql (generation-of node) 1)
       (let ((page (sb-vm:find-page-index
                    (sb-kernel:get-lisp-obj-address node))))

@@ -24,8 +24,8 @@
 
 ;;; Return a VAR structure for NAME, filling in info if it is globally
 ;;; special. If it is losing, we punt with a COMPILER-ERROR.
-(declaim (ftype (sfunction (symbol &optional t) lambda-var) varify-lambda-arg))
 (defun varify-lambda-arg (name &optional source-form)
+  (declare (type symbol name))
   (case (info :variable :kind name)
     (:special
      (let ((variable (find-free-var name)))
@@ -212,7 +212,7 @@
   (aver-live-component *current-component*)
 
   (let* ((bind (make-bind))
-         (lambda (make-lambda :vars vars
+         (lambda (make-clambda :vars vars
                               :bind bind
                               :%source-name source-name
                               :%debug-name debug-name

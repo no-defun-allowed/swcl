@@ -52,6 +52,7 @@
 #include "genesis/simple-fun.h"
 #include "save.h"
 #include "genesis/hash-table.h"
+#include "genesis/list-node.h"
 #include "genesis/instance.h"
 #include "genesis/layout.h"
 #include "hopscotch.h"
@@ -1871,7 +1872,7 @@ lispobj *search_dynamic_space(void *pointer)
             int widetag = widetag_of(found);
             if (widetag != CODE_HEADER_WIDETAG && widetag != FUNCALLABLE_INSTANCE_WIDETAG)
                 lose("header not OK for code page: @ %p = %"OBJ_FMTX"\n", found, *found);
-            int nwords = object_size(found);
+            sword_t nwords = object_size(found);
             lispobj *upper_bound = found + nwords;
             if (pointer < (void*)upper_bound) return found;
         }
@@ -2442,7 +2443,7 @@ static void obliterate_nonpinned_words()
         // If 'obj' spans pages, move its successive page(s) to newspace and
         // ensure that those pages' scan_starts point at the same address
         // that this page's scan start does, which could be this page or earlier.
-        size_t nwords = object_size(obj);
+        sword_t nwords = object_size(obj);
         uword_t obj_end = (uword_t)(obj + nwords); // non-inclusive address bound
         page_index_t end_page_index = find_page_index((char*)obj_end - 1); // inclusive bound
 
@@ -2801,7 +2802,7 @@ static inline void protect_page(void* page_addr)
 }
 #endif
 
-#define LOCKFREE_LIST_NEXT(x) ((struct instance*)x)->slots[INSTANCE_DATA_START]
+#define LOCKFREE_LIST_NEXT(x) ((struct list_node*)x)->_node_next
 
 /* Helper function for update_writeprotection.
  * If the [where,limit) contain an old->young pointer, then return
@@ -3910,7 +3911,7 @@ static void scan_explicit_pins(__attribute__((unused)) struct thread* th)
                 /* A logically-deleted explicitly-pinned lockfree list node pins its
                  * successor too, since Lisp reconstructs the next node's tagged pointer
                  * from an untagged pointer currently stored in %NEXT of this node. */
-                lispobj successor = instance->slots[INSTANCE_DATA_START];
+                lispobj successor = ((struct list_node*)instance)->_node_next;
                 // Be sure to ignore an uninitialized word containing 0.
                 if (successor && fixnump(successor))
                     pin_exact_root(successor | INSTANCE_POINTER_LOWTAG);

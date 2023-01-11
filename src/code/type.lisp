@@ -135,6 +135,8 @@
        (%map (cons-type-cdr-type type)))
       (array-type
        (%map (array-type-element-type type)))
+      (constant-type
+       (%map (constant-type-type type)))
       (args-type
        (mapc #'%map (args-type-required type))
        (mapc #'%map (args-type-optional type))
@@ -145,18 +147,6 @@
        (when (fun-type-p type)
          (%map (fun-type-returns type))))))
   nil)
-
-(defun contains-unknown-type-p (ctype)
-  (map-type (lambda (type)
-              (when (unknown-type-p type)
-                (return-from contains-unknown-type-p t)))
-            ctype))
-
-(defun contains-hairy-type-p (ctype)
-  (map-type (lambda (type)
-              (when (hairy-type-p type)
-                (return-from contains-hairy-type-p t)))
-            ctype))
 
 (defun replace-hairy-type (type)
   (if (contains-hairy-type-p type)
@@ -178,6 +168,8 @@
 ;; Similar to (NOT CONTAINS-UNKNOWN-TYPE-P), but report that (SATISFIES F)
 ;; is not a testable type unless F is currently bound.
 (defun testable-type-p (ctype)
+  (unless (contains-hairy-type-p ctype)
+    (return-from testable-type-p t))
   (map-type
    (lambda (ctype)
      (typecase ctype
@@ -286,7 +278,13 @@
           (t
            (let ((required (intern-ctype-list required))
                  (optional (intern-ctype-list optional)))
-             (new-ctype values-type required optional rest))))))
+             (new-ctype values-type
+                        (lambda (x)
+                          (logior (type-list-flags (args-type-required x))
+                                  (type-list-flags (args-type-optional x))
+                                  (acond ((args-type-rest x) (type-flags it))
+                                         (t 0))))
+                        required optional rest))))))
 
 (define-type-method (values :simple-subtypep :complex-subtypep-arg1)
                      (type1 type2)
@@ -340,6 +338,13 @@
                   (values-type-rest type))
               unparsed
               (nconc unparsed '(&optional))))))
+
+;;; Hmm, according to the comments at DEFUN-CACHED, it may be inefficient
+;;; to proclaim the type of a cached function, because it forces checks to
+;;; be inserted on every return from the function, even though we would only
+;;; need to check when inserting to the cache.
+#+sb-xc-host
+(declaim (ftype (sfunction (ctype ctype) (values t t)) type=))
 
 ;;; Return true if LIST1 and LIST2 have the same elements in the same
 ;;; positions according to TYPE=. We return NIL, NIL if there is an
@@ -530,11 +535,20 @@
   (let ((rest (if (eq rest *empty-type*) nil rest))
         (required (intern-ctype-list required))
         (optional (intern-ctype-list optional)))
-    (if designator
-        (new-ctype fun-designator-type required optional rest keyp keywords
-                   allowp wild-args returns)
-        (new-ctype fun-type required optional rest keyp keywords
-                   allowp wild-args returns))))
+    (flet ((fun-type-flags (x)
+             (logior (type-list-flags (fun-type-required x))
+                     (type-list-flags (fun-type-optional x))
+                     (acond ((fun-type-rest x) (type-flags it))
+                            (t 0))
+                     (key-info-list-flags (fun-type-keywords x))
+                     (type-flags (fun-type-returns x)))))
+      (macrolet ((new (metatype)
+                   `(new-ctype ,metatype #'fun-type-flags
+                               required optional rest keyp keywords
+                               allowp wild-args returns)))
+        (if designator
+            (new fun-designator-type)
+            (new fun-type))))))
 
 ;; This seems to be used only by cltl2, and within 'cross-type',
 ;; where it is never used, which makes sense, since pretty much we
@@ -556,7 +570,8 @@
   (type= (constant-type-type type1) (constant-type-type type2)))
 
 (def-type-translator constant-arg ((:context context) type)
-  (new-ctype constant-type (single-value-specifier-type type context)))
+  (let ((parse (single-value-specifier-type type context)))
+    (new-ctype constant-type (type-flags parse) parse)))
 
 (defun canonicalize-args-type-args (required optional rest &optional keyp)
   (when (eq rest *empty-type*)
@@ -844,7 +859,7 @@
             exact)))
 
 ;;; If TYPE isn't a values type, then make it into one.
-(defun-cached (%coerce-to-values :hash-bits 8 :hash-function #'type-hash-value)
+(defun-cached (%coerce-to-values :hash-bits 8 :hash-function #'type-%bits)
     ((type eq))
   (cond ((multiple-value-bind (res sure)
              (csubtypep (specifier-type 'null) type)
@@ -970,7 +985,7 @@
 ;;;
 ;;; The return convention seems to be analogous to
 ;;; TYPES-EQUAL-OR-INTERSECT. -- WHN 19990910.
-(defun-cached (values-type-union :hash-function #'type-cache-hash
+(defun-cached (values-type-union :hash-function #'hash-ctype-pair
                                  :hash-bits 8)
     ((type1 eq) (type2 eq))
   (declare (type ctype type1 type2))
@@ -980,7 +995,7 @@
         (t
          (values (values-type-op type1 type2 #'type-union #'min)))))
 
-(defun-cached (values-type-intersection :hash-function #'type-cache-hash
+(defun-cached (values-type-intersection :hash-function #'hash-ctype-pair
                                         :hash-bits 8)
     ((type1 eq) (type2 eq))
   (declare (type ctype type1 type2))
@@ -1017,7 +1032,7 @@
 
 ;;; a SUBTYPEP-like operation that can be used on any types, including
 ;;; VALUES types
-(defun-cached (values-subtypep :hash-function #'type-cache-hash
+(defun-cached (values-subtypep :hash-function #'hash-ctype-pair
                                :hash-bits 8
                                :values 2)
     ((type1 eq) (type2 eq))
@@ -1065,7 +1080,7 @@
 ;;;; type method interfaces
 
 ;;; like SUBTYPEP, only works on CTYPE structures
-(defun-cached (csubtypep :hash-function #'type-cache-hash
+(defun-cached (csubtypep :hash-function #'hash-ctype-pair
                          :hash-bits 10
                          :memoizer memoize
                          :values 2)
@@ -1112,37 +1127,57 @@
       (values t t)
       (csubtypep (specifier-type type1) (specifier-type type2))))
 
-(declaim (inline ctype-eq-comparable))
-(defun ctype-eq-comparable (ctype)
-  (logtest (type-hash-value ctype) +type-admits-type=-optimization+))
-
-(defun ctype-interned-p (ctype)
-  (logtest (type-hash-value ctype) +type-internedp+))
-
 (declaim (start-block))
+
+;;; Helper for TYPE= so that we can separately cache the :SIMPLE-= method.
+(sb-impl::!define-hash-cache %simple-type=
+                             ((type1 eq) (type2 eq))
+                             :hash-function #'hash-ctype-pair
+                             :hash-bits 11 :values 2)
 
 ;;; If two types are definitely equivalent, return true. The second
 ;;; value indicates whether the first value is definitely correct.
 ;;; This should only fail in the presence of HAIRY types.
-(defun-cached (type= :hash-function #'type-cache-hash
-                     :hash-bits 11
+(defun-cached (type= :hash-function #'hash-ctype-pair
+                     :hash-bits 12
                      :memoizer memoize
                      :values 2)
               ((type1 eq) (type2 eq))
   (declare (type ctype type1 type2))
-  (cond ((eq type1 type2)
-         (values t t))
-        ;; If args are not EQ, but both allow TYPE= optimization,
-        ;; and at least one is interned, then return no and certainty.
-        ;; Most of the interned CTYPEs admit this optimization,
-        ;; NUMERIC and MEMBER types do as well.
-        ((and (logtest +type-internedp+
-                       (logior (type-hash-value type1) (type-hash-value type2)))
-              (logtest +type-admits-type=-optimization+
-                       (logand (type-hash-value type1) (type-hash-value type2))))
-         (values nil t))
-        (t
-         (memoize (invoke-type-method :simple-= :complex-= type1 type2)))))
+  (macrolet ((quick-fail-simple-=-mask ()
+               ;; The set of type-classes for which not EQ implies not TYPE=.
+               (loop for class in '(character-set classoid member named
+                                    #+sb-simd-pack simd-pack
+                                    #+sb-simd-pack-256 simd-pack-256)
+                     sum (ash 1 (type-class-name->id class))))
+             (quick-fail-complex-= ()
+               ;; Fail if neither arg is in a class that defines a COMPLEX-= method
+               (let ((mask (loop for class in classes-having-complex-=-method
+                                 sum (ash 1 (type-class-name->id class)))))
+                 `(not (logtest (logior (ash 1 id1) (ash 1 id2)) ,mask)))))
+    (if (eq type1 type2)
+        (values t t)
+        (let ((id1 (type-class-id type1))
+              (id2 (type-class-id type2)))
+          (cond ((/= id1 id2)
+                 (if (quick-fail-complex-=)
+                     (values nil t)
+                     (memoize (invoke-type-method :none :complex-= type1 type2))))
+                ((logbitp id1 (quick-fail-simple-=-mask))
+                 (values nil t))
+                ((= id1 #.(type-class-name->id 'number)) ; do not cache
+                 ;; At most 2 EQL tests, which are as fast as memoization, if not faster.
+                 (number-simple-=-type-method type1 type2))
+                (t ; use the SIMPLE-= method
+                 ;; A cached answer for swapped args is the same, so always put the smaller
+                 ;; hash first, and we might win with a previous answer.
+                 #+nil ; not 100% sure this is legal even with SIMPLE-=
+                 (when (< (type-hash-value type2) (type-hash-value type1))
+                   (rotatef type1 type2))
+                 (sb-impl::with-cache (%simple-type= type1 type2)
+                   (funcall (type-class-simple-=
+                             (type-id->type-class (type-class-id type1)))
+                            type1 type2))))))))
 
 ;;; Not exactly the negation of TYPE=, since when the relationship is
 ;;; uncertain, we still return NIL, NIL. This is useful in cases where
@@ -1177,7 +1212,7 @@
 ;;; that is precise to the best of our knowledge. This result is
 ;;; simplified into the canonical form, thus is not a UNION-TYPE
 ;;; unless we find no other way to represent the result.
-(defun-cached (type-union2 :hash-function #'type-cache-hash
+(defun-cached (type-union2 :hash-function #'hash-ctype-pair
                            :hash-bits 11
                            :memoizer memoize)
               ((type1 eq) (type2 eq))
@@ -1241,7 +1276,7 @@
                       (t
                        nil))))))))
 
-(defun-cached (type-intersection2 :hash-function #'type-cache-hash
+(defun-cached (type-intersection2 :hash-function #'hash-ctype-pair
                                   :hash-bits 11
                                   :memoizer memoize
                                   :values 1)
@@ -1337,10 +1372,11 @@
 #+sb-xc-host
 (let ((table (make-hash-table :test 'equal)))
   (defun !values-specifier-type-memo-wrapper (thunk specifier)
-    (multiple-value-bind (type yesp) (gethash specifier table)
-      (if yesp
-          type
-          (setf (gethash specifier table) (funcall thunk)))))
+    (or (gethash specifier table)
+        (let ((parse (funcall thunk)))
+          ;; THUNK must nonlocally exit to avoid caching
+          (aver (not (contains-unknown-type-p parse)))
+          (setf (gethash specifier table) parse))))
   (defun values-specifier-type-cache-clear ()
     (clrhash table)))
 ;;; This cache is sized extremely generously, which has payoff
@@ -1351,9 +1387,14 @@
 ;;; This means that we won't match things like (INTEGER (0) 4) to an existing
 ;;; entry unless it is EQ.  This is probably not a disaster.
 #-sb-xc-host
+(progn
 (sb-impl::!define-hash-cache values-specifier-type
-  ((orig list-elements-eql)) ()
+  ((orig list-elements-eql))
    :hash-function #'sxhash :hash-bits 10)
+(declaim (inline !values-specifier-type-memo-wrapper))
+(defun !values-specifier-type-memo-wrapper (thunk specifier)
+  (sb-impl::with-cache (values-specifier-type specifier)
+    (funcall thunk))))
 
 (declaim (inline make-type-context))
 (defstruct (type-context
@@ -1490,14 +1531,8 @@
               ;; EQL specializers are are seldom used and not 100% portable,
               ;; though they are part of the AMOP.
               ;; See https://sourceforge.net/p/sbcl/mailman/message/11217378/
-              ;; We implement the notion that an EQL-SPECIALIZER has-a CTYPE.
-              ;; You might think that a cleverer way would be to say that
-              ;; EQL-SPECIALIZER is-a CTYPE, i.e. incorporating EQL-SPECIALIZER
-              ;; objects into the type machinary. Well, that's a problem -
-              ;; it would mess up admissibility of the TYPE= optimization.
-              ;; We don't want to create another way of representing
-              ;; the type NULL = (MEMBER NIL), for example.
-              (sb-pcl::eql-specializer-to-ctype type-specifier))
+              ;; We rely on caching of singleton EQL types to make this efficient.
+              (make-eql-type (sb-mop::eql-specializer-object type-specifier)))
              ((wrapper-p type-specifier)
               (wrapper-classoid type-specifier))
              (t (fail type-specifier))))))
@@ -1702,14 +1737,14 @@ expansion happened."
           nil
           result))))
 
-(defun-cached (type-negation :hash-function #'type-hash-value
+(defun-cached (type-negation :hash-function #'type-%bits
                              :hash-bits 8
                              :values 1)
               ((type eq))
   (declare (type ctype type))
   (funcall (type-class-negate (type-class type)) type))
 
-(defun-cached (type-singleton-p :hash-function #'type-hash-value
+(defun-cached (type-singleton-p :hash-function #'type-%bits
                              :hash-bits 8
                              :values 2)
               ((type eq))
@@ -1791,11 +1826,12 @@ expansion happened."
           ((null simplified-types) *universal-type*)
           ((null (cdr simplified-types)) (car simplified-types))
           (t (new-ctype intersection-type
+              #'compound-type-flags
               (some #'type-enumerable simplified-types)
               (intern-ctype-set simplified-types)))))))
 
 (defun make-union-type (enumerable types)
-  (new-ctype union-type enumerable (intern-ctype-set types)))
+  (new-ctype union-type #'compound-type-flags enumerable (intern-ctype-set types)))
 (defun type-union (&rest input-types)
   (declare (dynamic-extent input-types))
   (%type-union input-types))
@@ -1810,10 +1846,6 @@ expansion happened."
           simplified-types)))))
 
 ;;;; built-in types
-
-(define-type-method (named :simple-=) (type1 type2)
-  ;;(aver (not (eq type1 *wild-type*))) ; * isn't really a type.
-  (values (eq type1 type2) t))
 
 (defun cons-type-might-be-empty-type (type)
   (declare (type cons-type type))
@@ -2465,17 +2497,21 @@ expansion happened."
 (define-type-class number :enumerable #'numeric-type-enumerable :might-contain-other-types nil)
 
 (define-type-method (number :simple-=) (type1 type2)
-  ;; Note that EQUALP equates signed zeros of the same precision.
+  ;; If NUMERIC-TYPE-CLASS is FLOAT, then we have to compare the bounds using EQUALP
+  ;; which equates signed zeros of the same precision.
   ;; In particular all the following are different, but TYPE= to each other:
   ;;  (specifier-type '(single-float -0s0 -0s0))
   ;;  (specifier-type '(single-float -0s0 +0s0))
   ;;  (specifier-type '(single-float +0s0 -0s0))
   ;;  (specifier-type '(single-float +0s0 +0s0))
-  (values
-   (and (numtype-aspects-eq type1 type2)
-        (equalp (numeric-type-low type1) (numeric-type-low type2))
-        (equalp (numeric-type-high type1) (numeric-type-high type2)))
-   t))
+  ;; If not a FLOAT class, then thanks to hash-consing, two instances can be TYPE=
+  ;; only if EQ. Therefore, since this method was invoked, the arguments are not TYPE=
+  ;; if the class is other than FLOAT.
+  (values (and (eq (numeric-type-class type1) 'float)
+               (numtype-aspects-eq type1 type2)
+               (equalp (numeric-type-low type1) (numeric-type-low type2))
+               (equalp (numeric-type-high type1) (numeric-type-high type2)))
+          t))
 
 (declaim (inline bounds-unbounded-p))
 (defun bounds-unbounded-p (low high)
@@ -2680,7 +2716,7 @@ expansion happened."
       (return-from make-numeric-type *empty-type*))
     (when (and (eq class 'rational) (integerp low) (eql low high))
       (setf class 'integer))
-    (new-ctype numeric-type (get-numtype-aspects complexp class format) low high)))
+    (new-ctype numeric-type 0 (get-numtype-aspects complexp class format) low high)))
 
 (defun modified-numeric-type (base
                               &key
@@ -2959,7 +2995,7 @@ expansion happened."
   (setf (info :type :builtin 'number)
         #+sb-xc-host
         (hashset-insert *numeric-type-hashset*
-                        (!alloc-numeric-type #.(pack-interned-ctype-bits 'number)
+                        (!alloc-numeric-type #.(make-ctype-bits 'number)
                                              (get-numtype-aspects nil nil nil)
                                              nil nil))
         #-sb-xc-host (specifier-type 'number)))
@@ -3387,14 +3423,16 @@ used for a COMPLEX component.~:@>"
 (define-type-class character-set :enumerable nil :might-contain-other-types nil)
 
 (defun make-character-set-type (pairs)
-  ; (aver (equal (mapcar #'car pairs)
-  ;              (sort (mapcar #'car pairs) #'<)))
+  (unless pairs
+    (return-from make-character-set-type *empty-type*))
   ;; aver that the cars of the list elements are sorted into increasing order
-  (when pairs
-    (do ((p pairs (cdr p)))
-        ((null (cdr p)))
-      (aver (<= (caar p) (caadr p)))))
-  (let ((pairs (let (result)
+  (do ((p pairs (cdr p)))
+      ((null (cdr p)))
+    (aver (<= (caar p) (caadr p))))
+  (let ((pairs
+         (if (and (singleton-p pairs) (eql (caar pairs) (cdar pairs)))
+             pairs ; don't need to preprocess the pairs
+             (let (result)
                 (do ((pairs pairs (cdr pairs)))
                     ((null pairs) (nreverse result))
                   (destructuring-bind (low . high) (car pairs)
@@ -3408,14 +3446,12 @@ used for a COMPLEX component.~:@>"
                       ((< high 0))
                       (t (push (cons (max 0 low)
                                      (min high (1- char-code-limit)))
-                               result))))))))
-    (unless pairs
-      (return-from make-character-set-type *empty-type*))
+                               result)))))))))
     (unless (cdr pairs)
       (macrolet ((range (low high)
                    `(return-from make-character-set-type
                       (inline-cache-ctype
-                       (!alloc-character-set-type (pack-interned-ctype-bits 'character-set)
+                       (!alloc-character-set-type (make-ctype-bits 'character-set)
                                                   '((,low . ,high)))
                        (character-set ((,low . ,high)))))))
         (let* ((pair (car pairs))
@@ -3431,7 +3467,7 @@ used for a COMPLEX component.~:@>"
                 #+sb-unicode
                 ((and (eql low 0) (eql high (1- base-char-code-limit)))
                  (range 0 #.(1- base-char-code-limit)))))))
-    (new-ctype character-set-type pairs)))
+    (new-ctype character-set-type 0 pairs)))
 
 (declaim (ftype (sfunction (t &key (:complexp t)
                                    (:element-type t)
@@ -3452,6 +3488,7 @@ used for a COMPLEX component.~:@>"
          (type= (array-type-element-type type1)
                 (array-type-element-type type2)))
         (t
+         ;; FIXME: I would think this can be strength-reduced to EQ
          (values (type= (array-type-specialized-element-type type1)
                         (array-type-specialized-element-type type2))
                  t))))
@@ -3817,24 +3854,26 @@ used for a COMPLEX component.~:@>"
 (define-type-class member :enumerable t
                     :might-contain-other-types nil)
 
-(declaim (ftype (sfunction (xset list) ctype) make-member-type))
-(defun member-type-from-list (members)
-  (let ((xset (alloc-xset))
-        (fp-zeroes))
-    (dolist (elt members (make-member-type xset fp-zeroes))
-      (if (fp-zero-p elt)
-          (pushnew elt fp-zeroes)
-          (add-to-xset elt xset)))))
-(defun make-eql-type (elt) (member-type-from-list (list elt)))
 ;; Return possibly a union of a MEMBER type and a NUMERIC type,
 ;; or just one or the other, or *EMPTY-TYPE* depending on what's in the XSET
-;; and the FP-ZEROES. XSET should not contains characters or real numbers.
+;; and the FP-ZEROES. XSET must not contains characters or real numbers.
+;; MEMBER types go into one of three hash containers:
+;;  - *EQL-TYPE-CACHE* holds singleton types. A weak hash-table suffices for this.
+;;  - *MEMBER-TYPE-HASHSET* holds types whose members are {NUMBER|CHARACTER|SYMBOL}.
+;;    Intrinsically each element has a stable hash, making it possible to
+;;    hash-cons XSETs without complications for EQ-comparable keys.
+;;  - *MEMBER/EQ-TYPE-HASHSET* is the general case, allowing a mixture of objects
+;;;   hashed by content-dependent hash and/or pseudorandom opaque hash.
 (defun make-member-type (xset fp-zeroes)
   ;; if we have a pair of zeros (e.g. 0.0d0 and -0.0d0), then we can
   ;; canonicalize to (DOUBLE-FLOAT 0.0d0 0.0d0), because numeric
   ;; ranges are compared by arithmetic operators (while MEMBERship is
   ;; compared by EQL).  -- CSR, 2003-04-23
   (declare (sb-c::tlab :system))
+  (map-xset (lambda (elt)
+              (when (or (characterp elt) (realp elt))
+                (bug "MEMBER type contains ~S" elt)))
+            xset)
   (let ((presence 0)
         (unpaired nil)
         (float-types nil))
@@ -3848,33 +3887,62 @@ used for a COMPLEX component.~:@>"
                     (single-float 0)
                     (double-float 2
                     #+long-float (long-float 4)))))
-            (if (= pass 0)
-                (setf (ldb (byte 1 (+ pair-idx sign)) presence) 1)
-                (if (= (ldb (byte 2 pair-idx) presence) #b11)
-                    (when (= sign 0)
-                      ;; FIXME: CTYPE-OF is heavyweight for all of what, 2 cases?
-                      ;; Just a typecase would be better.
-                      ;; ('Sup Dawg, I heard you like caches so I put a cache lookup
-                      ;; in your cache lookup so you can cache while you cache.)
-                      (push (ctype-of z) float-types))
-                    (push z unpaired)))))))
+            (cond ((= pass 0) ; first pass: track presence of +-0 of each float format
+                   (setf (ldb (byte 1 (+ pair-idx sign)) presence) 1))
+                  ;; second pass: if not both signs present, then it's an unpaired zero
+                  ((/= (ldb (byte 2 pair-idx) presence) #b11)
+                   (push z unpaired))
+                  ((= sign 0) ; take the +0 as canonical when both +-0 are present
+                   (push (make-numeric-type :complexp :real :class 'float :low z :high z
+                                            :format (float-format-name z))
+                         float-types)))))))
      ((and (= (xset-count xset) 1)
            (eq (car (xset-members xset)) nil))
       ;; Bypass the hashset for type NULL because it's so important
       (return-from make-member-type
-        (inline-cache-ctype (!alloc-member-type (pack-interned-ctype-bits 'member)
-                                                (xset-from-list '(nil))
+        (inline-cache-ctype (!alloc-member-type (make-ctype-bits 'member)
+                                                (!new-xset '(nil) 1)
                                                 '())
                             null))))
-    (let ((member-type
-           (case (+ (length unpaired) (xset-count xset))
-             (0 nil) ; nil
-             ;; It's slightly suboptimal to use two DX-lets, but to remedy that,
-             ;; a single macro invocation would need to select which hash collection
-             ;; to look in. More easy would be to paste the macro guts here
-             ;; with suitable alteration, which I don't want to do.
-             (1 (new-ctype eql xset unpaired)) ; most common case
-             (t (new-ctype member-type xset unpaired)))))
+    (let* ((count (+ (length unpaired) (xset-count xset)))
+           (member-type
+            (unless (= count 0)
+              (dx-let ((temp (!alloc-member-type (ctype-class-bits 'member)
+                                                 xset unpaired)))
+                (cond
+                  ((= count 1)
+                   (let ((container *eql-type-cache*)
+                         (key (first (or unpaired (xset-data xset)))))
+                     (with-system-mutex ((hash-table-lock container))
+                       ;; This is like ENSURE-GETHASH but it potentially copies the key
+                       (or (gethash key container)
+                           (let ((copy (copy-ctype temp)))
+                             ;; re-fetch KEY from XSET in case it was copied.
+                             ;; hope no off-heap pointers buried within KEY.
+                             (setf (gethash (first (member-type-members copy)) container)
+                                   copy))))))
+                  ((xset-every (lambda (x) (typep x '(or symbol number character))) xset)
+                   (hashset-insert-if-absent *member-type-hashset* temp #'copy-ctype))
+                  (t
+                   (binding*
+                       ((container *member/eq-type-hashset*)
+                        ((result foundp)
+                         (with-system-mutex (*xset-mutex*)
+                           (xset-generate-stable-hashes xset)
+                           (acond ((hashset-find container temp)
+                                   (xset-delete-stable-hashes xset) ; inside the mutex scope
+                                   (values it t))
+                                  (t
+                                   (values (hashset-insert container (copy-ctype temp))
+                                           nil))))))
+                     (unless foundp ; "use" the var binding if #+sb-xc-host
+                       #-sb-xc-host ; attach finalizer (outside the mutex scope)
+                       (let ((xset (member-type-xset result))) ; in case XSET was copied
+                         (finalize
+                          result (lambda ()
+                                   (with-system-mutex (*xset-mutex*)
+                                     (xset-delete-stable-hashes xset))))))
+                     result)))))))
       ;; The actual member-type contains the XSET (with no FP zeroes),
       ;; and a list of unpaired zeroes.
       (if (not float-types)
@@ -4010,15 +4078,6 @@ used for a COMPLEX component.~:@>"
                     (union (member-type-fp-zeroes type1)
                            (member-type-fp-zeroes type2))))
 
-(define-type-method (member :simple-=) (type1 type2)
-  (let ((l1 (member-type-fp-zeroes type1))
-        (l2 (member-type-fp-zeroes type2)))
-    (values (and (xset= (member-type-xset type1)
-                        (member-type-xset type2))
-                 (subsetp l1 l2)
-                 (subsetp l2 l1))
-            t)))
-
 (define-type-method (member :complex-=) (type1 type2)
   (if (type-enumerable type1)
       (multiple-value-bind (val win) (csubtypep type2 type1)
@@ -4031,21 +4090,64 @@ used for a COMPLEX component.~:@>"
   ;; "* may appear as an argument to a MEMBER type specifier, but it indicates the
   ;;  literal symbol *, and does not represent an unspecified value."
   (if members
-      (let (ms numbers char-codes)
-        (dolist (m (remove-duplicates members))
+      (let ((xset (alloc-xset)) fp-zeros other-reals char-codes)
+        ;; Calling REMOVE-DUPLICATES up front as used to be done is wasteful because the XSET can't
+        ;; have dups in it. Elements that don't go in the XSET have to be de-duplicated.
+        ;; There are at most 4 fp-zeros, so calling PUSHNEW is fine. For the rest, we can suppose
+        ;; that DELETE-DUPLICATES is as good as it gets. (It could/should use a hash-table above
+        ;; a cetain length input, but does not)
+        (dolist (m members)
           (typecase m
             (character (push (sb-xc:char-code m) char-codes))
-            (real (if (and (floatp m) (zerop m))
-                      (push m ms)
-                      (push (ctype-of m) numbers)))
-            (t (push m ms))))
+            (real (if (fp-zero-p m) (pushnew m fp-zeros) (push m other-reals)))
+            (t (add-to-xset m xset))))
         (apply #'type-union
-               (member-type-from-list ms)
+               (make-member-type xset fp-zeros)
                ;; Constructor asserts that pairs are properly sorted
                (make-character-set-type (mapcar (lambda (x) (cons x x))
-                                                (sort char-codes #'<)))
-               (nreverse numbers)))
+                                                (sort (delete-duplicates char-codes) #'<)))
+               (mapcar #'ctype-of-number (delete-duplicates other-reals))))
       *empty-type*))
+(defun make-eql-type (elt)
+  ;; Start by looking in the hash-table, there's no reason not to.
+  ;; i.e. provided that ELT is one that should go in the hash-table, then the key
+  ;; is not a DX instance of the type, unlike for most CTYPES.
+  (or (let ((table *eql-type-cache*))
+        (with-system-mutex ((hash-table-lock table)) (gethash elt table)))
+      ;; It would be less messy to just call the parser for MEMBER, but there's no way
+      ;; to prevent it from consing. It always calls REMOVE-DUPLICATES on its input,
+      ;; and further builds up fresh data lists for the constructor(s).
+      (typecase elt
+        (character
+         ;; just checking an expectation of self-build here, no real reason to prohibit
+         #+sb-xc-host (bug "Unexpected singleton character type")
+         (let* ((codepoint (sb-xc:char-code elt))
+                (pairs (list (cons codepoint codepoint))))
+           ;; PAIRS will get copied if needed, but not for the host
+           #-sb-xc-host (declare (truly-dynamic-extent pairs))
+           (make-character-set-type pairs)))
+        (real
+         (unless (fp-zero-p elt)
+           ;; we do see singleton fp zeros in self-build but not other floats
+           #+sb-xc-host (bug "Unexpected singleton REAL type")
+           ;; This is a little redundant with CTYPE-OF-NUMBER,
+           ;; but imho easier to understand.
+           (multiple-value-bind (class format)
+               (typecase elt
+                 (float (values 'float (float-format-name elt)))
+                 (ratio 'rational)
+                 (t 'integer))
+             (make-numeric-type :class class :format format :low elt :high elt)))))
+      ;; The thing is definitely implemented as a MEMBER type. Just a question of
+      ;; whether to put ELT in the XSET.
+      (multiple-value-bind (xset fp-zeros)
+          (if (realp elt) ; is a floating-point zero
+              (values (load-time-value (alloc-xset) t) ; an always-empty XSET
+                      (list elt))
+              (let ((xset (alloc-xset)))
+                (add-to-xset elt xset)
+                (values xset nil)))
+        (make-member-type xset fp-zeros))))
 
 ;;;; intersection types
 ;;;;
@@ -4105,7 +4207,7 @@ used for a COMPLEX component.~:@>"
 ;;;
 ;;; Possibly yes, but then the SUBTYPEP methods would have to be
 ;;; rewritten not to use TYPE= (see the discussion around UNION
-;;; :SIMPLE=)
+;;; :SIMPLE-=)
 (define-type-method (intersection :simple-=) (type1 type2)
   (type=-set (intersection-type-types type1)
              (intersection-type-types type2)))
@@ -4600,8 +4702,6 @@ used for a COMPLEX component.~:@>"
 
 (define-type-class cons :enumerable nil :might-contain-other-types nil)
 
-#+sb-xc-host
-(declaim (ftype (sfunction (ctype ctype) (values t t)) type=))
 (defun make-cons-type (car-type cdr-type)
   (aver (not (or (eq car-type *wild-type*)
                  (eq cdr-type *wild-type*))))
@@ -4610,11 +4710,14 @@ used for a COMPLEX component.~:@>"
          *empty-type*)
         ;; Bypass the hashset for plain CONS
         ((and (eq car-type *universal-type*) (eq cdr-type *universal-type*))
-         (inline-cache-ctype (!alloc-cons-type (pack-interned-ctype-bits 'cons)
+         (inline-cache-ctype (!alloc-cons-type (make-ctype-bits 'cons)
                                                *universal-type* *universal-type*)
                              cons))
         (t
-         (new-ctype cons-type car-type cdr-type))))
+         (new-ctype cons-type
+                    (logand (logior (type-%bits car-type) (type-%bits cdr-type))
+                            +ctype-flag-mask+)
+                    car-type cdr-type))))
 
 ;;; Return TYPE converted to canonical form for a situation where the
 ;;; "type" '* (which SBCL still represents as a type even though ANSI
@@ -4865,14 +4968,6 @@ used for a COMPLEX component.~:@>"
         (values t (code-char (car pair)))
         (values nil nil))))
 
-(define-type-method (character-set :simple-=) (type1 type2)
-  ;; FIXME: Do we actually call the SIMPLE-= method on instances that are EQ?
-  ;; I can't recall if that's done at a higher level. If it is, then this method
-  ;; should return (VALUES NIL T) because two different instances are not TYPE=
-  (let ((pairs1 (character-set-type-pairs type1))
-        (pairs2 (character-set-type-pairs type2)))
-    (values (equal pairs1 pairs2) t)))
-
 (define-type-method (character-set :simple-subtypep) (type1 type2)
   (values
    (dolist (pair (character-set-type-pairs type1) t)
@@ -5042,11 +5137,6 @@ used for a COMPLEX component.~:@>"
   (define-type-method (simd-pack :unparse) (flags type)
     (simd-type-unparser-helper 'simd-pack (simd-pack-type-tag-mask type)))
 
-  (define-type-method (simd-pack :simple-=) (type1 type2)
-    (declare (type simd-pack-type type1 type2))
-    (values (= (simd-pack-type-tag-mask type1) (simd-pack-type-tag-mask type2))
-            t))
-
   (define-type-method (simd-pack :simple-subtypep) (type1 type2)
     (declare (type simd-pack-type type1 type2))
     (values (zerop (logandc2 (simd-pack-type-tag-mask type1)
@@ -5084,11 +5174,6 @@ used for a COMPLEX component.~:@>"
 
   (define-type-method (simd-pack-256 :unparse) (flags type)
     (simd-type-unparser-helper 'simd-pack-256 (simd-pack-256-type-tag-mask type)))
-
-  (define-type-method (simd-pack-256 :simple-=) (type1 type2)
-    (declare (type simd-pack-256-type type1 type2))
-    (values (= (simd-pack-256-type-tag-mask type1) (simd-pack-256-type-tag-mask type2))
-            t))
 
   (define-type-method (simd-pack-256 :simple-subtypep) (type1 type2)
     (declare (type simd-pack-256-type type1 type2))
@@ -5148,6 +5233,8 @@ used for a COMPLEX component.~:@>"
 
 ;;; This messy case of CTYPE for NUMBER is shared between the
 ;;; cross-compiler and the target system.
+;;; XXX: Is there a bug here with signed zeros, or are we confident that the
+;;; answer is always supposed to be a NUMERIC-TYPE and never (MEMBER -0.0) ?
 ;;; I'm not sure whether NaNs should be numeric types versus MEMBER (like
 ;;; singleton signed zero without the "other" sign), but it may not matter.
 ;;; At a bare minimum this prevents crashing in min/max.
@@ -5411,110 +5498,6 @@ used for a COMPLEX component.~:@>"
   ;; caches.
   (drop-all-hash-caches)
   (values))
-
-;;; This is like TYPE-OF, only we return a CTYPE structure instead of
-;;; a type specifier, and we try to return the type most useful for
-;;; type checking, rather than trying to come up with the one that the
-;;; user might find most informative.
-;;;
-;;; To avoid inadvertent memory retention we avoid using arrays
-;;; and functions as keys.
-;;; During cross-compilation, the CTYPE-OF function is not memoized.
-;;; Constants get their type stored in their LEAF, so it's ok.
-#-sb-xc-host
-(defun-cached (ctype-of :hash-bits 7 :hash-function #'sxhash
-                        :memoizer memoize)
-;; an unfortunate aspect of using EQ is that several appearances
-;; of the = double-float can be in the cache, but it's
-;; probably more efficient overall to use object identity.
-    ((x eq))
-  (flet ((try-cache (x)
-           (memoize
-            ;; For functions, the input is a type specifier
-            ;; of the form (FUNCTION (...) ...)
-            (cond ((listp x) (specifier-type x)) ; NIL can't occur
-                  ((symbolp x) (make-eql-type x))
-                  (t (ctype-of-number x))))))
-    (typecase x
-      (function
-       (if (funcallable-instance-p x)
-           (classoid-of x)
-           (let ((type (sb-impl::%fun-ftype x)))
-             (if (typep type '(cons (eql function))) ; sanity test
-                 (try-cache type)
-                 (classoid-of x)))))
-      (symbol (if x (try-cache x) (specifier-type 'null)))
-      (number (try-cache x))
-      (array (ctype-of-array x))
-      (cons (specifier-type 'cons))
-      (character
-       (typecase x
-         (standard-char (specifier-type 'standard-char))
-         (base-char (specifier-type 'base-char))
-         ;; If the last case were expressed as EXTENDED-CHAR,
-         ;; we wrongly get "this is not a (VALUES CTYPE): NIL"
-         ;; because the compiler is too naive to see that
-         ;; the last 2 cases partition CHARACTER.
-         (t (specifier-type 'extended-char))))
-      #+sb-simd-pack
-      (simd-pack
-       (let ((tag (%simd-pack-tag x)))
-         (svref #.(coerce (cons (specifier-type 'simd-pack)
-                               (map 'list (lambda (x) (specifier-type `(simd-pack ,x)))
-                                    +simd-pack-element-types+))
-                         'vector)
-                (if (<= 0 tag (1- (length +simd-pack-element-types+)))
-                    (1+ tag)
-                    0))))
-      #+sb-simd-pack-256
-      (simd-pack-256
-       (let ((tag (%simd-pack-256-tag x)))
-         (svref #.(coerce (cons (specifier-type 'simd-pack-256)
-                               (map 'list (lambda (x) (specifier-type `(simd-pack-256 ,x)))
-                                    +simd-pack-element-types+))
-                         'vector)
-                (if (<= 0 tag (1- (length +simd-pack-element-types+)))
-                    (1+ tag)
-                    0))))
-      (t
-       (classoid-of x)))))
-
-;; Helper function that implements (CTYPE-OF x) when X is an array.
-#-sb-xc-host
-(defun-cached (ctype-of-array
-               :values (ctype) ; Bind putative output to this when probing.
-               :hash-bits 7
-               :hash-function (lambda (a &aux (hash cookie))
-                                (if header-p
-                                    (dotimes (axis rank hash)
-                                      (mixf hash (%array-dimension a axis)))
-                                    (mixf hash (length a)))))
-    ;; "type-key" is a perfect hash of rank + widetag + simple-p.
-    ;; If it matches, then compare dims, which are read from the output.
-    ;; The hash of the type-key + dims can have collisions.
-    ((array (lambda (array type-key)
-              (and (eq type-key cookie)
-                   (let ((dims (array-type-dimensions ctype)))
-                     (if header-p
-                         (dotimes (axis rank t)
-                           (unless (eq (pop (truly-the list dims))
-                                       (%array-dimension array axis))
-                             (return nil)))
-                         (eq (length array) (car dims))))))
-            cookie) ; Store COOKIE as the single key.
-     &aux (rank (array-rank array))
-          (simple-p (if (simple-array-p array) 1 0))
-          (header-p (array-header-p array)) ; non-simple or rank <> 1 or both
-          (cookie (the fixnum (logior (ash (logior (ash rank 1) simple-p)
-                                           sb-vm:n-widetag-bits)
-                                      (array-underlying-widetag array)))))
-  ;; The value computed on cache miss.
-  ;; FIXME: don't cache if ARRAY is not heap-allocated
-  (let ((etype (sb-vm::array-element-ctype array)))
-    (make-array-type (array-dimensions array)
-                     :complexp (not (simple-array-p array))
-                     :element-type etype
-                     :specialized-element-type etype)))
 
 (!defun-from-collected-cold-init-forms !type-cold-init)
 

@@ -826,7 +826,7 @@
   (:translate truncate)
   (:args (x :scs (any-reg) :target eax)
          (y :scs (any-reg control-stack)))
-  (:args-var args)
+  (:arg-refs nil y-ref)
   (:arg-types tagged-num tagged-num)
   (:temporary (:sc signed-reg :offset rax-offset :target quo
                :from (:argument 0) :to (:result 0)) eax)
@@ -839,7 +839,7 @@
   (:vop-var vop)
   (:save-p :compute-only)
   (:generator 31
-    (when (types-equal-or-intersect (tn-ref-type (tn-ref-across args))
+    (when (types-equal-or-intersect (tn-ref-type y-ref)
                                     (specifier-type '(eql 0)))
       (if (sc-is y signed-reg)
           (inst test y y)               ; smaller instruction
@@ -888,7 +888,7 @@
   (:args (x :scs (unsigned-reg) :target eax)
          (y :scs (unsigned-reg signed-stack)))
   (:arg-types unsigned-num unsigned-num)
-  (:args-var args)
+  (:arg-refs nil y-ref)
   (:temporary (:sc unsigned-reg :offset rax-offset :target quo
                :from (:argument 0) :to (:result 0)) eax)
   (:temporary (:sc unsigned-reg :offset rdx-offset :target rem
@@ -900,7 +900,7 @@
   (:vop-var vop)
   (:save-p :compute-only)
   (:generator 33
-    (when (types-equal-or-intersect (tn-ref-type (tn-ref-across args))
+    (when (types-equal-or-intersect (tn-ref-type y-ref)
                                     (specifier-type '(eql 0)))
       (if (sc-is y signed-reg)
           (inst test y y)               ; smaller instruction
@@ -940,7 +940,7 @@
   (:translate truncate)
   (:args (x :scs (signed-reg) :target eax)
          (y :scs (signed-reg signed-stack)))
-  (:args-var args)
+  (:arg-refs nil y-ref)
   (:arg-types signed-num signed-num)
   (:temporary (:sc signed-reg :offset rax-offset :target quo
                    :from (:argument 0) :to (:result 0)) eax)
@@ -953,7 +953,7 @@
   (:vop-var vop)
   (:save-p :compute-only)
   (:generator 33
-    (when (types-equal-or-intersect (tn-ref-type (tn-ref-across args))
+    (when (types-equal-or-intersect (tn-ref-type y-ref)
                                     (specifier-type '(eql 0)))
       (if (sc-is y signed-reg)
           (inst test y y)               ; smaller instruction
@@ -1136,11 +1136,11 @@
 (define-vop (fast-ash-left/fixnum-modfx=>fixnum
              fast-ash-left/fixnum=>fixnum)
   (:translate ash-left-modfx)
-  (:args-var args)
+  (:arg-refs nil amount-ref)
   (:generator 3
     (with-shift-operands
       (move ecx amount)
-      (unless (csubtypep (tn-ref-type (tn-ref-across args)) ;; amount
+      (unless (csubtypep (tn-ref-type amount-ref)
                          (specifier-type '(mod 63)))
         (inst cmp amount 63)
         (inst jmp :be OKAY)
@@ -1160,11 +1160,11 @@
 (define-vop (fast-ash-left/unsigned-mod64=>unsigned
              fast-ash-left/unsigned=>unsigned)
   (:translate ash-left-mod64)
-  (:args-var args)
+  (:arg-refs nil amount-ref)
   (:generator 3
     (with-shift-operands
       (move ecx amount)
-      (unless (csubtypep (tn-ref-type (tn-ref-across args)) ;; amount
+      (unless (csubtypep (tn-ref-type amount-ref)
                          (specifier-type '(mod 63)))
         (inst cmp amount 63)
         (inst jmp :be OKAY)
@@ -1228,7 +1228,7 @@
   (:results (result :scs (unsigned-reg) :from (:argument 0)))
   (:result-types unsigned-num)
   (:temporary (:sc signed-reg :offset rcx-offset :from (:argument 1)) ecx)
-  (:args-var args)
+  (:arg-refs nil amount-ref)
   (:variant-vars check-amount signed)
   (:note "inline ASH")
   (:generator 5
@@ -1237,7 +1237,7 @@
     (inst test ecx ecx)
     (inst jmp :ns POSITIVE)
     (inst neg ecx)
-    (unless (csubtypep (tn-ref-type (tn-ref-across args))
+    (unless (csubtypep (tn-ref-type amount-ref)
                        (specifier-type `(integer -63 *)))
       (inst cmp ecx 63)
       (inst jmp :be OKAY)
@@ -1253,7 +1253,7 @@
 
     POSITIVE
     (unless (or (not check-amount) ;; The result-type ensures us that this shift will not overflow.
-                (csubtypep (tn-ref-type (tn-ref-across args))
+                (csubtypep (tn-ref-type amount-ref)
                            (specifier-type `(integer * 63))))
       (inst cmp ecx 63)
       (inst jmp :be STILL-OKAY)
@@ -1279,7 +1279,7 @@
          (amount :scs (signed-reg) :target ecx))
   (:arg-types (:or signed-num unsigned-num) signed-num)
   (:results (result :scs (any-reg) :from (:argument 0)))
-  (:args-var args)
+  (:arg-refs nil amount-ref)
   (:result-types tagged-num)
   (:temporary (:sc signed-reg :offset rcx-offset :from (:argument 1)) ecx)
   (:note "inline ASH")
@@ -1289,7 +1289,7 @@
     (inst test ecx ecx)
     (inst jmp :ns POSITIVE)
     (inst neg ecx)
-    (unless (csubtypep (tn-ref-type (tn-ref-across args))
+    (unless (csubtypep (tn-ref-type amount-ref)
                        (specifier-type `(integer -63 *)))
       (inst cmp ecx 63)
       (inst jmp :be OKAY)
@@ -1307,7 +1307,7 @@
     (inst jmp DONE)
 
     POSITIVE
-    (unless (csubtypep (tn-ref-type (tn-ref-across args))
+    (unless (csubtypep (tn-ref-type amount-ref)
                        (specifier-type `(integer * 63)))
       (inst cmp ecx 63)
       (inst jmp :be STILL-OKAY)
@@ -1778,7 +1778,7 @@
   (:args (x :scs (descriptor-reg)))
   (:arg-types * (:constant integer))
   (:info y)
-  (:args-var arg-ref)
+  (:arg-refs arg-ref)
   (:conditional :ne)
   (:generator 1
    (let ((disp (cdr (tn-ref-memory-access arg-ref))))
@@ -1952,7 +1952,7 @@
   (:args (x :scs (descriptor-reg)))
   (:arg-types (:constant (mod 64)) *)
   (:info bit)
-  (:args-var arg-ref)
+  (:arg-refs arg-ref)
   (:vop-var vop)
   (:conditional :ne)
   (:ignore temp)
@@ -2065,7 +2065,7 @@
                                    ,(symbolicate "FAST-CONDITIONAL"  suffix))
                         (:translate ,tran)
                         (:conditional ,(if signed cond unsigned))
-                        (:args-var x-tn-ref)
+                        (:arg-refs x-tn-ref)
                         (:generator ,cost
                           (emit-optimized-cmp
                            x ,(if (eq suffix '-c/fixnum) `(fixnumize y) 'y)
@@ -2191,7 +2191,7 @@
   (:conditional :e)
   (:policy :fast-safe)
   (:translate eql %eql/integer)
-  (:args-var x-tn-ref)
+  (:arg-refs x-tn-ref)
   (:generator 2 (emit-optimized-cmp x (fixnumize y) temp (tn-ref-type x-tn-ref))))
 
 ;;; FIXME: this seems never to be invoked any more. What did we either break or improve?
@@ -2450,7 +2450,7 @@
   (:policy :fast-safe)
   (:args (a :scs (unsigned-reg) :target result)
          (b :scs (unsigned-reg unsigned-stack) :to :eval)
-         (c :scs (any-reg unsigned-reg control-stack) :target temp))
+         (c :scs (any-reg unsigned-reg control-stack immediate) :target temp))
   (:arg-types unsigned-num unsigned-num positive-fixnum)
   (:temporary (:sc any-reg :from (:argument 2) :to :eval) temp)
   (:results (result :scs (unsigned-reg) :from (:argument 0))
@@ -2459,9 +2459,14 @@
   (:result-types unsigned-num positive-fixnum)
   (:generator 4
     (move result a)
-    (move temp c)
-    (inst neg temp) ; Set the carry flag to 0 if c=0 else to 1
-    (inst adc result b)
+    (cond ((and (sc-is c immediate)
+                (zerop (tn-value c)))
+           (inst add result b))
+          (t
+           (move temp c)
+           (inst neg temp)  ; Set the carry flag to 0 if c=0 else to 1
+           (inst adc result b)))
+
     (unless (eq (tn-kind carry) :unused)
      (inst set :c carry)
      (inst and :dword carry 1))))
@@ -2473,16 +2478,21 @@
   (:policy :fast-safe)
   (:args (a :scs (unsigned-reg) :to :eval :target result)
          (b :scs (unsigned-reg unsigned-stack) :to :result)
-         (c :scs (any-reg unsigned-reg control-stack)))
+         (c :scs (any-reg unsigned-reg control-stack immediate)))
   (:arg-types unsigned-num unsigned-num positive-fixnum)
   (:results (result :scs (unsigned-reg) :from :eval)
             (borrow :scs (unsigned-reg)))
   (:optional-results borrow)
   (:result-types unsigned-num positive-fixnum)
   (:generator 5
-    (inst cmp c 1) ; Set the carry flag to 1 if c=0 else to 0
-    (move result a)
-    (inst sbb result b)
+    (cond ((and (sc-is c immediate)
+                (eql (tn-value c) 1))
+           (move result a)
+           (inst sub result b))
+          (t
+           (inst cmp c 1)   ; Set the carry flag to 1 if c=0 else to 0
+           (move result a)
+           (inst sbb result b)))
     (unless (eq (tn-kind borrow) :unused)
      (inst mov borrow 1)
      (inst sbb :dword borrow 0))))

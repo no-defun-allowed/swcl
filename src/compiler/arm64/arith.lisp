@@ -265,21 +265,46 @@
 ;;; Multiplication
 
 (define-vop (fast-*/fixnum=>fixnum fast-fixnum-binop)
-  (:args (x :scs (signed-reg)) ;; one operand needs to be untagged
-         (y :scs (any-reg)))
+  (:args (x :scs (any-reg))
+         (y :scs (signed-reg immediate))) ;; one operand needs to be untagged
   (:translate *)
   (:generator 2
-    (inst mul r x y)))
+    (let (value)
+      (cond ((and (sc-is y immediate)
+                  (= (logcount (abs (setf value (tn-value y)))) 1))
+             (let ((shift (1- (integer-length (abs value)))))
+               (if (minusp value)
+                   (inst neg r (lsl x shift))
+                   (inst lsl r x shift))))
+            ((and (typep value '(integer 1))
+                  (= (logcount (1- value)) 1))
+             (inst add r x (lsl x (1- (integer-length (1- value))))))
+            ((and (typep value '(integer * -1))
+                  (= (logcount (- 1 value)) 1))
+             (inst sub r x (lsl x (1- (integer-length (- 1 value))))))
+            (t
+             (when value
+               (load-immediate-word tmp-tn value)
+               (setf y tmp-tn))
+             (inst mul r x y))))))
 
-(define-vop (fast-*/signed=>signed fast-signed-binop)
-  (:translate *)
-  (:generator 3
-    (inst mul r x y)))
+(define-vop (fast-*/signed=>signed fast-*/fixnum=>fixnum)
+  (:args (x :scs (signed-reg))
+         (y :scs (signed-reg immediate)))
+  (:arg-types signed-num signed-num)
+  (:results (r :scs (signed-reg)))
+  (:result-types signed-num)
+  (:note "inline (signed-byte 64) arithmetic")
+  (:variant-cost 3))
 
-(define-vop (fast-*/unsigned=>unsigned fast-unsigned-binop)
-  (:translate *)
-  (:generator 3
-    (inst mul r x y)))
+(define-vop (fast-*/unsigned=>unsigned fast-*/fixnum=>fixnum)
+  (:args (x :scs (unsigned-reg))
+         (y :scs (unsigned-reg immediate)))
+  (:arg-types unsigned-num unsigned-num)
+  (:results (r :scs (unsigned-reg)))
+  (:result-types unsigned-num)
+  (:note "inline (unsigned-byte 64) arithmetic")
+  (:variant-cost 3))
 
 ;;; Division
 (define-vop (fast-truncate/signed=>signed fast-safe-arith-op)
@@ -287,7 +312,7 @@
   (:args (x :scs (signed-reg) :to :result)
          (y :scs (signed-reg) :to :result))
   (:arg-types signed-num signed-num)
-  (:args-var args)
+  (:arg-refs nil y-ref)
   (:results (quo :scs (signed-reg) :from :eval)
             (rem :scs (signed-reg) :from :eval))
   (:optional-results rem)
@@ -296,7 +321,7 @@
   (:vop-var vop)
   (:save-p :compute-only)
   (:generator 33
-    (when (types-equal-or-intersect (tn-ref-type (tn-ref-across args))
+    (when (types-equal-or-intersect (tn-ref-type y-ref)
                                     (specifier-type '(eql 0)))
       (let ((zero (generate-error-code vop 'division-by-zero-error x y)))
         (inst cbz y zero)))
@@ -309,7 +334,7 @@
   (:args (x :scs (unsigned-reg) :to :result)
          (y :scs (unsigned-reg) :to :result))
   (:arg-types unsigned-num unsigned-num)
-  (:args-var args)
+  (:arg-refs nil y-ref)
   (:results (quo :scs (unsigned-reg) :from :eval)
             (rem :scs (unsigned-reg) :from :eval))
   (:optional-results rem)
@@ -318,7 +343,7 @@
   (:vop-var vop)
   (:save-p :compute-only)
   (:generator 33
-    (when (types-equal-or-intersect (tn-ref-type (tn-ref-across args))
+    (when (types-equal-or-intersect (tn-ref-type y-ref)
                                     (specifier-type '(eql 0)))
       (let ((zero (generate-error-code vop 'division-by-zero-error x y)))
         (inst cbz y zero)))
@@ -423,13 +448,13 @@
   (:results (result))
   (:policy :fast-safe)
   (:temporary (:sc non-descriptor-reg) temp)
-  (:args-var args)
+  (:arg-refs nil amount-ref)
   (:variant-vars variant)
   (:generator 5
     (inst subs temp amount zr-tn)
     (inst b :ge LEFT)
     (inst neg temp temp)
-    (cond ((csubtypep (tn-ref-type (tn-ref-across args))
+    (cond ((csubtypep (tn-ref-type amount-ref)
                       (specifier-type `(integer -63 *)))
            (ecase variant
              (:signed (inst asr result number temp))
@@ -449,7 +474,7 @@
 
     (inst b END)
     LEFT
-    (cond ((csubtypep (tn-ref-type (tn-ref-across args))
+    (cond ((csubtypep (tn-ref-type amount-ref)
                       (specifier-type `(integer * 63)))
            (inst lsl result number temp))
           (t
@@ -465,7 +490,7 @@
          (amount :scs (signed-reg) :to :save :target temp))
   (:arg-types (:or signed-num unsigned-num) signed-num)
   (:results (result :scs (any-reg)))
-  (:args-var args)
+  (:arg-refs nil amount-ref)
   (:result-types tagged-num)
   (:policy :fast-safe)
   (:temporary (:sc non-descriptor-reg) temp temp-result)
@@ -473,7 +498,7 @@
     (inst subs temp amount zr-tn)
     (inst b :ge LEFT)
     (inst neg temp temp)
-    (cond ((csubtypep (tn-ref-type (tn-ref-across args))
+    (cond ((csubtypep (tn-ref-type amount-ref)
                       (specifier-type `(integer -63 *)))
            (sc-case number
              (signed-reg (inst asr temp-result number temp))
@@ -493,7 +518,7 @@
 
     (inst b END)
     LEFT
-    (cond ((csubtypep (tn-ref-type (tn-ref-across args))
+    (cond ((csubtypep (tn-ref-type amount-ref)
                       (specifier-type `(integer * 63)))
            (inst lsl temp-result number temp))
           (t
@@ -531,13 +556,13 @@
                   ;; For modular variants
                   (:variant-vars cut)
                   (:arg-types ,type positive-fixnum)
-                  (:args-var args)
+                  (:arg-refs nil amount-ref)
                   (:results (result :scs (,result-type)))
                   (:result-types ,type)
                   (:policy :fast-safe)
                   (:generator ,cost
                     (cond ((and cut
-                                (not (csubtypep (tn-ref-type (tn-ref-across args)) ;; amount
+                                (not (csubtypep (tn-ref-type amount-ref)
                                                 (specifier-type `(mod ,n-word-bits)))))
                            (inst cmp amount n-word-bits)
                            (cond ((location= amount result)
@@ -1238,15 +1263,19 @@
   (:policy :fast-safe)
   (:args (a :scs (unsigned-reg))
          (b :scs (unsigned-reg))
-         (c :scs (any-reg)))
+         (c :scs (unsigned-reg any-reg immediate)))
   (:arg-types unsigned-num unsigned-num positive-fixnum)
   (:results (result :scs (unsigned-reg))
             (carry :scs (unsigned-reg) :from :eval))
   (:optional-results carry)
   (:result-types unsigned-num positive-fixnum)
   (:generator 3
-    (inst cmp c 1) ;; Set carry if (fixnum 0 or 1) c=0, else clear.
-    (inst adcs result a b)
+    (cond ((and (sc-is c immediate)
+                (zerop (tn-value c)))
+           (inst adds result a b))
+          (t
+           (inst cmp c 1)
+           (inst adcs result a b)))
     (unless (eq (tn-kind carry) :unused)
       (inst cset carry :cs))))
 
@@ -1255,15 +1284,20 @@
   (:policy :fast-safe)
   (:args (a :scs (unsigned-reg))
          (b :scs (unsigned-reg))
-         (c :scs (any-reg)))
+         (c :scs (unsigned-reg any-reg immediate)))
   (:arg-types unsigned-num unsigned-num positive-fixnum)
   (:results (result :scs (unsigned-reg))
             (borrow :scs (unsigned-reg) :from :eval))
   (:optional-results borrow)
   (:result-types unsigned-num positive-fixnum)
   (:generator 4
-    (inst cmp c 1) ;; Set carry if (fixnum 0 or 1) c=0, else clear.
-    (inst sbcs result a b)
+    (cond ((and (sc-is c immediate)
+                (eql (tn-value c) 1))
+           (inst subs result a b))
+          (t
+           (inst cmp c 1)
+           (inst sbcs result a b)))
+
     (unless (eq (tn-kind borrow) :unused)
       (inst cset borrow :cs))))
 
@@ -1404,12 +1438,15 @@
   (:translate sb-bignum:%ashr)
   (:policy :fast-safe)
   (:args (digit :scs (unsigned-reg))
-         (count :scs (unsigned-reg)))
+         (count :scs (unsigned-reg immediate)))
   (:arg-types unsigned-num positive-fixnum)
   (:results (result :scs (unsigned-reg)))
   (:result-types unsigned-num)
   (:generator 1
-    (inst asr result digit count)))
+    (inst asr result digit (sc-case count
+                             (immediate
+                              (tn-value count))
+                             (t count)))))
 
 (define-vop (digit-lshr digit-ashr)
   (:translate sb-bignum:%digit-logical-shift-right)
@@ -1436,16 +1473,20 @@
     (let* ((*location-context* (unless (eq type 'fixnum)
                                  type))
            (error (generate-error-code vop 'sb-kernel::mul-overflow-error r high)))
-      (let (value)
-        (when (sc-is y immediate)
-          (load-immediate-word high (setf value (tn-value y)))
-          (setf y high))
-        (if (and value
-                 (plusp value)
-                 (= (logcount value) 1))
-            (inst lsl r x (1- (integer-length value)))
-            (inst mul r x y))
-        (inst smulh high x y))
+      (let ((value (and (sc-is y immediate)
+                        (tn-value y))))
+        (cond ((and value
+                    (plusp value)
+                    (= (logcount value) 1))
+               (let ((shift (1- (integer-length value))))
+                 (inst lsl r x shift)
+                 (inst asr high x (- 64 shift))))
+              (t
+               (when value
+                 (load-immediate-word high value)
+                 (setf y high))
+               (inst mul r x y)
+               (inst smulh high x y))))
       (inst cmp high (asr r 63))
       (inst b :ne error))))
 
@@ -1464,16 +1505,20 @@
     (let* ((*location-context* (unless (eq type 'fixnum)
                                  type))
            (error (generate-error-code vop 'sb-kernel::mul-overflow-error r high)))
-      (let (value)
-        (when (sc-is y immediate)
-          (load-immediate-word high (setf value (tn-value y)))
-          (setf y high))
-        (if (and value
-                 (plusp value)
-                 (= (logcount value) 1))
-            (inst lsl r x (1- (integer-length value)))
-            (inst mul r x y))
-        (inst smulh high x y))
+      (let ((value (and (sc-is y immediate)
+                        (tn-value y))))
+        (cond ((and value
+                    (plusp value)
+                    (= (logcount value) 1))
+               (let ((shift (1- (integer-length value))))
+                 (inst lsl r x shift)
+                 (inst asr high x (- 64 shift))))
+              (t
+               (when value
+                 (load-immediate-word high value)
+                 (setf y high))
+               (inst mul r x y)
+               (inst smulh high x y))))
       (inst cmp high (asr r 63))
       (inst b :ne error))))
 
@@ -1521,16 +1566,20 @@
   (:policy :fast-safe)
   (:vop-var vop)
   (:generator 10
-    (let (value)
-      (when (sc-is y immediate)
-        (load-immediate-word high (setf value (tn-value y)))
-        (setf y high))
-      (if (and value
-               (plusp value)
-               (= (logcount value) 1))
-          (inst lsl low x (1- (integer-length value)))
-          (inst mul low x y))
-      (inst smulh high x y))
+    (let ((value (and (sc-is y immediate)
+                      (tn-value y))))
+      (cond ((and value
+                  (plusp value)
+                  (= (logcount value) 1))
+             (let ((shift (1- (integer-length value))))
+               (inst lsl low x shift)
+               (inst asr high x (- 64 shift))))
+            (t
+             (when value
+               (load-immediate-word high value)
+               (setf y high))
+             (inst mul low x y)
+             (inst smulh high x y))))
     (inst mov header (bignum-header-for-length 2))
     (inst cmp high (asr low 63))
     (inst b :ne allocate)

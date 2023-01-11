@@ -194,7 +194,7 @@ SBCL itself")
            "%FIXNUM-DIGIT-WITH-CORRECT-SIGN" "%FIXNUM-TO-DIGIT"
            "%BIGFLOOR" "%LOGAND" "%LOGIOR" "%LOGNOT" "%LOGXOR"
            "%MULTIPLY" "%MULTIPLY-AND-ADD"
-           "%SUBTRACT-WITH-BORROW" "ADD-BIGNUMS"
+           "%SUBTRACT-WITH-BORROW" "ADD-BIGNUMS" "ADD-BIGNUM-FIXNUM"
            "BIGNUM-ASHIFT-LEFT" "BIGNUM-ASHIFT-LEFT-FIXNUM"
            "BIGNUM-ASHIFT-RIGHT"
            "BIGNUM-COMPARE"
@@ -209,7 +209,9 @@ SBCL itself")
            "MAKE-SMALL-BIGNUM"
            "MULTIPLY-BIGNUM-AND-FIXNUM" "MULTIPLY-BIGNUMS"
            "MULTIPLY-FIXNUMS" "NEGATE-BIGNUM"
-           "%RANDOM-BIGNUM" "SUBTRACT-BIGNUM" "SXHASH-BIGNUM"
+           "%RANDOM-BIGNUM"
+           "SUBTRACT-BIGNUM" "SUBTRACT-FIXNUM-BIGNUM" "SUBTRACT-BIGNUM-FIXNUM"
+           "SXHASH-BIGNUM"
            "HALF-BIGNUM-ELEMENT-TYPE" "HALF-BIGNUM-INDEX" "HALF-BIGNUM-LENGTH"
            "%HALF-BIGNUM-REF" "%HALF-BIGFLOOR"))
 
@@ -247,7 +249,6 @@ SBCL itself")
         "SB-FASL" "SB-GRAY" "SB-INT" "SB-KERNEL" "SB-SYS"))
 
 (defpackage* "SB-SEQUENCE"
-  (:nicknames "SEQUENCE")
   (:documentation "semi-public: implements something which might eventually
 be submitted as a CDR")
   (:export "PROTOCOL-UNIMPLEMENTED"
@@ -1353,7 +1354,7 @@ like *STACK-TOP-HINT* and unsupported stuff like *TRACED-FUN-LIST*.")
            "LVAR-VALUE"
            "MACRO-POLICY-DECLS"
            "MAKE-ALIAS-TN" "MAKE-CATCH-BLOCK"
-           "MAKE-CLOSURE" "MAKE-CONSTANT-TN"
+           "MAKE-CLOSURE" #+(or x86-64 arm64) "MAKE-CLOSURE-FROM-LABEL" "MAKE-CONSTANT-TN"
            "MAKE-FIXUP-NOTE"
            "MAKE-LOAD-TIME-CONSTANT-TN" "MAKE-N-TNS" "MAKE-NORMAL-TN"
            "MAKE-RANDOM-TN"
@@ -1741,8 +1742,7 @@ of SBCL which maintained the CMU-CL-style split into two packages.)")
            "COMPUTE-ALIEN-REP-TYPE" "COMPUTE-DEPORT-ALLOC-LAMBDA"
            "COMPUTE-DEPORT-LAMBDA" "COMPUTE-DEPOSIT-LAMBDA"
            "COMPUTE-EXTRACT-LAMBDA" "COMPUTE-LISP-REP-TYPE"
-           "COMPUTE-NATURALIZE-LAMBDA" "DEFINE-ALIEN-TYPE-CLASS"
-           "DEFINE-ALIEN-TYPE-METHOD" "DEFINE-ALIEN-TYPE-TRANSLATOR"
+           "COMPUTE-NATURALIZE-LAMBDA" "DEFINE-ALIEN-TYPE-METHOD"
            "DEPORT" "DEPORT-ALLOC"
            "ENTER-ALIEN-CALLBACK"
            "HEAP-ALIEN-INFO" "HEAP-ALIEN-INFO-P" "HEAP-ALIEN-INFO-SAP-FORM"
@@ -3037,7 +3037,8 @@ possibly temporarily, because it might be used internally.")
             ;; hash mixing operations
 
            "MIX" "MIXF" "WORD-MIX"
-           "GOOD-HASH-WORD->FIXNUM"
+           "MURMUR-HASH-WORD/FIXNUM"
+           "MURMUR-HASH-WORD/+FIXNUM"
 
             ;; Macroexpansion that doesn't touch special forms
 
@@ -3594,4 +3595,5 @@ package is deprecated in favour of SB-MOP.")
 (defpackage* "SB-LOCKLESS"
   (:documentation "internal: lockfree lists")
   (:use "CL" "SB-INT" "SB-EXT" "SB-SYS" "SB-KERNEL")
+  (:export "+TAIL+")
   (:shadow "ENDP"))

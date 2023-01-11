@@ -84,7 +84,7 @@
          (ash (sb-vm::get-nil-taggedptr) (- sb-vm:n-fixnum-tag-bits)))
         (t
          ;; (STRING X) could be a non-simple string, it's OK.
-         (let ((hash (logxor (sb-impl::%sxhash-simple-string (string x))
+         (let ((hash (logxor (%sxhash-simple-string (string x))
                              most-positive-fixnum)))
            (aver (ldb-test (byte (- 32 sb-vm:n-fixnum-tag-bits) 0) hash))
            hash))))
@@ -175,15 +175,25 @@
   (logxor k (ash k -33)))
 (defmacro murmur3-fmix-word (x) `(murmur3-fmix64 ,x)))
 
-(defun murmur-fmix-word (x) ; FIXME: this is not a very distinctive name
-  (murmur3-fmix-word (truly-the sb-vm:word x)))
-(export 'murmur-fmix-word) ; for unit testing vs C code
+;;; You probably don't want to use this function because it (almost surely)
+;;; has to cons the result. Better to use the /FIXNUM functions below.
+(defun murmur-fmix-word-for-unit-test (x)
+  (murmur3-fmix-word (the sb-vm:word x)))
+(export 'murmur-fmix-word-for-unit-test) ; protect from tree-shaker
 
-;;; The "good" hash function on sb-vm:word returns a fixnum, does not cons,
+;;; This hash function on sb-vm:word returns a fixnum, does not cons,
 ;;; and has better avalanche behavior then SXHASH - changing any one input bit
 ;;; should affect each bit of output with equal chance.
-(defun good-hash-word->fixnum (x)
-  (logand (murmur3-fmix-word (truly-the sb-vm:word x)) most-positive-fixnum))
+#-sb-xc-host
+(progn
+(declaim (inline murmur-hash-word/fixnum)) ; don't want to cons the word to pass in
+(defun murmur-hash-word/fixnum (x) ; result may be positive or negative
+  (%make-lisp-obj (logandc2 (murmur3-fmix-word (truly-the sb-vm:word x))
+                            sb-vm:fixnum-tag-mask))))
+;;; Similar, but the sign bit is always 0
+(declaim (inline murmur-hash-word/+fixnum))
+(defun murmur-hash-word/+fixnum (x)
+  (logand (murmur3-fmix-word (truly-the sb-vm:word x)) sb-xc:most-positive-fixnum))
 
 ;;;; support for the hash values used by CLOS when working with LAYOUTs
 
@@ -212,19 +222,17 @@
   (let ((limit (1+ (ash most-positive-fixnum -1))))
     (declare (notinline random))
     (logior (if (typep name '(and symbol (not null)))
-                (flet ((improve-hash (x) (murmur3-fmix-word x)))
-                  (mix (logand
-                        (improve-hash (sb-impl::%sxhash-simple-string (symbol-name name)))
-                        most-positive-fixnum)
-                       (let ((package (sb-xc:symbol-package name)))
-                         (sb-impl::%sxhash-simple-string
+                (mix (murmur-hash-word/+fixnum
+                         (%sxhash-simple-string (symbol-name name)))
+                     (let ((package (sb-xc:symbol-package name)))
+                         (%sxhash-simple-string
                           ;; Must specifically look for CL package when cross-compiling
                           ;; because we might have remapped a symbol from its "actual"
                           ;; package of the host lisp, to being logically in CL if the
                           ;; host happens to have standard symbols homed elsewhere.
                           (cond #+sb-xc ((eq package *cl-package*) "COMMON-LISP")
                                 ((not package) "uninterned")
-                                (t (sb-xc:package-name package)))))))
+                                (t (sb-xc:package-name package))))))
                 ;; This L-T-V form has to remain out of the common path,
                 ;; or else cheneygc will crash in cold-init.
                 ;; Cold-init calls HASH-LAYOUT-NAME many times *before* the L-T-V

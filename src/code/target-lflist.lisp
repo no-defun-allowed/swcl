@@ -17,7 +17,9 @@
 
 (in-package "SB-LOCKLESS")
 
-(export '(make-ordered-list lfl-insert lfl-delete lfl-find))
+(export '(make-ordered-list lfl-insert lfl-delete lfl-find
+          lfl-insert*/t lfl-delete*/t lfl-find*/t
+          do-lockfree-list lfl-keys make-marked-ref))
 
 ;;; The changes to GC to support this code were as follows:
 ;;;
@@ -28,6 +30,10 @@
 ;;;   to, pinning a lockfree list node may implicitly pin not only that node but
 ;;;   also the successor node, since there would otherwise be no way to reconstruct
 ;;;   (in Lisp) a tagged pointer to the successor of a node pending deletion.
+;;;   Pinning a node always binds *PINNED-OBJECTS* and never relies on conservative
+;;;   stack scan even for the architectures that have conservative stack.
+;;;   arm64 and x86-64 uses PSEUDO-ATOMIC, which produces shorter code than
+;;;   WITH-PINNED-OBJECTS.
 ;;;
 ;;; * Copying a lockfree list node tries to copy the successor nodes into adjacent
 ;;;   memory just like copying a chain of cons cells. This is inessential but nice.
@@ -50,18 +56,12 @@
 (defun ptr-markedp (bits) (fixnump bits))
 (defun node-markedp (node) (fixnump (%node-next node)))
 
-;;; Lockless lists should be terminated by *tail-atom*.
-;;; The value of %NODE-NEXT of the tail atom is chosen such that we will never
-;;; violate the type assertion in GET-NEXT if pointer is inadvertently
-;;; followed out of the tail atom. It would mostly work to use NIL as the %NEXT,
-;;; but just in terms of whether the %MAKE-LISP-OBJ expression is correct.
-;;; (ORing in instance-pointer-lowtag does not change NIL's representation.)
-;;; However, using NIL would violates the type assertion.
-(define-load-time-global *tail-atom*
-  (let ((node (%make-sentinel-node)))
-    (setf (%node-next node) node)))
+;;; Lockfree lists are terminated by +TAIL+. The %NEXT bits in +TAIL+
+;;; must not imply that the node is marked for deletion.
+(setf (%node-next +tail+) nil)
+(assert (not (node-markedp +tail+)))
 
-(defmacro endp (node) `(eq ,node (load-time-value *tail-atom*)))
+(defmacro endp (node) `(eq ,node ,+tail+))
 
 ;;; WORD< uses fixnum-valued keys to represent aligned addresses
 ;;; a la DESCRIPTOR-SAP.
@@ -98,7 +98,7 @@
                          (coerce test 'function))
                  (error "Must specify both :SORT and :TEST"))))
     (let ((head (%make-sentinel-node)))
-      (setf (%node-next head) *tail-atom*)
+      (setf (%node-next head) +tail+)
       (funcall constructor
                head insert delete find inequality equality))))
 
@@ -123,6 +123,13 @@
 (progn
 (declaim (inline get-next))
 (defun get-next (node)
+  ;; You must not call GET-NEXT on +TAIL+ because the 'next' of +TAIL+ is NIL,
+  ;; and (LOGIOR NIL-VALUE INSTANCE-POINTER-LOWTAG) isn't necessarily NIL.
+  ;; It would be a bogus pointer on ppc64 because of rearranged lowtags.
+  ;; arm64 and x86-64 are missing this AVER (because the vop doesn't do it),
+  ;; but as long as some of the platforms test this it, we should be reasonably ok.
+  ;; (I could assign 'next' of +TAIL+ as +TAIL+ like it used to be, and remove this.)
+  (aver (neq node +tail+))
   ;; Storing NODE in *PINNED-OBJECTS* causes its successor to become pinned.
   (let* ((sb-vm::*pinned-objects* (cons node sb-vm::*pinned-objects*))
          (%next (%node-next node)))
@@ -151,9 +158,11 @@
          (print-unreadable-object (node stream :type t)
            (format stream "(~:[~;*~]~S ~S)"
                    (node-markedp node) (node-key node) (node-data node))))
-        ((eq node *tail-atom*)
-         (print-unreadable-object (node stream :type t)
-           (write '*tail-atom* :stream stream)))
+        ((eq node +tail+)
+         (if *read-eval*
+             (format stream "#.~S" '+tail+)
+             (print-unreadable-object (node stream :type t)
+               (write '+tail+ :stream stream))))
         (t
          (print-unreadable-object (node stream :type t :identity t)))))
 
@@ -369,7 +378,7 @@
 ;;; a complete snapshot of the list.
 (defun copy-lfl (lfl)
   (labels ((copy-chain (node)
-             (if (eq node *tail-atom*)
+             (if (eq node +tail+)
                  node
                  (let ((copy (copy-structure node))
                        (copy-of-next (copy-chain (get-next node))))

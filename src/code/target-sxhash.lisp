@@ -80,7 +80,7 @@
                    #+sb-thread (%primitive sb-vm::set-instance-hashed instance))
                  (get-lisp-obj-address instance))))
     ;; perturb the address
-    (logand (murmur3-fmix-word addr) most-positive-fixnum)))
+    (murmur-hash-word/+fixnum addr)))
 
 (declaim (inline instance-sxhash))
 (defun instance-sxhash (instance)
@@ -107,7 +107,8 @@
        ;; There is not more entropy imparted by doing a mix step on a value that had
        ;; at most 32 bits of randomness, but this makes more of the bits vary.
        ;; Some uses of the hash might expect the high bits to have randomness in them.
-       (logand (murmur-fmix-word hash) most-positive-fixnum)))
+       ;; This returns a positive fixnum to conform with the requirement on SXHASH.
+       (murmur-hash-word/+fixnum hash)))
    #-compact-instance-header
    (sb-pcl::standard-funcallable-instance-hash-code
     (truly-the sb-pcl::standard-funcallable-instance fin))))
@@ -249,8 +250,7 @@
 
 (defun sap-hash (x)
   ;; toss in a LOGNOT so that (the word a) and (int-sap a) hash differently
-  (let ((w (logand (lognot (sap-int x)) most-positive-word)))
-    (logand (murmur3-fmix-word w) most-positive-fixnum)))
+  (murmur-hash-word/+fixnum (logand (lognot (sap-int x)) most-positive-word)))
 
 (defun sxhash (x)
   ;; profiling SXHASH is hard, but we might as well try to make it go

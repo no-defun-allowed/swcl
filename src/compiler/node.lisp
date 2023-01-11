@@ -711,13 +711,8 @@
 (defstruct (environment (:copier nil))
   ;; the function that allocates this environment
   (lambda (missing-arg) :type clambda :read-only t)
-  ;; This ultimately converges to a list of all the LAMBDA-VARs and
-  ;; NLX-INFOs needed from enclosing environments by code in this
-  ;; environment. In the meantime, it may be
-  ;;   * NIL at object creation time
-  ;;   * a superset of the correct result, generated somewhat later
-  ;;   * smaller and smaller sets converging to the correct result as
-  ;;     we notice and delete unused elements in the superset
+  ;; a list of all the LAMBDA-VARS and NLX-INFOs needed from enclosing
+  ;; environments by code in this environment.
   (closure nil :type list)
   ;; a list of NLX-INFO structures describing all the non-local exits
   ;; into this environment
@@ -762,15 +757,14 @@
 ;;; ENVIRONMENT-NLX-INFO.
 (defstruct (nlx-info
             (:copier nil)
-            (:constructor make-nlx-info (cleanup block)))
+            (:constructor make-nlx-info (cleanup block exit)))
   ;; the cleanup associated with this exit. In a catch or
   ;; unwind-protect, this is the :CATCH or :UNWIND-PROTECT cleanup,
   ;; and not the cleanup for the escape block. The CLEANUP-KIND of
   ;; this thus provides a good indication of what kind of exit is
   ;; being done.
   (cleanup (missing-arg) :type cleanup)
-  ;; the ``continuation'' exited to (the block, succeeding the EXIT
-  ;; nodes). If this exit is from an escape function (CATCH or
+  ;; the continuation exited to. If this exit is from an escape function (CATCH or
   ;; UNWIND-PROTECT), then environment analysis deletes the
   ;; escape function and instead has the %NLX-ENTRY use this
   ;; continuation.
@@ -780,6 +774,7 @@
   ;; ENTRY must also be used to disambiguate, since exits to different
   ;; places may deliver their result to the same continuation.
   (block (missing-arg) :type cblock)
+  (exit (missing-arg) :type exit)
   ;; the entry stub inserted by environment analysis. This is a block
   ;; containing a call to the %NLX-ENTRY funny function that has the
   ;; original exit destination as its successor. Null only
@@ -792,6 +787,7 @@
   (info nil))
 (defprinter (nlx-info :identity t)
   block
+  exit
   target
   info)
 (!set-load-form-method nlx-info (:xc :target) :ignore-it)
@@ -1183,7 +1179,6 @@
 (defstruct (clambda (:include functional)
                     (:conc-name lambda-)
                     (:predicate lambda-p)
-                    (:constructor make-lambda)
                     (:copier nil))
   ;; list of LAMBDA-VAR descriptors for arguments
   (vars nil :type list)
@@ -1213,11 +1208,10 @@
   (lets nil :type list)
   ;; all the ENTRY nodes in this function and its LETs, or null in a LET
   (entries nil :type list)
-  ;; CLAMBDAs which are locally called by this lambda, and other
-  ;; objects (closed-over LAMBDA-VARs and XEPs) which this lambda
-  ;; depends on in such a way that DFO shouldn't put them in separate
-  ;; components.
-  (calls-or-closes (make-sset) :type (or null sset))
+  ;; a set of all the functions directly called from this function
+  ;; (or one of its LETs) using a non-LET local call. This may include
+  ;; deleted functions because nobody bothers to clear them out.
+  (calls (make-sset) :type (or null sset))
   ;; the TAIL-SET that this LAMBDA is in. This is null during creation.
   ;;
   ;; In CMU CL, and old SBCL, this was also NILed out when LET

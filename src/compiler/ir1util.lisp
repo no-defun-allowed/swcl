@@ -71,12 +71,12 @@
 ;;;; lvar use hacking
 
 ;;; Return a list of all the nodes which use LVAR.
-(declaim (ftype (sfunction (lvar) list) find-uses))
 (defun find-uses (lvar)
+  (declare (type lvar lvar) #-sb-xc-host (values list))
   (ensure-list (lvar-uses lvar)))
 
-(declaim (ftype (sfunction (lvar) lvar) principal-lvar))
 (defun principal-lvar (lvar)
+  (declare (type lvar lvar))
   (labels ((pl (lvar)
              (let ((use (lvar-uses lvar)))
                (if (cast-p use)
@@ -151,12 +151,11 @@
 ;;; Note: if you call this function, you may have to do a
 ;;; REOPTIMIZE-LVAR to inform IR1 optimization that something has
 ;;; changed.
-(declaim (ftype (sfunction (node) (values))
-                delete-lvar-use
-                %delete-lvar-use))
+
 ;;; Just delete NODE from its LVAR uses; LVAR is preserved so it may
 ;;; be given a new use.
 (defun %delete-lvar-use (node)
+  (declare (type node node))
   (let ((lvar (node-lvar node)))
     (when lvar
       (if (listp (lvar-uses lvar))
@@ -171,6 +170,7 @@
 ;;; Delete NODE from its LVAR uses; if LVAR has no other uses, delete
 ;;; its DEST's block, which must be unreachable.
 (defun delete-lvar-use (node)
+  (declare (type node node))
   (let ((lvar (node-lvar node)))
     (when lvar
       (%delete-lvar-use node)
@@ -187,8 +187,8 @@
 ;;; Note: if you call this function, you may have to do a
 ;;; REOPTIMIZE-LVAR to inform IR1 optimization that something has
 ;;; changed.
-(declaim (ftype (sfunction (node (or lvar null)) (values)) add-lvar-use))
 (defun add-lvar-use (node lvar)
+  (declare (type node node) (type (or lvar null) lvar))
   (aver (not (node-lvar node)))
   (when lvar
     (let ((uses (lvar-uses lvar)))
@@ -281,10 +281,10 @@
              (lvar-almost-immediately-used-p lvar))))))
 
 
-;;;; BLOCK UTILS
 
 (declaim (inline block-to-be-deleted-p))
 (defun block-to-be-deleted-p (block)
+  (declare (type cblock block))
   (or (block-delete-p block)
       (eq (functional-kind (block-home-lambda block)) :deleted)))
 
@@ -293,23 +293,17 @@
 (defun node-to-be-deleted-p (node)
   (block-to-be-deleted-p (node-block node)))
 
-(declaim (ftype (sfunction (clambda) cblock) lambda-block))
-(defun lambda-block (clambda)
-  (node-block (lambda-bind clambda)))
-(declaim (ftype (sfunction (clambda) component) lambda-component))
-(defun lambda-component (clambda)
-  (block-component (lambda-block clambda)))
+(defun lambda-block (lambda)
+  (declare (type clambda lambda))
+  (node-block (lambda-bind lambda)))
 
-(declaim (ftype (sfunction (cblock) node) block-start-node))
+(defun lambda-component (lambda)
+  (declare (type clambda lambda))
+  (block-component (lambda-block lambda)))
+
 (defun block-start-node (block)
+  (declare (type cblock block))
   (ctran-next (block-start block)))
-
-;;; Return the enclosing cleanup for environment of the first or last
-;;; node in BLOCK.
-(defun block-start-cleanup (block)
-  (node-enclosing-cleanup (block-start-node block)))
-(defun block-end-cleanup (block)
-  (node-enclosing-cleanup (block-last block)))
 
 
 ;;;; lvar substitution
@@ -617,6 +611,24 @@
   (declare (type node node) #-sb-xc-host (inline node-home-lambda))
   (the environment (lambda-environment (node-home-lambda node))))
 
+;;; Return the enclosing cleanup for environment of the first or last
+;;; node in BLOCK.
+(defun block-start-cleanup (block)
+  (node-enclosing-cleanup (block-start-node block)))
+(defun block-end-cleanup (block)
+  (node-enclosing-cleanup (block-last block)))
+
+;;; Return the non-LET LAMBDA that holds BLOCK's code.
+(defun block-home-lambda (block)
+  (declare (type cblock block)
+           #-sb-xc-host (inline node-home-lambda))
+  (node-home-lambda (block-last block)))
+
+;;; Return the IR1 environment for BLOCK.
+(defun block-environment (block)
+  (declare (type cblock block))
+  (lambda-environment (block-home-lambda block)))
+
 (declaim (inline node-stack-allocate-p))
 (defun node-stack-allocate-p (node)
   (awhen (node-lvar node)
@@ -696,55 +708,6 @@
         ;; Is it declared flushable locally?
         (let ((name (lvar-fun-name (combination-fun call) t)))
           (memq name (lexenv-flushable (node-lexenv call)))))))
-
-;;; Return the non-LET LAMBDA that holds BLOCK's code, or NIL
-;;; if there is none.
-;;;
-;;; There can legitimately be no home lambda in dead code early in the
-;;; IR1 conversion process, e.g. when IR1-converting the SETQ form in
-;;;   (BLOCK B (RETURN-FROM B) (SETQ X 3))
-;;; where the block is just a placeholder during parsing and doesn't
-;;; actually correspond to code which will be written anywhere.
-(declaim (ftype (sfunction (cblock) (or clambda null)) block-home-lambda-or-null))
-(defun block-home-lambda-or-null (block)
-  #-sb-xc-host (declare (inline node-home-lambda))
-  (if (node-p (block-last block))
-      ;; This is the old CMU CL way of doing it.
-      (node-home-lambda (block-last block))
-      ;; Now that SBCL uses this operation more aggressively than CMU
-      ;; CL did, the old CMU CL way of doing it can fail in two ways.
-      ;;   1. It can fail in a few cases even when a meaningful home
-      ;;      lambda exists, e.g. in IR1-CONVERT of one of the legs of
-      ;;      an IF.
-      ;;   2. It can fail when converting a form which is born orphaned
-      ;;      so that it never had a meaningful home lambda, e.g. a form
-      ;;      which follows a RETURN-FROM or GO form.
-      (let ((pred-list (block-pred block)))
-        ;; To deal with case 1, we reason that
-        ;; previous-in-target-execution-order blocks should be in the
-        ;; same lambda, and that they seem in practice to be
-        ;; previous-in-compilation-order blocks too, so we look back
-        ;; to find one which is sufficiently initialized to tell us
-        ;; what the home lambda is.
-        (if pred-list
-            ;; We could get fancy about this, flooding through the
-            ;; graph of all the previous blocks, but in practice it
-            ;; seems to work just to grab the first previous block and
-            ;; use it.
-            (node-home-lambda (block-last (first pred-list)))
-            ;; In case 2, we end up with an empty PRED-LIST and
-            ;; have to punt: There's no home lambda.
-            nil))))
-
-;;; Return the non-LET LAMBDA that holds BLOCK's code.
-(defun block-home-lambda (block)
-  (declare (type cblock block))
-  (the clambda (block-home-lambda-or-null block)))
-
-;;; Return the IR1 environment for BLOCK.
-(defun block-environment (block)
-  (declare (type cblock block))
-  (lambda-environment (block-home-lambda block)))
 
 ;;;; DYNAMIC-EXTENT related
 
@@ -915,7 +878,7 @@
           (loop for v in vars
                 for arg in (combination-args combination)
                 when (eq v var)
-                return arg))))))
+                  return arg))))))
 
 ;;; Return the Top Level Form number of PATH, i.e. the ordinal number
 ;;; of its original source's top level form in its compilation unit.
@@ -925,17 +888,17 @@
 
 ;;; Return the (reversed) list for the PATH in the original source
 ;;; (with the Top Level Form number last).
-(declaim (ftype (sfunction (list) list) source-path-original-source))
 (defun source-path-original-source (path)
-  (declare (list path) (inline member))
+  (declare (list path) (inline member)
+           #-sb-xc-host (values list))
   (cddr (member 'original-source-start path :test #'eq)))
 
 ;;; Return the Form Number of PATH's original source inside the Top
 ;;; Level Form that contains it. This is determined by the order that
 ;;; we walk the subforms of the top level source form.
-(declaim (ftype (sfunction (list) (or null index)) source-path-form-number))
 (defun source-path-form-number (path)
-  (declare (inline member))
+  (declare (type list path) (inline member)
+           #-sb-xc-host (values (or null index)))
   (cadr (member 'original-source-start path :test #'eq)))
 
 ;;; Return a list of all the enclosing forms not in the original
@@ -984,31 +947,6 @@
             (setf path (common-suffix path
                                       (node-source-path use)))))
         (list (node-source-form use)))))
-
-;;; Return the LAMBDA that is CTRAN's home, or NIL if there is none.
-(declaim (ftype (sfunction (ctran) (or clambda null))
-                ctran-home-lambda-or-null))
-(defun ctran-home-lambda-or-null (ctran)
-  ;; KLUDGE: This function is a post-CMU-CL hack by WHN, and this
-  ;; implementation might not be quite right, or might be uglier than
-  ;; necessary. It appears that the original Python never found a need
-  ;; to do this operation. The obvious things based on
-  ;; NODE-HOME-LAMBDA of CTRAN-USE usually work; then if that fails,
-  ;; BLOCK-HOME-LAMBDA of CTRAN-BLOCK works, given that we
-  ;; generalize it enough to grovel harder when the simple CMU CL
-  ;; approach fails, and furthermore realize that in some exceptional
-  ;; cases it might return NIL. -- WHN 2001-12-04
-  (cond ((ctran-use ctran)
-         (node-home-lambda (ctran-use ctran)))
-        ((ctran-block ctran)
-         (block-home-lambda-or-null (ctran-block ctran)))
-        (t
-         (bug "confused about home lambda for ~S" ctran))))
-
-;;; Return the LAMBDA that is CTRAN's home.
-(declaim (ftype (sfunction (ctran) clambda) ctran-home-lambda))
-(defun ctran-home-lambda (ctran)
-  (ctran-home-lambda-or-null ctran))
 
 (declaim (inline cast-single-value-p))
 (defun cast-single-value-p (cast)
@@ -1329,8 +1267,9 @@
 
 ;;; Unlink a block from the next/prev chain. We also null out the
 ;;; COMPONENT.
-(declaim (ftype (sfunction (cblock) (values)) remove-from-dfo))
+(declaim (inline remove-from-dfo))
 (defun remove-from-dfo (block)
+  (declare (type cblock block))
   (let ((next (block-next block))
         (prev (block-prev block)))
     (setf (block-component block) nil)
@@ -1340,6 +1279,7 @@
 
 ;;; Add BLOCK to the next/prev chain following AFTER. We also set the
 ;;; COMPONENT to be the same as for AFTER.
+(declaim (inline add-to-dfo))
 (defun add-to-dfo (block after)
   (declare (type cblock block after))
   (let ((next (block-next after))
@@ -1354,8 +1294,8 @@
 
 ;;; Set the FLAG for all the blocks in COMPONENT to NIL, except for
 ;;; the head and tail which are set to T.
-(declaim (ftype (sfunction (component) (values)) clear-flags))
 (defun clear-flags (component)
+  (declare (type component component))
   (let ((head (component-head component))
         (tail (component-tail component)))
     (setf (block-flag head) t)
@@ -1366,8 +1306,8 @@
 
 ;;; Make a component with no blocks in it. The BLOCK-FLAG is initially
 ;;; true in the head and tail blocks.
-(declaim (ftype (sfunction () component) make-empty-component))
 (defun make-empty-component ()
+  #-sb-xc-host (declare (values component))
   (let* ((head (make-block-key :start nil :component nil))
          (tail (make-block-key :start nil :component nil))
          (res (make-component head tail)))
@@ -1629,13 +1569,8 @@
 (defun delete-ref (ref)
   (declare (type ref ref))
   (let* ((leaf (ref-leaf ref))
-         (refs (delq1 ref (leaf-refs leaf)))
-         (home (node-home-lambda ref)))
+         (refs (delq1 ref (leaf-refs leaf))))
     (setf (leaf-refs leaf) refs)
-    (when (and (typep leaf '(or clambda lambda-var))
-               (not (find home refs :key #'node-home-lambda)))
-      ;; It was the last reference from this lambda, remove it
-      (sset-delete leaf (lambda-calls-or-closes home)))
     (cond ((null refs)
            (typecase leaf
              (lambda-var
@@ -2381,8 +2316,8 @@ is :ANY, the function name is not checked."
 
 ;;;; functional hackery
 
-(declaim (ftype (sfunction (functional) clambda) main-entry))
 (defun main-entry (functional)
+  (declare (type functional functional) #-sb-xc-host (values clambda))
   (etypecase functional
     (clambda functional)
     (optional-dispatch
@@ -2392,8 +2327,9 @@ is :ANY, the function name is not checked."
 ;;; MV-BIND when it appears in an MV-CALL. All fixed arguments must be
 ;;; optional with null default and no SUPPLIED-P. There must be a
 ;;; &REST arg with no references.
-(declaim (ftype (sfunction (functional) boolean) looks-like-an-mv-bind))
 (defun looks-like-an-mv-bind (functional)
+  (declare (type functional functional)
+           #-sb-xc-host (values boolean))
   (and (optional-dispatch-p functional)
        (do ((arg (optional-dispatch-arglist functional) (cdr arg)))
            ((null arg) nil)
@@ -2424,6 +2360,7 @@ is :ANY, the function name is not checked."
 ;;; Return true if function is an external entry point. This is true
 ;;; of normal XEPs (:EXTERNAL kind) and also of top level lambdas
 ;;; (:TOPLEVEL kind.)
+(declaim (inline xep-p))
 (defun xep-p (fun)
   (declare (type functional fun))
   (not (null (member (functional-kind fun) '(:external :toplevel)))))
@@ -2582,10 +2519,9 @@ is :ANY, the function name is not checked."
 ;;; resulting of the evaluation. If an error is signalled during the
 ;;; application, then return the condition and NIL as the
 ;;; second value.
-(declaim (ftype (sfunction ((or symbol function) list)
-                          (values t boolean))
-                careful-call))
 (defun careful-call (function args)
+  (declare (type (or symbol function) function)
+           (type list args))
   (handler-case (values (multiple-value-list (apply function args)) t)
     ;; When cross-compiling, being "careful" is the wrong thing - our code should
     ;; not allowed malformed or out-of-order definitions to proceed as if all is well.
@@ -2626,9 +2562,8 @@ is :ANY, the function name is not checked."
 ;;; lvars ARGS. It returns the lvar if the keyword is present, or NIL
 ;;; otherwise. The legality and constantness of the keywords should
 ;;; already have been checked.
-(declaim (ftype (sfunction (list keyword) (or lvar null))
-                find-keyword-lvar))
 (defun find-keyword-lvar (args key)
+  (declare (type list args) (type keyword key))
   (do ((arg args (cddr arg)))
       ((null arg) nil)
     (when (eq (lvar-value (first arg)) key)
@@ -2637,8 +2572,8 @@ is :ANY, the function name is not checked."
 ;;; This function is used by the result of PARSE-DEFTRANSFORM to
 ;;; verify that alternating lvars in ARGS are constant and that there
 ;;; is an even number of args.
-(declaim (ftype (sfunction (list) boolean) check-key-args-constant))
 (defun check-key-args-constant (args)
+  (declare (type list args) #-sb-xc-host (values boolean))
   (do ((arg args (cddr arg)))
       ((null arg) t)
     (unless (and (rest arg)
@@ -2648,8 +2583,8 @@ is :ANY, the function name is not checked."
 ;;; This function is used by the result of PARSE-DEFTRANSFORM to
 ;;; verify that the list of lvars ARGS is a well-formed &KEY arglist
 ;;; and that only keywords present in the list KEYS are supplied.
-(declaim (ftype (sfunction (list list) boolean) check-transform-keys))
 (defun check-transform-keys (args keys)
+  (declare (list args keys) #-sb-xc-host (values boolean))
   (and (check-key-args-constant args)
        (do ((arg args (cddr arg)))
            ((null arg) t)
@@ -2659,8 +2594,8 @@ is :ANY, the function name is not checked."
 ;;;; miscellaneous
 
 ;;; Called by the expansion of the EVENT macro.
-(declaim (ftype (sfunction (event-info (or node null)) *) %event))
 (defun %event (info node)
+  (declare (type event-info info) (type (or node null) node))
   (incf (event-info-count info))
   (when (and (>= (event-info-level info) *event-note-threshold*)
              (policy (or node *lexenv*)

@@ -29,8 +29,9 @@
 
 #include "genesis/cons.h"
 #include "genesis/gc-tables.h"
-#include "genesis/hash-table.h"
 #include "genesis/closure.h"
+#include "genesis/hash-table.h"
+#include "genesis/list-node.h"
 #include "gc-private.h"
 
 #define PAGES_CLAIMED_PER_THREAD 128

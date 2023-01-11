@@ -87,3 +87,100 @@
    `(lambda (x) (declare (type vector x)) (reduce #'+ x))
    ((#(1 2 3)) 6)
    (((make-array 3 :element-type '(unsigned-byte 8) :initial-contents '(4 5 6))) 15)))
+
+;;; We do not want functions closing over top level bindings to retain
+;;; load-time code in the component when not necessary.
+(with-test (:name :top-level-closure-separate-component)
+  (ctu:file-compile
+   `((let ((x (random 10)))
+       (defun top-level-closure-1 ()
+         x)
+       (setq x 4)))
+   :load t)
+  ;; Check there's no top level code hanging out.
+  (assert (= 1 (sb-kernel::code-n-entries (sb-kernel::fun-code-header (sb-kernel::%closure-fun #'top-level-closure-1)))))
+  (assert (= (top-level-closure-1) 4)))
+
+(with-test (:name :top-level-closure-separate-component.2)
+  (ctu:file-compile
+   `((let ((x (random 10)))
+       (flet ((bar () x))
+         (defun top-level-closure-2 ()
+           #'bar))
+       (setq x 4)))
+   :load t)
+  ;; Check there's no top level code hanging out. (We expect to only
+  ;; have (FLET BAR) and TOP-LEVEL-CLOSURE-2 present.)
+  (assert (= 2 (sb-kernel::code-n-entries (sb-kernel::fun-code-header (sb-kernel::%closure-fun #'top-level-closure-2)))))
+  (assert (= (funcall (top-level-closure-2)) 4)))
+
+(with-test (:name :dead-code-dfo-puking)
+  (ctu:file-compile
+   `((defun dead-code-puke-1 ()
+       (let ((bar (read)))
+         (labels ((emplace (thing)
+                    (print thing))
+                  (visit (thing)
+                    (case thing
+                      (0 (visit-code thing))
+                      (1 (visit-code thing))
+                      (2 (visit thing))
+                      (3 (visit thing))))
+                  (visit-code (thing)
+                    (when (read)
+                      (return-from visit-code))
+                    (print bar)
+                    (case thing
+                      (1 (visit thing))
+                      (2 (visit thing))
+                      (3 (map nil #'visit (list thing thing))))))
+           (emplace nil)))))
+   :load t)
+  ;; EMPLACE will have been LET-converted. VISIT and VISIT-CODE should
+  ;; have been separated out or simply deleted.
+  (assert (= 1 (sb-kernel::code-n-entries (sb-kernel::fun-code-header #'dead-code-puke-1)))))
+
+(with-test (:name :top-level-closure-is-dx)
+  (ctu:file-compile
+   `((eval-when (:compile-toplevel :load-toplevel :execute)
+       (defstruct (precondition-tag (:constructor nil))
+         (%bits0 0)
+         (%bits1 0)))
+
+     (defvar *pt-hash-set* 0)
+
+     (defmacro bit-op (operation destination source)
+       `(setf (precondition-tag-%bits0 ,destination)
+              (,operation (precondition-tag-%bits0 ,destination) (precondition-tag-%bits0 ,source))
+              (precondition-tag-%bits1 ,destination)
+              (,operation (precondition-tag-%bits1 ,destination) (precondition-tag-%bits1 ,source))))
+
+     (declaim (inline tags-logandc2))
+     (defun tags-logandc2 (a b)
+       (let ((result (copy-precondition-tag a)))
+         (bit-op logandc2 result b)
+         result))
+
+     (declaim (ftype (function)))
+     (declaim (inline mock-get-canonical-obj))
+     (defun mock-get-canonical-obj (pt)
+       (flet ((compute-it () (copy-precondition-tag pt)))
+         (declare (dynamic-extent #'compute-it))
+         (our-hash-table-lookup *pt-hash-set* pt #'compute-it)))
+
+     (declaim (sb-ext:freeze-type precondition-tag))
+     (declaim (inline tags-logior))
+     (defun tags-logior (a b)
+       (if (read)
+           (let ((result (copy-structure a)))
+             (bit-op logior result b)
+             (mock-get-canonical-obj result))
+           (let ((result (copy-precondition-tag a)))
+             (bit-op logior result b)
+             result)))
+
+     (defvar +z+
+       (tags-logandc2 (read)
+                      (tags-logior (tags-logior (read)
+                                                (read))
+                                   (read)))))))

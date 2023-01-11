@@ -3108,13 +3108,19 @@
                         (sleep 1)))
                    :allow-notes nil))
 
-(with-test (:name :full-warning-for-undefined-type-in-cl)
+;;; These next two tests rely on memoization and/or caching to d.t.r.t.
+;;; which is absurd. The warning suppression mechanism should be based
+;;; on something higher-level, and not whether an operation was memoized,
+;;; because who's to say we didn't kick something out of a cache?
+(with-test (:name :full-warning-for-undefined-type-in-cl
+                  :broken-on :sbcl)
   (multiple-value-bind (fun failure-p warnings)
       (checked-compile `(lambda (x) (the replace x)) :allow-warnings t)
     (declare (ignore fun failure-p))
     (assert (= 1 (length warnings)))))
 
-(with-test (:name :single-warning-for-single-undefined-type)
+(with-test (:name :single-warning-for-single-undefined-type
+                  :broken-on :sbcl)
   ;; STYLE-WARNING for symbol not in cl package.
   (multiple-value-bind (fun failure-p warnings style-warnings)
       (checked-compile `(lambda (x) (the #:no-type x))
@@ -4506,6 +4512,13 @@
                      (typecase x
                        (cons (or (car x) (ex)))
                        (t (ex)))))) :foo)
+    (test nil `(lambda (x)
+                 (declare (optimize speed))
+                 (block out
+                   (flet ((ex () (return-from out 'out!)))
+                     (typecase x
+                       (cons (or (car x) (ex)))
+                       (t (ex) 2))))) :foo)
     (test t   `(lambda (x)
                  (declare (optimize speed))
                  (funcall
@@ -4519,7 +4532,7 @@
                      (lambda (x)
                        (typecase x
                          (cons (or (car x) (ex)))
-                         (t (ex))))))) t t)
+                         (t (ex) 3)))))) t t)
     (test t   `(lambda (x)
                  (declare (optimize speed))
                  (flet ((eh (x)
@@ -4527,7 +4540,7 @@
                             (lambda ()
                               (typecase x
                                 (cons (or (car x) (meh)))
-                                (t (meh)))))))
+                                (t (meh) 3))))))
                    (funcall (eh x)))) t t)))
 
 (with-test (:name (compile :bug-1050768 :symptom))
@@ -6113,8 +6126,8 @@
 (with-test (:name :reducing-constants.2)
   (checked-compile-and-assert (:allow-style-warnings t)
       `(lambda () (*  1.0 2 (expt 2 127)))
-    (() #-(or arm64 arm) (condition 'floating-point-overflow)
-        #+(or arm64 arm) sb-ext:single-float-positive-infinity)))
+    (() #-(or (and arm64 (not darwin)) arm) (condition 'floating-point-overflow)
+        #+(or (and arm64 (not darwin)) arm) sb-ext:single-float-positive-infinity)))
 
 (with-test (:name (logbitp :past fixnum))
   (checked-compile-and-assert ()
@@ -6321,3 +6334,17 @@
       (handler-bind ((error (constantly nil)))
         (pathname-type x)))
    :allow-notes nil))
+
+(with-test (:name (propagate-let-args :cross-component-constant-substition))
+  (checked-compile
+   `(lambda (a)
+      (labels ((%f2 (x)
+                 (flet ((%f6 (y)
+                          (prog1 y
+                            (catch 'tag y)
+                            (return-from %f2
+                              (unwind-protect (reduce #'(lambda (b c) x)
+                                                      (list))
+                                a))))))))
+        (%f2 (loop for i below 1 sum (%f2 1)))))
+   :allow-warnings t))

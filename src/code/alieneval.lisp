@@ -141,9 +141,12 @@
         (mapcar (lambda (s) (or (assoc (the symbol s) overrides) s))
                 allocator-args))
        (hashset
-        ;; FLOAT has no direct instances, float subtypes and SAP each have 1 instance.
+        ;; FLOAT, MEM-BLOCK, and ALIEN-VALUE have no direct instances.
+        ;; (This naming is confusing AF - ALIEN-VALUE means ALIEN-ALIEN-VALUE-TYPE)
+        ;; float subtypes and SAP each have 1 instance.
         ;; ENUM and RECORD have handwritten caching constructors.
-        (unless (member name '(float single-float double-float system-area-pointer
+        (unless (member name '(float mem-block alien-value
+                               single-float double-float system-area-pointer
                                record enum))
           (symbolicate "*" defstruct-name "-CACHE*"))))
     `(progn
@@ -182,6 +185,7 @@
   (let ((defun-name (symbolicate class "-" method "-METHOD")))
     `(progn
        (defun ,defun-name ,lambda-list
+         ,@(when (eq method :unparse) `((declare (ignorable ,(second lambda-list)))))
          ,@body)
        (setf (,(method-slot method) (alien-type-class-or-lose ',class))
              #',defun-name))))
@@ -204,10 +208,6 @@
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (create-alien-type-class-if-necessary 'root 'alien-type nil))
-
-(defmethod print-object ((type alien-type) stream)
-  (print-unreadable-object (type stream :type t)
-    (sb-impl:print-type-specifier stream (unparse-alien-type type))))
 
 
 ;;;; type parsing and unparsing
@@ -292,24 +292,18 @@
       (when (info :alien-type kind name)
         (error "attempt to shadow definition of ~A ~S" kind name)))))
 
-;;; the list of record types that have already been unparsed. This is
-;;; used to keep from outputting the slots again if the same structure
-;;; shows up twice.
-(defvar *record-types-already-unparsed*)
-
-(defun unparse-alien-type (type)
+(defun unparse-alien-type (type &optional abbreviate)
   "Convert the alien-type structure TYPE back into a list specification of
    the type."
   (declare (type alien-type type))
-  (let ((*record-types-already-unparsed* nil))
-    (%unparse-alien-type type)))
+  (dx-let ((state (cons abbreviate nil)))
+    (%unparse-alien-type state type)))
 
-;;; Does all the work of UNPARSE-ALIEN-TYPE. It's separate because we
-;;; need to recurse inside the binding of
-;;; *RECORD-TYPES-ALREADY-UNPARSED*.
-(defun %unparse-alien-type (type)
-  (invoke-alien-type-method :unparse type))
-
+;;; Does all the work of UNPARSE-ALIEN-TYPE without rebinding the STATE.
+(defun %unparse-alien-type (state type)
+  (invoke-alien-type-method :unparse type state))
+(defun %unparse-alien-types (state list)
+  (mapcar (lambda (x) (%unparse-alien-type state x)) list))
 
 ;;;; alien type defining stuff
 
@@ -461,17 +455,6 @@
 
 ;;;; default methods
 
-(defun missing-alien-operation-error (type operation)
-  (error "Cannot ~A aliens of type ~/sb-impl:print-type-specifier/."
-         operation type))
-
-(define-alien-type-method (root :unparse) (type) ; why does ROOT have any methods at all?
-  `(<unknown-alien-type> ,(type-of type)))
-
-(define-alien-type-method (root :type=) (type1 type2)
-  (declare (ignore type1 type2))
-  (bug "unreachable"))
-
 (define-alien-type-method (root :subtypep) (type1 type2)
   (alien-type-= type1 type2))
 
@@ -483,14 +466,6 @@
   (declare (ignore type context))
   '*)
 
-(define-alien-type-method (root :naturalize-gen) (type alien)
-  (declare (ignore alien))
-  (missing-alien-operation-error "represent" type))
-
-(define-alien-type-method (root :deport-gen) (type object)
-  (declare (ignore object))
-  (missing-alien-operation-error "represent" type))
-
 (define-alien-type-method (root :deport-alloc-gen) (type object)
   (declare (ignore type))
   object)
@@ -501,22 +476,8 @@
   ;; GCable lisp object when deporting.
   nil)
 
-(define-alien-type-method (root :extract-gen) (type sap offset)
-  (declare (ignore sap offset))
-  (missing-alien-operation-error "represent" type))
-
 (define-alien-type-method (root :deposit-gen) (type sap offset value)
   `(setf ,(invoke-alien-type-method :extract-gen type sap offset) ,value))
-
-(define-alien-type-method (root :arg-tn) (type state)
-  (declare (ignore state))
-  (missing-alien-operation-error "pass as argument to CALL-OUT"
-                                 (unparse-alien-type type)))
-
-(define-alien-type-method (root :result-tn) (type state)
-  (declare (ignore state))
-  (missing-alien-operation-error "return from CALL-OUT"
-                                 (unparse-alien-type type)))
 
 ;;;; the INTEGER type
 
@@ -536,7 +497,7 @@
 (define-alien-type-translator unsigned (&optional (bits sb-vm:n-word-bits))
   (make-alien-integer-type :bits bits :signed nil))
 
-(define-alien-type-method (integer :unparse) (type)
+(define-alien-type-method (integer :unparse) (type state)
   (list (if (alien-integer-type-signed type) 'signed 'unsigned)
         (alien-integer-type-bits type)))
 
@@ -609,7 +570,7 @@
 (define-alien-type-translator boolean (&optional (bits sb-vm:n-word-bits))
   (make-alien-boolean-type :bits bits :signed nil))
 
-(define-alien-type-method (boolean :unparse) (type)
+(define-alien-type-method (boolean :unparse) (type state)
   `(boolean ,(alien-boolean-type-bits type)))
 
 (define-alien-type-method (boolean :lisp-rep) (type)
@@ -652,6 +613,22 @@
   (make-hashset 32 #'enum-type=-method #'alien-type-hash
                 :weakness t :synchronized t))
 
+(macrolet
+    ((calc-enum-hash ()
+           ;; Slots which are pure functions of the mapping need not be mixed in:
+           ;; * KIND is based on density of the numeric range
+           ;; * SIGNED is true if and only if the minimum value is negative
+           ;; * OFFSET is based on the minimum value if and only if the
+           ;;   inverse map is stored as is a vector
+       `(let ((h (sb-xc:sxhash name)))
+          (dolist (elt (alien-enum-type-from result))
+            ;; Mix by hand since our SXHASH has a cutoff on length, not to
+            ;; mention that this potentially runs on either the host or the target,
+            ;; and the host does't emulate the target's hashing of lists.
+            (setf h (mix (mix (sb-xc:sxhash (car elt)) (sb-xc:sxhash (cdr elt)))
+                         h)))
+          (setf (ldb (byte type-hash-nbits 0) (alien-type-hash result)) h))))
+
 (define-alien-type-translator enum (&whole
                                  type name
                                  &rest mappings
@@ -661,19 +638,7 @@
          (dx-let ((result (!make-alien-enum-type :alignment (guess-alignment 32)
                                                  :name name)))
            (%parse-enum mappings result)
-           ;; Slots which are pure functions of the mapping need not be mixed in:
-           ;; * KIND is based on density of the numeric range
-           ;; * SIGNED is true if and only if the minimum value is negative
-           ;; * OFFSET is based on the minimum value if and only if the
-           ;;   inverse map is stored as is a vector
-           (let ((h (sb-xc:sxhash name)))
-             (dolist (elt (alien-enum-type-from result))
-               ;; Mix by hand since our SXHASH has a cutoff on length, not to
-               ;; mention that this potentially runs on either the host or the target,
-               ;; and the host does't emulate the target's hashing of lists.
-               (setf h (mix (mix (sb-xc:sxhash (car elt)) (sb-xc:sxhash (cdr elt)))
-                            h)))
-             (setf (ldb (byte type-hash-nbits 0) (alien-type-hash result)) h))
+           (calc-enum-hash)
            (unless name
              (return-from alien-enum-type-translator
                (hashset-insert-if-absent *enum-type-cache* result #'sys-copy-struct)))
@@ -701,6 +666,15 @@
            result))
         (t
          (error "empty enum type: ~S" type))))
+
+(defun load-alien-enum (name mappings)
+  (declare (inline !make-alien-enum-type))
+  (dx-let ((result (!make-alien-enum-type :alignment (guess-alignment 32) :name name)))
+    ;; dumped as dotted pairs, but re-parsed as 2-lists
+    (%parse-enum (mapcar (lambda (x) (list (car x) (cdr x))) mappings)
+                 result)
+    (calc-enum-hash)
+    (hashset-insert-if-absent *enum-type-cache* result #'sys-copy-struct))))
 
 (defun %parse-enum (elements result)
   (when (null elements)
@@ -756,7 +730,7 @@
               (alien-enum-type-kind result) :alist)))
       (setf (alien-enum-type-from result) from-alist))))
 
-(define-alien-type-method (enum :unparse) (type)
+(define-alien-type-method (enum :unparse) (type state)
   `(enum ,(alien-enum-type-name type)
          ,@(let ((prev -1))
              (mapcar (lambda (mapping)
@@ -796,7 +770,7 @@
   ;; but we also keep the Lisp type in a slot. Why do that?
   (type (missing-arg) :type symbol :read-only t))
 
-(define-alien-type-method (float :unparse) (type)
+(define-alien-type-method (float :unparse) (type state)
   (alien-float-type-type type))
 
 (define-alien-type-method (float :lisp-rep) (type)
@@ -833,7 +807,7 @@
 
 (define-alien-type-class (system-area-pointer))
 
-(define-alien-type-method (system-area-pointer :unparse) (type)
+(define-alien-type-method (system-area-pointer :unparse) (type state)
   (declare (ignore type))
   'system-area-pointer)
 
@@ -912,11 +886,9 @@
 (define-alien-type-translator * (to &environment env)
   (make-alien-pointer-type :to (if (eq to t) nil (parse-alien-type to env))))
 
-(define-alien-type-method (pointer :unparse) (type)
+(define-alien-type-method (pointer :unparse) (type state)
   (let ((to (alien-pointer-type-to type)))
-    `(* ,(if to
-             (%unparse-alien-type to)
-             t))))
+    `(* ,(if to (%unparse-alien-type state to) t))))
 
 (define-alien-type-method (pointer :type=) (type1 type2)
   (let ((to1 (alien-pointer-type-to type1))
@@ -1003,8 +975,8 @@
                                 (alien-type-alignment parsed-ele-type))
                   (reduce #'* dims))))))
 
-(define-alien-type-method (array :unparse) (type)
-  `(array ,(%unparse-alien-type (alien-array-type-element-type type))
+(define-alien-type-method (array :unparse) (type state)
+  `(array ,(%unparse-alien-type state (alien-array-type-element-type type))
           ,@(alien-array-type-dimensions type)))
 
 (define-alien-type-method (array :type=) (type1 type2)
@@ -1027,9 +999,10 @@
 
 ;;;; the RECORD type
 
-(defstruct (alien-record-field (:copier nil))
-  (name (missing-arg) :type symbol)
-  (type (missing-arg) :type alien-type)
+(defstruct (alien-record-field (:constructor make-alien-record-field (name offset type))
+                               (:copier nil))
+  (name (missing-arg) :type symbol :read-only t)
+  (type (missing-arg) :type alien-type :read-only t)
   (offset 0 :type unsigned-byte))
 (defmethod print-object ((field alien-record-field) stream)
   (print-unreadable-object (field stream :type t)
@@ -1044,24 +1017,37 @@
   (name nil :type (or symbol null) :read-only t)
   (fields nil :type list)) ; mutable because of structural recursion and parser
 
-;;; TODOs:
-;;; * named ("tagged") record types that do not involve structural recursion can
-;;;   and should be hash-consed.  As they are currently not, the pristine core
-;;;   has about 6 separate instances of OS-CONTEXT-T-STRUCT and 2 of POLLFD.
-;;;   Real-world applications are even worse about making redundant types.
-(defun hash-alien-record-fields (fields)
-  (declare (notinline sb-xc:sxhash))
-  (let ((h (length fields)))
-    (dolist (field fields h)
-      (setq h (mix (mix (sb-xc:sxhash (alien-record-field-name field))
-                        (sb-xc:sxhash (alien-record-field-offset field)))
-                   (alien-type-hash (alien-record-field-type field)))))))
 (defun hash-alien-record-type (r)
-  (hash-alien-record-fields (alien-record-type-fields r)))
+  (declare (notinline sb-xc:sxhash))
+  (labels ((hash-fields (fields)
+             (let ((h (length fields)))
+               (dolist (field fields h)
+                 (setq h (mix h (hash-field field))))))
+           (hash-field (field)
+             (mix (mix (hash-sym (alien-record-field-name field))
+                       (sb-xc:sxhash (alien-record-field-offset field)))
+                  (alien-type-hash (alien-record-field-type field))))
+           (hash-sym (symbol)
+             ;; Since ALIEN-TYPE literals are reconstructed via load-forms that involve
+             ;; the constructor, host object hashes don't have to be target-compatible.
+             #+sb-xc-host (sb-xc:sxhash symbol)
+             ;; This mixes in package-id when hashing field names.
+             ;; The reason is that if you have 100 different packages each defining
+             ;; (STRUCT FOO (WORD0 INT) (WORD1 INT)), then without a better hash
+             ;; than symbol-name, those would cause a massive number of hash collisions.
+             ;; This hash is resilient against RENAME-PACKAGE, but not against re-homing
+             ;; a symbol. It's not important because at worst, you miss in the hashset.
+             ;; We can't perfectly hash-cons record types anyway.
+             ;; (Detecting isomorphism between possibly cyclic objects is hard)
+             #-sb-xc-host (mix (sb-kernel:symbol-package-id symbol)
+                               (sb-xc:sxhash symbol))))
+    (mix (hash-sym (alien-record-type-name r))
+         (hash-fields (alien-record-type-fields r)))))
 (defun alien-record-type-equiv (a b)
   (let ((fields1 (alien-record-type-fields a))
         (fields2 (alien-record-type-fields b)))
-    (and (= (length fields1) (length fields2))
+    (and (eq (alien-record-type-name a) (alien-record-type-name b))
+         (= (length fields1) (length fields2))
          (every (lambda (f1 f2)
                   (and (eq (alien-record-field-name f1) (alien-record-field-name f2))
                        (eq (alien-record-field-type f1) (alien-record-field-type f2))
@@ -1082,7 +1068,7 @@
                    :name name :kind kind :fields fields)))
          ;; XXX: probably a screwed up hash if there is recursion involved
          (setf (ldb (byte type-hash-nbits 0) (alien-type-hash new))
-               (hash-alien-record-fields fields))
+               (hash-alien-record-type new))
          (if name
              ;; named ("tagged") alien record types hang off a hook in the
              ;; lexenv (or possibly global env)
@@ -1107,9 +1093,7 @@
              (declare (ignore bits))
              (let* ((field-type (parse-alien-type type env))
                     (bits (alien-type-bits field-type))
-                    (parsed-field
-                     (make-alien-record-field :type field-type
-                                              :name var)))
+                    (parsed-field (make-alien-record-field var 0 field-type)))
                (unless alignment
                  (setf alignment (alien-type-alignment field-type)))
                (push parsed-field parsed-fields)
@@ -1142,8 +1126,9 @@
                       "Incompatible alien record type definition~%Old: ~S~%New: ~S"
                       (unparse-alien-type old)
                       `(,(unparse-alien-record-kind kind) ,name
-                        ,@(let ((*record-types-already-unparsed* '()))
-                            (mapcar #'unparse-alien-record-field new-fields))))
+                        ,@(let ((state (cons nil nil)))
+                            (mapcar (lambda (x) (unparse-alien-record-field state x))
+                                    new-fields))))
               (setq redefined t))
             (when redefined
               ;; Assert that we're not mutating a cache entry - unnamed types
@@ -1168,14 +1153,28 @@
   (define-alien-type-translator struct (name &rest fields &environment env)
     (parse-alien-record-type :struct name fields env))
 )
+;; Named and unnamed record types can be hash-consed when loaded from fasl,
+;; but this won't be used if there is a cycle involved.
+(defun load-alien-record-type (kind name bits alignment field-names offsets &rest types)
+  (let* ((fields (mapcar #'make-alien-record-field field-names offsets types))
+         (new (!make-alien-record-type :bits bits :alignment alignment
+                                       :name name :kind kind :fields fields)))
+    (setf (ldb (byte type-hash-nbits 0) (alien-type-hash new))
+          (hash-alien-record-type new))
+    (hashset-insert-if-absent
+     (if (eq kind :union) *union-type-cache* *struct-type-cache*)
+     new
+     #'identity)))
 
-(define-alien-type-method (record :unparse) (type)
-  `(,(unparse-alien-record-kind (alien-record-type-kind type))
-    ,(alien-record-type-name type)
-    ,@(unless (member type *record-types-already-unparsed* :test #'eq)
-        (push type *record-types-already-unparsed*)
-        (mapcar #'unparse-alien-record-field
-                (alien-record-type-fields type)))))
+(define-alien-type-method (record :unparse) (type state)
+  (if (car state) ; abbreviated
+      `(,(alien-record-type-kind type) ,(alien-record-type-name type))
+      `(,(unparse-alien-record-kind (alien-record-type-kind type))
+        ,(alien-record-type-name type)
+        ,@(unless (memq type (cdr state))
+            (push type (cdr state))
+            (mapcar (lambda (x) (unparse-alien-record-field state x))
+                    (alien-record-type-fields type))))))
 
 (defun unparse-alien-record-kind (kind)
   (case kind
@@ -1183,9 +1182,9 @@
     (:union 'union)
     (t '???)))
 
-(defun unparse-alien-record-field (field)
+(defun unparse-alien-record-field (state field)
   `(,(alien-record-field-name field)
-     ,(%unparse-alien-type (alien-record-field-type field))
+     ,(%unparse-alien-type state (alien-record-field-type field))
      ,@(when (alien-record-field-offset field)
              (list :offset (alien-record-field-offset field)))))
 
@@ -1305,15 +1304,19 @@
                         (if (eql varargs t)
                             (butlast arg-types)
                             arg-types)))))
+(defun load-alien-fun-type (convention result varargs &rest args)
+  (make-alien-fun-type :convention convention
+                       :result-type result
+                       :varargs varargs
+                       :arg-types args))
 
-(define-alien-type-method (fun :unparse) (type)
+(define-alien-type-method (fun :unparse) (type state)
   `(function ,(let ((result-type
-                     (%unparse-alien-type (alien-fun-type-result-type type)))
+                     (%unparse-alien-type state (alien-fun-type-result-type type)))
                     (convention (alien-fun-type-convention type)))
                 (if convention (list convention result-type)
                     result-type))
-             ,@(mapcar #'%unparse-alien-type
-                       (alien-fun-type-arg-types type))
+             ,@(%unparse-alien-types state (alien-fun-type-arg-types type))
              ,@(when (alien-fun-type-varargs type)
                  '(&rest))))
 
@@ -1339,9 +1342,8 @@
      :values (mapcar (lambda (alien-type) (parse-alien-type alien-type env))
                      values))))
 
-(define-alien-type-method (values :unparse) (type)
-  `(values ,@(mapcar #'%unparse-alien-type
-                     (alien-values-type-values type))))
+(define-alien-type-method (values :unparse) (type state)
+  `(values ,@(%unparse-alien-types state (alien-values-type-values type))))
 
 (define-alien-type-method (values :type=) (type1 type2)
   (and (= (length (alien-values-type-values type1))
@@ -1545,46 +1547,101 @@
          (dolist (x (alien-values-type-values x)) (visit x stack))))))
   t)
 
-;;; TODO: all alien-types loaded from fasl need to be hash-consed.
-;;; That's tricky (or impossible) if structural recursion is involved.
+;;; It's tricky (or impossible) to hash-cons if structural recursion is involved.
 ;;; We can always punt to MAKE-LOAD-FORM-SAVING-SLOTS which handles circularity,
 ;;; but then it doesn't know about hash-consing.
-#-sb-xc-host
-(defun make-type-load-form (x env)
-  ;; For now this deals with only a few categories of types:
-  ;; 1) Atoms INTEGER, BOOLEAN, SYSTEM-AREA-POINTER, C-STRING, FLOAT
-  ;;    but without whacky redefining behavior - so no ENUM.
-  ;; 2) FUN-TYPE
-  (cond
-    ((and (alien-integer-type-p x) (not (alien-enum-type-p x)))
-     (if (alien-boolean-type-p x)
-         `(make-alien-boolean-type :bits ,(alien-boolean-type-bits x)
-                                   :signed nil)
-         `(make-alien-integer-type :bits ,(alien-integer-type-bits x)
-                                   :signed ,(alien-integer-type-signed x))))
-    ((alien-float-type-p x)
+#|
+ Note that there can be untagged (unnamed) record types involved in cycles.
+ e.g. after executing
+    (parse-alien-type '(struct foo (a (struct nil (x (* (struct foo))))) (b int)) nil)
+ then
+   (acyclic-type-p
+     (alien-record-field-type
+       (first (alien-record-type-fields (parse-alien-type '(struct foo) nil))))) => NIL
+  so if that object were dumped literally - because we have some access path to it -
+  then it can't necessarily be hash-consed.
+|#
+
+(defun integer-type (bits signed) ; trivial helpers
+  (make-alien-integer-type :bits bits :signed signed))
+(defun boolean-type (bits)
+  (make-alien-boolean-type :bits bits :signed nil))
+(defun single-float-type () (parse-alien-type 'single-float nil))
+(defun double-float-type () (parse-alien-type 'double-float nil))
+(defun sap-type () (parse-alien-type 'system-area-pointer nil))
+
+;;; Genesis is limited in its ability to patch load-time-values into objects
+;;; other than code components. For this reason we want to emit a single sexpr
+;;; to handle all levels of structure nesting.
+(defun make-type-load-form (x)
+  ;; Cases have to be ordered most-specific-first!
+  (etypecase x
+    (alien-integer-type
+     (cond ((alien-enum-type-p x)
+            `(load-alien-enum ',(alien-enum-type-name x) ',(alien-enum-type-from x)))
+           ((alien-boolean-type-p x)
+            `(boolean-type ,(alien-boolean-type-bits x)))
+           (t
+            `(integer-type ,(alien-integer-type-bits x) ,(alien-integer-type-signed x)))))
+    (alien-float-type
      (ecase (alien-float-type-type x)
-       (single-float `(parse-alien-type 'single-float nil))
-       (double-float `(parse-alien-type 'double-float nil))))
-    ((eq (sb-kernel:%instance-layout x)
-         #.(sb-kernel:find-layout 'alien-system-area-pointer-type)) ; not its subtypes
-     `(parse-alien-type 'system-area-pointer nil))
-    ((alien-c-string-type-p x)
+       (single-float '(single-float-type))
+       (double-float '(double-float-type))))
+    ;; RECORD is-a MEM-BLOCK is-a ALIEN-VALUE is-a SYSTEM-AREA-POINTER
+    (alien-record-type
+     (and (acyclic-type-p x) ; hash-cons it
+          (let ((fields (alien-record-type-fields x)))
+            `(load-alien-record-type
+              ,(alien-record-type-kind x)
+              ',(alien-record-type-name x)
+              ,(alien-record-type-bits x)
+              ,(alien-record-type-alignment x)
+              ',(mapcar #'alien-record-field-name fields)
+              ',(mapcar #'alien-record-field-offset fields)
+              ,@(mapcar (lambda (x) (make-type-load-form (alien-record-field-type x)))
+                        fields)))))
+    ;; ARRAY is-a MEM-BLOCK is-a ALIEN-VALUE is-a SYSTEM-AREA-POINTER
+    (alien-array-type
+     (and (acyclic-type-p x) ; hash-cons it
+          `(make-alien-array-type
+            :element-type ,(make-type-load-form (alien-array-type-element-type x))
+            :dimensions ',(alien-array-type-dimensions x)
+            :alignment ,(alien-type-alignment x)
+            :bits ,(alien-type-bits x))))
+    ;; C-STRING is-a POINTER is-a ALIEN-VALUE is-a SYSTEM-AREA-POINTER
+    (alien-c-string-type
      `(load-alien-c-string-type ',(alien-c-string-type-element-type x)
                                 ',(alien-c-string-type-external-format x)
                                 ',(alien-c-string-type-not-null x)))
-    ((alien-fun-type-p x)
+    (alien-pointer-type
+     (and (acyclic-type-p x) ; hash-cons it
+          `(make-alien-pointer-type
+            ,@(awhen (alien-pointer-type-to x) `(:to ,(make-type-load-form it))))))
+    ;; FUN is-a MEM-BLOCK is-a ALIEN-VALUE is-a SYSTEM-AREA-POINTER
+    (alien-fun-type
      (if (acyclic-type-p x)
          ;; hash-cons it
-         `(make-alien-fun-type :convention ',(alien-fun-type-convention x)
-                               :result-type ,(alien-fun-type-result-type x)
-                               :arg-types ',(alien-fun-type-arg-types x)
-                               :varargs ,(alien-fun-type-varargs x))
+         `(load-alien-fun-type ',(alien-fun-type-convention x)
+                               ,(make-type-load-form (alien-fun-type-result-type x))
+                               ,(alien-fun-type-varargs x)
+                               ,@(mapcar #'make-type-load-form
+                                         (alien-fun-type-arg-types x)))
          ;; there is some cycle involving this type
          (make-load-form-saving-slots
           x
-          :slot-names '(hash bits alignment result-type arg-types varargs convention)
-          :environment env)))))
+          :slot-names '(hash bits alignment result-type arg-types varargs convention))))
+    (alien-system-area-pointer-type '(sap-type))
+    (alien-values-type
+     (let ((types (alien-values-type-values x)))
+       (if (every #'acyclic-type-p types)
+           `(make-alien-values-type
+             :values (list ,@(mapcar #'make-type-load-form types))))))))
+(!set-load-form-method alien-type (:xc :target)
+  (lambda (self env)
+    (declare (ignore env))
+    (aver (acyclic-type-p self))
+    (let ((form (make-type-load-form self)))
+      (the (not null) form))))
 
 (defun show-alien-type-caches ()
   (dolist (var *alien-type-hashsets*)
@@ -1597,4 +1654,22 @@
             (let ((entry (aref v i)))
               (when (and entry (not (eql entry 0)))
                 (format t " ~A~%" entry)))))))))
-(export '(*alien-type-hashsets* show-alien-type-caches))
+
+;;; Directly printing an alien-record-type will include its field names,
+;;; otherwise just the name.
+(defmethod print-object ((type alien-type) stream)
+  (if (alien-record-type-p type)
+      (print-unreadable-object (type stream :type nil :identity t)
+        (format stream "~S ~S ~@S" 'alien-type
+                (list (alien-record-type-kind type) (alien-record-type-name type))
+                (mapcar #'alien-record-field-name (alien-record-type-fields type))))
+      (let ((expr (unparse-alien-type type t)))
+        ;; Unparsed expression conveys its type. There's no need to print e.g.
+        ;; #<alien-single-float-type single-float>
+        (print-unreadable-object (type stream :type nil)
+          (format stream "~A ~S" 'alien-type expr)))))
+
+(push '("SB-ALIEN-INTERNALS"
+        define-alien-type-translator ; not sure why this doesn't get dropped automatically
+        define-alien-type-method) ; this is external, needed by compiler/*/c-call
+      *!removable-symbols*)

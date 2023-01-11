@@ -47,10 +47,6 @@
 
 (defun !c-runtime-noinform-p () (/= (extern-alien "lisp_startup_options" char) 0))
 
-(defun !format-cold-init ()
-  (sb-format::!late-format-init)
-  (sb-format::!format-directives-init))
-
 ;;; Allows the SIGNAL function to be called early.
 (defun !signal-function-cold-init ()
   #+sb-devel
@@ -235,9 +231,15 @@
                (funcall (second toplevel-thing))))
         ((cons (eql :load-time-value-fixup))
          (destructuring-bind (object index value) (cdr toplevel-thing)
-           (aver (typep object 'code-component))
-           (aver (unbound-marker-p (code-header-ref object index)))
-           (setf (code-header-ref object index) (svref *!load-time-values* value))))
+           (let ((replacement (svref *!load-time-values* value)))
+             (etypecase object
+               (code-component
+                (aver (unbound-marker-p (code-header-ref object index)))
+                (setf (code-header-ref object index) replacement))
+               (cons
+                (aver (= index 0))
+                (aver (unbound-marker-p (car object)))
+                (rplaca object replacement))))))
         ((cons (eql :named-constant))
          (destructuring-bind (object index name) (cdr toplevel-thing)
            (aver (typep object 'code-component))

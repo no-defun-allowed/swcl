@@ -506,18 +506,23 @@
        (if (eql value (complex $0d0 $0d0))
             fp-complex-double-zero-sc-number
             fp-complex-double-immediate-sc-number))
+    ;; This case has to follow the numeric cases because proxy floating-point numbers
+    ;; are host structs. Or we could implement and use something like SB-XC:TYPECASE
+    (structure-object
+     (when (eq value sb-lockless:+tail+)
+       immediate-sc-number))
     #+(and sb-simd-pack (not sb-xc-host))
-    ((simd-pack double-float) double-sse-immediate-sc-number)
-    #+(and sb-simd-pack (not sb-xc-host))
-    ((simd-pack single-float) single-sse-immediate-sc-number)
-    #+(and sb-simd-pack (not sb-xc-host))
-    (simd-pack int-sse-immediate-sc-number)
+    (simd-pack
+     (typecase value
+       ((simd-pack double-float) double-sse-immediate-sc-number)
+       ((simd-pack single-float) single-sse-immediate-sc-number)
+       (t int-sse-immediate-sc-number)))
     #+(and sb-simd-pack-256 (not sb-xc-host))
-    ((simd-pack-256 double-float) double-avx2-immediate-sc-number)
-    #+(and sb-simd-pack-256 (not sb-xc-host))
-    ((simd-pack-256 single-float) single-avx2-immediate-sc-number)
-    #+(and sb-simd-pack-256 (not sb-xc-host))
-    (simd-pack-256 int-avx2-immediate-sc-number)))
+    (simd-pack-256
+     (typecase value
+       ((simd-pack-256 double-float) double-avx2-immediate-sc-number)
+       ((simd-pack-256 single-float) single-avx2-immediate-sc-number)
+       (t int-avx2-immediate-sc-number)))))
 
 (defun boxed-immediate-sc-p (sc)
   (eql sc immediate-sc-number))
@@ -541,7 +546,11 @@
            (let ((bits (single-float-bits val)))
              (if tag
                  (dpb bits (byte 32 32) single-float-widetag)
-                 bits)))))
+                 bits)))
+          (structure-object
+           (if (eq val sb-lockless:+tail+)
+               (progn (aver tag) sb-vm::lockfree-list-tail-value)
+               (bug "immediate structure-object ~S" val)))))
       tn))
 
 ;;;; miscellaneous function call parameters

@@ -79,7 +79,8 @@
   "tests/package-test-3.lisp"
   "tests/package-test-4.lisp"
   "tests/package-test-5.lisp"
-  "tests/package-test-6.lisp")
+  "tests/package-test-6.lisp"
+  "tests/package-test-7.lisp")
  ("redblack.pure.lisp" "tests/bbtree-test-util.lisp")
  ("run-program.impure.lisp" "contrib/sb-posix.fasl")
  ("sb-aclrepl.impure.lisp" "contrib/sb-aclrepl.fasl"
@@ -96,7 +97,6 @@
   "../contrib/sb-concurrency/tests/test-gate.lisp")
  ("sb-cover.impure.lisp" "contrib/sb-cover.fasl")
  ("sb-gmp.impure.lisp" "contrib/sb-gmp.fasl" "../contrib/sb-gmp/tests.lisp")
- ("sb-graph.impure.lisp" "contrib/sb-graph.fasl" "contrib/uiop.fasl")
  ("sb-introspect.impure.lisp" "contrib/sb-introspect.fasl"
   "../contrib/sb-introspect/xref-test-data.lisp" "../contrib/sb-introspect/xref-test.lisp"
   "../contrib/sb-introspect/test.lisp" "../contrib/sb-introspect/test-driver.lisp"
