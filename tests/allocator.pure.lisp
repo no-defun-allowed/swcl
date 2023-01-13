@@ -33,7 +33,7 @@
   (sb-vm:map-allocated-objects
    (lambda (obj type size)
      (declare (ignore type size))
-     (when (>= (sb-ext:primitive-object-size obj) (* 4 sb-vm:gencgc-page-bytes))
+     (when (>= (sb-ext:primitive-object-size obj) sb-vm:large-object-size)
        (let* ((addr (sb-kernel:get-lisp-obj-address obj))
               (pte (deref sb-vm:page-table (sb-vm:find-page-index addr))))
          (when (eq (slot pte 'sb-vm::gen) sb-vm:+pseudo-static-generation+)
