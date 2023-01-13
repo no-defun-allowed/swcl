@@ -318,7 +318,13 @@
                     (unless (and (lambda-var-p what)
                                  (null (leaf-refs what)))
                       (if (lambda-p what)
-                          (delayed (list tn (find-in-environment what env) n))
+                          ;; If we have a deleted functional, punt,
+                          ;; since the component it refers to has
+                          ;; already been compiled.
+                          (let ((init (if (eq (functional-kind what) :deleted)
+                                          (make-constant-tn (find-constant nil))
+                                          (find-in-environment what env))))
+                            (delayed (list tn init n)))
                           (let ((initial-value (closure-initial-value what env nil)))
                             (if initial-value
                                 (vop closure-init node ir2-block tn initial-value n)
@@ -1882,7 +1888,7 @@ not stack-allocated LVAR ~S." source-lvar)))))
     ;; Emit either BIND or DYNBIND, preferring BIND if both exist.
     ;; If only one exists, it's DYNBIND.
     ;; Even if the backend supports load-time TLS index assignment,
-    ;; there might be only one vop (as with arm64).
+    ;; there might be only one vop.
     (macrolet ((doit (bind dynbind)
                  (if (gethash 'bind *backend-parsed-vops*) bind dynbind)))
       (doit

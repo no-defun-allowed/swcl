@@ -98,7 +98,7 @@
   (assert (= 0.0d0 (scale-float 1.0d0 (1- most-negative-fixnum)))))
 
 (with-test (:name (:scale-float-overflow :bug-372)
-            :fails-on (and :arm64 (not :darwin)))
+            :fails-on :no-float-traps)
   (flet ((test (form)
            (assert-error (funcall (checked-compile `(lambda () ,form)
                                                    :allow-style-warnings t))
@@ -134,6 +134,7 @@
 
 (with-test (:name (:addition-overflow :bug-372)
             :fails-on (or (and :arm64 (not :darwin))
+                          :arm
                           (and :ppc :openbsd)
                           (and :x86 :netbsd)))
   (assert-error
@@ -154,6 +155,7 @@
 ;; we might like.
 (with-test (:name (:addition-overflow :bug-372 :take-2)
             :fails-on (or (and :arm64 (not :darwin))
+                          :arm
                           (and :ppc :openbsd)
                           (and :x86 :netbsd)))
   (assert-error

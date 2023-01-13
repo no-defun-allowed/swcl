@@ -16,6 +16,7 @@
            (sb-kernel:type-specifier (sb-kernel:specifier-type type))))
     (let ((types (mapcar #'normalize-type types))
           (result-types (mapcar #'normalize-type result-types))
+          (progress 0)
           (cache (make-hash-table :test #'equal)))
       (loop for op in ops
             do
@@ -49,6 +50,13 @@
                                                               (setf (gethash lambda cache)
                                                                     (checked-compile lambda :allow-warnings t)))
                                                 do
+                                                (when (and (zerop (mod (incf progress) (or #+(or arm x86) 100 10000)))
+                                                           (interactive-stream-p *standard-output*))
+                                                  (write-char #\Return)
+                                                  (write progress)
+                                                  (write-char #\Space)
+                                                  (write (hash-table-count cache))
+                                                  (force-output))
                                                 (handler-case
                                                     (apply fun args)
                                                   (error (c)

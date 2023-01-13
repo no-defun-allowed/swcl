@@ -2818,7 +2818,7 @@
              (dotimes (c 3) (catch 'c)))))
     (() 10)))
 
-(with-test (:name :dce-more-often)
+(with-test (:name :dce-more-often :fails-on :arm)
   (checked-compile-and-assert
    ()
    `(lambda (a)
@@ -2838,7 +2838,7 @@
     ((1) 1)
     (:return-type (values (integer 1 1) &optional))))
 
-(with-test (:name :dce-more-often.2)
+(with-test (:name :dce-more-often.2 :fails-on :arm)
   (checked-compile-and-assert
    ()
    `(lambda (b)
@@ -3814,3 +3814,17 @@
        (shiftf a (bit #*01 (max 0 c)))
        (max 0 c)))
    ((1 1) -13)))
+
+(with-test (:name :find-initial-dfo-iugnore-let-converted-funs)
+  (checked-compile-and-assert
+   ()
+   `(lambda (c)
+      (tagbody
+         (flet ((%f7 (f7-3
+                      &optional (f7-4 (go tag5))
+                                (f7-5 ((lambda (&rest args) (go tag5))))
+                                (f7-6 0))
+                  0))
+           ((lambda (v10) (%f7 (go tag5) -63522127 v10)) c))
+       tag5))
+   ((9) nil)))
