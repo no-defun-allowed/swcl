@@ -38,7 +38,7 @@ void compactor_init() {
 
 /* Deciding how to compact */
 
-static boolean should_compact() {
+static boolean should_compact(char *why) {
   /* If there are many more small-object pages than there could
    * be, start compacting. */
   uword_t pages = 0, bytes = 0;
@@ -50,7 +50,7 @@ static boolean should_compact() {
   }
   float ratio = (float)(pages * GENCGC_PAGE_BYTES) / bytes;
   if (ratio > page_overhead_threshold)
-    fprintf(stderr, "Triggering compaction, ratio = %.2f\n", ratio);
+    fprintf(stderr, "%s, ratio = %.2f\n", why, ratio);
   return ratio > page_overhead_threshold;
 }
 
@@ -73,7 +73,7 @@ static void pick_targets() {
 
 
 void consider_compaction(generation_index_t gen) {
-  if (gen >= minimum_compact_gen && should_compact()) {
+  if (gen >= minimum_compact_gen && should_compact("Enabling remset")) {
     compacting = 1;
     target_generation = gen;
     pick_targets();
@@ -139,7 +139,10 @@ static void count_pages() {
 
 void run_compaction() {
   if (compacting) {
-    count_pages();
+    /* Check again, in case fragmentation somehow improves.
+     * Not likely, but it's a cheap test which avoids effort. */
+    if (should_compact("Performing compaction"))
+      count_pages();
     memset(target_pages, 0, page_table_pages);
     remset = NULL;
     suballoc_release(&remset_suballocator);
