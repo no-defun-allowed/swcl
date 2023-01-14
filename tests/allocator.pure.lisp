@@ -29,7 +29,12 @@
 ;;; of 64KB is only 1 page, but a "large" object is 4 pages or more.
 ;;; So the fix is for trans_code() to do the size test, and then we don't
 ;;; slow down the general case of gc_general_alloc.
-(with-test (:name :pseudostatic-large-objects)
+
+;;; With #+mark-region-gc there is a range of "large-ish" objects (between
+;;; 3/4 and 1 page large) where we try to allocate in a small page if
+;;; possible, but claim a fresh large page instead of wasting the small
+;;; page, so these tests don't work.
+(with-test (:name :pseudostatic-large-objects :skipped-on :mark-region-gc)
   (sb-vm:map-allocated-objects
    (lambda (obj type size)
      (declare (ignore type size))
@@ -44,7 +49,7 @@
   (defparameter large-n-words (/ sb-vm:large-object-size sb-vm:n-word-bytes))
   (defparameter large-n-conses (/ large-n-words 2))))
 
-(with-test (:name :no-&rest-on-large-object-pages :skipped-on (:not :gencgc))
+(with-test (:name :large-object-pages :skipped-on (:or :mark-region-gc (:not :gencgc)))
   ;; adding in a 2-word vector header makes it at least large-object-size.
   ;; The threshold in the allocator is exact equality for that.
   (let ((definitely-large-vector (make-array (- large-n-words 2)))
@@ -53,7 +58,8 @@
     ;; Verify the edge case for LARGE-OBJECT-P
     (assert (on-large-page-p definitely-large-vector))
     (assert (not (on-large-page-p not-large-vector)))
-    (assert (not (on-large-page-p (list 1 2)))))
+    (assert (not (on-large-page-p (list 1 2))))))
+(with-test (:name :no-&rest-on-large-object-pages :skipped-on (:not :gencgc))
   (let ((fun (checked-compile '(lambda (&rest params) params))))
     (assert (not (on-large-page-p (apply fun (make-list large-n-conses)))))))
 
