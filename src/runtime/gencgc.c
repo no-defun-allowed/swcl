@@ -5091,6 +5091,8 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
      * the TLAB now. */
     void *new_obj = region->free_pointer;
     char *new_free_pointer = (char*)new_obj + nbytes;
+    boolean __attribute__((unused)) largep =
+        ((uword_t)nbytes >= LARGE_OBJECT_SIZE) && page_type != PAGE_TYPE_CONS;
     if (new_free_pointer <= (char*)region->end_addr) {
         region->free_pointer = new_free_pointer;
 #if defined LISP_FEATURE_MIPS || defined LISP_FEATURE_PPC || \
@@ -5100,7 +5102,10 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
          * - CONS can come through here because when overflow occurs in lisp,
          *   the fallback logic will call lisp_alloc one or more times,
          *   obtaining possibly discontiguous pages of conses */
-        gc_assert(page_type == PAGE_TYPE_CONS || page_type == PAGE_TYPE_CODE);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+        if (!largep)
+#endif
+            gc_assert(page_type == PAGE_TYPE_CONS || page_type == PAGE_TYPE_CODE);
 #endif
         return new_obj;
     }
@@ -5167,7 +5172,6 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
     ensure_region_closed(region, page_type);
     int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
     gc_assert(ret);
-    boolean largep = ((uword_t)nbytes >= (GENCGC_PAGE_BYTES / 4 * 3)) && page_type != PAGE_TYPE_CONS;
     page_index_t alloc_start = get_alloc_start_page(page_type);
     if (largep) {
         page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,

@@ -29,7 +29,7 @@ gc_general_alloc(struct alloc_region* region, sword_t nbytes, int page_type)
     void *new_obj = region->free_pointer;
     void *new_free_pointer = (char*)new_obj + nbytes;
     // Large objects will never fit in a region, so we automatically dtrt
-    if (new_free_pointer <= region->end_addr) {
+    if (new_free_pointer < region->end_addr) {
         region->free_pointer = new_free_pointer;
         return new_obj;
     }
