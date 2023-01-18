@@ -2657,7 +2657,11 @@ static inline int lispobj_livep(lispobj obj_base) {
     extern int fullcgc_lispobj_livep(lispobj);
     lispobj obj = compute_lispobj((lispobj*)obj_base);
 #ifdef LISP_FEATURE_MARK_REGION_GC
-    return pointer_survived_gc_yet(obj);
+    /* We manipulate allocation bits, as we handle finalizers after
+     * sweeping, so that compaction can run before finalizers are
+     * scanned. Compaction needs to run before as scan_finalizers
+     * needs to rehash when forwarding pointers are encountered. */
+    return allocation_bit_marked(native_pointer(obj));
 #else
     return compacting_p() ? pointer_survived_gc_yet(obj) : fullcgc_lispobj_livep(obj);
 #endif
@@ -2696,7 +2700,7 @@ static void push_in_lockfree_list(struct symbol* list_holder,
         __sync_val_compare_and_swap(&list_holder->value, old, new);
     gc_assert(actual == old);
 #ifdef LISP_FEATURE_MARK_REGION_GC
-    mr_preserve_leaf(new);
+    set_allocation_bit_mark(node);
 #else
     if (!compacting_p()) gc_mark_obj(new);
 #endif
@@ -2712,7 +2716,7 @@ static void push_in_ordinary_list(struct symbol* list_holder, lispobj element)
         __sync_val_compare_and_swap(&list_holder->value, old, new);
     gc_assert(actual == old);
 #ifdef LISP_FEATURE_MARK_REGION_GC
-    mr_preserve_leaf(new);
+    set_allocation_bit_mark(cons);
 #else
     if (!compacting_p()) gc_mark_obj(new);
 #endif

@@ -67,12 +67,12 @@ static unsigned int collection = 0;
 
 void mr_print_meters() {
 #define NORM(x) (collection ? meters.x / collection : 0)
-  fprintf(stderr, "collection %d (%.0f%% compacting): %ldus consider %ld scavenge %ld trace (%ld alive %ld running) %ld sweep (%ld weak %ld lines %ld pages) %ld compact %ld raise; %ldB fresh %ldpg pinned\n",
+  fprintf(stderr, "collection %d (%.0f%% compacting): %ldus consider %ld scavenge %ld trace (%ld alive %ld running) %ld sweep (%ld lines %ld pages) %ld compact %ld raise; %ldB fresh %ldpg pinned\n",
           collection,
           collection ? 100.0 *  (float)meters.compacts / collection : 0.0,
           NORM(consider), NORM(scavenge),
           NORM(trace), NORM(trace_alive), NORM(trace_running),
-          NORM(sweep), NORM(weak), NORM(sweep_lines), NORM(sweep_pages),
+          NORM(sweep), NORM(sweep_lines), NORM(sweep_pages),
           NORM(compact), NORM(raise), NORM(fresh_pointers), NORM(pinned_pages));
 #undef NORM
 }
@@ -842,15 +842,11 @@ static void __attribute__((noinline)) sweep_pages() {
   reset_pinned_pages();
 }
 
-static void process_weak_pointers() {
+static void __attribute__((noinline)) sweep() {
+  /* Handle weak pointers. */
   local_smash_weak_pointers();
   gc_dispose_private_pages();
   cull_weak_hash_tables(mr_alivep_funs);
-  scan_finalizers();
-}
-
-static void __attribute__((noinline)) sweep() {
-  METER(weak, process_weak_pointers());
   /* Reset values we're about to recompute */
   bytes_allocated = 0;
   /* We recompute bytes allocated from scratch when doing full GC */
@@ -1074,9 +1070,12 @@ static void raise_survivors() {
   unsigned char line = ENCODE_GEN((unsigned char)gen);
   unsigned char target = ENCODE_GEN((unsigned char)gen + 1);
   for (page_index_t p = 0; p < next_free_page; p++)
+    /* Allocating in scan_finalizers can create fresh lines,
+     * which we need to check for. But we don't need to copy
+     * freshness, as we still set allocation bits. */
     if (!page_free_p(p))
       for_lines_in_page(l, p)
-        bytemap[l] = (bytemap[l] == line) ? target : bytemap[l];
+        bytemap[l] = (UNFRESHEN_GEN(bytemap[l]) == line) ? target : bytemap[l];
   for (page_index_t p = 0; p < next_free_page; p++)
     if (page_table[p].gen == gen && page_single_obj_p(p))
       page_table[p].gen++;
@@ -1113,6 +1112,9 @@ void mr_collect_garbage(boolean raise) {
   METER(sweep, sweep());
   if (compacting) meters.compacts++;
   METER(compact, run_compaction());
+  /* scan_finalizers check forwarding pointers, so we need to
+   * ensure it is called after compaction. */
+  scan_finalizers();
   if (raise) {
     METER(raise, raise_survivors());
   }
