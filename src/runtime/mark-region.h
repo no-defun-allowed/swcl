@@ -71,6 +71,7 @@ extern void mr_preserve_leaf(lispobj obj);
 extern void mr_preserve_object(lispobj obj);
 extern void mr_trace_object(lispobj *obj);
 extern void mr_trace_bump_range(lispobj* start, lispobj *end);
+extern boolean pointer_survived_gc_yet(lispobj object);
 
 /* Running the GC */
 extern void mr_pre_gc(generation_index_t generation);

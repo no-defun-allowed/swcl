@@ -1292,6 +1292,7 @@ struct hash_table *weak_hash_tables = NULL;
 struct hopscotch_table weak_objects; // other than weak pointers
 
 /* Return true if OBJ has already survived the current GC. */
+#ifndef LISP_FEATURE_MARK_REGION_GC
 static inline int pointer_survived_gc_yet(lispobj obj)
 {
 #ifdef LISP_FEATURE_CHENEYGC
@@ -1317,6 +1318,7 @@ static inline int pointer_survived_gc_yet(lispobj obj)
     return 1;
 #endif
 }
+#endif
 
 #define HT_ENTRY_LIVENESS_FUN_ARRAY_NAME weak_ht_alivep_funs
 #include "weak-hash-pred.inc"
@@ -2654,7 +2656,11 @@ static inline int dummy_node_p(so_node* node) {
 static inline int lispobj_livep(lispobj obj_base) {
     extern int fullcgc_lispobj_livep(lispobj);
     lispobj obj = compute_lispobj((lispobj*)obj_base);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    return pointer_survived_gc_yet(obj);
+#else
     return compacting_p() ? pointer_survived_gc_yet(obj) : fullcgc_lispobj_livep(obj);
+#endif
 }
 
 static void push_in_lockfree_list(struct symbol* list_holder,
@@ -2689,7 +2695,11 @@ static void push_in_lockfree_list(struct symbol* list_holder,
     lispobj __attribute__((unused)) actual =
         __sync_val_compare_and_swap(&list_holder->value, old, new);
     gc_assert(actual == old);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    mr_preserve_leaf(new);
+#else
     if (!compacting_p()) gc_mark_obj(new);
+#endif
 }
 static void push_in_ordinary_list(struct symbol* list_holder, lispobj element)
 {
@@ -2701,7 +2711,11 @@ static void push_in_ordinary_list(struct symbol* list_holder, lispobj element)
     lispobj __attribute__((unused)) actual =
         __sync_val_compare_and_swap(&list_holder->value, old, new);
     gc_assert(actual == old);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    mr_preserve_leaf(new);
+#else
     if (!compacting_p()) gc_mark_obj(new);
+#endif
 }
 
 /* Scan the finalizer table and take action on each node as follows:

@@ -54,7 +54,7 @@
 static struct {
   uword_t consider; uword_t scavenge;
   uword_t trace; uword_t trace_alive; uword_t trace_running;
-  uword_t sweep; uword_t sweep_lines; uword_t sweep_pages;
+  uword_t sweep; uword_t weak; uword_t sweep_lines; uword_t sweep_pages;
   uword_t compact; uword_t raise;
   uword_t fresh_pointers; uword_t pinned_pages;
   uword_t compacts;
@@ -67,12 +67,12 @@ static unsigned int collection = 0;
 
 void mr_print_meters() {
 #define NORM(x) (collection ? meters.x / collection : 0)
-  fprintf(stderr, "collection %d (%.0f%% compacting): %ldus consider %ld scavenge %ld trace (%ld alive %ld running) %ld sweep (%ld lines %ld pages) %ld compact %ld raise; %ldB fresh %ldpg pinned\n",
+  fprintf(stderr, "collection %d (%.0f%% compacting): %ldus consider %ld scavenge %ld trace (%ld alive %ld running) %ld sweep (%ld weak %ld lines %ld pages) %ld compact %ld raise; %ldB fresh %ldpg pinned\n",
           collection,
           collection ? 100.0 *  (float)meters.compacts / collection : 0.0,
           NORM(consider), NORM(scavenge),
           NORM(trace), NORM(trace_alive), NORM(trace_running),
-          NORM(sweep), NORM(sweep_lines), NORM(sweep_pages),
+          NORM(sweep), NORM(weak), NORM(sweep_lines), NORM(sweep_pages),
           NORM(compact), NORM(raise), NORM(fresh_pointers), NORM(pinned_pages));
 #undef NORM
 }
@@ -327,7 +327,7 @@ static boolean in_dynamic_space(lispobj object) {
   return find_page_index((void*)object) != -1;
 }
 
-static boolean pointer_survived_gc_yet(lispobj object) {
+boolean pointer_survived_gc_yet(lispobj object) {
   return !in_dynamic_space(object) || object_marked_p(object) || gc_gen_of(object, 0) > generation_to_collect;
 }
 
@@ -842,10 +842,15 @@ static void __attribute__((noinline)) sweep_pages() {
   reset_pinned_pages();
 }
 
-static void __attribute__((noinline)) sweep() {
+static void process_weak_pointers() {
   local_smash_weak_pointers();
   gc_dispose_private_pages();
   cull_weak_hash_tables(mr_alivep_funs);
+  scan_finalizers();
+}
+
+static void __attribute__((noinline)) sweep() {
+  METER(weak, process_weak_pointers());
   /* Reset values we're about to recompute */
   bytes_allocated = 0;
   /* We recompute bytes allocated from scratch when doing full GC */
