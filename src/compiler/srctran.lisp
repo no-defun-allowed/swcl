@@ -2913,6 +2913,15 @@
                         `(ash x ,shift))
                    (logand x ,mask))))))
 
+;;; Floats could be transformed if we had some declaration to ignore NaNs
+(deftransform truncate ((x y) (rational (or (rational (0) *)
+                                            (rational * (0))))
+                        *
+                        :important nil)
+  (if (same-leaf-ref-p x y)
+      `(values 1 0)
+      (give-up-ir1-transform)))
+
 ;;; And the same for REM.
 (deftransform rem ((x y) (integer (constant-arg integer)) *)
   "convert remainder mod 2^k to LOGAND"
@@ -3822,24 +3831,23 @@
   (neq *empty-type* (type-intersection (specifier-type 'float)
                                        (lvar-type lvar))))
 
-(flet ((maybe-invert (node op inverted x y)
+(flet ((maybe-invert (op inverted x y)
          (cond
-           #+(or x86-64 arm64) ;; have >=/<= VOPs
-           ((and (csubtypep (lvar-type x) (specifier-type 'float))
+           ((and (not (vop-existsp :translate >=))
+                 (csubtypep (lvar-type x) (specifier-type 'float))
                  (csubtypep (lvar-type y) (specifier-type 'float)))
-            (give-up-ir1-transform))
+            `(or (,op x y) (= x y)))
            ;; Don't invert if either argument can be a float (NaNs)
            ((or (maybe-float-lvar-p x) (maybe-float-lvar-p y))
-            (delay-ir1-transform node :constraint)
-            `(or (,op x y) (= x y)))
+            (give-up-ir1-transform))
            (t
             `(if (,inverted x y) nil t)))))
   (deftransform >= ((x y) (number number) * :node node)
     "invert or open code"
-    (maybe-invert node '> '< x y))
+    (maybe-invert '> '< x y))
   (deftransform <= ((x y) (number number) * :node node)
     "invert or open code"
-    (maybe-invert node '< '> x y)))
+    (maybe-invert '< '> x y)))
 
 ;;; See whether we can statically determine (< X Y) using type
 ;;; information. If X's high bound is < Y's low, then X < Y.
@@ -3936,9 +3944,12 @@
                                     nil ,result)
                                `(if (,predicate ,current ,last)
                                     ,result nil))))
-               ((zerop i)
-                `((lambda ,vars (declare (type ,type ,@vars)) ,result)
-                  ,@args)))))))
+                ((zerop i)
+                 `((lambda ,vars
+                     ;; the first two arguments will be checked by the comparison function.
+                     (declare (type ,type ,@(subseq vars 2)))
+                     ,result)
+                   ,@args)))))))
 
 (define-source-transform = (&rest args) (multi-compare '= args nil 'number))
 (define-source-transform < (&rest args) (multi-compare '< args nil 'real))

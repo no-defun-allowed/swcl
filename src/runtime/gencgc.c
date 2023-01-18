@@ -1838,9 +1838,9 @@ copy_unboxed_object(lispobj object, sword_t nwords)
     return gc_copy_object(object, nwords, unboxed_region, PAGE_TYPE_UNBOXED);
 }
 
-/* This may not reliably work for objects in a currently open allocation region,
+/* This WILL NOT reliably work for objects in a currently open allocation region,
  * because page_words_used() is not sync'ed to the free pointer until closing.
- * However it will work reliably for codeblobs, because if you can hold
+ * However it should work reliably for codeblobs, because if you can hold
  * a reference to the codeblob, then either you'll find it in the generation 0
  * tree, or else can linearly scan for it in an older generation */
 #include "brothertree.h"
@@ -1853,14 +1853,8 @@ lispobj *search_dynamic_space(void *pointer)
     /* The address may be invalid, so do some checks.
      * page_index -1 is legal, and page_free_p returns true in that case. */
     if (page_free_p(page_index)) return NULL;
+
     int type = page_table[page_index].type & PAGE_TYPE_MASK;
-    if (type == PAGE_TYPE_CONS) {
-        int wordindex = ((char*)pointer - page_address(page_index)) >> WORD_SHIFT;
-        if (wordindex < page_words_used(page_index))
-            return (lispobj*)(page_address(page_index) + ((wordindex >> 1) << (1+WORD_SHIFT)));
-        else
-            return NULL;
-    }
     // Generation 0 code is in the tree usually - it isn't for objects
     // in generation 0 following a non-promotion cycle.
     if (type == PAGE_TYPE_CODE && page_table[page_index].gen == 0) {
@@ -1877,9 +1871,13 @@ lispobj *search_dynamic_space(void *pointer)
             if (pointer < (void*)upper_bound) return found;
         }
     }
+    char* limit = page_address(page_index) +  page_bytes_used(page_index);
+    if ((char*)pointer > limit) return NULL;
+    if (type == PAGE_TYPE_CONS) {
+        return (lispobj*)ALIGN_DOWN((uword_t)pointer, 2*N_WORD_BYTES);
+    }
     lispobj *start;
     if (type == PAGE_TYPE_SMALL_MIXED) { // find the nearest card boundary below 'pointer'
-        if ((char*)pointer > page_address(page_index)+page_bytes_used(page_index)) return NULL;
         start = (lispobj*)ALIGN_DOWN((uword_t)pointer, GENCGC_CARD_BYTES);
     } else {
         start = (lispobj *)page_scan_start(page_index);
@@ -4359,6 +4357,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
     /* Return private-use pages to the general pool so that Lisp can have them */
     gc_dispose_private_pages();
     cull_weak_hash_tables(weak_ht_alivep_funs);
+    scan_finalizers();
 
     obliterate_nonpinned_words();
     // Do this last, because until obliterate_nonpinned_words() happens,

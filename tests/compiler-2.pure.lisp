@@ -2818,7 +2818,7 @@
              (dotimes (c 3) (catch 'c)))))
     (() 10)))
 
-(with-test (:name :dce-more-often :fails-on :arm)
+(with-test (:name :dce-more-often)
   (checked-compile-and-assert
    ()
    `(lambda (a)
@@ -2838,7 +2838,7 @@
     ((1) 1)
     (:return-type (values (integer 1 1) &optional))))
 
-(with-test (:name :dce-more-often.2 :fails-on :arm)
+(with-test (:name :dce-more-often.2)
   (checked-compile-and-assert
    ()
    `(lambda (b)
@@ -3815,7 +3815,7 @@
        (max 0 c)))
    ((1 1) -13)))
 
-(with-test (:name :find-initial-dfo-iugnore-let-converted-funs)
+(with-test (:name :find-initial-dfo-ignore-let-converted-funs)
   (checked-compile-and-assert
    ()
    `(lambda (c)
@@ -3828,3 +3828,50 @@
            ((lambda (v10) (%f7 (go tag5) -63522127 v10)) c))
        tag5))
    ((9) nil)))
+
+(with-test (:name :find-initial-dfo-ignore-assignment-converted-funs)
+  (checked-compile-and-assert
+   ()
+   `(lambda ()
+      (values
+       (catch 'c 0)
+       (labels ((%f (&optional (x 0) (y 0)) y))
+         (case 0
+           ((1) (%f 0))
+           ((2) (%f))))))
+   (() (values 0 nil))))
+
+(with-test (:name :find-initial-dfo-ignore-assignment-converted-funs.2)
+  (checked-compile-and-assert
+   (:allow-style-warnings t)
+   `(lambda (a)
+      (let ((v (make-array 1 :initial-element (catch 'ct 42))))
+        (labels ((f (&optional (x 4) &key (k a)) x))
+          (if nil (f) (f a)))))
+   ((9) 9)))
+
+(with-test (:name :if-eq-optimizer-nil)
+  (checked-compile-and-assert
+      ()
+      `(lambda (x)
+         (let (b)
+           (unless (eq x b)
+             (error ""))
+           x))
+    ((nil) nil)))
+
+(with-test (:name :assignment-convert-check-same-lvar)
+  (checked-compile-and-assert
+   (:allow-style-warnings t)
+   `(lambda (c)
+      (flet ((%f9 (f9-1 f9-2 &optional (key1 0))
+               f9-2))
+        (multiple-value-prog1 (%f9 701021570480035 c)
+          (if t
+              0
+              (progn
+                (%f9 1048572 2385880201)
+                (if t
+                    (%f9 777238289903386671 -15131644893)
+                    0))))))
+   ((10) 10)))

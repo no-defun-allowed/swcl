@@ -326,10 +326,11 @@
               `(or (eq ,object ,low) (eq ,object ,high)))
              #+(or x86 x86-64 arm arm64) ;; Not implemented elsewhere yet
              ((and (eql (numeric-type-class type) 'integer)
-                   (or (eql low 0) (eql low 1))
-                   (fixnump (numeric-type-high type)))
-              (let ((mod-p
-                      `(fixnum-mod-p ,object ,(numeric-type-high type))))
+                   (or (eql low 0)
+                       (and (eql low 1)
+                            (not (eql high most-positive-fixnum))))
+                   (fixnump high))
+              (let ((mod-p `(fixnum-mod-p ,object ,high)))
                 (if (eql low 1)
                     `(and (not (eq ,object 0))
                           ,mod-p)
@@ -507,6 +508,64 @@
              other
              `((typep ,object '(or ,@(mapcar #'type-specifier other))))))))))
 
+(defun source-transform-union-numeric-typep (object types)
+  (cond ((not (every #'numeric-type-p types))
+         nil)
+        ((and (= (length types) 2)
+              ;; (and subtype-of-integer (not (eql x)))
+              ;; don't test a range.
+              ;; (and subtype-of-integer (not (integer x y)))
+              (destructuring-bind (b a) types
+                (and (eq (numeric-type-class a) 'integer)
+                     (eq (numeric-type-class b) 'integer)
+                     (flet ((check (a b)
+                              (let* ((a-hi (numeric-type-high a))
+                                     (a-lo (numeric-type-low a))
+                                     (b-hi (numeric-type-high b))
+                                     (b-lo (numeric-type-low b)))
+                                (when (and a-hi b-lo
+                                           (not (eql a-lo a-hi))
+                                           (not (eql b-lo b-hi))
+                                           (> b-lo a-hi))
+                                  (let* (typecheck
+                                         (a
+                                           (%source-transform-typep object
+                                                                    `(integer ,(or a-lo '*) ,(or b-hi '*))))
+                                         (b `(not
+                                              ,(cond ((= (1+ a-hi)
+                                                         (1- b-lo))
+                                                      `(eql ,object ,(1+ a-hi)))
+                                                     (t
+                                                      (setf typecheck t)
+                                                      (%source-transform-typep object
+                                                                               `(integer (,a-hi) (,b-lo))))))))
+                                    (if typecheck
+                                        `(and ,a ,b)
+                                        `(and ,b ,a)))))))
+                       (or (check a b)
+                           (check b a)))))))
+        ((and (= (length types) 2)
+              ;; (or (integer * fixnum-x) (integer fixnum-y))
+              ;; only check for bignump and not its value.
+              (destructuring-bind (b a) types
+                (and (eq (numeric-type-class a) 'integer)
+                     (eq (numeric-type-class b) 'integer)
+                     (flet ((check (a b)
+                              (let* ((a-hi (numeric-type-high a))
+                                     (a-lo (numeric-type-low a))
+                                     (b-hi (numeric-type-high b))
+                                     (b-lo (numeric-type-low b)))
+                                (when (and (fixnump a-hi)
+                                           (fixnump b-lo)
+                                           (not a-lo)
+                                           (not b-hi))
+                                  `(or (and (fixnump ,object)
+                                            (or (>= ,object ,b-lo)
+                                                (<= ,object ,a-hi)))
+                                       (bignump ,object))))))
+                       (or (check a b)
+                           (check b a)))))))))
+
 ;;; Do source transformation for TYPEP of a known union type. If a
 ;;; union type contains LIST, then we pull that out and make it into a
 ;;; single LISTP call.
@@ -535,6 +594,7 @@
                                 (remove type-symbol types)))))))
           ((group-vector-type-length-tests object types))
           ((group-vector-length-type-tests object types))
+          ((source-transform-union-numeric-typep object types))
           (t
            (multiple-value-bind (widetags more-types)
                (sb-kernel::widetags-from-union-type types)

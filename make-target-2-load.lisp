@@ -6,6 +6,13 @@
 (defvar *compile-files-p* nil)
 (load (merge-pathnames "src/cold/warm.lisp" *load-pathname*))
 
+;; sb-xref-for-internals is actively harmful to tree-shaking.
+;; Remove some symbols to make the hide-packages test pass.
+#+sb-xref-for-internals
+(progn
+  (fmakunbound 'sb-kernel::type-class-fun-slot)
+  (fmakunbound 'sb-kernel::new-ctype))
+
 (sb-impl::!recompile-globaldb-checkfuns)
 
 ;;; Users don't want to know if there are multiple TLABs per se, but they do want
@@ -336,7 +343,7 @@ Please check that all strings which were not recognizable to the compiler
                ;; but both "cooked" values are empty
                (null (sb-kernel:symbol-dbinfo symbol))
                (null (symbol-plist symbol)))
-      (sb-sys:%primitive sb-vm::set-slot symbol nil
+      (sb-sys:%primitive sb-c:set-slot symbol nil
                          'make-symbol sb-vm:symbol-info-slot sb-vm:other-pointer-lowtag)))
 )
 

@@ -198,12 +198,12 @@
     `(sb-c::*code-serialno*
       sb-c::*compile-elapsed-time*
       sb-c::*compile-file-elapsed-time*
-      *gc-real-time*
+      sb-impl::*finalizer-rehashlist*
+      sb-impl::*finalizers-triggered*
       sb-impl::*package-names-cookie*
       sb-impl::*available-buffers*
       sb-impl::*token-buf-pool*
       sb-impl::*user-hash-table-tests*
-      sb-impl::**finalizer-store**
       sb-impl::*pn-dir-table*
       sb-impl::*pn-table*
       sb-vm::*immobile-codeblob-tree*
@@ -211,6 +211,7 @@
       ,(maybe "SB-KERNEL" "*EVAL-CALLS*")
       sb-kernel::*type-cache-nonce*
       sb-ext:*gc-run-time*
+      sb-ext:*gc-real-time*
       sb-kernel::*gc-epoch*
       sb-int:*n-bytes-freed-or-purified*
       ,(maybe "SB-VM" "*BINDING-STACK-POINTER*")

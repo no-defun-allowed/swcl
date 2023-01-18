@@ -1,4 +1,3 @@
-#-sb-thread (invoke-restart 'run-tests::skip-file)
 (in-package sb-lockless)
 
 ;;; Show all nodes including dummies.
@@ -287,7 +286,7 @@
       (assert (= (so-count tbl) initial-count)))
     tbl))
 
-(test-util:with-test (:name :basic-functionality)
+(test-util:with-test (:name :basic-functionality :skipped-on (not :sb-thread))
   (smoke-test))
 
 ;;; All threads try to insert each key. At most one thread wins,
@@ -330,7 +329,8 @@
   (dolist (k keys)
     (assert (not (so-find tbl k)))))
 
-(test-util:with-test (:name :concurrently-insert-same-keys/string)
+(test-util:with-test (:name :concurrently-insert-same-keys/string
+                      :skipped-on (not :sb-thread))
   (let* ((objects *strings*)
          (tbl (make-so-map/string))
          (keys-to-delete
@@ -347,7 +347,26 @@
     (assert-not-found tbl keys-to-delete)
     tbl))
 
-(test-util:with-test (:name :concurrently-insert-same-keys/object)
+;;; sb-eval gets
+;;;    UNEXPECTED-FAILURE :CONCURRENTLY-INSERT-SAME-KEYS/OBJECT
+;;;      due to UNBOUND-VARIABLE: "The variable X is unbound."
+;;; It's talking about the X in the REMOVE-IF lambda.
+;;; I tried renaming it to BLAHBLAH and sure enough got
+;;;      due to UNBOUND-VARIABLE: "The variable BLAHBLAH is unbound."
+;;; Based on that I know what the problem was: sb-eval uses a certain magic uninterned
+;;; symbol in a LET binding frame to indicate that the variable is special.
+;;; To read the binding, it examines the value in the storage location, and if it sees
+;;; the magic symbol, it calls SYMBOL-VALUE instead. So sb-eval can't actually represent
+;;; a lexical var whose _actual_ _value_ is that magic uninterned symbol.
+;;; Instead you'll (potentially) get an error that the variable you referenced is
+;;; unbound, unless it really is specially bound also.
+;;; Naturally MAP-ALLOCATED-OBJECTS produces that symbol, and so this test can't run,
+;;; because we "don't know" what the magic symbol is, since it's uninterned and
+;;; therefore can't easily weed it out from the list.
+;;; sb-fasteval does not use that same technique to represent special bindings,
+;;; and has no problem iterating over all symbols.
+(test-util:with-test (:name :concurrently-insert-same-keys/object
+                      :skipped-on (or (not :sb-thread) (not :sb-fasteval)))
   (let* ((objects
           (remove-if (lambda (x)
                        (not (eql (generation-of x) sb-vm:+pseudo-static-generation+)))

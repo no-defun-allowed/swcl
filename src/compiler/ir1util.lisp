@@ -1571,18 +1571,6 @@
   (let* ((leaf (ref-leaf ref))
          (refs (delq1 ref (leaf-refs leaf))))
     (setf (leaf-refs leaf) refs)
-    (when (lambda-p leaf)
-      (let ((home (node-home-lambda ref)))
-        ;; If it was the last local call from this lambda, remove it.
-        ;; KLUDGE: This is probably slower than it needs to be. See if
-        ;; we can do some additional bookkeeping or simply ignore more
-        ;; types of lambdas when scanning lambda-calls.
-        (dolist (ref refs (sset-delete leaf (lambda-calls home)))
-          (let ((dest (node-dest ref)))
-            (when (and (basic-combination-p dest)
-                       (eq (basic-combination-kind dest) :local)
-                       (eq home (node-home-lambda ref)))
-              (return))))))
     (cond ((null refs)
            (typecase leaf
              (lambda-var
@@ -2505,7 +2493,6 @@ is :ANY, the function name is not checked."
     (functional
      (assure-functional-live-p leaf))))
 
-
 (defun call-full-like-p (call)
   (declare (type basic-combination call))
   (let ((kind (basic-combination-kind call)))
@@ -2521,9 +2508,8 @@ is :ANY, the function name is not checked."
                 (not (fun-info-ltn-annotate info))
                 (dolist (template (fun-info-templates info) t)
                   (when (eq (template-ltn-policy template) :fast-safe)
-                    (multiple-value-bind (val win)
-                        (valid-fun-use call (template-type template))
-                      (when (or val (not win)) (return nil)))))))))))
+                    (when (valid-fun-use call (template-type template))
+                      (return))))))))))
 
 ;;;; careful call
 

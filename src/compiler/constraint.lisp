@@ -71,7 +71,7 @@
   ;;     X is a LAMBDA-VAR and Y is a CTYPE. The value of X is
   ;;     constrained to be of type Y.
   ;;
-  ;; >, <, or =
+  ;; >, <, >=, <=, or =
   ;;     X is a lambda-var and Y is a CTYPE. The relation holds
   ;;     between X and some object of type Y.
   ;;
@@ -81,7 +81,7 @@
   ;;
   ;; EQUALITY
   ;;     Relations between two variables.
-  (kind nil :type (member typep < > = eql equality))
+  (kind nil :type (member typep < > = >= <= eql equality))
   ;; The operands to the relation.
   (x nil :type (or lambda-var vector-length-constraint))
   (y nil :type constraint-y)
@@ -755,6 +755,16 @@
                                  (add name var1 (lvar-type arg2) nil))
                                (when var2
                                  (add (if (eq name '<) '> '<) var2 (lvar-type arg1) nil)))))
+                          ((<= >=)
+                           (when (= (length args) 2)
+                             (let* ((arg1 (first args))
+                                    (var1 (ok-lvar-lambda-var arg1 constraints))
+                                    (arg2 (second args))
+                                    (var2 (ok-lvar-lambda-var arg2 constraints)))
+                               (when var1
+                                 (add name var1 (lvar-type arg2) nil))
+                               (when var2
+                                 (add (if (eq name '<=) '>= '<=) var2 (lvar-type arg1) nil)))))
                           (=
                            (when (= (length args) 2)
                              (let* ((arg1 (first args))
@@ -875,6 +885,24 @@
             (make-numeric-type :low bound)
             (make-numeric-type :high bound))))))
 
+(defun constrain-real (y greater or-equal)
+  (let ((int (type-approximate-interval y)))
+    (when int
+      (flet ((exclude (x)
+               (cond ((not x) nil)
+                     (or-equal x)
+                     ((consp x) x)
+                     (t (list x))))
+             (bound (x)
+               (if greater
+                   (interval-low x)
+                   (interval-high x))))
+        (let ((bound (exclude (bound int))))
+          (when bound
+            (if greater
+                (make-numeric-type :low bound)
+                (make-numeric-type :high bound))))))))
+
 ;;; Return true if LEAF is "visible" from NODE.
 (defun leaf-visible-from-node-p (leaf node)
   (cond
@@ -967,24 +995,10 @@
                              (when (null not-numeric)
                                (setf not-numeric (alloc-xset)))
                              (add-to-xset (constant-value other) not-numeric)))))))
-            ((< >)
-             (let* ((greater (eq kind '>))
-                    (greater (if not-p (not greater) greater)))
-               (cond ((and (integer-type-p type) (integer-type-p y))
-                      (setf type (constrain-integer-type type y greater not-p)))
-                     ((and (float-type-p type) (float-type-p y))
-                      (setf type (constrain-float-type type y greater not-p)))
-                     ((integer-type-p y)
-                      (let ((real-type (constrain-real-to-integer y greater not-p)))
-                        (when real-type (intersect-result real-type)))))))
-            (=
-             (when (and (numeric-type-p y)
-                        (not not-p))
-               (let* ((low (numeric-type-low y))
-                      (high (numeric-type-high y))
-                      (real (make-numeric-type :low low :high high))
-                      (complex (make-numeric-type :complexp :complex :low low :high high)))
-                 (intersect-result (type-union real complex)))))))))
+            ((< > <= >= =)
+             (let ((after (type-after-comparison kind not-p type y)))
+               (when after
+                 (setf type after))))))))
     (let* ((negated not-type)
            (negated (if (and (null not-set) (null not-fpz))
                         negated
@@ -1003,24 +1017,48 @@
 (defun type-after-comparison (operator not-p current-type type)
   (case operator
     ((= eq)
-     (when (and (numeric-type-p type)
-                (not not-p))
-       (type-intersection current-type
-                          (type-union (make-numeric-type :low (numeric-type-low type)
-                                                         :high (numeric-type-high type))
-                                      (make-numeric-type :complexp :complex
-                                                         :low (numeric-type-low type)
-                                                         :high (numeric-type-high type))))))
+     (unless not-p
+       (multiple-value-bind (lo hi)
+           (if (numeric-type-p type)
+               (values (numeric-type-low type)
+                       (numeric-type-high type))
+               ;; Doesn't handle infinities
+               (let ((int (type-approximate-interval type)))
+                 (and int
+                      (values
+                       (interval-low int)
+                       (interval-high int)))))
+         (when (or lo hi)
+           (type-intersection current-type
+                              (type-union (make-numeric-type :low lo
+                                                             :high hi)
+                                          (make-numeric-type :complexp :complex
+                                                             :low lo
+                                                             :high hi)))))))
     (t
-     (let* ((greater (eq operator '>))
-            (greater (if not-p (not greater) greater)))
+     (multiple-value-bind (greater equal)
+         (if not-p
+             (case operator
+               (> (values nil t))
+               (< (values t t))
+               (>= (values nil nil))
+               (<= (values t nil)))
+             (case operator
+               (> (values t nil))
+               (< (values nil nil))
+               (>= (values t t))
+               (<= (values nil t))))
        (cond
          ((and (integer-type-p current-type) (integer-type-p type))
-          (constrain-integer-type current-type type greater not-p))
+          (constrain-integer-type current-type type greater equal))
          ((and (float-type-p current-type) (float-type-p type))
-          (constrain-float-type current-type type greater not-p))
+          (constrain-float-type current-type type greater equal))
          ((integer-type-p type)
-          (let ((type (constrain-real-to-integer type greater not-p)))
+          (let ((type (constrain-real-to-integer type greater equal)))
+            (when type
+              (type-intersection current-type type))))
+         (t
+          (let ((type (constrain-real type greater equal)))
             (when type
               (type-intersection current-type type)))))))))
 
@@ -1109,7 +1147,7 @@
                         (when (constant-p other) (return)))
                        (t
                         (setq res (type-intersection res other-type))))))))
-            ((< > =)
+            ((< > <= >= =)
              (let ((type (type-after-comparison kind not-p res y)))
                (when type
                  (setf res type))))))))

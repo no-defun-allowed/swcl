@@ -119,15 +119,16 @@
 (defun make-marked-ref (x)
   (%make-lisp-obj (logandc2 (get-lisp-obj-address x) sb-vm:lowtag-mask)))
 
-#-(or arm64 x86-64) ; why in hell doesn't vop-exists-p working here? wtf?
-(progn
+(sb-c::when-vop-existsp (:translate get-next)
+  (defun get-next (node) (get-next node)))
+(sb-c::unless-vop-existsp (:translate get-next)
 (declaim (inline get-next))
 (defun get-next (node)
   ;; You must not call GET-NEXT on +TAIL+ because the 'next' of +TAIL+ is NIL,
   ;; and (LOGIOR NIL-VALUE INSTANCE-POINTER-LOWTAG) isn't necessarily NIL.
   ;; It would be a bogus pointer on ppc64 because of rearranged lowtags.
   ;; arm64 and x86-64 are missing this AVER (because the vop doesn't do it),
-  ;; but as long as some of the platforms test this it, we should be reasonably ok.
+  ;; but as long as some of the platforms test this, we should be reasonably ok.
   ;; (I could assign 'next' of +TAIL+ as +TAIL+ like it used to be, and remove this.)
   (aver (neq node +tail+))
   ;; Storing NODE in *PINNED-OBJECTS* causes its successor to become pinned.
