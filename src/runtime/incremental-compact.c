@@ -71,7 +71,6 @@ static void pick_targets() {
   }
 }
 
-
 void consider_compaction(generation_index_t gen) {
   if (gen >= minimum_compact_gen && should_compact("Enabling remset")) {
     compacting = 1;
@@ -100,13 +99,14 @@ void commit_thread_local_remset() {
   }
 }
 
-void log_relevant_slot(lispobj *where, enum source source) {
+void log_relevant_slot(lispobj *where, lispobj *source_object, enum source source_type) {
   if (!remset_block) remset_block = suballoc_allocate(&remset_suballocator);
   if (remset_block->count == QBLOCK_CAPACITY) {
     commit_thread_local_remset();
     remset_block = suballoc_allocate(&remset_suballocator);
   }
-  remset_block->elements[remset_block->count++] = tag_source(where, source);
+  remset_block->elements[remset_block->count++] = tag_source(where, source_type);
+  remset_block->elements[remset_block->count++] = (lispobj)source_object;
 }
 
 /* Compacting */
@@ -126,7 +126,7 @@ static void count_pages() {
     }
   uword_t pointers = 0;
   for (struct Qblock *b = remset; b; b = b->next) {
-    pointers += b->count;
+    pointers += b->count / 2;
     for (int i = 0; i < b->count; i++)
       tags[b->elements[i] & 7]++;
   }

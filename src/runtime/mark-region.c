@@ -292,9 +292,6 @@ void mr_update_closed_region(struct alloc_region *region, generation_index_t gen
 
 /* Marking */
 
-/* Old generation for finding old->young pointers */
-static _Thread_local generation_index_t dirty_generation_source = 0;
-static _Thread_local boolean dirty = 0;
 static generation_index_t generation_to_collect = 0;
 
 #define ANY(x) ((x) != 0)
@@ -395,7 +392,13 @@ static void mark_lines(lispobj *p) {
   add_words_used(p, word_count);
 }
 
-static void mark(lispobj object, lispobj *where, enum source source) {
+/* Generation of the object being scavenged,
+ * for finding old->young pointers */
+static _Thread_local generation_index_t dirty_generation_source = 0;
+static _Thread_local boolean dirty = 0;
+static _Thread_local lispobj *source_object;
+
+static void mark(lispobj object, lispobj *where, enum source source_type) {
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
 #ifdef DEBUG
     if (page_free_p(find_page_index(native_pointer(object))))
@@ -414,7 +417,7 @@ static void mark(lispobj object, lispobj *where, enum source source) {
       lispobj *base = fun_code_header(np);
       object = make_lispobj(base, OTHER_POINTER_LOWTAG);
     }
-    log_slot(object, where, source);
+    log_slot(object, where, source_object, source_type);
     boolean set_allocation = IS_FRESH(line_bytemap[address_line(np)]);
     /* Enqueue onto mark queue */
     if (set_mark_bit(object, set_allocation)) {
@@ -452,33 +455,38 @@ static void watch_deferred(lispobj *where, uword_t start, uword_t end);
 
 static void trace_object(lispobj object) {
  again:
+  source_object = native_pointer(object);
   if (listp(object)) {
     struct cons *c = CONS(object);
     mark(c->car, &c->car, SOURCE_NORMAL);
     lispobj next = c->cdr;
     /* Tail-recurse on the cdr, unless we're recording dirty cards. */
-    if (!dirty_generation_source && is_lisp_pointer(next)) {
-      /* Fix up embedded simple-fun objects. */
-      lispobj *np = native_pointer(next);
-      if (functionp(next) && embedded_obj_p(widetag_of(np))) {
-        lispobj *base = fun_code_header(np);
-        next = make_lispobj(base, OTHER_POINTER_LOWTAG);
-        np = base;
-      }
-      /* Inlined logic from mark() */
-      if (!pointer_survived_gc_yet(next)) {
-        boolean set_allocation = IS_FRESH(line_bytemap[address_line(np)]);
-        if (set_mark_bit(next, set_allocation)) {
-          if (listp(next))
-            mark_cons_line(CONS(next));
-          else
-            mark_lines(np);
-          object = next;
-          goto again;
+    if (is_lisp_pointer(next)) {
+      if (!dirty_generation_source) {
+        /* Fix up embedded simple-fun objects. */
+        lispobj *np = native_pointer(next);
+        if (functionp(next) && embedded_obj_p(widetag_of(np))) {
+          lispobj *base = fun_code_header(np);
+          next = make_lispobj(base, OTHER_POINTER_LOWTAG);
+          np = base;
         }
+        /* Inlined logic from mark() */
+        log_slot(c->cdr, &c->cdr, native_pointer(object), SOURCE_NORMAL);
+        if (!pointer_survived_gc_yet(next)) {
+          boolean set_allocation = IS_FRESH(line_bytemap[address_line(np)]);
+          if (set_mark_bit(next, set_allocation)) {
+            if (listp(next))
+              mark_cons_line(CONS(next));
+            else
+              mark_lines(np);
+            object = next;
+            goto again;
+          }
+        }
+      } else {
+        mark(next, &c->cdr, SOURCE_NORMAL);
       }
     }
-    mark(next, &c->cdr, SOURCE_NORMAL);
   } else {
     lispobj *p = native_pointer(object);
     trace_other_object(p);
@@ -959,7 +967,7 @@ static void watch_deferred(lispobj *where, uword_t start, uword_t end) {
   generation_index_t gen = dirty_generation_source;
   for (uword_t i = start; i < end; i++) {
     if (is_lisp_pointer(where[i])) {
-      log_slot(where[i], where + i, SOURCE_NORMAL);
+      log_slot(where[i], where + i, where, SOURCE_NORMAL);
       if (gc_gen_of(where[i], 0) < gen) {
         dirty = 1;
         return;

@@ -323,9 +323,28 @@ static inline boolean pinned_p(lispobj obj, page_index_t page)
     return (pins & (1<<subpage)) && hopscotch_containsp(&pinned_objects, obj);
 }
 
+// Need this up here, in order to implement from_space_p for
+// mark-region GC.
+generation_index_t gc_gen_of(lispobj obj, int defaultval);
+
 // Return true only if 'obj' must be *physically* transported to survive gc.
 // Return false if obj is in the immobile space regardless of its generation.
 // Pretend pinned objects are not in oldspace so that they don't get moved.
+#ifdef LISP_FEATURE_MARK_REGION_GC
+static boolean __attribute__((unused))
+from_space_p(lispobj obj)
+{
+    /* There'd be a cyclic dependency between gencgc-internal.h and
+     * incremental-compact.h would we try to #include the latter. */
+    extern unsigned char *target_pages;
+    page_index_t page_index = find_page_index((void*)obj);
+    if (page_index == -1) return 0;
+    /* We can only move objects in or younger than the current
+     * generation, as we can't build a complete remset for older
+     * objects in a younger GC. */
+    return target_pages[page_index] && gc_gen_of(obj, 0) <= new_space;
+}
+#else
 static boolean __attribute__((unused))
 from_space_p(lispobj obj)
 {
@@ -335,6 +354,7 @@ from_space_p(lispobj obj)
     // and the 'gen' of page -1 is an otherwise unused value.
     return page_table[page_index].gen == from_space && !pinned_p(obj, page_index);
 }
+#endif
 
 static boolean __attribute__((unused)) new_space_p(lispobj obj)
 {
@@ -368,7 +388,5 @@ extern page_index_t next_free_page;
 extern uword_t
 walk_generation(uword_t (*proc)(lispobj*,lispobj*,uword_t),
                 generation_index_t generation, uword_t extra);
-
-generation_index_t gc_gen_of(lispobj obj, int defaultval);
 
 #endif /* _GENCGC_INTERNAL_H_*/

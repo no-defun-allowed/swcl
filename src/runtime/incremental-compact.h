@@ -1,3 +1,4 @@
+#ifdef LISP_FEATURE_MARK_REGION_GC
 #ifndef INCREMENTAL_COMPACT_H
 #define INCREMENTAL_COMPACT_H
 #include "os.h"
@@ -10,16 +11,19 @@ extern void consider_compaction(generation_index_t gen);
 extern void run_compaction();
 
 extern unsigned char *target_pages;
-extern void log_relevant_slot(lispobj *where, enum source source);
+extern void log_relevant_slot(lispobj *where, lispobj *source_object, enum source source_type);
 extern unsigned char *target_pages;
 /* Avoid a full call unless the slot is relevant. */
-static inline void log_slot(lispobj target, lispobj *where, enum source source) {
+static inline void log_slot(lispobj target, lispobj *where,
+                            lispobj *source_object, enum source source_type) {
   /* mark() can provide NULL when there is no easy way to pass
    * around the source. */
+  if (!where) return;
   page_index_t p = find_page_index(native_pointer(target));
-  if (where && p != -1 && target_pages[p])
-    log_relevant_slot(where, source);
+  if (p != -1 && target_pages[p])
+    log_relevant_slot(where, source_object, source_type);
 }
 extern void commit_thread_local_remset();
 
+#endif
 #endif
