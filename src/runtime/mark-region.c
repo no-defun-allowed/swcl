@@ -991,7 +991,6 @@ static void scavenge_root_gens_worker() {
     for (page_index_t i = claim; i < limit; i++) {
       unsigned char page_type = page_table[i].type & PAGE_TYPE_MASK;
       if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(i)) continue;
-      // fprintf(stderr, "Scavenging page %ld\n", i);
       if (page_single_obj_p(i) && page_type == PAGE_TYPE_MIXED) {
         if (page_table[i].gen > generation_to_collect) {
           /* Check the widetag, to make sure we aren't going to
@@ -1003,6 +1002,10 @@ static void scavenge_root_gens_worker() {
               gc_card_mark[card] = CARD_UNMARKED;
             continue;
           }
+          /* This page has the start of a large vector, and later pages
+           * will be part of this vector. */
+          if (page_starts_contiguous_block_p(i))
+            source_object = (lispobj*)page_address(i);
           /* The only time that page_address + page_words_used actually
            * demarcates the end of a (sole) object on the page, with this
            * heap layout. */
@@ -1015,11 +1018,9 @@ static void scavenge_root_gens_worker() {
             if (card_dirtyp(card)) {
               lispobj *card_end = start + WORDS_PER_CARD;
               lispobj *end = (limit < card_end) ? limit : card_end;
-              // fprintf(stderr, "Scavenging large page %ld from %p to %p: ", i, start, end);
               dirty_generation_source = gen, dirty = 0;
               for (lispobj *p = start; p < end; p++)
                 mark(*p, p, SOURCE_NORMAL);
-              // fprintf(stderr, "%s\n", dirty ? "dirty" : "clean");
               update_card_mark(card, dirty);
             }
           }
