@@ -16,13 +16,11 @@
   (compiles-with-warning '(lambda () (make-a-foo-2 3))))
 
 (with-test (:name (inline structure :ctor :no declaim))
-  (let ((f (checked-compile '(lambda ()
-                               (make-a-foo-1 :a 'wat :b 3)))))
-    (assert (ctu:find-named-callees f)))
-  (let ((f (checked-compile '(lambda ()
+  (assert (ctu:ir1-named-calls '(lambda () (make-a-foo-1 :a 'wat :b 3))))
+  (assert (not (ctu:ir1-named-calls
+                            '(lambda ()
                                (declare (inline make-a-foo-1))
-                               (make-a-foo-1 :a 'wat :b 3)))))
-    (assert (not (ctu:find-named-callees f)))))
+                               (make-a-foo-1 :a 'wat :b 3))))))
 
 (defstruct %instance-ref-eq (n 0))
 
@@ -217,3 +215,24 @@
         (top-level-closure-dead-component-reference :keyword "~a" 2)
         (top-level-closure-dead-component-reference :keyword "~a" 2))))
    :load t))
+
+(with-test (:name :top-level-closure-zombie-reference)
+  (ctu:file-compile
+   `((declaim (inline top-level-closure-zombie-reference))
+
+     (defun top-level-closure-zombie-reference ()
+       (multiple-value-bind (g190 param) (#.(gensym))
+         (unwind-protect (#.(gensym) g190)
+           (#.(gensym) g190 param))))
+
+     (print (top-level-closure-zombie-reference)))))
+
+(with-test (:name :top-level-closure-type-errors
+            :fails-on :sbcl)
+  (let (warnings)
+    (handler-bind ((warning (lambda (c) (push c warnings))))
+      (ctu:file-compile
+       `((let ((x (random 1d0)))
+           (defun test ()
+             (car x))))))
+    (assert (typep (car warnings) 'sb-int:type-warning))))

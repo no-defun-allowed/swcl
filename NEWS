@@ -1,13 +1,49 @@
 ;;;; -*- coding: utf-8; fill-column: 78 -*-
 
-changes relative to sbcl-2.3.0:
+changes relative to sbcl-2.3.1:
+  * incompatible change: the :ORDER long-form-option in
+    DEFINE-METHOD-COMBINATION accepts NIL as well as :MOST-SPECIFIC-FIRST and
+    :MOST-SPECIFIC-LAST.  A value of NIL implies no particular ordering of the
+    methods, and so disables checks of multiple methods with the same
+    specializers in that group.
+  * bug fix: evaluate the :ORDER long-form-option in DEFINE-METHOD-COMBINATION
+    properly, avoiding an infinite loop in DEFINE-METHOD-COMBINATION if the
+    :ORDER argument leads to a cycle of compile-time constants.
+
+changes in sbcl-2.3.1 relative to sbcl-2.3.0:
+  * sb-graph has been removed. To visualize IR1 in sbcl, it is recommended to
+    use the function IR1-TO-DOT (which only survives the final tree shake if
+    the feature :sb-devel is enabled at build time).
+  * platform support:
+    ** implement some peephole optimizations on arm64;
+    ** support float traps on arm64;
+  * bug fix: package-manipulation operations within fasls work as expected in
+    the absence of explicit block compilation requests.  (lp#2000004, reported
+    by Shubhamkar Ayare)
+  * bug fix: incorrect type simplification of certain CONS types.
+    (lp#1999352, reported by Paul Dietz)
+  * bug fix: method combination group selection interprets the symbol * as
+    a wildcard element within proper qualifier-pattern lists.  (reported by
+    Maciej Katafiasz and by Daniel Kochmański)
+  * bug fix: &WHOLE can be used without error in define-method-combination
+    arguments lambda lists.  (reported by Daniel Kochmański)
+  * bug fix: bogus debug variables generated for closure variables whose value
+    cell had not yet been allocated could cause segfaults and gc crashes
+    (reported by _death on #sbcl)
+  * bug fix: handling of float NaNs in two-arg numeric comparison functions is
+    more consistent with the required semantics in IEEE 754 when comparing
+    with rationals.
+  * bug fix: ensure that the hide-packages test passes even when the system
+    retains internal cross-reference metadata.  (lp#2002896, reported by 3b)
+  * bug fix: don't trip an internal assertion in weak hash tables with
+    finalizers.  (lp#1998064)
   * optimization: load-time only code is no longer retained at runtime when
     functions close over top level bindings.
   * optimization: GO and RETURN-FROM now elide out-of-extent tag checks when
     the compiler can prove it's safe even on high safety.
-  * sb-graph has been removed. To visualize IR1 in sbcl, it is recommended to
-    use the function IR1-TO-DOT (which only survives the final tree shake if
-    the feature :sb-devel is enabled at build time).
+  * optimization: addition of a fixnum to a bignum generates less garbage.
+  * optimization: in many cases, type inference and code generation is
+    improved for and around numerical comparison functions.
 
 changes in sbcl-2.3.0 relative to sbcl-2.2.11:
   * enhancement: support for SLOT-VALUE and friends has been extended to

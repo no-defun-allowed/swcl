@@ -1900,17 +1900,6 @@
                         temp))))
       (inst bt word bit))))
 
-(defun change-tested-flag (vop from-flag to-flag)
-  (ecase (vop-name vop)
-    (branch-if
-     (let ((info (vop-codegen-info vop)))
-       (aver (equal (third info) (list from-flag)))
-       (setf (vop-codegen-info vop) (list (car info) (cadr info) (list to-flag)))))
-    (compute-from-flags
-     (let ((info (vop-codegen-info vop)))
-       (aver (equal (first info) (list from-flag)))
-       (setf (vop-codegen-info vop) (list (list to-flag)))))))
-
 (define-vop (%logbitp/c fast-safe-arith-op)
   (:translate %logbitp)
   (:conditional :c)
@@ -1924,28 +1913,26 @@
       ;; Acount for fixnum tag bit.
       ;; Reading beyond the sign bit is the same as reading the sign bit.
       (setf bit (min (1- n-word-bits) (+ bit n-fixnum-tag-bits))))
-    (let ((next (vop-next vop)))
-      (when (member (vop-name next) '(branch-if compute-from-flags))
-        (cond ((not (gpr-tn-p int)) ; is in memory, issue it as a TEST
-               ;; To test bit index 8: add 1 to the disp, and use immediate val 0x01
-               ;;             index 9: add 1 to the disp, and use immediate val 0x02
-               ;;             etc
-               ;; I'm not crazy about this approach, because we lose the connection
-               ;; to which TN we're reading.  There needs to be a way to emit the instruction
-               ;; as byte-within-stack-tn so that it is understood by other optimizations.
-               (binding* ((frame-disp  (frame-byte-offset (tn-offset int)))
-                          ((extra-disp bit-shift) (floor bit 8)))
-                 (inst test :byte (ea (+ frame-disp extra-disp) rbp-tn) (ash 1 bit-shift)))
-               (change-tested-flag next :c :ne)
-               (return-from %logbitp/c))
-              ((= bit 31) ; test the sign bit of the 32-bit register
-               (inst test :dword int int)
-               (change-tested-flag next :c :s)
-               (return-from %logbitp/c))
-              ((< bit 32)
-               (inst test (if (< bit 8) :byte :dword) int (ash 1 bit))
-               (change-tested-flag next :c :ne)
-               (return-from %logbitp/c)))))
+    (cond ((not (gpr-tn-p int))     ; is in memory, issue it as a TEST
+           ;; To test bit index 8: add 1 to the disp, and use immediate val 0x01
+           ;;             index 9: add 1 to the disp, and use immediate val 0x02
+           ;;             etc
+           ;; I'm not crazy about this approach, because we lose the connection
+           ;; to which TN we're reading.  There needs to be a way to emit the instruction
+           ;; as byte-within-stack-tn so that it is understood by other optimizations.
+           (binding* ((frame-disp  (frame-byte-offset (tn-offset int)))
+                      ((extra-disp bit-shift) (floor bit 8)))
+             (inst test :byte (ea (+ frame-disp extra-disp) rbp-tn) (ash 1 bit-shift)))
+           (change-vop-flags vop '(:ne))
+           (return-from %logbitp/c))
+          ((= bit 31)       ; test the sign bit of the 32-bit register
+           (inst test :dword int int)
+           (change-vop-flags vop '(:s))
+           (return-from %logbitp/c))
+          ((< bit 32)
+           (inst test (if (< bit 8) :byte :dword) int (ash 1 bit))
+           (change-vop-flags vop '(:ne))
+           (return-from %logbitp/c)))
     (inst bt (if (<= bit 31) :dword :qword) int bit)))
 
 (define-vop (%logbitp-memref fast-conditional)
@@ -1992,7 +1979,7 @@
                              (template-or-lose '%logbitp-memref)
                              arg-ref nil prev (list info))))
               (setf (tn-ref-memory-access arg-ref) `(:read . ,disp))
-              (change-tested-flag (vop-next vop) :c :ne)
+              (change-vop-flags vop '(:ne))
               (sb-c::delete-vop prev)
               (sb-c::delete-vop vop)
               new)))))))
@@ -2066,28 +2053,40 @@
                              (/signed 6 t)
                              (-c/signed 5 t t)
                              (/unsigned 6)
-                             (-c/unsigned 5 nil t))
+                              (-c/unsigned 5 nil t))
                         collect
-                        `(define-vop (,(symbolicate "FAST-IF-" tran suffix)
-                                      ,(symbolicate "FAST-CONDITIONAL"  suffix))
-                           (:translate ,tran)
-                           (:vop-var vop)
-                           ,(if constant
-                                `(:conditional
-                                  :after-sc-selection
-                                  (cond ((zerop (+ y ,addend))
-                                         (setf (car (vop-codegen-info vop)) 0)
-                                         ,(if signed
-                                              addend-signed
-                                              addend-unsigned))
-                                        (t
-                                         ,(if signed cond unsigned))))
-                                `(:conditional ,(if signed cond unsigned)))
-                           (:arg-refs x-tn-ref)
-                           (:generator ,cost
-                             (emit-optimized-cmp
-                               x ,(if (eq suffix '-c/fixnum) `(fixnumize y) 'y)
-                               temp (tn-ref-type x-tn-ref))))))))
+                        (flet ((fix (n)
+                                 (if (eq suffix '-c/fixnum)
+                                     `(fixnumize ,n)
+                                     n)))
+                          `(define-vop (,(symbolicate "FAST-IF-" tran suffix)
+                                        ,(symbolicate "FAST-CONDITIONAL"  suffix))
+                             (:translate ,tran)
+                             (:vop-var vop)
+                             (:conditional)
+                             (:conditional ,(if signed cond unsigned))
+                             (:arg-refs x-tn-ref)
+                             (:generator ,cost
+                               ,(when constant
+                                  `(cond ((zerop (+ y ,addend))
+                                          (setf y 0)
+                                          (change-vop-flags
+                                           vop
+                                           ',(if signed
+                                                 (list addend-signed)
+                                                 (list addend-unsigned))))
+                                         ((and
+                                           (not (plausible-signed-imm32-operand-p ,(fix 'y)))
+                                           (plausible-signed-imm32-operand-p ,(fix `(+ y ,addend))))
+                                          (incf y ,addend)
+                                          (change-vop-flags
+                                           vop
+                                           ',(if signed
+                                                 (list addend-signed)
+                                                 (list addend-unsigned))))))
+                               (emit-optimized-cmp
+                                 x ,(fix 'y)
+                                 temp (tn-ref-type x-tn-ref)))))))))
   (define-conditional-vop < :l :b -1 :le :be)
   (define-conditional-vop > :g :a 1 :ge :ae))
 
@@ -2922,3 +2921,109 @@
                       'sb-vm::fast-logand-c/fixnum=>fixnum)
                   (exactly-one-read-p (vop-results next-vop)))
          (car (vop-codegen-info next-next-vop)))))))
+
+(in-package :sb-vm)
+
+(macrolet ((def (name excl-low excl-high)
+             `(progn
+                (define-vop (,(symbolicate name '/c))
+                  (:translate ,name)
+                  (:args (x :scs (any-reg signed-reg unsigned-reg) :target temp))
+                  (:arg-types (:constant t)
+                              (:or tagged-num signed-num unsigned-num)
+                              (:constant t))
+                  (:info lo hi)
+                  (:temporary (:sc signed-reg :from (:argument 0)) temp)
+                  (:temporary (:sc signed-reg) temp2)
+                  (:conditional :be)
+                  (:vop-var vop)
+                  (:policy :fast-safe)
+                  (:generator 2
+                    (let ((lo (+ lo ,@(and excl-low
+                                           '(1))))
+                          (hi (+ hi ,@(and excl-high
+                                           '(-1)))))
+                      (flet ((imm (x)
+                               (cond ((plausible-signed-imm32-operand-p x)
+                                      x)
+                                     (t
+                                      (inst mov temp2 x)
+                                      temp2))))
+                        (multiple-value-bind (flo fhi)
+                            (if (sc-is x any-reg)
+                                (values (fixnumize lo) (fixnumize hi))
+                                (values lo hi))
+
+                          (cond
+                            ((or (< hi lo)
+                                 (and (sc-is x unsigned-reg)
+                                      (< hi 0)))
+                             (inst cmp rsp-tn 0))
+                            ((or (= lo 0)
+                                 (and (sc-is x unsigned-reg)
+                                      (<= flo 0)))
+                             (cond ((and (power-of-two-limit-p hi)
+                                         (not (plausible-signed-imm32-operand-p fhi)))
+                                    (change-vop-flags vop '(:e))
+                                    (move temp x)
+                                    (inst shr temp (integer-length fhi)))
+                                   (t
+                                    (inst cmp x (imm fhi)))))
+                            ((= hi -1)
+                             (change-vop-flags vop '(:ae))
+                             (inst cmp x (imm flo)))
+                            (t
+                             (if (location= temp x)
+                                 (if (plusp flo)
+                                     (inst sub temp (imm flo))
+                                     (inst add temp (imm (- flo))))
+                                 (inst lea temp (ea (imm (- flo)) x)))
+                             (inst cmp temp (imm (- fhi flo))))))))))
+
+                (define-vop (,(symbolicate name '-integer/c))
+                  (:translate ,name)
+                  (:args (x :scs (descriptor-reg) :target temp))
+                  (:arg-types (:constant t) (:or integer bignum) (:constant t))
+                  (:info target not-p lo hi)
+                  (:temporary (:sc signed-reg :from (:argument 0)) temp)
+                  (:temporary (:sc signed-reg) temp2)
+                  (:conditional)
+                  (:vop-var vop)
+                  (:policy :fast-safe)
+                  (:generator 5
+                    (let ((lo (fixnumize (+ lo ,@(and excl-low
+                                            '(1)))))
+                          (hi (fixnumize (+ hi ,@(and excl-high
+                                            '(-1))))))
+                      (cond ((< hi lo)
+                             (inst jmp (if not-p target skip)))
+                            (t
+                             (flet ((imm (x)
+                                      (cond ((plausible-signed-imm32-operand-p x)
+                                             x)
+                                            (t
+                                             (inst mov temp2 x)
+                                             temp2))))
+                               (generate-fixnum-test x)
+                               (inst jmp :ne (if not-p target skip))
+                               (cond
+                                 ((= lo 0)
+                                  (inst cmp x (imm hi))
+                                  (inst jmp (if not-p :a :be) target))
+                                 ((= hi ,(fixnumize -1))
+                                  (inst cmp x (imm lo))
+                                  (inst jmp (if not-p :b :ae) target))
+                                 (t
+                                  (if (location= temp x)
+                                      (if (plusp lo)
+                                          (inst sub temp (imm lo))
+                                          (inst add temp (imm (- lo))))
+                                      (inst lea temp (ea (imm (- lo)) x)))
+                                  (inst cmp temp (imm (- hi lo)))
+                                  (inst jmp (if not-p :a :be) target)))))))
+                    skip)))))
+
+  (def range< t t)
+  (def range<= nil nil)
+  (def range<<= t nil)
+  (def range<=< nil t))

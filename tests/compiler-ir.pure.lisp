@@ -23,9 +23,7 @@
           sb-c::%check-bound
           sb-kernel:%bit-pos-fwd/1))
 
-(defun inspect-ir (form fun &rest checked-compile-args)
-  (let ((*compile-component-hook* fun))
-    (apply #'checked-compile form checked-compile-args)))
+(import 'ctu:inspect-ir)
 
 (defun ir-full-calls (form)
   (let (calls)
@@ -385,3 +383,15 @@
                       `(lambda (a b)
                          (< (truly-the double-float a) b)))
                      :key (lambda (x) (combination-fun-source-name x nil))))))
+
+(with-test (:name :constant-substitution)
+  (let ((calls (ir-calls
+                `(lambda (a b)
+                   (or (eq a 2)
+                       (eq b 10))))))
+    (assert (not (find-if
+                  (lambda (call)
+                    (let ((fun (sb-c::ref-leaf (sb-c::lvar-uses (sb-c::combination-fun call)))))
+                      (and (sb-c::functional-p fun)
+                           (eq (sb-c::functional-kind fun) :let))))
+                  calls)))))

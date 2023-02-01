@@ -38,43 +38,44 @@
   (:info dest not-p flags)
   (:vop-var vop)
   (:generator 0
-    (when (cdr flags)
-      ;; Specifying multiple flags is an extremely confusing convention that supports
-      ;; floating-point inequality tests utilizing the flag register in an unusual way,
-      ;; as documented in the COMISS and COMISD instructions:
-      ;; "the ZF, PF, and CF flags in the EFLAGS register according
-      ;;  to the result (unordered, greater than, less than, or equal)"
-      ;; I think it would have been better if, instead of allowing more than one flag,
-      ;; we passed in a pseudo-condition code such as ':sf<=' and deferred to this vop
-      ;; to interpret the abstract condition in terms of how to CPU sets the bits
-      ;; in those particular instructions.
-      ;; Note that other architectures allow only 1 flag in branch-if, if it works at all.
-      ;; Enable this assertion if you need to sanity-check the preceding claim.
-      ;; There's really no "dynamic" reason for it to fail.
-      #+nil
-      (aver (memq (vop-name (sb-c::vop-prev vop))
-                  '(<single-float <double-float <=single-float <=double-float
-                    >single-float >double-float >=single-float >=double-float
-                    =/single-float =/double-float))))
-     (when (eq (car flags) 'not)
-       (pop flags)
-       (setf not-p (not not-p)))
-     (cond ((null (rest flags))
-              (inst jmp
-                    (if not-p
-                        (negate-condition (first flags))
-                        (first flags))
-                    dest))
-           (not-p
-              (let ((not-lab (gen-label))
-                    (last    (car (last flags))))
-                (dolist (flag (butlast flags))
-                  (inst jmp flag not-lab))
-                (inst jmp (negate-condition last) dest)
-                (emit-label not-lab)))
-           (t
-              (dolist (flag flags)
-                (inst jmp flag dest))))))
+    (let ((flags (conditional-flags-flags flags)))
+      (when (cdr flags)
+        ;; Specifying multiple flags is an extremely confusing convention that supports
+        ;; floating-point inequality tests utilizing the flag register in an unusual way,
+        ;; as documented in the COMISS and COMISD instructions:
+        ;; "the ZF, PF, and CF flags in the EFLAGS register according
+        ;;  to the result (unordered, greater than, less than, or equal)"
+        ;; I think it would have been better if, instead of allowing more than one flag,
+        ;; we passed in a pseudo-condition code such as ':sf<=' and deferred to this vop
+        ;; to interpret the abstract condition in terms of how to CPU sets the bits
+        ;; in those particular instructions.
+        ;; Note that other architectures allow only 1 flag in branch-if, if it works at all.
+        ;; Enable this assertion if you need to sanity-check the preceding claim.
+        ;; There's really no "dynamic" reason for it to fail.
+        #+nil
+        (aver (memq (vop-name (sb-c::vop-prev vop))
+                    '(<single-float <double-float <=single-float <=double-float
+                      >single-float >double-float >=single-float >=double-float
+                      =/single-float =/double-float))))
+      (when (eq (car flags) 'not)
+        (pop flags)
+        (setf not-p (not not-p)))
+      (cond ((null (rest flags))
+             (inst jmp
+                   (if not-p
+                       (negate-condition (first flags))
+                       (first flags))
+                   dest))
+            (not-p
+             (let ((not-lab (gen-label))
+                   (last    (car (last flags))))
+               (dolist (flag (butlast flags))
+                 (inst jmp flag not-lab))
+               (inst jmp (negate-condition last) dest)
+               (emit-label not-lab)))
+            (t
+             (dolist (flag flags)
+               (inst jmp flag dest)))))))
 
 (define-vop (multiway-branch-if-eq)
   ;; TODO: also accept signed-reg, unsigned-reg, character-reg
@@ -165,27 +166,37 @@
   (:info flags)
   (:temporary (:sc unsigned-reg) temp)
   (:generator 0
-    (let ((not-p (eq (first flags) 'not)))
+    (let* ((flags (conditional-flags-flags flags))
+           (not-p (eq (first flags) 'not))
+           (size))
       (when not-p (pop flags))
       (when (location= res then)
         (rotatef then else)
         (setf not-p (not not-p)))
       (flet ((load-immediate (dst constant-tn
                               &optional (sc-reg dst))
-               ;; Can't use ZEROIZE, since XOR will affect the flags.
-               (inst mov dst
-                     (encode-value-if-immediate constant-tn
-                                                (sc-is sc-reg any-reg descriptor-reg)))))
+               (let ((encode (encode-value-if-immediate constant-tn
+                                                        (sc-is sc-reg any-reg descriptor-reg))))
+                 (if (typep encode '(unsigned-byte 31))
+                     (unless size
+                       (setf size :dword))
+                     (setf size :qword))
+                 ;; Can't use ZEROIZE, since XOR will affect the flags.
+                 (inst mov dst encode))))
         (cond ((null (rest flags))
-               (if (sc-is else immediate)
-                   (load-immediate res else)
-                   (move res else))
-               (when (sc-is then immediate)
-                 (load-immediate temp then res)
-                 (setf then temp))
-               (inst cmov (if not-p
-                              (negate-condition (first flags))
-                              (first flags))
+               (cond ((sc-is else immediate)
+                      (load-immediate res else))
+                     (t
+                      (setf size :qword)
+                      (move res else)))
+               (cond ((sc-is then immediate)
+                      (load-immediate temp then res)
+                      (setf then temp))
+                     (t
+                      (setf size :qword)))
+               (inst cmov size (if not-p
+                                   (negate-condition (first flags))
+                                   (first flags))
                      res
                      then))
               (not-p

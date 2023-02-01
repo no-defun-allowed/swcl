@@ -14,14 +14,20 @@
 (defpackage :compiler-test-util
   (:nicknames :ctu)
   (:use :cl :sb-c :sb-kernel)
-  (:export #:assert-consing
+  (:import-from #:sb-c #:*compile-component-hook*)
+  (:export #:asm-search
+           #:assert-consing
            #:assert-no-consing
            #:compiler-derived-type
            #:count-full-calls
            #:find-code-constants
            #:find-named-callees
            #:find-anonymous-callees
-           #:file-compile))
+           #:file-compile
+           #:inspect-ir
+           #:ir1-named-calls
+           #:ir1-funargs
+           #:disassembly-lines))
 
 (cl:in-package :ctu)
 
@@ -33,6 +39,67 @@
   (defun compiler-derived-type (x)
     (declare (ignore x))
     (values t nil)))
+
+;;; New tests should use INSPECT-IR or ASM-SEARCH rather than FIND-NAMED-CALLEES
+;;; unless you are 100% certain that there will be an fdefn of the given name.
+;;; (negative assertions may yield falsely passing tests)
+(defun asm-search (expect lambda)
+  (let* ((code (etypecase lambda
+                 (cons (test-util:checked-compile lambda))
+                 (function lambda)))
+         (disassembly
+          (with-output-to-string (s)
+            (let ((sb-disassem:*disassem-location-column-width* 0)
+                  (*print-pretty* nil))
+              (sb-c:dis code s)))))
+    (loop for line in (test-util:split-string disassembly #\newline)
+          when (search expect line) collect line)))
+
+(defun inspect-ir (form fun &rest checked-compile-args)
+  (let ((*compile-component-hook* fun))
+    (apply #'test-util:checked-compile form checked-compile-args)))
+
+(defun ir1-named-calls (lambda-expression &optional (full t))
+  (let* ((calls)
+         (compiled-fun
+          (inspect-ir
+           lambda-expression
+           (lambda (component)
+             (do-blocks (block component)
+               (do-nodes (node nil block)
+                 (when (and (sb-c::basic-combination-p node)
+                            (if full
+                                (eq (sb-c::basic-combination-info node) :full)
+                                t))
+                   (pushnew (sb-c::combination-fun-debug-name node)
+                            calls :test 'equal))))))))
+    (values calls compiled-fun)))
+
+;;; For any call that passes a global constant funarg - as in (FOO #'EQ) -
+;;; return the name of the caller and the names of all such funargs.
+(defun ir1-funargs (lambda-expression)
+  (let* ((calls)
+         (compiled-fun
+          (inspect-ir
+           lambda-expression
+           (lambda (component)
+             (do-blocks (block component)
+               (do-nodes (node nil block)
+                 (when (and (sb-c::basic-combination-p node)
+                            (eq (sb-c::basic-combination-info node) :full))
+                   (let ((filtered
+                          (mapcan
+                           (lambda (arg &aux (uses (sb-c::lvar-uses arg)))
+                             (when (sb-c::ref-p uses)
+                               (let ((leaf (sb-c::ref-leaf uses)))
+                                 (when (and (sb-c::global-var-p leaf)
+                                            (eq (sb-c::global-var-kind leaf) :global-function))
+                                   (list (sb-c::leaf-source-name leaf))))))
+                           (sb-c::combination-args node))))
+                     (when filtered
+                       (push (cons (sb-c::combination-fun-debug-name node) filtered)
+                             calls))))))))))
+    (values calls compiled-fun)))
 
 (defun find-named-callees (fun &key (name nil namep))
   (sb-int:binding* ((code (fun-code-header (%fun-fun fun)))
@@ -129,22 +196,35 @@
       (ignore-errors (delete-file lisp))
       (ignore-errors (delete-file fasl)))))
 
-;; Pretty horrible, but does the job
-(defun count-full-calls (name function)
-  (let ((code (with-output-to-string (s)
-                (let ((*print-right-margin* 120))
-                  (sb-disassem:disassemble-code-component function :stream s))))
-        (n 0))
-    (flet ((asm-line-calls-name-p (line name)
-             (dolist (herald '("#<FDEFN" "#<SB-KERNEL:FDEFN" "#<FUNCTION"))
-               (let ((pos (search herald line)))
-                 (when pos
-                   (return (string= (subseq line
-                                            (+ pos (length herald) 1)
-                                            (1- (length line)))
-                                    name)))))))
-      (with-input-from-string (s code)
-        (loop for line = (read-line s nil nil)
-              while line
-              when (asm-line-calls-name-p line name) do (incf n)))
-      n)))
+;;; TODO: this would be better done as LIST-FULL-CALLS so that you could
+;;; make an assertion that the list EQUALs something in particular.
+;;; Negative assertions (essentially "count = 0") are silently susceptible
+;;; to spelling mistakes or a change in how we name nodes.
+(defun count-full-calls (function-name lambda-expression)
+  (let ((n 0))
+    (inspect-ir
+     lambda-expression
+     (lambda (component)
+       (do-blocks (block component)
+         (do-nodes (node nil block)
+           (when (and (sb-c::basic-combination-p node)
+                      (eq (sb-c::basic-combination-info node) :full)
+                      (equal (sb-c::combination-fun-debug-name node)
+                             function-name))
+             (incf n))))))
+    n))
+
+(defun disassembly-lines (fun)
+  ;; FIXME: I don't remember what this override of the hook is for.
+  (sb-int:encapsulate 'sb-disassem::add-debugging-hooks 'test
+                      (lambda (f &rest args) (declare (ignore f args))))
+  (prog1
+      (mapcar (lambda (x) (string-left-trim " ;" x))
+              (cddr
+               (test-util:split-string
+                (with-output-to-string (s)
+                  (let ((sb-disassem:*disassem-location-column-width* 0)
+                        (*print-pretty* nil))
+                    (disassemble fun :stream s)))
+                #\newline)))
+    (sb-int:unencapsulate 'sb-disassem::add-debugging-hooks 'test)))

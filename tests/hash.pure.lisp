@@ -371,12 +371,12 @@
 ;;; Check that hashing a stringlike thing which is possibly NIL uses
 ;;; a specialized hasher (after prechecking for NIL via the transform).
 (with-test (:name :transform-sxhash-string-and-bv)
-  (dolist (case `((bit-vector . ,#'sb-kernel:%sxhash-bit-vector)
-                  (string . ,#'sb-kernel:%sxhash-string)
-                  (simple-bit-vector . ,#'sb-kernel:%sxhash-simple-bit-vector)
-                  (simple-string . ,#'sb-kernel:%sxhash-simple-string)))
-    (let ((f (compile nil `(lambda (x) (sxhash (truly-the (or null ,(car case)) x))))))
-      (assert (eq (car (ctu:find-named-callees f)) (cdr case))))))
+  (dolist (case `((bit-vector sb-kernel:%sxhash-bit-vector)
+                  (string sb-kernel:%sxhash-string)
+                  (simple-bit-vector sb-kernel:%sxhash-simple-bit-vector)
+                  (simple-string sb-kernel:%sxhash-simple-string)))
+    (let ((f `(lambda (x) (sxhash (truly-the (or null ,(car case)) x)))))
+      (assert (equal (ctu:ir1-named-calls f) (cdr case))))))
 
 (with-test (:name :sxhash-on-displaced-string
             :fails-on :sbcl)
@@ -403,7 +403,8 @@
     ;; Also the same issue exists with bit-vectors.
     (assert-error (sxhash displaced-string))))
 
-(with-test (:name :array-psxhash-non-consing :skipped-on :interpreter)
+(with-test (:name :array-psxhash-non-consing :skipped-on :interpreter
+            :fails-on :ppc64)
    (let ((a (make-array 1000 :element-type 'double-float
                         :initial-element (+ 0d0 #+(or arm64 x86-64)
                                                 1d300))))

@@ -49,6 +49,8 @@
              ((string= arg "--report-skipped-tests")
               (setf *report-skipped-tests* t))
              ((string= arg "--no-color"))
+             ((string= arg "--slow")
+              (push :slow *features*))
              (t
               (push (merge-pathnames (parse-namestring arg)) *explicit-test-files*))))
   (setf *explicit-test-files* (nreverse *explicit-test-files*))
@@ -200,6 +202,7 @@
       sb-c::*compile-file-elapsed-time*
       sb-impl::*finalizer-rehashlist*
       sb-impl::*finalizers-triggered*
+      sb-impl::*all-packages*
       sb-impl::*package-names-cookie*
       sb-impl::*available-buffers*
       sb-impl::*token-buf-pool*
@@ -225,6 +228,7 @@
       ,(maybe "SB-VM" "*STORE-BARRIERS-EMITTED*")
       ,(maybe "SB-INTERPRETER" "*LAST-TOPLEVEL-ENV*")
       ,(maybe "SB-SYS" "*THRUPTION-PENDING*")
+      ,(maybe "SB-THREAD" "*ALLOCATOR-METRICS*")
       sb-pcl::*dfun-constructors*
       #+win32 sb-impl::*waitable-timer-handle*
       #+win32 sb-impl::*timer-thread*)))
@@ -272,7 +276,8 @@
            (n-new (when (and (slot-exists-p gf 'sb-pcl::methods)
                              (slot-boundp gf 'sb-pcl::methods))
                     (length (sb-mop:generic-function-methods gf)))))
-      (assert (eql n-old n-new)))))
+      (unless (eql n-old n-new)
+        (error "Generic-Function change: ~S (had ~D methods)" gf n-old)))))
 
 (defun tersely-summarize-globaldb ()
   (let* ((symbols-with-properties)
@@ -353,7 +358,16 @@
     (dolist (package delete)
       (unuse-package (package-use-list package) package))
     ;; Then all deletions
-    (mapc 'delete-package delete))
+    (mapc 'delete-package delete)
+    (when delete
+      (format t "::: NOTE: Deleted ~D package~:P~%" (length delete))))
+  ;; Remove PRINT-OBJECT methods specialized on uninterned symbols
+  (let ((gf #'print-object))
+    (dolist (method (sb-mop:generic-function-methods gf))
+      (let ((first-specializer
+             (class-name (car (sb-mop:method-specializers method)))))
+        (unless (symbol-package first-specializer)
+          (remove-method gf method)))))
   (loop for x in (cdr globaldb-summary) for y in (cdr (tersely-summarize-globaldb))
         for index from 0
         unless (equal x y)
@@ -388,11 +402,15 @@
                        (search ".impure-cload" (namestring file)))))
              (packages-to-use '("ASSERTOID" "TEST-UTIL"))
              (initial-packages (list-all-packages))
+             ;; It is not only permitted to change this GC parameter in tests, it is
+             ;; _encouraged_ as a way to show insensitivity to object address stability.
+             (gen0-gcs-before-promo (generation-number-of-gcs-before-promotion 0))
              (global-symbol-values (when actually-pure
                                      (collect-symbol-values)))
              (gf-summary (summarize-generic-functions))
              (globaldb-summary (when actually-pure
                                  (tersely-summarize-globaldb)))
+             (logical-hosts sb-impl::*logical-hosts*)
              (test-package
               (if actually-pure
                   (make-package
@@ -471,12 +489,16 @@
             (skip-file ())))
         (sb-impl::disable-stepping)
         (sb-int:unencapsulate 'open 'open-guard)
+        (unless (eql (generation-number-of-gcs-before-promotion 0) gen0-gcs-before-promo)
+          (format t "~&::: NOTE: nursery space promotion rate restored to nominal~%")
+          (setf (generation-number-of-gcs-before-promotion 0) gen0-gcs-before-promo))
+        (setq sb-impl::*logical-hosts* logical-hosts)
         (when actually-pure
           (setq sb-disassem::*disassem-inst-space* nil
                 sb-disassem::*assembler-routines-by-addr* nil)
           (compare-symbol-values global-symbol-values)
-          (compare-gf-summary gf-summary)
           (globaldb-cleanup initial-packages globaldb-summary)
+          (compare-gf-summary gf-summary)
           (dolist (symbol '(sb-pcl::compile-or-load-defgeneric
                             sb-kernel::%compiler-defclass))
             (sb-int:unencapsulate symbol 'defblah-guard)))))
@@ -510,7 +532,9 @@
      ,*break-on-failure*
      ,*break-on-expected-failure*
      ,*break-on-error*
-     ,(eq *test-evaluator-mode* :interpret))))
+     ,(eq *test-evaluator-mode* :interpret)
+     ,(and (member :slow *features*)
+           t))))
 
 (defun impure-runner (files test-fun log)
   (when files

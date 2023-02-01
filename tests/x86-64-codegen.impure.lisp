@@ -11,6 +11,9 @@
 
 #-x86-64 (invoke-restart 'run-tests::skip-file)
 
+(load "compiler-test-util.lisp")
+(import 'ctu:disassembly-lines)
+
 ;;; This trivial function failed to compile due to rev 88d078fe
 (defun foo (&key k)
   (make-list (reduce #'max (mapcar #'length k))))
@@ -38,22 +41,6 @@
   (let ((a (- (sb-kernel:get-lisp-obj-address (sb-kernel:make-unbound-marker))
               sb-vm:other-pointer-lowtag)))
     (assert (> a sb-vm:static-space-start))))
-
-(load "compiler-test-util.lisp")
-(defun disassembly-lines (fun)
-  ;; FIXME: I don't remember what this override of the hook is for.
-  (sb-int:encapsulate 'sb-disassem::add-debugging-hooks 'test
-                      (lambda (f &rest args) (declare (ignore f args))))
-  (prog1
-      (mapcar (lambda (x) (string-left-trim " ;" x))
-              (cddr
-               (split-string
-                (with-output-to-string (s)
-                  (let ((sb-disassem:*disassem-location-column-width* 0)
-                        (*print-pretty* nil))
-                    (disassemble fun :stream s)))
-                #\newline)))
-    (sb-int:unencapsulate 'sb-disassem::add-debugging-hooks 'test)))
 
 (sb-vm::define-vop (tryme)
     (:generator 1 (sb-assem:inst mov :byte (sb-vm::ea :gs sb-vm::rax-tn) 0)))
@@ -535,16 +522,20 @@
     ;; Aside from ECASE failure, there are no other JMPs
     (assert (= (count-assembly-labels lines) 1))))
 
+;;; Assert that the ECASE-FAILURE vop emits a trap and that we don't call ERROR
+;;; (cutting down on the code size for each ECASE)
 (with-test (:name :ecase-failure-trap)
-  (assert (null (ctu:find-named-callees
-                 (checked-compile `(lambda (x)
-                                     (ecase x (:a 1) (:b 2) (:c 3)))))))
-  (assert (null (ctu:find-named-callees
-                 (checked-compile `(lambda (x)
+  ;; test ECASE
+  (assert (ctu:asm-search "ECASE-FAILURE-ERROR"
+                                  `(lambda (x)
+                                     (ecase x (:a 1) (:b 2) (:c 3)))))
+  ;; test ETYPECASE
+  (assert (ctu:asm-search "ETYPECASE-FAILURE-ERROR"
+                                  `(lambda (x)
                                      (etypecase x
                                        ((integer 1 20) 'hi)
                                        ((cons (eql :thing)) 'wat)
-                                       (bit-vector 'hi-again))))))))
+                                       (bit-vector 'hi-again))))))
 
 (with-test (:name :symbol-case-optimization-levels)
   (let ((cases

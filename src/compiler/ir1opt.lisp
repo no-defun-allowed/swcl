@@ -343,6 +343,19 @@
                 ~%  ~S~%*** possible internal error? Please report this."
                (type-specifier rtype) (type-specifier node-type))))
           (setf (node-derived-type node) int)
+          ;; If the new type consists of only one object, replace the
+          ;; node with a constant reference.
+          (when (and (ref-p node)
+                     (lambda-var-p (ref-leaf node)))
+            (let ((type (single-value-type int)))
+              (when (and (and (boundp '*component-being-compiled*)
+                              (eq (node-component node) *component-being-compiled*))
+                         (member-type-p type)
+                         (eql (member-type-size type) 1)
+                         (not (preserve-single-use-debug-var-p node (ref-leaf node))))
+
+                (change-ref-leaf node (find-constant
+                                       (first (member-type-members type)))))))
           (reoptimize-lvar lvar)))))
   (values))
 
@@ -731,7 +744,7 @@
 
 ;;;; IF optimization
 
-(declaim (start-block ir1-optimize-if))
+(declaim (start-block ir1-optimize-if kill-if-branch-1))
 
 ;;; Check whether the predicate is known to be true or false,
 ;;; deleting the IF node in favor of the appropriate branch when this
@@ -1414,18 +1427,9 @@
                   (when (eq (car *current-path*) 'original-source-start)
                     (setf (ctran-source-path (node-prev call)) *current-path*))
                   ;; Convert.
-                  (let* ((name (leaf-source-name leaf))
-                         (*inline-expansions*
+                  (let* ((*inline-expansions*
                            (register-inline-expansion leaf call))
-                         (res (ir1-convert-inline-expansion
-                               name
-                               (defined-fun-inline-expansion leaf)
-                               leaf
-                               inlinep
-                               (info :function :info name))))
-
-                    ;; Allow backward references to this function from following
-                    ;; forms.
+                         (res (ir1-convert-inline-expansion leaf inlinep)))
                     (setf (defined-fun-functional leaf) res)
                     (change-ref-leaf ref res)
                     (unless ir1-converting-not-optimizing-p
@@ -1614,8 +1618,7 @@
                           (remove transform (gethash node table) :key #'car)))
                 t)
                (:delayed
-                (remhash node table)
-                nil))))
+                t))))
           ((and flame
                 (valid-fun-use node
                                type
@@ -1671,6 +1674,17 @@
             (dolist (reason reasons)
               (pushnew reason (cdr assoc)))
             (throw 'give-up-ir1-transform :delayed)))))
+
+(defun delay-ir1-optimizer (node &rest reasons)
+  (let ((assoc (assoc node *delayed-ir1-transforms*)))
+    (cond ((not assoc)
+           (setf *delayed-ir1-transforms*
+                 (acons node reasons *delayed-ir1-transforms*))
+           t)
+          ((cdr assoc)
+           (dolist (reason reasons)
+             (pushnew reason (cdr assoc)))
+           t))))
 
 ;;; Poor man's catching and resignalling
 ;;; Implicit %GIVE-UP macrolet will resignal the give-up "condition"
@@ -1749,7 +1763,7 @@
       (let* ((*transforming* (1+ *transforming*))
              (new-fun (ir1-convert-inline-lambda
                        res
-                       :debug-name (debug-name 'lambda-inlined source-name)))
+                       :debug-name (debug-name 'transform-for source-name)))
              (type (node-derived-type call))
              (ref (lvar-use (combination-fun call))))
         (change-ref-leaf ref new-fun)
@@ -1930,8 +1944,8 @@
               (setf this-low (car this-low)))
             (when (consp this-high)
               (setf this-high (car this-high)))
-            (setf low  (min this-low  (or low  this-low))
-                  high (max this-high (or high this-high))))))
+            (setf low  (sb-xc:min this-low  (or low  this-low))
+                  high (sb-xc:max this-high (or high this-high))))))
       type))
 
 ;;; Iteration variable: only SETQs of the form:

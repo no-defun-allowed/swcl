@@ -1121,7 +1121,7 @@ void gc_init_immobile()
     logfile = stderr;
 #endif
     int n_fixedobj_pages = FIXEDOBJ_SPACE_SIZE / IMMOBILE_CARD_BYTES;
-    int n_text_pages = TEXT_SPACE_SIZE / IMMOBILE_CARD_BYTES;
+    int n_text_pages = text_space_size / IMMOBILE_CARD_BYTES;
     fixedobj_pages = calloc(n_fixedobj_pages, sizeof(struct fixedobj_page));
     gc_assert(fixedobj_pages);
 
@@ -2187,3 +2187,16 @@ void dump_immobile_text(lispobj* where, lispobj* end, FILE*f)
       }
 }
 #endif
+
+void* expropriate_memory_from_tlsf(size_t amount)
+{
+  extern void* tlsf_pool_shrink(void*,void*,size_t);
+  char* end = (char*)TEXT_SPACE_START + text_space_size;
+  char* start = tlsf_pool_shrink(tlsf_control, end, amount);
+#ifdef TLSF_CONFIG_DEBUG
+  tlsf_check(tlsf_control);
+  tlsf_check_pool(tlsf_mem_start);
+  //fprintf(stderr, "TLSF integrity checks passed\n");
+#endif
+  return start;
+}

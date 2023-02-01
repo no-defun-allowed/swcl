@@ -20,6 +20,12 @@
 ;;; is free to :USE (PACKAGE-USE-LIST :CL-USER) or whatever.
 (defglobal *!default-package-use-list* nil)
 
+(defmacro sanitize-nicknames (name list)
+  `(let ((list ,list))
+     (when list
+       (remove ,name (remove-duplicates (stringify-string-designators list) :test 'string=)
+               :test 'string=))))
+
 (defun make-package (name &key
                           (use '#.*!default-package-use-list*)
                           nicknames
@@ -31,69 +37,52 @@ list. :INTERNAL-SYMBOLS and :EXTERNAL-SYMBOLS are estimates for the number of
 internal and external symbols which will ultimately be present in the package.
 The default value of USE is implementation-dependent, and in this
 implementation it is ~S." *!default-package-use-list*)
-  (prog ((name (stringify-string-designator name))
-         (nicks (stringify-string-designators nicknames))
+  (let* ((name (stringify-string-designator name))
+         (nicks (sanitize-nicknames name nicknames))
          (package
+          ;; a "resolved" package is not in the global name->package mapping yet,
+          ;; which is why the FIND-PACKAGE / CERROR below does not signal.
           (or (resolve-deferred-package name)
               (%make-package (make-symbol-hashset internal-symbols)
                              (make-symbol-hashset external-symbols))))
-         clobber)
-   :restart
-     (when (find-package name)
-       ;; ANSI specifies that this error is correctable.
-       (signal-package-cerror
-        name
-        "Clobber existing package."
-        "A package named ~S already exists" name)
-       (setf clobber t))
-     (with-package-graph ()
-         ;; Check for race, signal the error outside the lock.
-         (when (and (not clobber) (find-package name))
-           (go :restart))
-         (setf (package-%name package) name)
-         ;; Do a USE-PACKAGE for each thing in the USE list so that checking for
-         ;; conflicting exports among used packages is done.
-         (use-package use package)
-         ;; FIXME: ENTER-NEW-NICKNAMES can fail (ERROR) if nicknames are illegal,
-         ;; which would leave us with possibly-bad side effects from the earlier
-         ;; USE-PACKAGE (e.g. this package on the used-by lists of other packages,
-         ;; but not in *PACKAGE-NAMES*, and possibly import side effects too?).
-         ;; Perhaps this can be solved by just moving ENTER-NEW-NICKNAMES before
-         ;; USE-PACKAGE, but I need to check what kinds of errors can be caused by
-         ;; USE-PACKAGE, too.
-         (%enter-new-nicknames package nicks)
-         ;; The name table is actually multi-writer concurrent, but due to
-         ;; lazy removal of :DELETED entries we want to enforce a single-writer.
-         ;; We're inside WITH-PACKAGE-GRAPH so this is already synchronized with
-         ;; other MAKE-PACKAGE operations, but we need the additional lock
-         ;; so that it synchronizes with RENAME-PACKAGE.
-         (with-package-names (table)
-           (%register-package table name package))
-         (atomic-incf *package-names-cookie*)
-         (when (boundp 'sb-c::*compilation*)
-           (setf (sb-c::package-environment-changed sb-c::*compilation*) t))
-         (return package))
-     (bug "never")))
-
-(flet ((remove-names (package name-table keep-primary-name)
-         ;; An INFO-HASHTABLE does not support REMHASH. We can simulate it
-         ;; by changing the value to :DELETED.
-         ;; (NIL would be preferable, but INFO-GETHASH does not return
-         ;; a secondary value indicating whether the NIL was by default
-         ;; or found, not does it take a different default to return).
-         ;; At some point the table might contain more deleted values than
-         ;; useful values. We call %REBUILD-PACKAGE-NAMES to rectify that.
-         (dx-let ((names (cons (package-name package)
-                               (package-nicknames package)))
-                  (i 0))
-           (when keep-primary-name (pop names))
-           (dolist (name names)
-             ;; Aver that the following SETF doesn't insert a new <k,v> pair.
-             (aver (info-gethash name name-table))
-             (setf (info-gethash name name-table) :deleted)
-             (incf i))
-           (incf (info-env-tombstones name-table) i))
-         nil))
+         (existing-pkg)
+         (namelist (cons name nicks))
+         (conflict))
+    (setf (symtbl-package (package-external-symbols package)) package)
+    (with-package-names (table) ; get exclusive use of name -> package mapping
+      ;; If the loop runs to completion, then insert all names,
+      ;; which also assigns the %NAME and KEYS slots of the package.
+      (dolist (string namelist (package-registry-update package namelist))
+        (when (setq existing-pkg (%get-package string table))
+          (return (setq conflict string)))))
+    (when existing-pkg
+      ;; Of the possible ways to continue from the "package already exists" error,
+      ;; I've seen implementations offer these:
+      ;;  - pick a different name for the new package
+      ;;  - return the existing package as-is
+      ;; Other ways to proceed might be:
+      ;;  - rename the existing package to something different (mostly harmless)
+      ;;  - first delete the existing package (potentially nontrivial)
+      ;; SBCL had the weirdest of all solutions: alter the existing name->package mapping
+      ;; while leaving the old package with a name, but not findable by that name.
+      ;; Imho the safe assumption is that the user wants the same package back.
+      ;; All sorts of crazy restarts would in theory be possible, such as if one nickname
+      ;; that you specified (N1) already finds package P1, and another nickname (N2) finds P2
+      ;; and P1 and P2 are distinct. What are we supposed to do? Figure our that you meant
+      ;; to return the existing P1, but give it an additional nickname, and delete P2?
+      ;; Also bear in mind that for most purposes, a package's multiple "names" are
+      ;; equivalent; one is canonical for printing symbols homed in that package.
+      ;; Global nicknames are an absurdly unnecessary part of the language.
+      (signal-package-cerror name "Return the existing package."
+                             "A package named ~S already exists" conflict)
+      ;; We don't do the USE in this case.
+      ;; It's OK given the lack of guidance in CLHS about how to "continue".
+      (return-from make-package existing-pkg))
+    (atomic-incf *package-names-cookie*)
+    (when (boundp 'sb-c::*compilation*)
+      (setf (sb-c::package-environment-changed sb-c::*compilation*) t))
+    (use-package use package)
+    package))
 
 ;;; Change the name if we can, blast any old nicknames and then
 ;;; add in any new ones.
@@ -120,52 +109,50 @@ implementation it is ~S." *!default-package-use-list*)
 ;;; was given. I see no reason to be more strict than the spec would have it be.
 (defun rename-package (package-designator name &optional (nicknames ()))
   "Changes the name and nicknames for a package."
-  (prog ((nicks (stringify-string-designators nicknames)))
-   :restart
-     (let ((package (find-undeleted-package-or-lose package-designator))
-           ;; This is the "weirdness" alluded to. Do it in the loop in case
-           ;; the stringified value changes on restart when NAME is a package.
-           (name (stringify-package-designator name))
-           (found (find-package name)))
-       (unless (or (not found) (eq found package))
-         (signal-package-error name
-                               "A package named ~S already exists." name))
-       (with-single-package-locked-error ()
-         (unless (and (string= name (package-name package))
-                      (null (set-difference nicks (package-nicknames package)
-                                            :test #'string=)))
-           (assert-package-unlocked
-            package "renaming as ~A~@[ with nickname~*~P ~1@*~{~A~^, ~}~]"
-            name nicks (length nicks)))
-         (with-package-names (table)
-           ;; Check for race conditions now that we have the lock.
-           (unless (eq package (find-package package-designator))
-             (go :restart))
-           ;; Do the renaming.
-           ;; As a special case, do not allow the package to transiently disappear
-           ;; if PACKAGE-NAME is unchanged. This avoids glitches with build systems
-           ;; which try to operate on subcomponents in parallel, where one of the
-           ;; built subcomponents needs to add nicknames to an existing package.
-           ;; We could be clever here as well by not removing nicknames that
-           ;; will ultimately be re-added, but that didn't seem as critical.
-           (let ((keep-primary-name (string= name (package-%name package))))
-             (remove-names package table keep-primary-name)
-             (unless keep-primary-name
-               (%register-package table name package)))
-           (setf (package-%name package) name
-                 (package-%nicknames package) ()))
-         ;; Adding each nickname acquires and releases the table lock,
-         ;; because it's potentially interactive (on failure) and therefore
-         ;; not ideal to hold the lock for the entire duration.
-         (%enter-new-nicknames package nicks))
-       (atomic-incf *package-names-cookie*)
-       (when (boundp 'sb-c::*compilation*)
-         (setf (sb-c::package-environment-changed sb-c::*compilation*) t))
-       (return package))))
+  ;; CLHS says:
+  ;; "The consequences are undefined if new-name or any new-nickname
+  ;; conflicts with any existing package names."
+  ;; Signaling an error is what most implementations do. So shall we now.
+  ;; (There is no portable standard way to proceed)
+  (let* ((package (find-undeleted-package-or-lose package-designator))
+         ;; This potentially allows the "weirdness" alluded to above
+         (name (stringify-package-designator name))
+         (nicknames (sanitize-nicknames name nicknames))
+         (namelist (cons name nicknames))
+         (conflict))
+    (with-single-package-locked-error ()
+      (unless (and (string= name (package-name package))
+                   (null (set-difference nicknames (package-%nicknames package)
+                                         :test #'string=))
+                   (null (set-difference (package-%nicknames package) nicknames
+                                         :test #'string=)))
+        (assert-package-unlocked
+         package "renaming as ~A~@[ with nickname~*~P ~1@*~{~A~^, ~}~]"
+         name nicknames (length nicknames))))
+    (with-package-names (table)
+      ;; get exclusive use of name -> package mapping
+      ;; and also prevent concurrent modification to this package's names.
+      (dolist (string namelist (package-registry-update package namelist))
+        (let ((found (%get-package string table)))
+          (cond ((eq found package))
+                (found (return (setq conflict string)))))))
+    (cond (conflict
+           (signal-package-error
+            ;; avoid saying "another package ... has name X" so the pedants
+            ;; don't complain when X is a "nickname" rather than "name"
+            package "Another package is already accessible via name ~S" conflict))
+          (t
+           (atomic-incf *package-names-cookie*)
+           (when (boundp 'sb-c::*compilation*)
+             (setf (sb-c::package-environment-changed sb-c::*compilation*) t))
+           package))))
 
 (defun delete-package (package-designator)
   "Delete the package designated by PACKAGE-DESIGNATOR from the package
   system data structures."
+  (when (and (packagep package-designator)
+             (not (package-%name package-designator))) ; already deleted
+    (return-from delete-package nil))
   (tagbody :restart
      (let ((package (find-package package-designator)))
        (cond ((not package)
@@ -174,8 +161,6 @@ implementation it is ~S." *!default-package-use-list*)
                package-designator
                "Ignore."
                "There is no package named ~S." package-designator)
-              (return-from delete-package nil))
-             ((not (package-name package)) ; already deleted
               (return-from delete-package nil))
              (t
               (with-single-package-locked-error
@@ -209,29 +194,44 @@ implementation it is ~S." *!default-package-use-list*)
                                (%set-symbol-package x nil)))))
                     (nullify-home (package-internal-symbols package))
                     (nullify-home (package-external-symbols package)))
-                  (with-package-names (table)
+                  (with-package-names ()
+                    (package-registry-update package nil)
                     (awhen (package-id package)
                       (setf (aref *id->package* it) nil (package-id package) nil))
-                    (remove-names package table nil)
                     (setf (package-%name package) nil
                           ;; Setting PACKAGE-%NAME to NIL is required in order to
                           ;; make PACKAGE-NAME return NIL for a deleted package as
                           ;; ANSI requires. Setting the other slots to NIL
                           ;; and blowing away the SYMBOL-HASHSETs is just done
                           ;; for tidiness and to help the GC.
-                          (package-%nicknames package) nil))
+                          (package-keys package) #()))
                   (atomic-incf *package-names-cookie*)
                   (when (boundp 'sb-c::*compilation*)
                     (setf (sb-c::package-environment-changed sb-c::*compilation*) t))
-                  (setf (package-%use-list package) nil
-                        (package-tables package) #()
+                  (setf (package-tables package) #()
                         (package-%shadowing-symbols package) nil
-                        (package-internal-symbols package)
-                        (make-symbol-hashset 0)
-                        (package-external-symbols package)
-                        (make-symbol-hashset 0)))
+                        (package-internal-symbols package) (make-symbol-hashset 0)
+                        (package-external-symbols package) (make-symbol-hashset 0)))
                 (return-from delete-package t)))))))
-) ; end FLET
+
+;;; Possible FIXME:
+;;;   After doing these 2 things:
+;;;    (defpackage "P" (:nicknames "PNICK" "PNICK2"))
+;;;    (defpackage "P" (:nicknames "NN"))
+;;;   how many nicknames has "P" - 1, 2, 3?
+;;;   The case for 1 is that DEFPACKAGE says:
+;;;      "The arguments to :nicknames set the package's nicknames to the supplied names."
+;;       [ECL interprets the redefinition thusly]
+;;;   The case for 2 is that it says:
+;;;      "If defined-package-name already refers to an existing package,
+;;;       the name-to-package mapping for that name is not changed."
+;;;      [ABCL interprets the redefinition thusly]
+;;;   The case for 3 is that nicknames are cumulative.
+;;;      [SBCL interprets the redefinition thusly]
+;;; I suspect that any treatment is fine as long as its documented.
+;;; Relatedly, ECL and ABCL take a redefinition with 0 nicknames as follows:
+;;;  (defpackage "P" (:nicknames))
+;;; to imply _no_ _change_ to existing nicknames, while CLISP removes any nicknames.
 
 (defmacro defpackage (package &rest options)
   #.(format nil
@@ -419,7 +419,7 @@ implementation it is ~S." *!default-package-use-list*)
                        imports interns
                        exports implement local-nicknames
                        lock doc-string)
-  (%enter-new-nicknames package nicknames)
+  (rename-package package (package-name package) nicknames)
   ;; 1. :shadow and :shadowing-import-from
   ;;
   ;; shadows is a list of strings, shadowing-imports is a list of symbols.

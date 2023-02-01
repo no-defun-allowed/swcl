@@ -205,14 +205,18 @@
 
 ;;; Return true if LVAR destination is executed immediately after
 ;;; NODE. Cleanups are ignored.
-(defun immediately-used-p (lvar node)
+(defun immediately-used-p (lvar node &optional single-predecessor)
   (declare (type lvar lvar) (type node node))
   (aver (eq (node-lvar node) lvar))
   (let ((dest (lvar-dest lvar)))
     (acond ((node-next node)
             (eq (ctran-next it) dest))
-           (t (eq (block-start (first (block-succ (node-block node))))
-                  (node-prev dest))))))
+           (t
+            (let ((succ (first (block-succ (node-block node)))))
+              (and (not (and single-predecessor
+                             (cdr (block-pred succ))))
+                   (eq (block-start succ)
+                       (node-prev dest))))))))
 
 ;;; Returns the defined (usually untrusted) type of the combination,
 ;;; or NIL if we couldn't figure it out.
@@ -1356,24 +1360,6 @@
           (setf (ctran-block ctran) new-block))
         new-block))))
 
-;;; This is called by locall-analyze-fun-1 after it convers a call to
-;;; FUN into a local call.
-;;; Presumably, the function can be no longer reused by new calls to
-;;; FUN, so the whole thing has to be removed from (FREE-FUN *IR1-NAMESPACE*).
-(defun note-local-functional (fun &aux (free-funs (free-funs *ir1-namespace*)))
-  (declare (type functional fun))
-  (when (and (leaf-has-source-name-p fun)
-             (eq (leaf-source-name fun) (functional-debug-name fun)))
-    (let* ((name (leaf-source-name fun))
-           (defined-fun (gethash name free-funs)))
-      (when (and (defined-fun-p defined-fun)
-                 ;; KLUDGE: We must not blow away the free-fun entry
-                 ;; while block compiling. It would be better to get
-                 ;; rid of this function entirely and untangle this
-                 ;; mess, since this is really a workaround.
-                 (not (eq (block-compile *compilation*) t)))
-        (remhash name free-funs)))))
-
 
 ;;;; deleting stuff
 
@@ -2413,7 +2399,7 @@ is :ANY, the function name is not checked."
            (values nil nil)))))
 
 (defun combination-fun-debug-name (combination)
-  (let ((uses (principal-lvar-use (combination-fun combination))))
+  (let ((uses (principal-lvar-use (basic-combination-fun combination))))
     (when (ref-p uses)
       (let ((leaf (ref-leaf uses)))
         (typecase leaf

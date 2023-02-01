@@ -449,51 +449,6 @@
               ((ir2-block-last-vop prev)
                (return (ir2-block-last-vop prev)))))))
 
-(defun immediate-cmp-templates (fun &optional (constants t))
-  (let* ((signed (mapcar #'primitive-type-or-lose
-                         (cddr (assoc 'sb-vm::signed-num *backend-primitive-type-aliases*))))
-         (unsigned (mapcar #'primitive-type-or-lose
-                           (cddr (assoc 'sb-vm::unsigned-num *backend-primitive-type-aliases*))))
-         (primitive-types (list* (primitive-type-or-lose 'character)
-                                 #-x86 ;; i387 is weird
-                                 (primitive-type-or-lose 'double-float)
-                                 #-x86
-                                 (primitive-type-or-lose 'single-float)
-                                 (append signed unsigned))))
-    (loop for template in (fun-info-templates (fun-info-or-lose fun))
-          for types = (template-arg-types template)
-          when (and (typep (template-result-types template) '(cons (eql :conditional)))
-                    (loop for type in types
-                          always (and (consp type)
-                                      (case (car type)
-                                        (:or
-                                         (loop for type in (cdr type)
-                                               always (memq type primitive-types)))
-                                        (:constant constants))))
-                    ;; signed-unsigned VOPs have more than just a single CMP instruction
-                    (not (and (= (length types) 2)
-                              (typep (first types) '(cons (eql :or)))
-                              (typep (second types) '(cons (eql :or)))
-                              (or (and (equal (cdr (first types)) signed)
-                                       (equal (cdr (second types)) unsigned))
-                                  (and (equal (cdr (first types)) unsigned)
-                                       (equal (cdr (second types)) signed))))))
-          collect (template-name template))))
-
-(define-load-time-global *comparison-vops*
-    (append (immediate-cmp-templates 'eq)
-            (immediate-cmp-templates '=)
-            (immediate-cmp-templates '>)
-            (immediate-cmp-templates '<)
-            (immediate-cmp-templates 'char<)
-            (immediate-cmp-templates 'char>)
-            (immediate-cmp-templates 'char=)))
-
-(define-load-time-global *commutative-comparison-vops*
-    (append (immediate-cmp-templates 'eq nil)
-            (immediate-cmp-templates 'char= nil)
-            (immediate-cmp-templates '= nil)))
-
 (defun vop-arg-list (vop)
   (let ((args (loop for arg = (vop-args vop) then (tn-ref-across arg)
                     while arg
@@ -512,36 +467,8 @@
 
 ;; cmov conversion needs to know the SCs
 (defoptimizer (vop-optimize branch-if select-representations) (branch-if)
-  (cond ((maybe-convert-one-cmov branch-if)
-         nil)
-        #+(or arm arm64 x86 x86-64)
-        (t
-         ;; Turn CMP X,Y BRANCH-IF M CMP X,Y BRANCH-IF N
-         ;; into CMP X,Y BRANCH-IF M BRANCH-IF N
-         ;; Run it after SELECT-REPRESENTATIONS, after CMOVs are
-         ;; converted and :after-sc-selection flags are resolved.
-         ;; While it's portable the VOPs are not validated for
-         ;; compatibility on other backends yet.
-         (let ((prev (vop-prev branch-if)))
-           (when (and prev
-                      (memq (vop-name prev) *comparison-vops*))
-             (let ((next (next-vop branch-if))
-                   transpose)
-               (when (and next
-                          (memq (vop-name next) *comparison-vops*)
-                          (or (vop-args-equal prev next)
-                              (and (or (setf transpose
-                                             (memq (vop-name prev) *commutative-comparison-vops*))
-                                       (memq (vop-name next) *commutative-comparison-vops*))
-                                   (vop-args-equal prev next t))))
-                 (when transpose
-                   ;; Could flip the flags for non-commutative operations
-                   (loop for tn-ref = (vop-args prev) then (tn-ref-across tn-ref)
-                         for arg in (nreverse (vop-arg-list prev))
-                         do (change-tn-ref-tn tn-ref arg)))
-                 (setf (sb-assem::label-comment (car (vop-codegen-info branch-if)))
-                       :merged-ifs)
-                 (delete-vop next))))))))
+  (maybe-convert-one-cmov branch-if)
+  nil)
 
 (defun next-start-vop (block)
   (loop thereis (ir2-block-start-vop block)
@@ -549,7 +476,7 @@
                    (setf block (ir2-block-next block)))))
 
 (defun branch-destination (branch &optional (true t))
-  (unless (vop-codegen-info branch)
+  (unless (typep (vop-codegen-info branch) '(cons t (cons t)))
     (let ((next (vop-next branch)))
       (if (and next
                (eq (vop-name next) 'branch-if))
@@ -984,14 +911,15 @@
                    (not (tn-ref-next (tn-reads result)))
                    (eq result (tn-ref-tn (vop-args next))))
           (check-type value bit)
-          (let ((template (template-or-lose #+arm64
-                                            (if (eq (vop-name vop) 'sb-vm::data-vector-ref/simple-bit-vector)
-                                                'sb-vm::data-vector-ref/simple-bit-vector-eq
-                                                'sb-vm::data-vector-ref/simple-bit-vector-c-eq)
-                                            #+x86-64
-                                            (if (eq (vop-name vop) 'sb-vm::data-vector-ref-with-offset/simple-bit-vector)
-                                                'sb-vm::data-vector-ref-with-offset/simple-bit-vector-eq
-                                                'sb-vm::data-vector-ref-with-offset/simple-bit-vector-c-eq))))
+          (let* ((template (template-or-lose #+arm64
+                                             (if (eq (vop-name vop) 'sb-vm::data-vector-ref/simple-bit-vector)
+                                                 'sb-vm::data-vector-ref/simple-bit-vector-eq
+                                                 'sb-vm::data-vector-ref/simple-bit-vector-c-eq)
+                                             #+x86-64
+                                             (if (eq (vop-name vop) 'sb-vm::data-vector-ref-with-offset/simple-bit-vector)
+                                                 'sb-vm::data-vector-ref-with-offset/simple-bit-vector-eq
+                                                 'sb-vm::data-vector-ref-with-offset/simple-bit-vector-c-eq)))
+                 (flags (make-conditional-flags (cdr (template-result-types template)))))
             (prog1
                 (emit-and-insert-vop (vop-node vop)
                                      (vop-block vop)
@@ -999,10 +927,9 @@
                                      (reference-tn-refs (vop-args vop) nil)
                                      nil
                                      vop
-                                     (vop-codegen-info vop))
-              ;; copy the condition flag
+                                     (append (vop-codegen-info vop) (list flags)))
               (setf (third (vop-codegen-info branch))
-                    (cdr (template-result-types template)))
+                    flags)
               (when (eq value 1)
                 (setf (second (vop-codegen-info branch))
                       (not (second (vop-codegen-info branch)))))
@@ -1268,29 +1195,35 @@
                           single-reader)
   (let ((reads (tn-reads tn))
         (writes (tn-writes tn)))
-   (and reads writes
-        (not (and single-reader
-                  (tn-ref-next reads)))
-        (not (and single-writer
-                  (tn-ref-next writes)))
-        (tn-ref-vop reads))))
+    (and reads writes
+         (not (and single-reader
+                   (tn-ref-next reads)))
+         (not (and single-writer
+                   (tn-ref-next writes)))
+         (tn-ref-vop reads))))
+
+(defun tn-single-writer-p (tn)
+  (let ((writes (tn-writes tn)))
+    (and writes
+         (not (tn-ref-next writes)))))
 
 (defoptimizer (vop-optimize sb-vm::move-from-word/fixnum)
     (vop)
   (vop-bind (in) (out) vop
-    (let ((to (tn-reader out :single-writer t)))
-      (when (and to
-                 (eq (vop-name to) 'sb-vm::move-to-word/fixnum))
-        (vop-bind (in2) (out2) to
-          (when (eq out in2)
-            (emit-and-insert-vop
-             (vop-node to) (vop-block to)
-             (template-or-lose 'sb-vm::word-move)
-             (reference-tn in nil)
-             (reference-tn out2 t)
-             to)
-            (delete-vop to)
-            nil))))))
+    (when (tn-single-writer-p in)
+      (let ((to (tn-reader out :single-writer t)))
+        (when (and to
+                   (eq (vop-name to) 'sb-vm::move-to-word/fixnum))
+          (vop-bind (in2) (out2) to
+            (when (eq out in2)
+              (emit-and-insert-vop
+               (vop-node to) (vop-block to)
+               (template-or-lose 'sb-vm::word-move)
+               (reference-tn in nil)
+               (reference-tn out2 t)
+               to)
+              (delete-vop to)
+              nil)))))))
 
 (defun very-temporary-p (tn)
   (let ((writes (tn-writes tn))

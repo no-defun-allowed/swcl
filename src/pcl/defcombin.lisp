@@ -263,29 +263,24 @@
 ;;; multiple methods with the same specializers in the same method
 ;;; group are unclear by the spec: a portion of the standard implies
 ;;; that an error should be signalled, and another is more lenient.
-;;;
-;;; It is reasonable to allow a single method group of * to bypass all
-;;; rules, as this is explicitly stated in the standard.
-
-(defun group-cond-clause (name tests specializer-cache star-only)
+(defun group-cond-clause (name tests specializer-cache order-matters-test)
   (let ((maybe-error-clause
-         (if star-only
-             `(setq ,specializer-cache .specializers.)
-             `(if (and (equal ,specializer-cache .specializers.)
-                       (not (null .specializers.)))
-                  (return-from .long-method-combination-function.
-                    '(error 'long-method-combination-error
-                      :format-control "More than one method of type ~S ~
+          `(if (and ,order-matters-test
+                    (equal ,specializer-cache .specializers.)
+                    (not (null .specializers.)))
+               (return-from .long-method-combination-function.
+                 '(error 'long-method-combination-error
+                   :format-control "More than one method of type ~S ~
                                        with the same specializers."
-                      :format-arguments (list ',name)))
-                  (setq ,specializer-cache .specializers.)))))
+                   :format-arguments (list ',name)))
+               (setq ,specializer-cache .specializers.))))
     `((or ,@tests)
       ,maybe-error-clause
       (push .method. ,name))))
 
 (defun wrap-method-group-specifier-bindings
     (method-group-specifiers declarations real-body)
-  (let (names specializer-caches cond-clauses required-checks order-cleanups)
+  (let (names specializer-caches cond-clauses required-checks order-vars order-cleanups)
     (let ((nspecifiers (length method-group-specifiers)))
       (dolist (method-group-specifier method-group-specifiers
                (push `(t (return-from .long-method-combination-function.
@@ -296,13 +291,33 @@
         (multiple-value-bind (name tests description order required)
             (parse-method-group-specifier method-group-specifier)
           (declare (ignore description))
-          (let ((specializer-cache (gensym)))
+          (let* ((specializer-cache (gensym))
+                 (order-var (gensym "O"))
+                 (order-constantp (constantp order))
+                 (order-value (and order-constantp (constant-form-value order))))
             (push name names)
             (push specializer-cache specializer-caches)
-            (push (group-cond-clause name tests specializer-cache
-                                     (and (eq (cadr method-group-specifier) '*)
-                                          (= nspecifiers 1)))
-                  cond-clauses)
+            (unless order-constantp
+              (push `(,order-var ,order) order-vars))
+            (let ((order-matters-test
+                    (cond
+                      ;; It is reasonable to allow a single method
+                      ;; group of * to bypass all rules, as this is
+                      ;; explicitly stated in the standard.
+                      ((and (eq (cadr method-group-specifier) '*)
+                            (= nspecifiers 1))
+                       nil)
+                      ;; an :ORDER value known at compile-time to be
+                      ;; NIL (an SBCL extension) also bypasses the
+                      ;; ordering checks.  (Other :ORDER values do
+                      ;; not.)
+                      (order-constantp (not (eql order-value nil)))
+                      ;; otherwise, check the ORDER value at
+                      ;; method-combination time, bypassing ordering
+                      ;; checks if it is NIL.
+                      (t `(not (eql ,order-var nil))))))
+              (push (group-cond-clause name tests specializer-cache order-matters-test)
+                    cond-clauses))
             (when required
               (push `(when (null ,name)
                       (return-from .long-method-combination-function.
@@ -310,20 +325,16 @@
                           :format-control "No ~S methods."
                           :format-arguments (list ',name))))
                     required-checks))
-            (loop (unless (and (constantp order)
-                               (neq order (setq order
-                                                (constant-form-value order))))
-                    (return t)))
-            (push (cond ((eq order :most-specific-first)
-                         `(setq ,name (nreverse ,name)))
-                        ((eq order :most-specific-last) ())
-                        (t
-                         `(ecase ,order
-                           (:most-specific-first
-                            (setq ,name (nreverse ,name)))
-                           (:most-specific-last))))
-                  order-cleanups))))
-      `(let (,@(nreverse names) ,@specializer-caches)
+            (cond
+              ((and order-constantp (eq order-value :most-specific-first))
+               (push `(setq ,name (nreverse ,name)) order-cleanups))
+              ((and order-constantp
+                    (or (null order-value) (eq order-value :most-specific-last))))
+              (t (push `(ecase ,order-var
+                          (:most-specific-first (setq ,name (nreverse ,name)))
+                          ((nil :most-specific-last)))
+                       order-cleanups))))))
+      `(let (,@(nreverse names) ,@specializer-caches ,@order-vars)
         (declare (ignorable ,@specializer-caches))
         ,@declarations
         (dolist (.method. .applicable-methods.)
@@ -378,7 +389,9 @@
   (loop (cond ((and (null pattern) (null qualifiers))
                (return t))
               ((eq pattern '*) (return t))
-              ((and pattern qualifiers (eq (car pattern) (car qualifiers)))
+              ((and pattern qualifiers
+                    (or (eq (car pattern) '*)
+                        (eq (car pattern) (car qualifiers))))
                (pop pattern)
                (pop qualifiers))
               (t (return nil)))))
@@ -483,7 +496,7 @@
             ;; it result in the actual arguments of the generic-function
             ;; not the frobbed list.
             ,,(when whole
-                ``(setq ,',whole .gf-args.))
+                ``(setq ,',(car whole) .gf-args.))
             ,inner-result.)))))
 
 ;;; Partition VALUES into three sections: required, optional, and the

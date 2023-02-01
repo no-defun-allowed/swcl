@@ -829,6 +829,21 @@ necessary, since type inference may take arbitrarily long to converge.")
     ;; Its refs will be scanned redundantly, which is harmless.
     (blast (eql-constants ns)))
   (values))
+
+;;; Clear the global hash tables held in IR1-NAMESPACE.
+(defun clear-ir1-namespace ()
+  (when (boundp '*ir1-namespace*)
+    (let ((ir1-namespace *ir1-namespace*))
+      (clrhash (free-funs ir1-namespace))
+      (clrhash (free-vars ir1-namespace))
+      ;; FIXME: It would make sense to clear these tables as well, but
+      ;; ARM64 relies on the constant for NIL to stay around in order to
+      ;; assign a wired TN to it, so we let people share it. Investigate a
+      ;; proper fix.
+      #+(or)
+      (progn
+        (clrhash (eql-constants ir1-namespace))
+        (clrhash (similar-constants ir1-namespace))))))
 
 ;;;; trace output
 
@@ -1060,7 +1075,12 @@ necessary, since type inference may take arbitrarily long to converge.")
                       :disabled-package-locks *disabled-package-locks*))
            (tll (ir1-toplevel form path nil)))
       (if (eq (block-compile *compilation*) t)
-          (push tll (toplevel-lambdas *compilation*))
+          (let ((compilation *compilation*))
+            (push tll (toplevel-lambdas compilation))
+            (when (package-environment-changed compilation)
+              (finish-block-compilation)
+              (setf (block-compile compilation) t)
+              (setf (package-environment-changed compilation) nil)))
           (compile-toplevel (list tll) nil))
       nil)))
 
@@ -1593,7 +1613,9 @@ necessary, since type inference may take arbitrarily long to converge.")
           (compile-load-time-value-lambda lambdas)
           (compile-toplevel-lambdas lambdas top-level-closure)))
 
-    (mapc #'clear-ir1-info components))
+    (dolist (component components)
+      (clear-ir1-info component))
+    (clear-ir1-namespace))
   (values))
 
 ;;; Actually compile any stuff that has been queued up for block

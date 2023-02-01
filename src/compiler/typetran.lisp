@@ -107,6 +107,11 @@
                       ;; If it's a lisp-rep-type, the CTYPE should be one already.
                       (aver (not (compute-lisp-rep-type alien-type)))
                       `(sb-alien::alien-value-typep object ',alien-type)))
+            ((let ((intersect (type-intersection otype type))
+                   (fixnum (specifier-type 'fixnum)))
+               (when (and (csubtypep intersect fixnum)
+                          (not (csubtypep type fixnum)))
+                 `(typep object ',(type-specifier intersect)))))
             (t
              (give-up-ir1-transform))))))
 
@@ -614,11 +619,32 @@
                                     `(typep ,object ',(type-specifier x)))
                                   more-types))))))))))
 
-;;; Do source transformation for TYPEP of a known intersection type.
 (defun source-transform-intersection-typep (object type)
-  `(and ,@(mapcar (lambda (x)
-                    `(typep ,object ',(type-specifier x)))
-                  (intersection-type-types type))))
+  (let (types
+        negated)
+    ;; Group negated types into a union type which might be better
+    ;; handled by source-transform-union-typep above.
+    (loop for type in (intersection-type-types type)
+          do
+          (cond ((hairy-type-p type)
+                 ;; These might impose some sort of an order.
+                 (setf negated nil)
+                 (return))
+                ((typep type 'negation-type)
+                 (push (negation-type-type type) negated))
+                (t
+                 (push type types))))
+    (cond (negated
+           `(and ,@(and types
+                        `((typep ,object
+                                 '(and ,@(mapcar #'type-specifier types)))))
+                 (not
+                  (typep ,object
+                         '(or ,@(mapcar #'type-specifier negated))))))
+          (t
+           `(and ,@(mapcar (lambda (x)
+                             `(typep ,object ',(type-specifier x)))
+                           (intersection-type-types type)))))))
 
 ;;; If necessary recurse to check the cons type.
 (defun source-transform-cons-typep
