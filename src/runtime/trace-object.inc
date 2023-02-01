@@ -83,9 +83,10 @@ static void TRACE_NAME(lispobj* where)
 #ifdef LISP_FEATURE_UBSAN
         if (is_lisp_pointer(where[1])) NORMAL(where[1]);
 #endif
-        /* XXX: When compacting, set the need-to-rehash bit.
-         * Compaction is infrequent, so not too worried about being
-         * picky which tables need to be rehashed. */
+        /* Would be more precise to only make hash-tables rehash when
+         * some key actually moves, and we don't really trace large and
+         * old tables when scavenging properly. So we _don't_ touch
+         * rehash bits here. */
         // non-weak hashtable kv vectors are trivial in fullcgc. Keys don't move
         // so the table will not need rehash as a result of gc.
         // Ergo, those may be treated just like ordinary simple vectors.
