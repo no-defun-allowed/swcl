@@ -228,20 +228,23 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
 DEF_FINDER(find_free_page, page_index_t, page_free_p(where), -1);
 DEF_FINDER(find_used_page, page_index_t, !page_free_p(where), end);
 
-page_index_t try_allocate_large(sword_t nbytes,
+page_index_t try_allocate_large(uword_t nbytes,
                                 int page_type, generation_index_t gen,
-                                page_index_t *start, page_index_t end) {
+                                page_index_t *start, page_index_t end,
+                                uword_t *largest_hole) {
   void set_allocation_bit_mark(void *address);
   gc_assert(gen != SCRATCH_GENERATION);
   // printf("try_allocate_large(%lu, %d, %d, %ld, %ld)\n", nbytes, page_type, gen, *start, end);
-  int pages_needed = ALIGN_UP(nbytes, GENCGC_PAGE_BYTES) / GENCGC_PAGE_BYTES;
+  uword_t pages_needed = ALIGN_UP(nbytes, GENCGC_PAGE_BYTES) / GENCGC_PAGE_BYTES;
   uword_t remainder = nbytes % GENCGC_PAGE_BYTES;
   page_index_t where = *start;
+  uword_t largest_hole_seen = 0;
   while (1) {
     page_index_t chunk_start = find_free_page(where, end);
     if (chunk_start == -1) return -1;
     page_index_t chunk_end = find_used_page(chunk_start, end);
-    if (chunk_end - chunk_start >= pages_needed) {
+    uword_t hole_size = chunk_end - chunk_start;
+    if (hole_size >= pages_needed) {
       page_index_t last_page = chunk_start + pages_needed - 1;
       for (page_index_t p = chunk_start; p <= last_page; p++) {
         page_table[p].type = SINGLE_OBJECT_FLAG | page_type;
@@ -260,9 +263,14 @@ page_index_t try_allocate_large(sword_t nbytes,
       if (last_page + 1 > next_free_page) next_free_page = last_page + 1;
       return chunk_start;
     }
-    if (chunk_end == end) return -1;
+    if (hole_size > largest_hole_seen) largest_hole_seen = hole_size;
+    if (chunk_end == end) {
+      *largest_hole = largest_hole_seen * GENCGC_PAGE_BYTES;
+      return -1;
+    }
     where = chunk_end;
   }
+  /* Shouldn't end up here, really. */
   return -1;
 }
 

@@ -53,9 +53,10 @@ extern boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region
                                              page_index_t *start, page_index_t end);
 extern boolean try_allocate_small_after_region(sword_t nbytes,
                                                struct alloc_region *region);
-extern page_index_t try_allocate_large(sword_t nbytes,
+extern page_index_t try_allocate_large(uword_t nbytes,
                                        int page_type, generation_index_t gen,
-                                       page_index_t *start, page_index_t end);
+                                       page_index_t *start, page_index_t end,
+                                       uword_t *largest_hole);
 extern void mr_update_closed_region(struct alloc_region *region, generation_index_t gen);
 
 /* Bitmaps */

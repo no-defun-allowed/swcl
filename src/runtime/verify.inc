@@ -439,8 +439,9 @@ static uword_t table_spans;
 static struct span *span_table;
 static uword_t (*parallel_proc)(lispobj*,lispobj*,uword_t);
 
-static uword_t fill_table(lispobj *start, lispobj *end, uword_t unused) {
+static uword_t fill_table(lispobj *start, lispobj *end, __attribute__((unused)) uword_t unused) {
     span_table[table_spans++] = (struct span){start, end};
+    return 0;
 }
 
 static void parallel_walk_worker() {

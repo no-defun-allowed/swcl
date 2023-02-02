@@ -76,7 +76,7 @@ static struct cons* private_cons_impl()
 #ifdef LISP_FEATURE_MARK_REGION_GC
         page_index_t alloc_start = get_alloc_start_page(PAGE_TYPE_UNBOXED);
         page = try_allocate_large(GENCGC_PAGE_BYTES, PAGE_TYPE_UNBOXED, 0,
-                                  &alloc_start, page_table_pages);
+                                  &alloc_start, page_table_pages, NULL);
         set_alloc_start_page(PAGE_TYPE_UNBOXED, alloc_start);
         /* TODO: Should figure out what will trigger "heap exhausted" errors.
          * Probably not this though. */

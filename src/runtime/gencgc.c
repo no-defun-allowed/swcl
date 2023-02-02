@@ -1546,9 +1546,10 @@ void *collector_alloc_fallback(struct alloc_region* region, sword_t nbytes, int 
     page_index_t alloc_start = get_alloc_start_page(page_type);
     void *new_obj;
     if ((uword_t)nbytes >= (GENCGC_PAGE_BYTES / 4 * 3)) {
+        uword_t largest_hole;
         page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,
-                                                   &alloc_start, page_table_pages);
-        if (new_page == -1) gc_heap_exhausted_error_or_lose(0, nbytes);
+                                                   &alloc_start, page_table_pages, &largest_hole);
+        if (new_page == -1) gc_heap_exhausted_error_or_lose(largest_hole, nbytes);
         new_obj = page_address(new_page);
     } else {
         ensure_region_closed(region, page_type);
@@ -5173,9 +5174,10 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
     gc_assert(ret);
     page_index_t alloc_start = get_alloc_start_page(page_type);
     if (largep) {
+        uword_t largest_hole;
         page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,
-                                                   &alloc_start, page_table_pages);
-        if (new_page == -1) gc_heap_exhausted_error_or_lose(0, nbytes);
+                                                   &alloc_start, page_table_pages, &largest_hole);
+        if (new_page == -1) gc_heap_exhausted_error_or_lose(largest_hole, nbytes);
         ret = mutex_release(&free_pages_lock);
         gc_assert(ret);
         new_obj = page_address(new_page);
