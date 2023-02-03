@@ -17,12 +17,14 @@ struct suballocator_chunk {
 /* suballoc_allocate is lazily written and skips over the first chunk, so
  * add one here to make CHUNKS make sense. No big loss. */
 struct suballocator {
+  char *name;
   struct suballocator_chunk chunks[CHUNKS + 1];
   unsigned int current_chunk;
+  uword_t hwm;
   lock_t suballocator_lock;
 };
 /* Zero-initialising structs in an array in a struct - hooray */
-#define SUBALLOCATOR_INITIALIZER { { { 0 } }, 0, LOCK_INITIALIZER }
+#define SUBALLOCATOR_INITIALIZER(name) { name, { { 0 } }, 0, 0, LOCK_INITIALIZER }
 
 static boolean chunk_has_space(struct suballocator *s, int index) {
   return s->chunks[index].free < s->chunks[index].start + s->chunks[index].size;
@@ -30,8 +32,10 @@ static boolean chunk_has_space(struct suballocator *s, int index) {
 
 /* Free all memory used by the mark stack, giving back to the OS. */
 static void suballoc_release(struct suballocator *s) {
+  uword_t used = 0;
   for (int i = 0; i < CHUNKS; i++) {
     if (s->chunks[i].start) {
+      used += s->chunks[i].size;
       if (s->chunks[i].age >= AGE_LIMIT) {
         os_deallocate((void*)s->chunks[i].start, s->chunks[i].size);
         s->chunks[i].start = s->chunks[i].free = s->chunks[i].size = 0;
@@ -40,6 +44,12 @@ static void suballoc_release(struct suballocator *s) {
         s->chunks[i].free = s->chunks[i].start;
       }
     }
+  }
+  if (used > s->hwm) {
+#if 0
+    fprintf(stderr, "Used %ld bytes for %s\n", used, s->name);
+#endif
+    s->hwm = used;
   }
   s->current_chunk = 0;
 }

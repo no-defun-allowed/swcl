@@ -26,7 +26,7 @@ static generation_index_t target_generation;
 /* A queue of interesting slots. */
 static struct Qblock *remset;
 static lock_t remset_lock;
-static struct suballocator remset_suballocator = SUBALLOCATOR_INITIALIZER;
+static struct suballocator remset_suballocator = SUBALLOCATOR_INITIALIZER("compaction remset");
 boolean compacting;
 unsigned char *target_pages;
 

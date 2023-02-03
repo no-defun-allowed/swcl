@@ -39,6 +39,7 @@
 
 //#define DEBUG
 //#define LOG_COLLECTIONS
+//#define COMPACT
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -341,7 +342,7 @@ boolean pointer_survived_gc_yet(lispobj object) {
 static sword_t blocks_in_flight = 0;
 static lock_t grey_list_lock = LOCK_INITIALIZER;
 static struct Qblock *grey_list = NULL;
-static struct suballocator grey_suballocator = SUBALLOCATOR_INITIALIZER;
+static struct suballocator grey_suballocator = SUBALLOCATOR_INITIALIZER("grey stack");
 
 /* Thanks to Larry Masinter for suggesting that I use per-thread
  * free lists, rather than hurting my head on lock-free free lists.
@@ -1115,7 +1116,9 @@ void mr_pre_gc(generation_index_t generation) {
           generations[generation].bytes_allocated >> 20,
           bytes_allocated >> 20);
 #endif
+#ifdef COMPACT
   METER(consider, consider_compaction(generation));
+#endif
   generation_to_collect = generation;
   reset_statistics();
 }
@@ -1127,8 +1130,10 @@ void mr_collect_garbage(boolean raise) {
   trace_static_roots();
   METER(trace, trace_everything());
   METER(sweep, sweep());
+#ifdef COMPACT
   if (compacting) meters.compacts++;
   METER(compact, run_compaction());
+#endif
   /* scan_finalizers check forwarding pointers, so we need to
    * ensure it is called after compaction. */
   scan_finalizers();
