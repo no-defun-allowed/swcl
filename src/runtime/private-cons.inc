@@ -87,9 +87,8 @@ static struct cons* private_cons_impl()
             gc_find_freeish_pages(&page, GENCGC_PAGE_BYTES,
                                   SINGLE_OBJECT_FLAG | PAGE_TYPE_UNBOXED,
                                   GC_PRIVATE_CONS_GENERATION);
-        set_alloc_start_page(PAGE_TYPE_UNBOXED, page);
         // See question about last_page in gc_alloc_large
-        set_alloc_start_page(PAGE_TYPE_UNBOXED, 0, page);
+        set_alloc_start_page(PAGE_TYPE_UNBOXED, page);
         gc_assert(last_page == page);
 #endif
         gc_dcheck(page_cards_all_marked_nonsticky(page));

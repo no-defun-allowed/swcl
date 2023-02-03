@@ -353,9 +353,9 @@ void gc_scavenge_arenas()
                     fprintf(stderr, "Arena @ %p: scavenging %p..%p\n",
                             a, block, block->freeptr);
 #ifdef LISP_FEATURE_MARK_REGION_GC
-                    heap_scavenge((lispobj*)block, (lispobj*)block->freeptr);
-#else
                     mr_trace_bump_range((lispobj*)block, (lispobj*)block->freeptr);
+#else
+                    heap_scavenge((lispobj*)block, (lispobj*)block->freeptr);
 #endif
                 } while ((block = block->next) != NULL);
             }

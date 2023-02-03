@@ -241,7 +241,7 @@ void gc_mark_range(lispobj* where, long count) {
 static void wrap_mark(lispobj obj,
                       __attribute__((unused)) lispobj *where,
                       __attribute__((unused)) enum source source) {
-  __mark_obj(obj);
+  gc_mark_obj(obj);
 }
 
 #define ACTION wrap_mark

@@ -29,13 +29,13 @@ static lispobj __attribute__((unused)) *page_limit(page_index_t page) {
 
 #else
 
-static lispobj *next_object(lispobj *previous, uword_t size, lispobj *limit) {
+static lispobj *next_object(lispobj *previous, uword_t size, lispobj *end) {
   if (previous + size >= end) return NULL;
   return previous + size;
 }
 
 static lispobj __attribute__((unused)) *page_limit(page_index_t page) {
-  return page_address(page) + page_words_used(page);
+  return ((lispobj*)page_address(page)) + page_words_used(page);
 }
 
 #endif
