@@ -5053,6 +5053,9 @@ static void maybe_patch_code() {
  * The check for a GC trigger is only performed when the current
  * region is full, so in most cases it's not needed. */
 
+/* Make this easy for Lisp to read. */
+int small_allocation_count = 0;
+
 int gencgc_alloc_profiler;
 static NO_SANITIZE_MEMORY lispobj*
 lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
@@ -5183,6 +5186,7 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
         new_obj = page_address(new_page);
         memset(new_obj, 0, nbytes);
     } else {
+        if (!gc_active_p) small_allocation_count++;
         boolean success =
             try_allocate_small_from_pages(nbytes, region, page_type,
                                           gc_alloc_generation,
@@ -5199,6 +5203,7 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
 
     int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
     gc_assert(ret);
+    if (!gc_active_p) small_allocation_count++;
     ensure_region_closed(region, page_type);
     // hold the lock after alloc_new_region if a cons page
     int release = page_type != PAGE_TYPE_CONS;
