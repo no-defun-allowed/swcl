@@ -77,6 +77,7 @@ void mr_print_meters() {
           NORM(compact), NORM(raise), NORM(fresh_pointers), NORM(pinned_pages));
 #undef NORM
 }
+void mr_reset_meters() { meters = (typeof(meters)){ 0 }; collection = 0; }
 
 static uword_t get_time() {
   struct timespec t;
