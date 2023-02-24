@@ -13,7 +13,7 @@
 #define _GENCGC_PRIVATE_H_
 
 /* The minimum heap occupancy to force more aggressive collections above. */
-#define PANIC_THRESHOLD 0.85
+#define PANIC_THRESHOLD 0.9
 #ifdef LISP_FEATURE_MARK_REGION_GC
 #define FRAGMENTATION_COMPENSATION 0.8
 #else
