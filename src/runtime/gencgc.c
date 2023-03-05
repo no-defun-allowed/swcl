@@ -5181,6 +5181,7 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
         page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,
                                                    &alloc_start, page_table_pages, &largest_hole);
         if (new_page == -1) gc_heap_exhausted_error_or_lose(largest_hole, nbytes);
+        set_alloc_start_page(page_type, alloc_start);
         ret = mutex_release(&free_pages_lock);
         gc_assert(ret);
         new_obj = page_address(new_page);
@@ -5192,12 +5193,12 @@ lisp_alloc(int flags, struct alloc_region *region, sword_t nbytes,
                                           gc_alloc_generation,
                                           &alloc_start, page_table_pages);
         if (!success) gc_heap_exhausted_error_or_lose(0, nbytes);
+        set_alloc_start_page(page_type, alloc_start);
         ret = mutex_release(&free_pages_lock);
         gc_assert(ret);
         new_obj = region->start_addr;
         memset(new_obj, 0, addr_diff(region->end_addr, new_obj));
     }
-    set_alloc_start_page(page_type, alloc_start);
 #else
     if (flags & 1) return gc_alloc_large(nbytes, page_type);
 
