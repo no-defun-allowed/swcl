@@ -98,15 +98,15 @@
           (unless (type= difference (specifier-type 'fixnum))
             (return-from  ir1-transform-type-predicate `(not (null object))))))
       (cond ((typep type 'alien-type-type)
-                    ;; We don't transform alien type tests until here, because
-                    ;; once we do that the rest of the type system can no longer
-                    ;; reason about them properly -- so we'd miss out on type
-                    ;; derivation, etc.
-                    (delay-ir1-transform node :optimize)
-                    (let ((alien-type (alien-type-type-alien-type type)))
-                      ;; If it's a lisp-rep-type, the CTYPE should be one already.
-                      (aver (not (compute-lisp-rep-type alien-type)))
-                      `(sb-alien::alien-value-typep object ',alien-type)))
+             ;; We don't transform alien type tests until here, because
+             ;; once we do that the rest of the type system can no longer
+             ;; reason about them properly -- so we'd miss out on type
+             ;; derivation, etc.
+             (delay-ir1-transform node :ir1-phases)
+             (let ((alien-type (alien-type-type-alien-type type)))
+               ;; If it's a lisp-rep-type, the CTYPE should be one already.
+               (aver (not (compute-lisp-rep-type alien-type)))
+               `(sb-alien::alien-value-typep object ',alien-type)))
             ((let ((intersect (type-intersection otype type))
                    (fixnum (specifier-type 'fixnum)))
                (when (and (csubtypep intersect fixnum)
@@ -1040,7 +1040,7 @@
             ;; because it is quite legitimate to pass an object with an invalid layout
             ;; to a structure type test.
            (if (vop-existsp :translate structure-typep)
-               ;; A single VOP is easier to optimize later in ir2opt.
+               ;; A single VOP is easier to optimize later
                `(structure-typep object ,wrapper)
                `(and (%instancep object)
                      ,(if (<= depthoid sb-kernel::layout-id-vector-fixed-capacity)
@@ -1516,3 +1516,25 @@
 
 ;;; BIGNUMP is simpler than INTEGERP, so if we can rule out FIXNUM then ...
 (deftransform integerp ((x) ((not fixnum)) * :important nil) '(bignump x))
+
+(deftransform structure-typep ((object type) (t (constant-arg t)))
+  (let* ((layout (lvar-value type))
+         (type (case layout
+                 (#.+condition-layout-flag+ (specifier-type 'condition))
+                 (#.+pathname-layout-flag+  (specifier-type 'pathname))
+                 (#.+structure-layout-flag+ (specifier-type 'structure-object))
+                 (t
+                  (wrapper-classoid layout))))
+         (diff (type-difference (lvar-type object) type))
+         (pred (backend-type-predicate diff)))
+    (if pred
+        `(not (,pred object))
+        (give-up-ir1-transform))))
+
+(deftransform classoid-cell-typep ((cell object) ((constant-arg t) t))
+  (let* ((type (specifier-type (classoid-cell-name (lvar-value cell))))
+         (diff (type-difference (lvar-type object) type))
+         (pred (backend-type-predicate diff)))
+    (if pred
+        `(not (,pred object))
+        (give-up-ir1-transform))))

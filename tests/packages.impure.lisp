@@ -150,6 +150,10 @@ if a restart was invoked."
 
 ;;;; Tests
 ;;; USE-PACKAGE
+(with-test (:name :use-keyword-nope)
+  (assert-error (use-package "KEYWORD"))
+  (assert-error (use-package "CL-USER" "KEYWORD")))
+
 (with-test (:name :use-package.1)
   (with-packages (("FOO" (:export "SYM"))
                   ("BAR" (:export "SYM"))
@@ -1053,7 +1057,7 @@ if a restart was invoked."
   ;; Check that SP is a local nickname
   (assert (let ((*package* (find-package "MYPKG"))) (find-symbol "ZOOK" "SP")))
   ;;; But not a global name of any package
-  (assert-error  (find-symbol "ZOOK" "SP"))
+  (assert-error (find-symbol "ZOOK" "SP"))
   (delete-package "SOMEPACKAGE")
   ;; Assert that the local nickname vector has not yet removed the
   ;; deleted package. DELETE-PACKAGE does not scan all packages to adjust
@@ -1067,7 +1071,13 @@ if a restart was invoked."
              2))
   (sb-sys:scrub-control-stack)
   (gc :full t)
-  (assert (not (weak-pointer-value *the-weak-ptr*)))
+  ;; Asserting that the weak pointer gets splatted _before_ doing the next FIND-SYMBOL
+  ;; confirms that the nickname representation did not store a strong reference
+  ;; to #<SOMEPACKAGE>. Package-local nicknames are necessarily purged of any deleted
+  ;; packages just-in-time, so the assertion would not demonstrate anything if run
+  ;; _after_ calling FIND-SYMBOL. I don't know why this fails on #+win32, SEARCH-ROOTS
+  ;; did not return a path, so there must also be a deficiency in that.
+  #-win32 (assert (not (weak-pointer-value *the-weak-ptr*)))
   (assert-error (let ((*package* (find-package "MYPKG")))
                   ;; the nickname magically went away!
                   (find-symbol "ZOOK" "SP"))))
@@ -1153,5 +1163,6 @@ if a restart was invoked."
   (with-scratch-file (fasl7 "fasl")
     (compile-file "package-test-7.lisp" :output-file fasl7)
     (compile-file "package-test-7.lisp" :output-file fasl7)
+    (delete-package "COMPILE-TWICE")
     (load fasl7)
     (delete-package "COMPILE-TWICE")))

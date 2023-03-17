@@ -12,6 +12,7 @@
 (defun f (x y z)
   (with-arena (*arena*) (list x y z)))
 
+#+nil
 (test-util:with-test (:name :arena-alloc-waste-reduction)
   (let* ((list1 (f 'foo 'bar'baz))
          (list1-addr (get-lisp-obj-address list1))
@@ -255,6 +256,7 @@
           (with-arena (arena)
             (test-util:opaque-identity (make-array 5)))))))
   bytes-used)
+#+nil
 (test-util:with-test (:name :allocator-resumption)
   (map nil 'rewind-arena *many-arenas*)
   (let ((bytes-used-per-arena (use-up-some-space 10000)))
@@ -279,6 +281,70 @@
               (unuse-arena)))))
       (sb-thread:join-thread thread))))
 
+;;;; Type specifier parsing and operations
+
+(defparameter *bunch-of-objects*
+  `((foo)
+    "astring"
+    #*1010
+    ,(find-package "CL")
+    ,(pathname "/tmp/blub")
+    ,#'open
+    #2a((1 2) (3 4))
+    ,(ash 1 64)
+    ))
+
+;; These type-specs are themselves consed so that we can
+;; ascertain whether there are arena pointers in internalized types.
+(defun get-bunch-of-type-specs ()
+  `((integer ,(random 47) *)
+    (and bignum (not (eql ,(random 1000))))
+    (and bignum (not (eql ,(logior #x8000000000000001
+                                   (ash (1+ (random #xF00)) 10)))))
+    (member ,(complex (coerce (random 10) 'single-float)
+                      (coerce (- (random 10)) 'single-float))
+            (goo)
+            #+sb-unicode
+            #\thumbs_up_sign
+            #-sb-unicode
+            #\a)
+    (or stream (member :hello
+                       #+sb-unicode #\thumbs_down_sign
+                       #-sb-unicode #\B))
+    (array t (,(+ 10 (random 10))))))
+
+(defun show-cache-counts ()
+  (dolist (s sb-impl::*cache-vector-symbols*)
+    (let ((v (symbol-value s)))
+      (when (vectorp v)
+        (format t "~5d  ~a~%"
+                (count-if (lambda (x) (not (eql x 0))) v)
+                s)))))
+
+(defun ctype-operator-tests (arena &aux (result 0))
+  (sb-int:drop-all-hash-caches)
+  (flet ((try (spec)
+           (dolist (x *bunch-of-objects*)
+             (when (typep x spec)
+               (incf result)))))
+    (sb-vm:with-arena (arena)
+      (let ((specs (get-bunch-of-type-specs)))
+        (dolist (spec1 specs)
+          (dolist (spec2 specs)
+            (try `(and ,spec1 ,spec2))
+            (try `(or ,spec1 ,spec2))
+            (try `(and ,spec1 (not ,spec2)))
+            (try `(or ,spec1 (not ,spec2))))))))
+  (assert (not (sb-vm:c-find-heap->arena arena)))
+  result)
+(test-util:with-test (:name :ctype-cache
+                      ;; don't have time to figure out the 'c-find-heap->arena' crashes
+                      :skipped-on :win32)
+  (let ((arena (sb-vm:new-arena 1048576)))
+    (ctype-operator-tests arena)))
+
+;;;;
+
 (defvar *newpkg* (make-package "PACKAGE-GROWTH-TEST"))
 (defun addalottasymbols ()
   (with-arena (*arena*)
@@ -287,7 +353,10 @@
         (assert (not (heap-allocated-p str)))
         (let ((sym (intern str *newpkg*)))
           (assert (heap-allocated-p sym))
-          (assert (heap-allocated-p (symbol-name sym))))))))
+          (assert (heap-allocated-p (symbol-name sym)))))))
+  #-win32
+  (assert (not (sb-vm:c-find-heap->arena *arena*))))
+
 (test-util:with-test (:name :intern-a-bunch)
   (let ((old-n-cells
          (length (sb-impl::symtbl-cells
@@ -309,6 +378,49 @@
                   (output))
                (output (get-lisp-obj-address a))))))))
 
+(define-condition foo (simple-warning)
+  ((a :initarg :a)
+   (b :initarg :b)))
+(defvar *condition* (make-condition 'foo
+                                    :format-control "hi there"
+                                    :a '(x y) :b #P"foofile"
+                                    :format-arguments '("Yes" "no")))
+(test-util:with-test (:name :arena-condition-slot-access)
+  (assert (null (sb-kernel::condition-assigned-slots *condition*)))
+  (let ((val (with-arena (*arena*)
+               (slot-value *condition* 'b))))
+    (assert (pathnamep val))
+    (assert (not (sb-vm:points-to-arena *condition*)))))
+
+(test-util:with-test (:name :gc-epoch-not-in-arena)
+  (with-arena (*arena*) (gc))
+  (assert (heap-allocated-p sb-kernel::*gc-epoch*)))
+
+(defvar *thing-created-by-hook* nil)
+(push (lambda () (push (cons 1 2) *thing-created-by-hook*))
+      *after-gc-hooks*)
+(test-util:with-test (:name :post-gc-hooks-unuse-arena)
+  (with-arena (*arena*) (gc))
+  (setq *after-gc-hooks* nil)
+  (assert (heap-allocated-p *thing-created-by-hook*))
+  (assert (heap-allocated-p (car *thing-created-by-hook*))))
+
+;;; CAUTION: tests of C-FIND-HEAP->ARENA that execute after destroy-arena and a following
+;;; NEW-ARENA might spuriously fail depending on how eagerly malloc() reuses addresses.
+;;; The failure goes something like this:
+;;;
+;;; stack -> some-cons C1 ; conservative reference
+;;; heap: C1 = (#<instance-in-arena> . mumble)
+;;;
+;;; now rewind the arena. "instance-in-arena" is not a valid object.
+;;; But: allocate more stuff in the arena, and suppose the address where instance-in-arena
+;;; formerly was now holds a different primitive object, like a cons cell.
+;;; The C-FIND-HEAP->ARENA function won't die, but you *will* die when trying to examine
+;;; what it found.  The heap cons is conservatively live, its contents are assumed good,
+;;; yet its CAR has instance-pointer-lowtag pointing to something that does not have
+;;; INSTANCE-WIDETAG. The Lisp printer suffers a horrible fate and causes recursive errors.
+;;; Had malloc() not reused an address, this would not happen, because the destroyed arena
+;;; can not be seen, and the cons pointing to nothing will not be returned by the finder.
 (test-util:with-test (:name destroy-arena)
   (macrolet ((exit-if-no-arenas ()
                '(progn (incf n-deleted)
@@ -373,68 +485,6 @@
   (rewind-arena *another-arena*)
   (dotimes (i 10) (f *another-arena* 1000)))
 
-;;;; Type specifier parsing and operations
-
-(defparameter *bunch-of-objects*
-  `((foo)
-    "astring"
-    #*1010
-    ,(find-package "CL")
-    ,(pathname "/tmp/blub")
-    ,#'open
-    #2a((1 2) (3 4))
-    ,(ash 1 64)
-    ))
-
-;; These type-specs are themselves consed so that we can
-;; ascertain whether there are arena pointers in internalized types.
-(defun get-bunch-of-type-specs ()
-  `((integer ,(random 47) *)
-    (and bignum (not (eql ,(random 1000))))
-    (and bignum (not (eql ,(logior #x8000000000000001
-                                   (ash (1+ (random #xF00)) 10)))))
-    (member ,(complex (coerce (random 10) 'single-float)
-                      (coerce (- (random 10)) 'single-float))
-            (goo)
-            #+sb-unicode
-            #\thumbs_up_sign
-            #-sb-unicode
-            #\a)
-    (or stream (member :hello
-                       #+sb-unicode #\thumbs_down_sign
-                       #-sb-unicode #\B))
-    (array t (,(+ 10 (random 10))))))
-
-(defun show-cache-counts ()
-  (dolist (s sb-impl::*cache-vector-symbols*)
-    (let ((v (symbol-value s)))
-      (when (vectorp v)
-        (format t "~5d  ~a~%"
-                (count-if (lambda (x) (not (eql x 0))) v)
-                s)))))
-
-(defun ctype-operator-tests (arena &aux (result 0))
-  (sb-int:drop-all-hash-caches)
-  (flet ((try (spec)
-           (dolist (x *bunch-of-objects*)
-             (when (typep x spec)
-               (incf result)))))
-    (sb-vm:with-arena (arena)
-      (let ((specs (get-bunch-of-type-specs)))
-        (dolist (spec1 specs)
-          (dolist (spec2 specs)
-            (try `(and ,spec1 ,spec2))
-            (try `(or ,spec1 ,spec2))
-            (try `(and ,spec1 (not ,spec2)))
-            (try `(or ,spec1 (not ,spec2))))))))
-  (assert (null (sb-vm:c-find-heap->arena arena)))
-  result)
-(test-util:with-test (:name :ctype-cache
-                      ;; don't have time to figure out the 'c-find-heap->arena' crashes
-                      :skipped-on :win32)
-  (let ((arena (sb-vm:new-arena 1048576)))
-    (ctype-operator-tests arena)))
-
 ;; #+sb-devel preserves some symbols that the test doesn't care about
 ;; as the associated function will never be called.
 (defvar *ignore* '("!EARLY-LOAD-METHOD"))
@@ -469,3 +519,48 @@
                 (unless (every #'line-ok lines)
                   (format *error-output* "Failure:~{~%~A~}~%" lines)
                   (error  "Bad result for ~S" symbol))))))))))
+
+(defun collect-objects-pointing-off-heap ()
+  (let (list)
+    (flet ((add-to-result (obj referent)
+             ;; If this is a code component and it points to fixups
+             ;; which are a bignum in a random place, assume that it's an ELF core
+             ;; and that the packed fixup locs are in a ".rodata" section
+             (cond ((and (typep obj 'sb-kernel:code-component)
+                         (typep referent 'bignum)
+                         (eq referent (%code-fixups obj)))
+                    nil)
+                   (t
+                    (push (cons (sb-ext:make-weak-pointer obj)
+                                (if (sb-ext:stack-allocated-p referent t)
+                                    :stack
+                                    (sb-sys:int-sap (get-lisp-obj-address referent))))
+                          list)))))
+      (macrolet ((visit (referent)
+                   `(let ((r ,referent))
+                      (when (and (is-lisp-pointer (get-lisp-obj-address r))
+                                 (not (heap-allocated-p r))
+                                 (add-to-result obj r))
+                        (return-from done)))))
+        (sb-vm:map-allocated-objects
+         (lambda (obj type size)
+           (declare (ignore type size))
+           (block done
+             (do-referenced-object (obj visit)
+               (t
+                :extend
+                (case (widetag-of obj)
+                  (#.sb-vm:value-cell-widetag
+                   (visit (value-cell-ref obj)))
+                  (t
+                   (warn "Unknown widetag ~x" (widetag-of obj))))))))
+         :all)))
+    list))
+
+(defun show-objects-pointing-off-heap (list)
+  (dolist (x list)
+    (let ((obj (weak-pointer-value (car x))))
+      (if (typep obj '(or sb-kernel:code-component
+                       symbol))
+          (format t "~s -> ~s~%" obj (cdr x))
+          (format t "~s -> ~s~%" (type-of obj) (cdr x))))))

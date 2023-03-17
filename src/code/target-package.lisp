@@ -214,29 +214,19 @@
 (define-load-time-global *package-names-cookie* most-negative-fixnum)
 (declaim (fixnum *package-names-cookie*))
 
-;;; *ALL-PACKAGES* is a prime-number-sized vector (physically with extra cells)
+;;; *ALL-PACKAGES* is a power-of-2-sized table (physically with 1 extra cell of metadata)
 ;;; as the backing storage of a closed-addressing hash-set with a peculiar aspect
 ;;; of allowing one key to appear in multiple buckets. This aspect allows each global name
 ;;; ("nickname" and "name" being synonymous in this usage) to appear in its respective
 ;;; hash bucket. By pure coincidence, names for one package could hash to the same bucket,
 ;;; so removal has to account for that - removal occurs only when the package does not
 ;;; belong in a bucket via any of its names.
-(defconstant pkgtable-fixed-cells 3)
-(defmacro pkgtable-magic (table) `(truly-the (unsigned-byte 32) (svref ,table 0)))
-(defmacro pkgtable-mask (table) `(truly-the (unsigned-byte 32) (svref ,table 1)))
-(defmacro pkgtable-count (table) `(truly-the fixnum (svref ,table 2)))
+(defconstant pkgtable-fixed-cells 1)
+(defmacro pkgtable-count (table)
+  `(truly-the fixnum (svref ,table (1- (length ,table)))))
 
 (defmacro pkgtable-bucket-index (vector hash)
-  `(let ((h ,hash)
-         (divisor (- (length ,vector) pkgtable-fixed-cells)))
-     (+ pkgtable-fixed-cells
-        ,(sb-c::if-vop-existsp (:translate sb-vm::fastrem-32)
-           `(let ((c (pkgtable-magic ,vector)))
-              (if (/= c 0)
-                  (sb-vm::fastrem-32 (logand h (pkgtable-mask ,vector)) c
-                                     (truly-the (unsigned-byte 32) divisor))
-                  (rem h divisor))) ; don't have a fastrem coeffficient
-           `(rem h divisor)))))
+  `(logand ,hash (- (length ,vector) ,(1+ pkgtable-fixed-cells))))
 
 (defmacro do-pkg-table (((package-var &optional (keys-var '#:keys)) table-var)
                         &body body
@@ -245,7 +235,7 @@
          (cell (list nil)))
      (declare (truly-dynamic-extent cell))
      (loop for ,index-var of-type index
-           from pkgtable-fixed-cells below (length .tbl.)
+           from 0 below (1- (length .tbl.))
            do (let ((data (svref .tbl. ,index-var)))
                 (setf (car cell) data) ; in case DATA is a non-null atom
                 (dolist (,package-var (if (%instancep data) cell data))
@@ -268,19 +258,14 @@
                                                   (t (list package data))))
                  (incf (pkgtable-count vector)))))) ; count once for each insertion
          (new-table (size)
-           (let* ((n (loop for n of-type fixnum
-                           from (logior (ceiling size 87/100) 1) by 2 ; target LF=87%
-                           when (positive-primep n) return n))
+           (let* ((n (power-of-two-ceiling size))
                   (vector (make-array (+ n pkgtable-fixed-cells) :initial-element nil)))
-             (multiple-value-bind (mask c) (optimized-symtbl-remainder-params n)
-               (setf (pkgtable-mask vector) mask
-                     (pkgtable-magic vector) c
-                     (pkgtable-count vector) 0))
+             (setf (pkgtable-count vector) 0)
              vector)))
     ;; First maybe rehash, assuming all names need to be added to the table.
     ;; The rehash threshold is 1 item or more per bucket
     (let ((new-count (+ (pkgtable-count vector) (floor (length keys) 2))))
-      (when (>= new-count (- (length vector) pkgtable-fixed-cells))
+      (when (> new-count (- (length vector) pkgtable-fixed-cells))
         (let ((new-table (new-table new-count)))
           (do-pkg-table ((package keys) vector)
             (insert new-table package keys))
@@ -452,6 +437,7 @@ of :INHERITED :EXTERNAL :INTERNAL."
 ;;; using a division by the table size minus two.
 (defun make-symbol-hashset (size &optional (load-factor 3/4))
   (declare (sb-c::tlab :system)
+           (inline make-symtbl-magic) ; to allow system-TLAB allocation
            (inline %make-symbol-hashset))
   (flet ((choose-good-size (size)
            (loop for n of-type fixnum
@@ -468,10 +454,9 @@ of :INHERITED :EXTERNAL :INTERNAL."
                (size (truncate (* n load-factor)))
                (reciprocals
                 (if (= n 3) ; minimal table
-                    (make-symtbl-magic 0 0 0 0)
+                    (make-symtbl-magic 0 0 0 0) ; <-- should be LTV but can't be.
+                                                ; (package-cold-init called before LTV fixups)
                     (make-symtbl-magic h1-mask h1-c h2-mask 0))))
-      ;; Store optimized remainder parameters unles either reciprocal
-      ;; (for H1 or H2) can't work using the fast REM algorithm in 32 bits.
       (%make-symbol-hashset (cons reciprocals (make-array n :initial-element 0))
                             size))))
 
@@ -832,12 +817,64 @@ REMOVE-PACKAGE-LOCAL-NICKNAME, and the DEFPACKAGE option :LOCAL-NICKNAMES."
 (defun package-%use-list (package)
   (map 'list #'symtbl-package (package-tables package)))
 
-;;; ANSI says (in the definition of DELETE-PACKAGE) that these, and
-;;; most other operations, are unspecified for deleted packages. We
-;;; just do the easy thing and signal errors in that case.
+(defmacro do-packages ((package) &body body)
+  ;; Even if iterating over the name -> package mapping were threadsafe
+  ;; (which is isn't), there could nonetheless exist a race between iterators
+  ;; and RENAME-PACKAGE. This is true whether first deleting the old name
+  ;; and then inserting the new, or the other way around.
+  ;; The examples below (only 2 out of many schedulings and choices of insert/delete
+  ;; ordering) show that iteration can produce a package twice, or skip it entirely.
+  ;;
+  ;; Consider the table bins could have oldname in an earlier bin:
+  ;;   bin 1 -> oldname, bin 2 -> newname
+  ;; and suppose we first delete old, the insert new.
+  ;;
+  ;;  Thread1                Thread2
+  ;;  ------------           -------------
+  ;;  read bin 1 = oldname
+  ;;                         delete oldname
+  ;;                         insert newname
+  ;;  read bin 2 = newname
+  ;;
+  ;; So it is produced twice even though it was not really in the table twice.
+  ;; Or we can see it not at all. Suppose bin1 -> newname, bin 2 -> oldname
+  ;;
+  ;;  Thread1                Thread2
+  ;;  ------------           -------------
+  ;;  read bin 1 (initially empty)
+  ;;                         delete oldname
+  ;;                         insert newname
+  ;;  read bin 2 (empty)
+  ;;
+  ;; The situation is further confounded by the fact that the primary name could
+  ;; become a nickname or vice-versa (among all the myriad other things that
+  ;; renaming can do) in which case there is ambiguity about the table cell
+  ;; that is considered the representative one for the package.
+  `(with-package-names ()
+     (do-pkg-table ((,package) *all-packages*) ,@body)))
+
+(defun package-%used-by-list (package &aux (wp (package-%used-by package)))
+  (or (and wp (weak-pointer-value wp))
+      ;; Ensure that the "uses" relation is fixed by acquiring the graph lock.
+      ;; Additionally, DO-PACKAGES will acquire the name table lock.
+      (with-package-graph ()
+        (let ((me (package-external-symbols package))
+              (list))
+          (do-packages (user)
+            (when (find me (package-tables user))
+              (push user list)))
+          ;; A minor deficiency: if the actual result is NIL, it will appear to
+          ;; always need recomputation. Honestly it's not worth caring about.
+          (setf (package-%used-by package) (if list (make-weak-pointer list)))
+          list))))
+
 (macrolet ((def (ext real)
              `(defun ,ext (package-designator)
-                (,real (find-undeleted-package-or-lose package-designator)))))
+                (,real (%find-package-or-lose package-designator)))))
+  (def package-name package-%name)
+  ;; ANSI says (in the definition of DELETE-PACKAGE) that these, and
+  ;; most other operations, are unspecified for deleted packages.
+  ;; There's no harm in returning NIL from the slot accessors.
   (def package-nicknames package-%nicknames)
   (def package-use-list package-%use-list)
   (def package-used-by-list package-%used-by-list)
@@ -877,42 +914,6 @@ Experimental: interface subject to change."
           :package package
           :format-control format-control
           :format-arguments format-args))
-
-(defmacro do-packages ((package) &body body)
-  ;; Even if iterating over the name -> package mapping were threadsafe
-  ;; (which is isn't), there could nonetheless exist a race between iterators
-  ;; and RENAME-PACKAGE. This is true whether first deleting the old name
-  ;; and then inserting the new, or the other way around.
-  ;; The examples below (only 2 out of many schedulings and choices of insert/delete
-  ;; ordering) show that iteration can produce a package twice, or skip it entirely.
-  ;;
-  ;; Consider the table bins could have oldname in an earlier bin:
-  ;;   bin 1 -> oldname, bin 2 -> newname
-  ;; and suppose we first delete old, the insert new.
-  ;;
-  ;;  Thread1                Thread2
-  ;;  ------------           -------------
-  ;;  read bin 1 = oldname
-  ;;                         delete oldname
-  ;;                         insert newname
-  ;;  read bin 2 = newname
-  ;;
-  ;; So it is produced twice even though it was not really in the table twice.
-  ;; Or we can see it not at all. Suppose bin1 -> newname, bin 2 -> oldname
-  ;;
-  ;;  Thread1                Thread2
-  ;;  ------------           -------------
-  ;;  read bin 1 (initially empty)
-  ;;                         delete oldname
-  ;;                         insert newname
-  ;;  read bin 2 (empty)
-  ;;
-  ;; The situation is further confounded by the fact that the primary name could
-  ;; become a nickname or vice-versa (among all the myriad other things that
-  ;; renaming can do) in which case there is ambiguity about the table cell
-  ;; that is considered the representative one for the package.
-  `(with-package-names ()
-     (do-pkg-table ((,package) *all-packages*) ,@body)))
 
 (defun package-locally-nicknamed-by-list (package-designator)
   "Returns a list of packages which have a local nickname for the designated
@@ -1062,13 +1063,6 @@ Experimental: interface subject to change."
   (if (listp thing)
       (mapcar #'find-undeleted-package-or-lose thing)
       (list (find-undeleted-package-or-lose thing))))
-
-;;; ANSI specifies (in the definition of DELETE-PACKAGE) that PACKAGE-NAME
-;;; returns NIL (not an error) for a deleted package, so this is a special
-;;; case where we want to use bare %FIND-PACKAGE-OR-LOSE instead of
-;;; FIND-UNDELETED-PACKAGE-OR-LOSE.
-(defun package-name (package-designator)
-  (package-%name (%find-package-or-lose package-designator)))
 
 ;;;; operations on symbol hashsets
 
@@ -1109,7 +1103,25 @@ Experimental: interface subject to change."
 (defun package-registry-update (package namelist)
   (declare (type (or list (eql t)) namelist))
   (aver (sb-thread:holding-mutex-p *package-table-lock*))
-  (let* ((n (if (listp namelist) (length namelist) 0))
+  (when (and namelist (not (package-id package)))
+    ;; Registration ensures a non-null id if it can (even for a "deferred" package)
+    (let* ((vector *id->package*)
+           ;; 30 is an arbitrary constant exceeding the number of wired IDs
+           (new-id (position nil vector :start 30)))
+      (when (and (null new-id) (< (length vector) +package-id-overflow+))
+        (let* ((current-length (length vector))
+               (new-length (min (+ current-length 10) +package-id-overflow+))
+               (new-vector (make-array new-length :initial-element nil)))
+          (replace new-vector vector)
+          (setf *id->package* new-vector)
+          (setf new-id current-length
+                vector new-vector)))
+      (when new-id
+        (setf (package-id package) new-id
+              (aref vector new-id) package))))
+  (when (eq namelist 't)
+    (return-from package-registry-update))
+  (let* ((n (length namelist))
          (new-hashes (mapcar #'sxhash namelist))
          (new-keys (make-array (* 2 n)))
          (old-hashes (let ((old-keys (package-keys package)))
@@ -1121,24 +1133,6 @@ Experimental: interface subject to change."
           do (setf (aref new-keys i) name)
              (setf (aref new-keys (1+ i)) hash))
     (when namelist
-      ;; Registration ensures a non-null id if it can (even for a "deferred" package)
-      (unless (package-id package)
-        (let* ((vector *id->package*)
-               ;; 30 is an arbitrary constant exceeding the number of wired IDs
-               (new-id (position nil vector :start 30)))
-          (when (and (null new-id) (< (length vector) +package-id-overflow+))
-            (let* ((current-length (length vector))
-                   (new-length (min (+ current-length 10) +package-id-overflow+))
-                   (new-vector (make-array new-length :initial-element nil)))
-              (replace new-vector vector)
-              (setf *id->package* new-vector)
-              (setf new-id current-length
-                    vector new-vector)))
-          (when new-id
-            (setf (package-id package) new-id
-                  (aref vector new-id) package))))
-      (when (eq namelist 't)
-        (return-from package-registry-update))
       (let* ((old-table *all-packages*)
              (new-table (pkgtable-insert old-table package new-keys)))
         (unless (eq old-table new-table)
@@ -1286,6 +1280,20 @@ Experimental: interface subject to change."
 
 ;;; Delete SYMBOL from TABLE, storing -1 in its place. SYMBOL must exist.
 ;;;
+;;; NOTE: It's possible that NUKE-SYMBOL should never 0-fill the old symbol-hashset if downsizing.
+;;; CLHS nowhere implies that altering accessability of a symbol already _present_ in a package
+;;; counts as INTERNing. Iterating over directly present symbols of a package permits UNINTERN on
+;;; the current symbol, which might rehash the storage vector, creating a new one. To allow it,
+;;; UNINTERN does not 0-fill the old vector, so any observers of that vector still see all symbols
+;;; beyond the cursor. But what if the operation is EXPORT or UNEXPORT? This moves the symbol from
+;;; one table to the other for that same package. EXPORT would remove from internals and move to
+;;; externals. If the internals can down-size and 0-fill (as we do), then symbols beyond the cursor
+;;; are missed. The argument in favaor of allowing EXPORT would seem to be that EXPORT is not
+;;; technically INTERNing in this case. But the argument _against_ allowing EXPORT or UNEXPORT
+;;; is that there is one and only one exception specifically called out as permissible, namely:
+;;;  "the current symbol may be uninterned from the package being traversed."
+;;; If it were _also_ intended to be permissible to EXPORT or UNEXPORT, would it not have said
+;;; that it is permissible to change accessibility ? I'm not sure.
 (defun nuke-symbol (table symbol splat)
   (let* ((string (symbol-name symbol))
          (length (length string))
@@ -1840,10 +1848,22 @@ it is not already present."
   "Add all the PACKAGES-TO-USE to the use list for PACKAGE so that the
 external symbols of the used packages are accessible as internal symbols in
 PACKAGE."
-  (with-package-graph ()
-    (let ((packages (package-listify packages-to-use))
-          (package (find-undeleted-package-or-lose package)))
-
+  ;; These don't have to be continuable errors.
+  ;; Don't signal them while holding the graph lock
+  ;; (Note that we resolve the names outside of any lock.
+  ;; If user code further affects the name -> package mapping while concurrently
+  ;; doing a USE-PACKAGE, that not our problem)
+  (let ((package
+         (let ((pkg (find-undeleted-package-or-lose package)))
+           ;; "package [...] cannot be the KEYWORD package."
+           (when (eq pkg *keyword-package*)
+             (error "~S can't use packages" pkg))
+           pkg))
+        (packages (package-listify packages-to-use)))
+    ;; "packages-to-use ... The KEYWORD package may not be supplied."
+    (when (memq *keyword-package* packages)
+      (error "Can not USE-PACKAGE ~S" *keyword-package*))
+    (with-package-graph ()
       ;; Loop over each package, USE'ing one at a time...
       (with-single-package-locked-error ()
         (dolist (pkg packages)
@@ -1894,7 +1914,7 @@ PACKAGE."
                     (replace (make-array (1+ (length tbls))
                               :initial-element (package-external-symbols pkg))
                              tbls)))
-            (push package (package-%used-by-list pkg)))))))
+            (setf (package-%used-by pkg) nil)))))) ; recomputed on demand
   t)
 
 (defun unuse-package (packages-to-unuse &optional (package (sane-package)))
@@ -1909,8 +1929,7 @@ PACKAGE."
                                      (length packages) packages))
           (setf (package-tables package)
                 (delete (package-external-symbols p) (package-tables package)))
-          (setf (package-%used-by-list p)
-                (remove package (the list (package-%used-by-list p))))))
+          (setf (package-%used-by p) nil))) ; recomputed on demand
       t)))
 
 ;;;; final initialization
@@ -1943,7 +1962,7 @@ PACKAGE."
   ;; (setq *sym-lookups* 0 *sym-hit-1st-try* 0)
   (setf *package-graph-lock* (sb-thread:make-mutex :name "Package Graph Lock"))
   (setf *package-table-lock* (sb-thread:make-mutex :name "Package Table Lock"))
-  (setf *all-packages* #(0 0 0))
+  (setf *all-packages* #(0))
   (setf *package-nickname-ids* (cons (make-info-hashtable :comparator #'pkg-name=
                                                           :hash-function #'sxhash)
                                      1))
@@ -1951,12 +1970,11 @@ PACKAGE."
         "package nicknames")
   (dolist (spec specs)
     (destructuring-bind (pkg external-v internal-v) spec
-      (let ((names (cons (package-%name pkg) (package-%nicknames pkg))))
-        ;; Genesis uses %NAME and KEYS to convey strings to package-cold-init
-        ;; but technically these slots would not be set in a new package.
-        (setf (package-keys pkg) #()
-              (package-%name pkg) nil)
-        (with-package-names () (package-registry-update pkg names)))
+      ;; Genesis conveys the name strings via KEYS in an exceptional but type-correct
+      ;; way. The slot has to be cleared to look like a newly made package.
+      (with-package-names ()
+        (package-registry-update
+         pkg (elt (shiftf (package-keys pkg) #()) 0)))
       ;; the symbol MAKE-TABLE wouldn't magically disappear,
       ;; though its only use be to name an FLET in a function
       ;; hanging on an otherwise uninternable symbol. strange but true :-(
@@ -1974,13 +1992,10 @@ PACKAGE."
             (package-%implementation-packages pkg) nil)))
 
   ;; pass 2 - set the 'tables' slots only after all tables have been made
-  (dolist (item *!initial-package-graph*)
-    (let ((this (find-package (car item)))
-          (use-list (mapcar #'find-package (cdr item))))
-      (dolist (other use-list)
-        (push this (package-%used-by-list other)))
-      (setf (package-tables this)
-            (map 'vector #'package-external-symbols use-list))))
+  (loop for (this . use) in *!initial-package-graph*
+        do (setf (package-tables (find-package this))
+                 (map 'vector (lambda (x) (package-external-symbols (find-package x)))
+                              use)))
 
   (rebuild-package-vector)
   ;; Having made all packages, verify that symbol hashes are good.
@@ -2110,7 +2125,6 @@ PACKAGE."
 ;;; PACKAGE-DESIGNATOR is actually a deleted package, and in that case
 ;;; you generally do want to signal an error instead of proceeding.)
 (defun %find-package-or-lose (package-designator)
-  (declare (optimize allow-non-returning-tail-call))
   (let ((package-designator package-designator))
     (prog () retry
        (let ((result (find-package package-designator)))
@@ -2126,7 +2140,6 @@ PACKAGE."
 ;;; consequences of most operations on deleted packages are
 ;;; unspecified. We try to signal errors in such cases.
 (defun find-undeleted-package-or-lose (package-designator)
-  (declare (optimize allow-non-returning-tail-call))
   (let ((package-designator package-designator))
     (prog () retry
        (let ((maybe-result (%find-package-or-lose package-designator)))
@@ -2202,6 +2215,7 @@ PACKAGE."
                                           (make-symbol-hashset 0))))
               (setf (symtbl-package (package-external-symbols package)) package)
               (with-package-names ()
+                (setf (package-%name package) name)
                 ;; T is an indicator for doing nothing except assigning an ID
                 (package-registry-update package t))
               (setf (gethash name table) package))))))

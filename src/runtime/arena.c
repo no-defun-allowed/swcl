@@ -58,7 +58,8 @@ lispobj sbcl_new_arena(size_t size)
     //   Memblk
     struct arena* arena = ARENA_GET_OS_MEMORY(size);
     memset(arena, 0, sizeof *arena);
-    arena->header = (sizeof (struct arena) / N_WORD_BYTES) << INSTANCE_LENGTH_SHIFT;
+    arena->header = ((sizeof (struct arena) / N_WORD_BYTES) << INSTANCE_LENGTH_SHIFT)
+      | INSTANCE_WIDETAG;
     struct arena_memblk* block =
       (void*)((char*)arena + ALIGN_UP(sizeof (struct arena), 2*N_WORD_BYTES));
     // arenas require threads, but the header for the mutex definition
@@ -179,6 +180,7 @@ void AMD64_SYSV_ABI switch_to_arena(lispobj arena_taggedptr,
         if (th->mixed_tlab.start_addr) gc_close_region(&th->mixed_tlab, PAGE_TYPE_MIXED);
         if (th->cons_tlab.start_addr) gc_close_region(&th->cons_tlab, PAGE_TYPE_CONS);
         release_gc_page_table_lock();
+#if 0 // this causes a data race, the very thing it's trying to avoid
         int arena_index = fixnum_value(arena->index);
         /* If this thread has potentially used this arena previously, see if
          * the TLAB pointers can be restored based on token validity */
@@ -191,6 +193,7 @@ void AMD64_SYSV_ABI switch_to_arena(lispobj arena_taggedptr,
             }
             memset(state, 0, sizeof (arena_state));
         }
+#endif
     } else { // finished with the arena
         gc_assert(th->arena); // must have been an arena in use
         struct arena* old_arena = (void*)native_pointer(th->arena);
@@ -496,9 +499,40 @@ int find_dynspace_to_arena_ptrs(lispobj arena, lispobj result_buffer)
     return result;
 }
 
+static int count_arena_objects(lispobj arena, int *pnchunks)
+{
+    struct arena* a = (void*)native_pointer(arena);
+    struct arena_memblk* blk = (void*)a->uw_first_block;
+    int nobjects = 0;
+    int nchunks = 0;
+    do {
+        ++nchunks;
+        lispobj* where = (void*)ALIGN_UP(((uword_t)blk + sizeof (struct arena_memblk)),
+                                         CHUNK_ALIGN);
+        lispobj* limit = (void*)blk->freeptr;
+        while (where < limit) {
+            if (*where == (uword_t)-1) { // filler
+                where += 2;
+            } else {
+                ++nobjects;
+                where += object_size(where);
+            }
+        }
+        blk = blk->next;
+    } while (blk);
+    *pnchunks = nchunks;
+    return nobjects;
+}
+
 void arena_mprotect(lispobj arena, int option)
 {
 #ifndef LISP_FEATURE_WIN32
+    if (option) { // protecting
+        int nchunks;
+        int count = count_arena_objects(arena, &nchunks); // mainly as a sanity-check
+        fprintf(stderr, "arena_mprotect %p: %d objects in %d chunk(s)\n",
+                (void*)arena, count, nchunks);
+    }
     // PROT_EXEC is not needed. Code blobs always go to dynamic or immobile space
     int prot = option ? PROT_NONE : (PROT_READ|PROT_WRITE /*|PROT_EXEC*/);
     struct arena* a = (void*)native_pointer(arena);
@@ -520,8 +554,8 @@ lispobj arena_find_containing_object(lispobj arena, char* ptr)
     do {
         lispobj* where = (void*)ALIGN_UP(((uword_t)blk + sizeof (struct arena_memblk)),
                                          CHUNK_ALIGN);
-        lispobj* limit = (void*)blk->limit;
-        while (where <  limit) {
+        lispobj* limit = (void*)blk->freeptr;
+        while (where < limit) {
             if (*where == (uword_t)-1) { // filler
                 where += 2;
             } else {
@@ -539,20 +573,40 @@ lispobj arena_find_containing_object(lispobj arena, char* ptr)
 int diagnose_arena_fault(os_context_t* context, char *addr)
 {
 #ifndef LISP_FEATURE_WIN32
+    if (!arena_chain) return 0; // not handled
     lispobj arena = find_containing_arena((lispobj)addr);
-    if (!arena) return 0; // not handled
-    if (arena && ((struct arena*)native_pointer(arena))->hidden == LISP_T) {
-        arena_mprotect(arena, 0); // unprotect it and find the object
-        lispobj obj = arena_find_containing_object(arena, addr);
-        if (obj) {
-            fprintf(stderr, "access @ %p sees hidden arena object @ %p in arena %p\n",
-                    addr, (void*)obj, (void*)arena);
-            fflush(stderr);
-        }
-        //        arena_mprotect(arena, 1); // put it back the way it was
-        lisp_memory_fault_error(context, addr);
-        return 1;
+    struct thread* th = get_sb_vm_thread();
+    struct thread_instance* instance = (void*)native_pointer(th->lisp_thread);
+    lispobj name = instance->name;
+    char *c_string = 0;
+    if (name != NIL) {
+        struct vector* string = (void*)native_pointer(name);
+        if (header_widetag(string->header) == SIMPLE_BASE_STRING_WIDETAG)
+            c_string = (char*)string->data;
     }
-    return 0;
+    fprintf(stderr, "trying diagnose_arena_fault(%p,'%s')\n",
+            addr, c_string);
+    if (!arena) {
+        fprintf(stderr, "fault is not in an arena\n");
+        fflush(stderr);
+        return 0; // not handled
+    }
+    int hidden = ((struct arena*)native_pointer(arena))->hidden == LISP_T;
+    fprintf(stderr, "fault in arena %p [%s]\n", (void*)arena, (hidden ? "HIDDEN" : "visible"));
+    fflush(stderr);
+    if (!hidden) return 0;
+    arena_mprotect(arena, 0); // unprotect it and find the object
+    fprintf(stderr, "unprotected OK\n");
+    fflush(stderr);
+    lispobj obj = arena_find_containing_object(arena, addr);
+    if (!obj) {
+        fprintf(stderr, "could not find containing lispobj\n");
+        fflush(stderr);
+        return 0;
+    }
+    fprintf(stderr, "access of object @ %p\n", (void*)obj);
+    fflush(stderr);
+    lisp_memory_fault_error(context, addr);
 #endif
+    return 1;
 }

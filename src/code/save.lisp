@@ -360,7 +360,6 @@ sufficiently motivated to do lengthy fixes."
 
 sb-c::
 (defun coalesce-debug-info ()
-  #+cheneygc (clrhash sb-di::*compiled-debug-funs*)
   (flet ((debug-source= (a b)
            (and (equal (debug-source-plist a) (debug-source-plist b))
                 (eql (debug-source-created a) (debug-source-created b)))))
@@ -378,7 +377,7 @@ sb-c::
          (declare (ignore size))
          (case widetag
           (#.sb-vm:code-header-widetag
-           (let ((di (sb-vm::%%code-debug-info obj)))
+           (let ((di (%code-debug-info obj)))
              ;; Discard memoized debugger's debug info
              (when (typep di 'sb-c::compiled-debug-info)
                (setf (sb-c::compiled-debug-info-memo-cell di) nil)))

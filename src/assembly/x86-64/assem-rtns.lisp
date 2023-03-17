@@ -223,7 +223,7 @@
 
   (%lea-for-lowtag-test rbx-tn fun fun-pointer-lowtag)
   (inst test :byte rbx-tn lowtag-mask)
-  (inst jmp :nz (entry-point-label 'call-symbol))
+  (inst jmp :nz (make-fixup 'call-symbol :assembly-routine))
   (inst jmp (ea (- (* closure-fun-slot n-word-bytes) fun-pointer-lowtag) fun)))
 
 #+sb-assembling
@@ -245,7 +245,7 @@
   (inst mov fun fdefn)
   (inst jmp (ea (- (* fdefn-raw-addr-slot n-word-bytes) other-pointer-lowtag) fdefn))
   UNDEFINED
-  (inst jmp (entry-point-label 'undefined-tramp))
+  (inst jmp (make-fixup 'undefined-tramp :assembly-routine))
   NOT-CALLABLE
   (inst cmp fun nil-value) ;; NIL doesn't have SYMBOL-WIDETAG
   (inst jmp :e undefined)
@@ -294,7 +294,7 @@
   ;; Here RAX points to catch block containing symbol pointed to by RDX.
   ;; An extra RET gets stuffed after the JMP, but oh well. You can't just change
   ;; the :return-style to :none because that also affects the call sequence.
-  (inst jmp (entry-point-label 'unwind)))
+  (inst jmp (make-fixup 'unwind :assembly-routine)))
 
 ;;; Simply return and enter the loop in UNWIND instead of calling
 ;;; UNWIND directly
@@ -446,7 +446,7 @@
     ((:arg x (descriptor-reg) rdx-offset)
      (:res r (descriptor-reg) rdx-offset))
   (progn x r)
-  (with-registers-preserved (lisp :except rdx-tn)
+  (with-registers-preserved (lisp :except rdx)
     (call-static-fun 'update-object-layout 1)))
 
 (define-assembly-routine (sb-impl::install-hash-table-lock
@@ -456,7 +456,7 @@
     ((:arg x (descriptor-reg) rdx-offset)
      (:res r (descriptor-reg) rdx-offset))
   (progn x r)
-  (with-registers-preserved (lisp :except rdx-tn)
+  (with-registers-preserved (lisp :except rdx)
     (call-static-fun 'sb-impl::install-hash-table-lock 1)))
 
 ;;; From a perspective of reducing code bloat, this asm routine does not merit
@@ -469,7 +469,7 @@
      (:res res (descriptor-reg) rdx-offset))
   (progn c-arg1 c-arg2) ; "use" the args
   ;; Don't preserve the register which holds the lisp return value
-  (with-registers-preserved (c :except rdx-tn)
+  (with-registers-preserved (c :except rdx)
     (pseudo-atomic ()
       (inst call (make-fixup "alloc_code_object" :foreign)))
     (move res rax-tn)))

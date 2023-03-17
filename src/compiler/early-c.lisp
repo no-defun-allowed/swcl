@@ -16,14 +16,22 @@
 (in-package "SB-C")
 
 ;;; ANSI limits on compilation
-(defconstant call-arguments-limit most-positive-fixnum
+;;; On AMD64 we prefer to use the ECX (not RCX) register,
+;;; which means that there can only be 32 bits of precision,
+;;; so accounting for the fixnum tag and 1 bit for the sign,
+;;; this leaves 30 bits. Of course this number is ridiculous
+;;; as a call with that many args would consume 8 GB of stack,
+;;; but it's surely not as ridiculous as MOST-POSITIVE-FIXNUM.
+(defconstant call-arguments-limit
+  #+x86-64 (ash 1 30)
+  #-x86-64 most-positive-fixnum
   "The exclusive upper bound on the number of arguments which may be passed
   to a function, including &REST args.")
-(defconstant lambda-parameters-limit most-positive-fixnum
+(defconstant lambda-parameters-limit call-arguments-limit
   "The exclusive upper bound on the number of parameters which may be specified
   in a given lambda list. This is actually the limit on required and &OPTIONAL
   parameters. With &KEY and &AUX you can get more.")
-(defconstant multiple-values-limit most-positive-fixnum
+(defconstant multiple-values-limit call-arguments-limit
   "The exclusive upper bound on the number of multiple VALUES that you can
   return.")
 

@@ -35,7 +35,7 @@ include ../../output/prefix.def
 
 CFLAGS += -g -Wall -Wundef -Wsign-compare -Wpointer-arith -O3
 ASFLAGS += $(CFLAGS)
-CPPFLAGS += -I. -I../../
+CPPFLAGS += -I.
 
 # Give make access to the target Lisp features.
 include genesis/Makefile.features
@@ -178,7 +178,8 @@ TAGS tags: $(SRCS) $(HEADERS) $(INC)
 	@etags --language=c $(SRCS) $(HEADERS) $(INC) || true
 
 clean:
-	-rm -f *.[do] $(TARGET) ldb unit-tests sbcl.h core *.tmp libsbcl.a shrinkwrap-sbcl* sbcl.mk
+	-rm -f *.[do] ../../tlsf-bsd/tlsf/tlsf.o $(TARGET) *.tmp libsbcl.a sbcl.h \
+ ldb unit-tests libsbcl.a shrinkwrap-sbcl* sbcl.mk core
 
 %.d: %.c sbcl.h
 	@$(CC) $(DEPEND_FLAGS) $(CPPFLAGS) $< > $@.tmp; \

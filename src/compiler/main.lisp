@@ -424,16 +424,9 @@ necessary, since type inference may take arbitrarily long to converge.")
                         (not (component-reanalyze component))
                         (eq (component-reoptimize component) :maybe))
                (maybe-mumble "*")
-               (cond ((retry-delayed-ir1-transforms :optimize)
-                      (maybe-mumble "+")
-                      (setq count 0))
-                     (t
-                      (event ir1-optimize-maxed-out)
-                      (ir1-optimize-last-effort component)
-                      (return)))))
-            ((retry-delayed-ir1-transforms :optimize)
-             (setf count 0)
-             (maybe-mumble "+"))
+               (event ir1-optimize-maxed-out)
+               (ir1-optimize-last-effort component)
+               (return)))
             (t
              (return)))
       (when (setq fastp (>= count *max-optimize-iterations*))
@@ -466,7 +459,7 @@ necessary, since type inference may take arbitrarily long to converge.")
 
 (defun ir1-optimize-phase-1 (component)
   (let ((loop-count 0)
-        (*constraint-propagate* *constraint-propagate*))
+        (constraint-propagate *constraint-propagate*))
     (tagbody
      again
        (loop
@@ -484,7 +477,7 @@ necessary, since type inference may take arbitrarily long to converge.")
                (return)))
         (eliminate-dead-code component)
         (dfo-as-needed component)
-        (when *constraint-propagate*
+        (when constraint-propagate
           (maybe-mumble "Constraint ")
           (constraint-propagate component)
           (when (retry-delayed-ir1-transforms :constraint)
@@ -507,7 +500,7 @@ necessary, since type inference may take arbitrarily long to converge.")
        ;; part, so avoid it.
        (when (retry-delayed-ir1-transforms :ir1-phases)
          (setf loop-count 0
-               *constraint-propagate* nil)
+               constraint-propagate nil)
          (go again)))))
 
 ;;; Do all the IR1 phases for a non-top-level component.
@@ -567,10 +560,10 @@ necessary, since type inference may take arbitrarily long to converge.")
   (defun code-immobile-p (thing)
     #+sb-xc-host (declare (ignore thing)) #+sb-xc-host t
     #-sb-xc-host
-    (let ((component (typecase thing
+    (let ((component (etypecase thing
                        (vop  (node-component (vop-node thing)))
                        (node (node-component thing))
-                       (t    thing))))
+                       (component thing))))
       (eq (component-mem-space component) :immobile))))
 
 (defun %compile-component (component)
@@ -588,11 +581,6 @@ necessary, since type inference may take arbitrarily long to converge.")
   (when (or (ir2-component-values-receivers (component-info component))
             (component-dx-lvars component))
     (maybe-mumble "Stack ")
-    ;; STACK only uses dominance information for DX LVAR back
-    ;; propagation (see BACK-PROPAGATE-ONE-DX-LVAR).
-    (when (component-dx-lvars component)
-      (clear-dominators component)
-      (find-dominators component))
     (stack-analyze component)
     ;; Assign BLOCK-NUMBER for any cleanup blocks introduced by
     ;; stack analysis. There shouldn't be any unreachable code after
@@ -772,6 +760,8 @@ necessary, since type inference may take arbitrarily long to converge.")
     (environment-analyze component)
     (dfo-as-needed component)
 
+    (delete-if-no-entries component)
+
     (if (eq (block-next (component-head component))
             (component-tail component))
         (report-code-deletion)
@@ -861,7 +851,7 @@ necessary, since type inference may take arbitrarily long to converge.")
     (format t "~4TL~D: ~S~:[~; [closure]~]~%"
             (label-id (entry-info-offset entry))
             (entry-info-name entry)
-            (entry-info-closure-p entry)))
+            (entry-info-closure-tn entry)))
   (terpri)
   (pre-pack-tn-stats component *standard-output*)
   (terpri)
@@ -1590,16 +1580,13 @@ necessary, since type inference may take arbitrarily long to converge.")
   (locall-analyze-clambdas-until-done lambdas)
 
   (maybe-mumble "IDFO ")
-  (multiple-value-bind (components top-components hairy-top)
+  (multiple-value-bind (components top-components)
       (find-initial-dfo lambdas)
     (when *check-consistency*
       (maybe-mumble "[Check]~%")
       (check-ir1-consistency (append components top-components)))
 
     (let ((top-level-closure nil))
-      (dolist (component (append hairy-top top-components))
-        (when (pre-environment-analyze-top-level component)
-          (setq top-level-closure t)))
       (dolist (component components)
         (compile-component component)
         (when (replace-toplevel-xeps component)
@@ -1717,7 +1704,7 @@ necessary, since type inference may take arbitrarily long to converge.")
         (sb-impl::*eval-tlf-index* nil)
         (sb-impl::*eval-source-context* nil))
     (handler-case
-        (handler-bind (((satisfies handle-condition-p) #'handle-condition-handler))
+        (handler-bind (((satisfies handle-condition-p) 'handle-condition-handler))
           (with-compilation-values
             (with-compilation-unit ()
               (fasl-dump-partial-source-info info *compile-object*)

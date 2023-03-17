@@ -1729,3 +1729,137 @@
                                 m)))
                        (declare (dynamic-extent x))
                        (print x)))))
+
+(with-test (:name :nested-var)
+  (checked-compile-and-assert
+   ()
+   `(lambda ()
+      (multiple-value-bind (v4 c)
+          (values (vector 1) 2)
+        (let ((m v4))
+          (declare (dynamic-extent m))
+          (eval m))
+        (values (sb-ext:heap-allocated-p v4) c)))
+   (() (values :dynamic 2)))
+  (checked-compile-and-assert
+   ()
+   `(lambda ()
+      (flet ((m (&key v4 c)
+               (let ((m v4))
+                 (declare (dynamic-extent m))
+                 (eval m))
+               (values v4 c)))
+        (let ((m (vector 1)))
+          (m :v4 m)
+          (sb-ext:heap-allocated-p m))))
+   (() :dynamic)))
+
+(with-test (:name :dx-do-propagate-let-var)
+  (checked-compile-and-assert
+   ()
+   '(lambda (z)
+     (let ((x (cons nil (let ((y (list z z z)))
+                          (declare (optimize debug))
+                          y))))
+       (declare (dynamic-extent x))
+       (print x)
+       (print x)
+       (assert (sb-ext:stack-allocated-p x))
+       (assert (sb-ext:stack-allocated-p (cdr x))))
+     nil)
+   ((3) NIL)))
+
+(with-test (:name :dx-anonymous-closure)
+  (checked-compile-and-assert
+   ()
+   '(lambda (z)
+     (let ((x (lambda () (print z))))
+       (declare (dynamic-extent x))
+       (funcall x)
+       (funcall x)
+       (assert (sb-ext:stack-allocated-p x))
+       (funcall x)))
+   ((3) 3)))
+
+(with-test (:name :dx-anonymous-closure-otherwise-inaccessible)
+  (checked-compile-and-assert
+   ()
+   '(lambda (x)
+     (let ((y (cons (lambda () (print x))
+                    (lambda () (print x)))))
+       (declare (dynamic-extent y))
+       (print y)
+       (assert (sb-ext:stack-allocated-p y))
+       (assert (sb-ext:stack-allocated-p (car y)))
+       (assert (sb-ext:stack-allocated-p (cdr y)))
+       (print y)
+       (funcall (car y))))
+   ((3) 3)))
+
+(with-test (:name :dx-anonymous-closure-otherwise-inaccessible.flet)
+  (checked-compile-and-assert
+   ()
+   '(lambda (x)
+     (let ((y (cons (flet ((g () (print x)))
+                      #'g)
+                    (lambda () (print x)))))
+       (declare (dynamic-extent y))
+       (print y)
+       (assert (sb-ext:stack-allocated-p y))
+       (assert (sb-ext:stack-allocated-p (car y)))
+       (assert (sb-ext:stack-allocated-p (cdr y)))
+       (print y)
+       (funcall (car y))))
+   ((3) 3)))
+
+(defun known-function-autodx (x thing list)
+  (subst-if x (lambda (y) (eq y thing)) list))
+
+(with-test (:name :auto-dx-known-functions-too)
+  (assert (equal (known-function-autodx 3 4 (list 1 2 3 4)) '(1 2 3 3)))
+  (assert-no-consing (known-function-autodx 3 4 nil)))
+
+;;; It's difficult to isolate the runtime effect of no consing for the
+;;; closure in this case, so just check we don't get a note about
+;;; stack allocation at compile time.
+(with-test (:name :auto-dx-known-functions-too.transform)
+  (checked-compile-and-assert
+   (:allow-notes nil
+    :optimize '(:speed 1))
+   '(lambda (y list)
+     (map 'vector (lambda (x) (+ x y)) list))
+   ((3 '(1 2 3 4)) #(4 5 6 7) :test #'equalp)))
+
+(defun known-function-autodx-transform (array x list)
+  (map-into array (lambda (y) (+ x y)) list)
+  array)
+
+#+(or) ;; this test doesn't work on some platforms for some
+       ;; reason. maybe because of the assert no consing?
+(with-test (:name :auto-dx-known-functions-too.transform-2)
+  (let ((array (make-array 4)))
+    (declare (dynamic-extent array))
+    (assert (equalp (known-function-autodx-transform array 3 (list 1 2 3 4)) #(4 5 6 7)))
+    (assert-no-consing (known-function-autodx-transform array 3 nil))))
+
+(defun auto-dx-cleaned-up-too-many-times (off array)
+  (let ((acc 0))
+    (flet ((positivep (num) (plusp (+ num off))))
+      (dotimes (i 10)
+        (incf acc (position-if #'positivep array))))
+    acc))
+
+(with-test (:name :auto-dx-cleaned-up-too-many-times)
+  (assert (= (auto-dx-cleaned-up-too-many-times 1 #(-1 2 3)) 10)))
+
+(with-test (:name :auto-dx-correct-mess-up)
+  (checked-compile-and-assert
+   (:allow-notes nil
+    :optimize '(:speed 1))
+   '(lambda (x y z)
+     (map 'list
+      (lambda (a b)
+        (+ z a b))
+      x
+      y))
+   (('(1 2 3 4) '(1 2 3 4) 1) '(3 5 7 9) :test #'equal)))

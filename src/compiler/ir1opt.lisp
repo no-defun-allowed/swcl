@@ -348,12 +348,9 @@
           (when (and (ref-p node)
                      (lambda-var-p (ref-leaf node)))
             (let ((type (single-value-type int)))
-              (when (and (and (boundp '*component-being-compiled*)
-                              (eq (node-component node) *component-being-compiled*))
-                         (member-type-p type)
+              (when (and (member-type-p type)
                          (eql (member-type-size type) 1)
                          (not (preserve-single-use-debug-var-p node (ref-leaf node))))
-
                 (change-ref-leaf node (find-constant
                                        (first (member-type-members type)))))))
           (reoptimize-lvar lvar)))))
@@ -679,7 +676,8 @@
 ;;; results of the calls.
 (defun ir1-optimize-return (node)
   (declare (type creturn node))
-  (let ((lambda (return-lambda node)))
+  (let ((lambda (return-lambda node))
+        single-value-p)
     (when (and
            (singleton-p (tail-set-funs (lambda-tail-set lambda)))
            (dolist (ref (leaf-refs lambda)
@@ -690,38 +688,51 @@
                (unless (and (combination-p combination)
                             (eq (combination-kind combination) :local)
                             (eq (combination-fun combination) lvar)
-                            (not (or (node-lvar combination)
+                            (not (or (and (node-lvar combination)
+                                          (not (setf single-value-p
+                                                     (lvar-single-value-p (node-lvar combination)))))
                                      (node-tail-p combination))))
                  (return)))))
       ;; Delete the uses if the result is not used anywhere
       (let* ((lvar (return-result node))
              (combination (lvar-uses lvar)))
-        (unless (or (and (combination-p combination)
-                         (lvar-fun-is (combination-fun combination) '(values))
-                         (null (combination-args combination)))
-                    (do-uses (node lvar)
-                      (typecase node
-                        (combination
-                         ;; Don't unlink non flushable combinations
-                         ;; because they can be tail called.
-                         (unless (flushable-combination-p node)
-                           (return t))))))
-          (let ((ctran (make-ctran))
-                (new-lvar (make-lvar node)))
-            (setf (ctran-next (node-prev node)) nil)
-            (flush-dest lvar)
-            (with-ir1-environment-from-node node
-              (ir1-convert (node-prev node) ctran new-lvar  '(values)))
-            (setf (return-result node) new-lvar)
-
-            (link-node-to-previous-ctran node ctran)
-            (dolist (ref (leaf-refs lambda))
-              (let* ((lvar (node-lvar ref))
-                     (combination (lvar-dest lvar)))
-                (setf (node-derived-type combination) *wild-type*)))
-            (setf (return-result-type node) *wild-type*
-                  (tail-set-type (lambda-tail-set lambda)) *wild-type*)
-            (return-from ir1-optimize-return)))))
+        (flet ((erase-types ()
+                 (dolist (ref (leaf-refs lambda))
+                   (let* ((lvar (node-lvar ref))
+                          (combination (lvar-dest lvar)))
+                     (setf (node-derived-type combination) *wild-type*)))
+                 (setf (return-result-type node) *wild-type*
+                       (tail-set-type (lambda-tail-set lambda)) *wild-type*)
+                 (do-uses (use lvar)
+                   (reoptimize-node use))
+                 (let ((defined-fun (functional-inline-expanded lambda)))
+                   (when (defined-fun-p defined-fun)
+                     (setf (defined-fun-functional defined-fun) nil)))))
+          (cond ((do-uses (node lvar)
+                   (typecase node
+                     (combination
+                      ;; Don't unlink non flushable combinations
+                      ;; because they can be tail called.
+                      (unless (flushable-combination-p node)
+                        (return t))))))
+                (single-value-p
+                 (unless (type-single-value-p (lvar-derived-type lvar))
+                   (filter-lvar lvar (lambda (x) `(values ,x)))
+                   (erase-types)
+                   (return-from ir1-optimize-return)))
+                ((not (and (combination-p combination)
+                           (lvar-fun-is (combination-fun combination) '(values))
+                           (null (combination-args combination))))
+                 (let ((ctran (make-ctran))
+                       (new-lvar (make-lvar node)))
+                   (setf (ctran-next (node-prev node)) nil)
+                   (flush-dest lvar)
+                   (with-ir1-environment-from-node node
+                     (ir1-convert (node-prev node) ctran new-lvar '(values)))
+                   (setf (return-result node) new-lvar)
+                   (link-node-to-previous-ctran node ctran)
+                   (erase-types)
+                   (return-from ir1-optimize-return)))))))
     (tagbody
      :restart
        (let* ((tails (lambda-tail-set lambda))
@@ -854,13 +865,13 @@
                                               (pushnew node (lvar-dependent-nodes lvar)
                                                        :test #'eq))
                                          nil))))
-             (let* ((lvar (lambda-var-ref-lvar ref))
+             (let* ((initial-value (let-var-initial-value var))
                     (lambda (lambda-var-home var))
                     (good-lambda-shape (= (length (lambda-vars lambda)) 1)))
-               (when (and lvar
-                          (listp (lvar-uses lvar)))
-                 (do-uses (use lvar)
-                   (when (and (immediately-used-p lvar use)
+               (when (and (null (lambda-var-sets var))
+                          (listp (lvar-uses initial-value)))
+                 (do-uses (use initial-value)
+                   (when (and (immediately-used-p initial-value use)
                               (type= (single-value-type (node-derived-type use))
                                      (specifier-type 'null))
                               (eq (block-last (node-block use)) use)
@@ -1058,111 +1069,6 @@
        "The return value of ~A should not be discarded."
        (lvar-fun-name (basic-combination-fun node) t)))))
 
-(defglobal *debug-auto-dx* nil)
-;;; Generalized transform: For each downward funarg, unless it is
-;;; a global var (like #'EQL), or the user already DXified,
-;;; or this transform already ran, then try to wrap in DX-FLET.
-;;; Change the call only if at least one DXable arg is known
-;;; to be a fuction. If no eligible arg is, then do nothing.
-;;; For now this only works on globally named functions.
-(defun dxify-downward-funargs (node dxable-args fun-name)
-  (when *debug-auto-dx*
-    (format t "~&DXifying funargs to ~S~%" fun-name))
-  (let* ((dx-flets)
-         (received-args)
-         (passed-args))
-    ;; Experience shows that users place incorrect DYNAMIC-EXTENT declarations
-    ;; without due consideration and care. Since the declaration was ignored
-    ;; in more contexts than not, it was relatively harmless.
-    ;; In light of that, only make this transform if willing to generate
-    ;; wrong code, or if the declaration can be trusted.
-    ;; [It's seems to be true that users who want this are OK with lack of
-    ;; tail-callability and/or potential stack exhaustion due to the assumption
-    ;; that callers should always use more stack space. You should really
-    ;; only do that if you don't also need an arbitrarily long call chain.
-    ;; MAP and friends are good examples where this pertains]
-    (when #+sb-xc-host t ; always trust our own code
-          #-sb-xc-host
-          (or (let ((pkg (sb-xc:symbol-package (fun-name-block-name fun-name))))
-                ;; callee "probably" won't get redefined
-                (or (not pkg) (package-locked-p pkg)))
-              (policy node (= safety 0)))
-      (dolist (arg-spec dxable-args)
-        (when (symbolp arg-spec)
-          ;; If there are keywords, we had better have a FUN-TYPE
-          (let ((fun-type (lvar-type (combination-fun node))))
-            ;; Can't do anything unless we can ascertain where
-            ;; the keyword arguments start.
-            (when (fun-type-p fun-type)
-              (let* ((keys-index
-                      (+ (length (fun-type-required fun-type))
-                         (length (fun-type-optional fun-type))))
-                     (keywords-supplied
-                      (nthcdr keys-index (combination-args node))))
-                ;; Everything in a keyword position needs to be
-                ;; constant, or else no transform occurs.
-                (loop
-                   (unless (cdr keywords-supplied) (return))
-                   (let ((keyword (car keywords-supplied)))
-                     (unless (constant-lvar-p keyword)
-                       (return))
-                     (when (eq (lvar-value keyword) arg-spec)
-                       ;; Map it to a positional arg
-                       (setq arg-spec (1+ keys-index))
-                       (return))
-                     (setq keywords-supplied (cddr keywords-supplied))
-                     (incf keys-index 2)))))))
-        (when (integerp arg-spec)
-          ;; OK, turn the Nth argument into a dx-flet
-          (let* ((arg (or (nth arg-spec (combination-args node))
-                          (return-from dxify-downward-funargs nil)))
-                 (use (principal-lvar-use arg)))
-            (when (and (ref-p use)
-                       (lambda-p (ref-leaf use))
-                       (neq (leaf-extent (lambda-parent (ref-leaf use)))
-                            'truly-dynamic-extent))
-              (unless received-args
-                (setq received-args
-                      (make-gensym-list (length (combination-args node))))
-                (setq passed-args (copy-list received-args)))
-              (let ((tempname (let ((*gensym-counter* (length dx-flets)))
-                                (gensym "LAMBDA")))
-                    (original-lambda
-                     (functional-inline-expansion
-                      (lambda-entry-fun (ref-leaf use)))))
-                (aver (typep original-lambda '(cons (eql lambda))))
-                (let ((original-lambda-list (second original-lambda)))
-                  ;; KISS - the closure that you're passing can have 0 or more
-                  ;; mandatory args and nothing else.
-                  (unless (intersection original-lambda-list lambda-list-keywords)
-                    (push `(,tempname ,original-lambda-list
-                             (%funcall ,(nth arg-spec received-args)
-                                       ,@original-lambda-list))
-                          dx-flets)
-                    (setf (nth arg-spec passed-args) `#',tempname)))))))))
-    (when dx-flets
-      (let ((new
-             `(lambda ,received-args
-                (dx-flet ,(nreverse dx-flets)
-                  (,@(if (symbolp fun-name) `(,fun-name) `(funcall #',fun-name))
-                   ,@passed-args)))))
-        (when *debug-auto-dx*
-          (format t "->~%~S~%" new))
-        new))))
-
-;;; This does not work. The intent was to prepend this transform to the list
-;;; of (FUN-INFO-TRANSFORMS INFO) when applicable, in the known fun case.
-;;; But the reason it doesn't work isn't that the transform doesn't transform
-;;; the code - it does; but compiler doesn't appear to respect the DX-FLET.
-(defglobal *dxify-args-transform*
-  (make-transform :type (specifier-type 'function)
-                  :%fun (lambda (node)
-                              "auto-DX"
-                              (or (let ((name (combination-fun-source-name node)))
-                                    (dxify-downward-funargs
-                                     node (fun-name-dx-args name) name))
-                                  (give-up-ir1-transform)))))
-
 (defun check-proper-sequences (combination info)
   (when (fun-info-annotation info)
     (map-combination-args-and-types
@@ -1233,14 +1139,8 @@
                               (and (fun-type-p defined-type)
                                    (not (fun-type-p type))))
                       (validate-call-type node type leaf)))
-                  (if (neq (basic-combination-kind node) kind)
-                      (ir1-optimize-combination node)
-                      (binding* ((name (and leaf ;; don't want to transform CASTs
-                                            (lvar-fun-name fun))
-                                       :exit-if-null)
-                                 (dxable-args (fun-name-dx-args name) :exit-if-null))
-                        (awhen (dxify-downward-funargs node dxable-args name)
-                          (transform-call node it name))))))))
+                  (unless (eq (basic-combination-kind node) kind)
+                    (ir1-optimize-combination node))))))
         (:known
          (aver info)
          (clear-reoptimize-args)
@@ -1258,8 +1158,7 @@
                         (not (constant-lvar-p (second args))))
                (setf (basic-combination-args node) (nreverse args))))
 
-           (let ((fun-source-name (combination-fun-source-name node))
-                 (optimizer (fun-info-optimizer info)))
+           (let ((optimizer (fun-info-optimizer info)))
              (unless (and optimizer (funcall optimizer node))
                ;; First give the VM a peek at the call
                (multiple-value-bind (style transform)
@@ -1271,14 +1170,9 @@
                    (:transform
                     ;; The VM mostly knows how to handle this.  We need
                     ;; to massage the call slightly, though.
-                    (transform-call node transform fun-source-name))
+                    (transform-call node transform (combination-fun-source-name node)))
                    ((:default :maybe)
                     ;; Let transforms have a crack at it.
-                    ;; We should always try with the dxify-args transform,
-                    ;; but ironically it *does* *not* *work* for any function
-                    ;; that has FUNCTION-DESIGNATOR in its arg signature
-                    ;; (pretty much any CL: function). This is just sad.
-                    ;; Are type checks getting in the way?
                     (or (try-equality-constraint node)
                         (dolist (x (fun-info-transforms info))
                           (when (eq show :all)
@@ -1646,17 +1540,11 @@
 ;;;
 ;;; DELAY-IR1-TRANSFORM is used to throw out of an IR1 transform, and
 ;;; delay the transform on the node until later. REASONS specifies
-;;; when the transform will be later retried. The :OPTIMIZE reason
-;;; causes the transform to be delayed until after the current IR1
-;;; optimization pass. The :CONSTRAINT reason causes the transform to
-;;; be delayed until after constraint propagation.
-;;;
-;;; FIXME: Now (0.6.11.44) that there are 4 variants of this (GIVE-UP,
-;;; ABORT, DELAY/:OPTIMIZE, DELAY/:CONSTRAINT) and we're starting to
-;;; do CASE operations on the various REASON values, it might be a
-;;; good idea to go OO, representing the reasons by objects, using
-;;; CLOS methods on the objects instead of CASE, and (possibly) using
-;;; SIGNAL instead of THROW.
+;;; when the transform will be later retried. The :IR1-PHASES reason
+;;; causes the transform to be delayed until after the current
+;;; IR1-OPTIMIZE-PHASE-1 optimization pass. The :CONSTRAINT reason
+;;; causes the transform to be delayed until after constraint
+;;; propagation.
 (defun give-up-ir1-transform (&rest args)
   (throw 'give-up-ir1-transform (values :failure args)))
 (defun abort-ir1-transform (&rest args)
@@ -1741,6 +1629,12 @@
   (declare (type combination call) (list res))
   (aver (and (legal-fun-name-p source-name)
              (not (eql source-name '.anonymous.))))
+  ;; Try and DXify downward funargs before any transformation happens
+  ;; so that we get the right scoping information.
+  (when source-name
+    (let ((dxable-args (fun-name-dx-args source-name)))
+      (when dxable-args
+        (dxify-downward-funargs call dxable-args source-name))))
   (node-ends-block call)
   (setf (combination-lexenv call)
         (make-lexenv :default (combination-lexenv call)
@@ -2299,7 +2193,7 @@
                      (propagate-to-refs var type)
                      (unless (preserve-single-use-debug-var-p call var)
                        (update-lvar-dependencies leaf arg)
-                       (propagate-ref-dx use arg)
+                       (propagate-ref-dx use arg var)
                        (let ((use-component (node-component use)))
                          (substitute-leaf-if
                           (lambda (ref)
@@ -2327,8 +2221,8 @@
 ;;; variable, we compute the union of the types across all calls and
 ;;; propagate this type information to the var's refs.
 ;;;
-;;; If the function has an entry-fun, then we don't do anything: since
-;;; it has a XEP we would not discover anything.
+;;; If the function has an XEP, then we don't do anything, since we
+;;; won't discover anything.
 ;;;
 ;;; If the function is an optional-entry-point, we will just make sure
 ;;; &REST lists are known to be lists. Doing the regular rigamarole
@@ -2376,7 +2270,23 @@
 
           (loop for var in vars
                 and type in union
-                when type do (propagate-to-refs var type)))))
+                when type do (propagate-to-refs var type))
+
+          ;; It's possible to discover new inline calls which may have
+          ;; incompatible argument types, so don't allow reuse of this
+          ;; functional during future inline expansion to prevent
+          ;; spurious type conflicts.
+          (let ((defined-fun (functional-inline-expanded fun)))
+            (when (defined-fun-p defined-fun)
+              (do ((args (basic-combination-args call) (cdr args))
+                   (vars vars (cdr vars)))
+                  ((null args))
+                (let ((arg (car args))
+                      (var (car vars)))
+                  (unless (and arg
+                               (eq (leaf-type var) *universal-type*))
+                    (setf (defined-fun-functional defined-fun) nil)
+                    (return)))))))))
 
   (values))
 

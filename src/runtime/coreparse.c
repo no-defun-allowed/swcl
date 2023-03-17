@@ -541,24 +541,8 @@ static void relocate_space(uword_t start, lispobj* end, struct heap_adjust* adj)
                 FIXUP(where[1] += delta, where+1);
             }
             continue;
-        case BIGNUM_WIDETAG:
-#ifndef LISP_FEATURE_64_BIT
-        case SINGLE_FLOAT_WIDETAG:
-#endif
-        case DOUBLE_FLOAT_WIDETAG:
-        case COMPLEX_SINGLE_FLOAT_WIDETAG:
-        case COMPLEX_DOUBLE_FLOAT_WIDETAG:
-#ifdef SIMD_PACK_WIDETAG
-        case SIMD_PACK_WIDETAG:
-#endif
-#ifdef SIMD_PACK_256_WIDETAG
-        case SIMD_PACK_256_WIDETAG:
-#endif
-        case FILLER_WIDETAG: // non-card-spanning object pages container fillers
-            continue;
         default:
-          if (other_immediate_lowtag_p(widetag)
-              && specialized_vector_widetag_p(widetag))
+          if (other_immediate_lowtag_p(widetag) && leaf_obj_widetag_p(widetag))
               continue;
           else
               lose("Unrecognized heap object: @%p: %"OBJ_FMTX, where, *where);
@@ -1061,7 +1045,11 @@ load_core_file(char *file, os_vm_offset_t file_offset, int merge_core_pages)
 char* get_asm_routine_by_name(const char* name, int *index)
 {
     struct code* code = (struct code*)asm_routines_start;
+#ifdef LISP_FEATURE_DARWIN_JIT
     lispobj ht = CONS(code->debug_info)->car;
+#else
+    lispobj ht = code->debug_info;
+#endif
     if (ht) {
         struct vector* table =
             VECTOR(((struct hash_table*)native_pointer(ht))->pairs);

@@ -416,11 +416,29 @@ STRING (or the subsequence bounded by START and END)."
   ;; All synonyms of that name will also references the loaded format.
   (let* ((entry (apply #'%make-external-format :names names args))
          (table *external-formats*)
-         (free-index (position nil table)))
+         (free-index (or (get (car names) :external-format)
+                         (position nil table))))
     (dolist (name names)
       (setf (get name :external-format) free-index))
     (setf (aref table free-index) entry)))
 
+(defun wrap-external-format-functions (external-format fun)
+  (let ((result (%copy-external-format external-format)))
+    (macrolet ((frob (accessor)
+                 `(setf (,accessor result) (funcall fun (,accessor result)))))
+      (frob ef-read-n-chars-fun)
+      (frob ef-read-char-fun)
+      (frob ef-write-n-bytes-fun)
+      (frob ef-write-char-none-buffered-fun)
+      (frob ef-write-char-line-buffered-fun)
+      (frob ef-write-char-full-buffered-fun)
+      (frob ef-resync-fun)
+      (frob ef-bytes-for-char-fun)
+      (frob ef-read-c-string-fun)
+      (frob ef-write-c-string-fun)
+      (frob ef-octets-to-string-fun)
+      (frob ef-string-to-octets-fun))
+    result))
 ;;; This function was moved from 'fd-stream' because it depends on
 ;;; the various error classes, two of which are defined just above.
 ;;; XXX: Why does this get called with :DEFAULT and NIL when neither is

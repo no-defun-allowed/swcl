@@ -2519,7 +2519,12 @@ int sb_introspect_pinnedp(lispobj obj) {
  */
 #define PAGE_PINNED 0xFF
 #ifdef LISP_FEATURE_MARK_REGION_GC
-static void preserve_pointer(lispobj object) { mr_preserve_ambiguous(object); }
+static void preserve_pointer(lispobj object, int __attribute__((unused)) contextp) {
+    /* The mark-region GC never filters based on type tags,
+     * so it already covers the special case of untagged instance
+     * pointers in registers. */
+    mr_preserve_ambiguous(object);
+}
 #else
 static void pin_object(lispobj object)
 {
@@ -2583,7 +2588,7 @@ static void pin_object(lispobj object)
  * It is also assumed that the current gc_alloc() region has been
  * flushed and the tables updated. */
 
-static boolean NO_SANITIZE_MEMORY preserve_pointer(uword_t word)
+static boolean NO_SANITIZE_MEMORY preserve_pointer(uword_t word, int contextp)
 {
 #ifdef LISP_FEATURE_METASPACE
     extern lispobj valid_metaspace_ptr_p(void* addr);
@@ -2604,11 +2609,21 @@ static boolean NO_SANITIZE_MEMORY preserve_pointer(uword_t word)
             && valid_metaspace_ptr_p((void*)word)) {
             lispobj wrapper = LAYOUT(word)->friend;
             // fprintf(stderr, "stack -> metaspace ptr %p -> %p\n", addr, (void*)wrapper);
-            preserve_pointer((void*)wrapper);
+            preserve_pointer((void*)wrapper, contextp);
         }
 #endif
         return 0;
     }
+
+    // Special case for untagged instance pointers in registers. This might belong in
+    // conservative_root_p() but the pointer has to be adjusted here or else the wrong
+    // value will be inserted into 'pinned_objects' (which demands tagged pointers)
+    if (contextp && lowtag_of(word) == 0 &&
+        (page_table[page].type == PAGE_TYPE_MIXED ||
+         page_table[page].type == PAGE_TYPE_SMALL_MIXED) &&
+        widetag_of((lispobj*)word) == INSTANCE_WIDETAG)
+        word |= INSTANCE_POINTER_LOWTAG;
+
     lispobj object = conservative_root_p(word, page);
     if (!object) return 0;
     if (object != AMBIGUOUS_POINTER) {
@@ -2639,7 +2654,7 @@ static boolean NO_SANITIZE_MEMORY preserve_pointer(uword_t word)
  * prior to storing. If GC occurs in between setting the mark and storing,
  * then resetting the mark would be wrong if the subsequent store
  * creates an old->young pointer.
- * Mark stickiness is checked only once per invocation of collect_garbge(),
+ * Mark stickiness is checked only once per invocation of collect_garbage(),
  * so it when scanning interrupt contexts for generation 0 but not higher gens.
  * Also note the two scenarios:
  * (1) tagged pointer to a large simple-vector, but we scan card-by-card
@@ -2657,7 +2672,7 @@ static boolean NO_SANITIZE_MEMORY preserve_pointer(uword_t word)
 #ifdef LISP_FEATURE_SOFT_CARD_MARKS
 // registers can be wider than words. This could accept uword_t as the arg type
 // but I like it to be directly callable with os_context_register.
-static void sticky_preserve_pointer(os_context_register_t register_word)
+static void sticky_preserve_pointer(os_context_register_t register_word, int contextp)
 {
     uword_t word = register_word;
     if (is_lisp_pointer(word)) {
@@ -2689,7 +2704,7 @@ static void sticky_preserve_pointer(os_context_register_t register_word)
             }
         }
     }
-    preserve_pointer(word);
+    preserve_pointer(word, contextp);
 }
 #endif
 
@@ -3583,54 +3598,6 @@ write_protect_generation_pages(generation_index_t generation)
 #endif
 }
 
-#if !GENCGC_IS_PRECISE
-static void
-preserve_context_registers (void __attribute__((unused)) (*proc)(os_context_register_t),
-                            os_context_t __attribute__((unused)) *c)
-{
-#ifdef LISP_FEATURE_SB_THREAD
-    /* On Darwin the signal context isn't a contiguous block of memory,
-     * so just preserve_pointering its contents won't be sufficient.
-     */
-#if defined(LISP_FEATURE_DARWIN)||defined(LISP_FEATURE_WIN32)
-#if defined LISP_FEATURE_X86
-    proc(*os_context_register_addr(c,reg_EAX));
-    proc(*os_context_register_addr(c,reg_ECX));
-    proc(*os_context_register_addr(c,reg_EDX));
-    proc(*os_context_register_addr(c,reg_EBX));
-    proc(*os_context_register_addr(c,reg_ESI));
-    proc(*os_context_register_addr(c,reg_EDI));
-    proc(os_context_pc(c));
-#elif defined LISP_FEATURE_X86_64
-    proc(*os_context_register_addr(c,reg_RAX));
-    proc(*os_context_register_addr(c,reg_RCX));
-    proc(*os_context_register_addr(c,reg_RDX));
-    proc(*os_context_register_addr(c,reg_RBX));
-    proc(*os_context_register_addr(c,reg_RSI));
-    proc(*os_context_register_addr(c,reg_RDI));
-    proc(*os_context_register_addr(c,reg_R8));
-    proc(*os_context_register_addr(c,reg_R9));
-    proc(*os_context_register_addr(c,reg_R10));
-    proc(*os_context_register_addr(c,reg_R11));
-    proc(*os_context_register_addr(c,reg_R12));
-    proc(*os_context_register_addr(c,reg_R13));
-    proc(*os_context_register_addr(c,reg_R14));
-    proc(*os_context_register_addr(c,reg_R15));
-    proc(os_context_pc(c));
-#else
-    #error "preserve_context_registers needs to be tweaked for non-x86 Darwin"
-#endif
-#endif
-#if !defined(LISP_FEATURE_WIN32)
-    void **ptr;
-    for(ptr = ((void **)(c+1))-1; ptr>=(void **)c; ptr--) {
-        proc((os_context_register_t)*ptr);
-    }
-#endif
-#endif // LISP_FEATURE_SB_THREAD
-}
-#endif
-
 static void
 move_pinned_pages_to_newspace()
 {
@@ -3727,22 +3694,22 @@ static void semiconservative_pin_stack(struct thread* th,
         for(j=1; j<32; ++j) {
             // context registers have more significant bits than lispobj.
             uword_t word = mctx->gregs[j];
-            if (gen == 0) sticky_preserve_pointer(word);
-            else preserve_pointer(word);
+            if (gen == 0) sticky_preserve_pointer(word, 1);
+            else preserve_pointer(word, 1);
         }
 #elif defined LISP_FEATURE_PPC64
         static int boxed_registers[] = BOXED_REGISTERS;
         for (j = (int)(sizeof boxed_registers / sizeof boxed_registers[0])-1; j >= 0; --j) {
             lispobj word = *os_context_register_addr(context, boxed_registers[j]);
-            if (gen == 0) sticky_preserve_pointer(word);
-            else preserve_pointer(word);
+            if (gen == 0) sticky_preserve_pointer(word, 1);
+            else preserve_pointer(word, 1);
         }
         // What kinds of data do we put in the Count register?
         // maybe it's count (raw word), maybe it's a PC. I just don't know.
-        preserve_pointer(*os_context_lr_addr(context));
-        preserve_pointer(*os_context_ctr_addr(context));
+        preserve_pointer(*os_context_lr_addr(context), 1);
+        preserve_pointer(*os_context_ctr_addr(context), 1);
 #endif
-        preserve_pointer(os_context_pc(context));
+        preserve_pointer(os_context_pc(context), 1);
     }
 }
 #endif
@@ -3783,6 +3750,8 @@ static void pin_call_chain_and_boxed_registers(struct thread* th) {
 #endif
 
 #if !GENCGC_IS_PRECISE
+extern void visit_context_registers(void (*proc)(os_context_register_t, int),
+                                    os_context_t *context);
 static void NO_SANITIZE_ADDRESS NO_SANITIZE_MEMORY
 conservative_stack_scan(struct thread* th,
                         __attribute__((unused)) generation_index_t gen,
@@ -3802,11 +3771,11 @@ conservative_stack_scan(struct thread* th,
      * sigcontext, though there could, in theory be if it performs
      * GC while handling an interruption */
 
-    __attribute__((unused)) void (*context_method)(os_context_register_t) =
+    __attribute__((unused)) void (*context_method)(os_context_register_t,int) =
 #ifdef LISP_FEATURE_SOFT_CARD_MARKS
-        gen == 0 ? sticky_preserve_pointer : (void (*)(os_context_register_t))preserve_pointer;
+        gen == 0 ? sticky_preserve_pointer : (void (*)(os_context_register_t,int))preserve_pointer;
 #else
-        (void (*)(os_context_register_t))preserve_pointer;
+        (void (*)(os_context_register_t,int))preserve_pointer;
 #endif
 
     void* esp = (void*)-1;
@@ -3833,7 +3802,7 @@ conservative_stack_scan(struct thread* th,
         while (k > 0) {
             os_context_t* context = nth_interrupt_context(--k, th);
             if (context)
-                preserve_context_registers(context_method, context);
+                visit_context_registers(context_method, context);
         }
     }
 #  endif
@@ -3845,7 +3814,7 @@ conservative_stack_scan(struct thread* th,
             th->control_stack_end - th->control_stack_start); */
     for (i = fixnum_value(read_TLS(FREE_INTERRUPT_CONTEXT_INDEX,th))-1; i>=0; i--) {
         os_context_t *c = nth_interrupt_context(i, th);
-        preserve_context_registers(context_method, c);
+        visit_context_registers(context_method, c);
         lispobj* esp1 = (lispobj*) *os_context_register_addr(c,reg_SP);
         if (esp1 >= th->control_stack_start && esp1 < th->control_stack_end && (void*)esp1 < esp)
             esp = esp1;
@@ -3885,11 +3854,7 @@ conservative_stack_scan(struct thread* th,
         // since there is no memory on the 0th page.
         // (most OSes don't let users map memory there, though they used to).
         if (word >= BACKEND_PAGE_BYTES && potential_heap_pointer(word)) {
-#ifdef LISP_FEATURE_MARK_REGION_GC
-            mr_preserve_ambiguous(word);
-#else
-            preserve_pointer(word);
-#endif
+          preserve_pointer(word, 0);
         }
     }
 }
@@ -4116,7 +4081,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
                 // is pseudo-static, but let's use the right pinning function.
                 // (This line of code is so rarely executed that it doesn't
                 // impact performance to search for the object)
-                preserve_pointer(fun);
+                preserve_pointer(fun, 0);
 #else
                 pin_exact_root(fun);
 #endif
@@ -4828,7 +4793,7 @@ collect_garbage(generation_index_t last_gen)
     if (gc_object_watcher) {
         extern void gc_prove_liveness(void(*)(), lispobj, int, uword_t*, int);
 #ifdef LISP_FEATURE_C_STACK_IS_CONTROL_STACK
-        gc_prove_liveness(preserve_context_registers,
+        gc_prove_liveness(visit_context_registers,
                           gc_object_watcher,
                           gc_pin_count, gc_filtered_pins,
                           gc_traceroot_criterion);

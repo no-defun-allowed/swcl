@@ -535,7 +535,13 @@ describe_thread_state(void)
 }
 
 static void print_backtrace_frame(char *pc, void *fp, int i, FILE *f) {
+#ifdef BACKTRACE_SHOW_FRAME_SIZE
+    // This display is a little confusing.  It's the size of the frame that this
+    // frame will return to.
+    fprintf(f, "%4d: fp=%p [%5x] pc=%p ", i, fp, (int)(*(char**)fp-(char*)fp), pc);
+#else
     fprintf(f, "%4d: fp=%p pc=%p ", i, fp, pc);
+#endif
     struct code *code = (void*)component_ptr_from_pc(pc);
     if (code) {
         struct compiled_debug_fun *df = debug_function_from_pc(code, pc);
@@ -595,10 +601,10 @@ void backtrace_from_fp(void *fp, int nframes, int start) {
     log_backtrace_from_fp(get_sb_vm_thread(), fp, nframes, start, stdout);
 }
 
-void backtrace_from_context(os_context_t *context, int nframes) {
+void print_backtrace_from_context(os_context_t *context, int nframes, FILE* file) {
     void *fp = (void *)os_context_frame_pointer(context);
-    print_backtrace_frame((void *)os_context_pc(context), fp, 0, stdout);
-    backtrace_from_fp(fp, nframes - 1, 1);
+    print_backtrace_frame((void *)os_context_pc(context), fp, 0, file);
+    log_backtrace_from_fp(get_sb_vm_thread(), fp, nframes - 1, 1, file);
 }
 
 void
@@ -609,7 +615,7 @@ lisp_backtrace(int nframes)
 
     if (free_ici) {
         os_context_t *context = nth_interrupt_context(free_ici - 1, thread);
-        backtrace_from_context(context, nframes);
+        print_backtrace_from_context(context, nframes, stdout);
     } else {
         void *fp;
 

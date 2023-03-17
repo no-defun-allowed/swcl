@@ -116,12 +116,6 @@
        (2 (weaken-values-type type))
        (3 type)))))
 
-(defun type-contains-fun-type-p (type)
-  (sb-kernel::map-type (lambda (type)
-                         (when (fun-type-p type)
-                           (return-from type-contains-fun-type-p t)))
-                       type))
-
 ;;; LVAR is an lvar we are doing a type check on and TYPES is a list
 ;;; of types that we are checking its values against. If we have
 ;;; proven that LVAR generates a fixed number of values, then for each
@@ -218,7 +212,9 @@
     (and (combination-p dest)
          (or (not (combination-fun-info dest))
              ;; fixed-args functions do not check their arguments.
-             (not (ir1-attributep (fun-info-attributes (combination-fun-info dest)) fixed-args)))
+             (not (ir1-attributep (fun-info-attributes (combination-fun-info dest))
+                                  fixed-args
+                                  always-translatable)))
          ;; The theory is that the type assertion is from a declaration on the
          ;; callee, so the callee should be able to do the check. We want to
          ;; let the callee do the check, because it is possible that by the

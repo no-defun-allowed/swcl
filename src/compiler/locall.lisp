@@ -41,72 +41,47 @@
 ;;; lvars.
 (defun propagate-to-args (call fun)
   (declare (type combination call) (type clambda fun))
-  (loop with policy = (lexenv-policy (node-lexenv call))
-        for args on (basic-combination-args call)
-        for var in (lambda-vars fun)
-        for name = (or (and (lambda-var-arg-info var )
-                            (arg-info-key (lambda-var-arg-info var )))
-                       (lambda-var-%source-name var))
-        do (assert-lvar-type (car args) (leaf-type var) policy
-                             (if (eq (functional-kind fun) :optional)
-                                 (make-local-call-context fun name)
-                                 name))
-           (unless (leaf-refs var)
-             (flush-dest (car args))
-             (setf (car args) nil)))
+  (do ((args (basic-combination-args call) (cdr args))
+       (vars (lambda-vars fun) (cdr vars))
+       (policy (lexenv-policy (node-lexenv call))))
+      ((null args))
+    (let* ((var (car vars))
+           (name (or (and (lambda-var-arg-info var)
+                          (arg-info-key (lambda-var-arg-info var)))
+                     (lambda-var-%source-name var))))
+      (assert-lvar-type (car args) (leaf-type var) policy
+                        (if (eq (functional-kind fun) :optional)
+                            (make-local-call-context fun name)
+                            name))
+      (unless (leaf-refs var)
+        (flush-dest (car args))
+        (setf (car args) nil))))
+
   (values))
 
-;;; Given a local call CALL to FUN, find the associated argument LVARs
-;;; of CALL corresponding to declared dynamic extent LAMBDA-VARs and
-;;; mark them as dynamic extent, setting up the cleanup corresponding
-;;; to the dynamic extent as well. We mark them now so that
-;;; optimizations optimizing away LVARs have the chance to propagate
-;;; the dynamic extent information. Environment analysis is
-;;; responsible for actually deciding if the lvars can be
-;;; dynamic-extent allocated, dealing with transitively marking the
+;;; Given a local call CALL to FUN, mark the associated args of CALL
+;;; corresponding to declared dynamic extent LAMBDA-VARs as dynamic
+;;; extent, setting up the corresponding cleanup. We do this now so
+;;; that the cleanup has the right scope. Environment analysis is
+;;; responsible for actually deciding if the arguments can be
+;;; dynamic-extent allocated, and deals with transitively marking the
 ;;; otherwise-inaccessible parts of these values as dynamic extent as
-;;; well. This is because environment analysis happens after qll major
-;;; changes to the dataflow in IR1 have been done and it is clear
-;;; whether an LVAR is actually used by a combination which can
-;;; dynamic-extent allocate.
-(defun recognize-potentially-dynamic-extent-lvars (call fun)
+;;; well. We do this because environment analysis happens after all
+;;; major changes to the dataflow in IR1 have been done and it is
+;;; clear whether a combination can actually stack allocate it's value.
+(defun mark-dynamic-extent-args (call fun)
   (declare (type combination call) (type clambda fun))
-  ;; The block may end up being deleted due to cast optimization
-  ;; caused by USE-GOOD-FOR-DX-P
-  (unless (node-to-be-deleted-p call)
-    (let* (no-notes
-           (dx-lvars
-             (loop for arg in (basic-combination-args call)
-                   for var in (lambda-vars fun)
-                   for dx = (leaf-dynamic-extent var)
-                   when (and dx arg (not (lvar-dynamic-extent arg)))
-                   collect (cons dx arg)
-                   do
-                   (when (eq dx 'dynamic-extent-no-note)
-                     (setf no-notes dx)))))
-      (when dx-lvars
-        (let* ((entry (with-ir1-environment-from-node call
-                        (make-entry)))
-               (cleanup (make-cleanup :kind :dynamic-extent
-                                      :mess-up entry
-                                      :nlx-info dx-lvars
-                                      :dx-kind no-notes)))
-          (setf (entry-cleanup entry) cleanup)
-          (insert-node-before call entry)
-          (setf (node-lexenv call)
-                (make-lexenv :default (node-lexenv call)
-                             :cleanup cleanup))
-          (setf (ctran-next (node-prev call)) nil)
-          (let ((ctran (make-ctran)))
-            (with-ir1-environment-from-node call
-              (ir1-convert (node-prev call) ctran nil '(%cleanup-point))
-              (link-node-to-previous-ctran call ctran)))
-          ;; Make CALL end its block, so that we have a place to
-          ;; insert cleanup code.
-          (node-ends-block call)
-          (push entry (lambda-entries (node-home-lambda entry)))
-          (dolist (cell dx-lvars)
-            (setf (lvar-dynamic-extent (cdr cell)) cleanup))))))
+  (let (cleanup)
+    (loop for arg in (basic-combination-args call)
+          for var in (lambda-vars fun)
+          do (let ((dx-kind (leaf-dynamic-extent var)))
+               (when (and arg dx-kind (not (lvar-dynamic-extent arg)))
+                 (unless cleanup
+                   (setq cleanup (insert-dynamic-extent-cleanup call)))
+                 (let ((dx-info (make-dx-info :kind dx-kind :value arg
+                                              :cleanup cleanup)))
+                   (setf (lvar-dynamic-extent arg) dx-info)
+                   (push dx-info (cleanup-nlx-info cleanup)))))))
   (values))
 
 ;;; This function handles merging the tail sets if CALL is potentially
@@ -154,23 +129,8 @@
   (declare (type ref ref) (type combination call) (type clambda fun))
   (propagate-to-args call fun)
   (setf (basic-combination-kind call) :local)
-  (let ((fun-environment (lambda-environment fun))
-        (call-home (node-home-lambda call)))
-    ;; FUN might close over top-level variables. Make sure we
-    ;; propagate those in the local call environment.
-    (when fun-environment
-      (dolist (thing (environment-closure fun-environment))
-        (let ((thing-env
-                (lambda-environment
-                 (etypecase thing
-                   (lambda-var (lambda-var-home thing))
-                   (nlx-info (node-home-lambda (exit-entry (nlx-info-exit thing))))
-                   (clambda
-                    (aver (xep-p thing))
-                    (node-home-lambda (xep-enclose thing)))))))
-          (close-over thing (lambda-environment call-home) thing-env))))
-    (sset-adjoin fun (lambda-calls call-home)))
-  (recognize-potentially-dynamic-extent-lvars call fun)
+  (sset-adjoin fun (lambda-calls-or-closes (node-home-lambda call)))
+  (mark-dynamic-extent-args call fun)
   (merge-tail-sets call fun)
   (change-ref-leaf ref fun)
   (values))
@@ -614,7 +574,7 @@
                      (call-all-args-fixed-p call)))
         (aver (= (optional-dispatch-min-args fun) 0))
         (setf (basic-combination-kind call) :local)
-        (sset-adjoin ep (lambda-calls (node-home-lambda call)))
+        (sset-adjoin ep (lambda-calls-or-closes (node-home-lambda call)))
         (merge-tail-sets call ep)
         (change-ref-leaf ref ep)
         (if (singleton-p args)
@@ -721,15 +681,14 @@
 ;;; function that rearranges the arguments and calls the entry point.
 ;;; We analyze the new function and the entry point immediately so
 ;;; that everything gets converted during the single pass.
-(defun convert-hairy-fun-entry (ref call entry vars ignores args indef)
+(defun convert-hairy-fun-entry (ref call entry vars ignores args)
   (declare (list vars ignores args) (type ref ref) (type combination call)
            (type clambda entry))
   (let ((new-fun
          (with-ir1-environment-from-node call
            (ir1-convert-lambda
             `(lambda ,vars
-               (declare (ignorable ,@ignores)
-                        (indefinite-extent ,@indef))
+               (declare (ignorable ,@ignores))
                (%funcall ,entry ,@args))
             :debug-name (debug-name 'hairy-function-entry
                                     (lvar-fun-debug-name
@@ -892,9 +851,7 @@
 
         (convert-hairy-fun-entry ref call (optional-dispatch-main-entry fun)
                                  (append temps more-temps)
-                                 (ignores) (call-args)
-                                 (when (optional-rest-p fun)
-                                   more-temps)))))
+                                 (ignores) (call-args)))))
 
   (values))
 
@@ -1045,12 +1002,13 @@
     (setf (lambda-lets clambda) nil)
 
     ;; HOME no longer calls CLAMBDA, and owns all of CLAMBDA's old
-    ;; calls.
-    (sset-union (lambda-calls home) (lambda-calls clambda))
-    (sset-delete clambda (lambda-calls home))
+    ;; DFO dependencies.
+    (sset-union (lambda-calls-or-closes home)
+                (lambda-calls-or-closes clambda))
+    (sset-delete clambda (lambda-calls-or-closes home))
     ;; CLAMBDA no longer has an independent existence as an entity
-    ;; which calls things.
-    (setf (lambda-calls clambda) nil)
+    ;; which calls things or has DFO dependencies.
+    (setf (lambda-calls-or-closes clambda) nil)
     ;; Make sure the exits that are no longer non-local are deleted
     (loop for entry in (lambda-entries home)
           do (loop for exit in (entry-exits entry)
@@ -1110,39 +1068,40 @@
 ;;; all calls were TR.)
 (defun unconvert-tail-calls (fun call next-block)
   (let (maybe-terminate)
-    (do-sset-elements (called (lambda-calls fun))
-      (dolist (ref (leaf-refs called))
-        (let ((this-call (node-dest ref)))
-          (when (and this-call
-                     (node-tail-p this-call)
-                     (not (node-to-be-deleted-p this-call))
-                     (eq (node-home-lambda this-call) fun))
-            (setf (node-tail-p this-call) nil)
-            (ecase (functional-kind called)
-              ((nil :cleanup :optional)
-               (let ((block (node-block this-call))
-                     (lvar (node-lvar call)))
-                 (unlink-blocks block (first (block-succ block)))
-                 (link-blocks block next-block)
-                 (if (eq (node-derived-type this-call) *empty-type*)
-                     ;; Delay terminating the block, because there may be more calls
-                     ;; to be processed here and this may prematurely delete NEXT-BLOCK
-                     ;; before we attach more preceding blocks to it.
-                     ;; Although probably if one call to a function
-                     ;; is derived to be NIL all other calls would
-                     ;; be NIL too, but that may not be available at the same time.
-                     ;; (Or something is smart in the future to
-                     ;; derive different results from different
-                     ;; calls.)
-                     (push this-call maybe-terminate)
-                     (add-lvar-use this-call lvar))))
-              (:deleted)
-              ;; The called function might be an assignment in the
-              ;; case where we are currently converting that function.
-              ;; In steady-state, assignments never appear as a called
-              ;; function.
-              (:assignment
-               (aver (eq called fun))))))))
+    (do-sset-elements (called (lambda-calls-or-closes fun))
+      (when (lambda-p called)
+        (dolist (ref (leaf-refs called))
+          (let ((this-call (node-dest ref)))
+            (when (and this-call
+                       (node-tail-p this-call)
+                       (not (node-to-be-deleted-p this-call))
+                       (eq (node-home-lambda this-call) fun))
+              (setf (node-tail-p this-call) nil)
+              (ecase (functional-kind called)
+                ((nil :cleanup :optional)
+                 (let ((block (node-block this-call))
+                       (lvar (node-lvar call)))
+                   (unlink-blocks block (first (block-succ block)))
+                   (link-blocks block next-block)
+                   (if (eq (node-derived-type this-call) *empty-type*)
+                       ;; Delay terminating the block, because there may be more calls
+                       ;; to be processed here and this may prematurely delete NEXT-BLOCK
+                       ;; before we attach more preceding blocks to it.
+                       ;; Although probably if one call to a function
+                       ;; is derived to be NIL all other calls would
+                       ;; be NIL too, but that may not be available at the same time.
+                       ;; (Or something is smart in the future to
+                       ;; derive different results from different
+                       ;; calls.)
+                       (push this-call maybe-terminate)
+                       (add-lvar-use this-call lvar))))
+                (:deleted)
+                ;; The called function might be an assignment in the
+                ;; case where we are currently converting that function.
+                ;; In steady-state, assignments never appear as a called
+                ;; function.
+                (:assignment
+                 (aver (eq called fun)))))))))
     maybe-terminate))
 
 ;;; Deal with returning from a LET or assignment that we are
@@ -1286,6 +1245,7 @@
                          (leaf-type var))
               (let ((use-component (node-component use)))
                 (propagate-lvar-annotations-to-refs arg var)
+                (propagate-ref-dx use arg var)
                 (update-lvar-dependencies leaf arg)
                 (substitute-leaf-if
                  (lambda (ref)

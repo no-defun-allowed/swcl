@@ -104,6 +104,7 @@
 #+(or x86 x86-64) (defknown (layout-depthoid-ge) (sb-vm:layout integer) boolean (flushable))
 (defknown %structure-is-a (instance t) boolean (foldable flushable))
 (defknown structure-typep (t t) boolean (foldable flushable))
+(defknown classoid-cell-typep (t t) boolean (foldable flushable no-verify-arg-count))
 (defknown copy-structure (structure-object) structure-object
   (flushable)
   :derive-type #'result-type-first-arg)
@@ -906,6 +907,8 @@
   (call important-result)
   :derive-type (creation-result-type-specifier-nth-arg 0))
 
+;; N.B., sb-simple-streams clobbers this; if this changes, make sure
+;; sb-simple-streams follows along, where necessary.
 (defknown read-sequence ((modifying sequence) stream
                          &key
                          (:start index)
@@ -1477,8 +1480,12 @@
   ()
   :derive-type (read-elt-type-deriver t 'character nil))
 
+;; N.B., sb-simple-streams clobbers this; if this changes, make sure
+;; sb-simple-streams follows along, where necessary.
 (defknown listen (&optional stream-designator) boolean (flushable))
 
+;; N.B., sb-simple-streams clobbers this; if this changes, make sure
+;; sb-simple-streams follows along, where necessary.
 (defknown clear-input (&optional stream-designator) null ())
 
 (defknown read-from-string
@@ -1671,6 +1678,8 @@
 
 (defknown user-homedir-pathname (&optional t) pathname (flushable))
 
+;; N.B., sb-simple-streams clobbers this; if this changes, make sure
+;; sb-simple-streams follows along, where necessary.
 (defknown open
   (pathname-designator &key
                        (:class symbol)
@@ -2233,19 +2242,24 @@
 (defknown fixnum*
   (fixnum fixnum t)
   fixnum
-  (movable foldable always-translatable))
+  (movable always-translatable))
 
 (defknown (signed* signed+ signed-)
   (sb-vm:signed-word sb-vm:signed-word t)
   sb-vm:signed-word
-  (movable foldable commutative always-translatable))
+  (movable always-translatable))
 
 (defknown (unsigned* unsigned+ unsigned-)
   (word word t)
   word
-  (movable foldable commutative always-translatable))
+  (movable always-translatable))
 
 (defknown (unsigned+signed unsigned-signed)
   (word sb-vm:signed-word t)
-  word
-  (movable foldable commutative always-translatable))
+  integer
+  (movable always-translatable))
+
+(defknown (signed-unsigned)
+  (sb-vm:signed-word word t)
+  integer
+  (movable always-translatable))

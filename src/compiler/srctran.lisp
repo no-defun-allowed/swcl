@@ -19,25 +19,13 @@
 (define-source-transform identity (x) `(prog1 ,x))
 (define-source-transform values (x) `(prog1 ,x))
 
-(deftransform constantly ((value) * * :node node)
-  (if (constant-lvar-p value)
-      `#'(lambda (&rest rest)
-           (declare (ignore rest))
-           ',(lvar-value value))
-      (let ((lvar (node-lvar node)))
-        ;; Is it destined to a funcall? Then don't create a closure
-        (map-all-lvar-dests
-         lvar
-         (lambda (lvar node)
-           (unless (lvar-called-by-node-p lvar node)
-             (give-up-ir1-transform))))
-        `#'(lambda (&rest rest)
-             (declare (ignore rest))
-             value))))
-
-(defoptimizer (constantly derive-type) ((value))
-  (specifier-type
-   `(function (&rest t) (values ,(type-specifier (lvar-type value)) &optional))))
+;;; Bind the value and make a closure that returns it.
+(define-source-transform constantly (value)
+  (with-unique-names (rest n-value)
+    `(let ((,n-value ,value))
+       (lambda (&rest ,rest)
+         (declare (ignore ,rest))
+         ,n-value))))
 
 (defoptimizer (complement derive-type) ((fun))
   (let ((type (lvar-fun-type fun)))
@@ -58,13 +46,11 @@
      ((and min (eql min max))
       (let ((dums (make-gensym-list min)))
         `#'(lambda ,dums (not (funcall fun ,@dums)))))
-     ((block nil
-        (map-all-lvar-dests
-         (node-lvar node)
-         (lambda (lvar node)
-           (unless (lvar-called-by-node-p lvar node)
-             (return))))
-        t)
+     ((let ((lvar (node-lvar node)))
+        (when lvar
+          (let ((dest (lvar-dest lvar)))
+            (and (combination-p dest)
+                 (eq (combination-fun dest) lvar)))))
       '#'(lambda (&rest args)
            (not (apply fun args))))
      (t
@@ -2721,7 +2707,7 @@
 (deftransform * ((x y) (integer (constant-arg unsigned-byte)) * :node node)
   "convert x*2^k to shift"
   ;; Delay to make sure the surrounding casts are apparent.
-  (delay-ir1-transform node :optimize)
+  (delay-ir1-transform node :ir1-phases)
   (let* ((type (single-value-type (node-asserted-type node)))
          (y (lvar-value y))
          (len (1- (integer-length y))))
@@ -2740,7 +2726,7 @@
                    :important nil
                    :node node)
   ;; Give modular arithmetic optimizers a chance
-  (delay-ir1-transform node :optimize)
+  (delay-ir1-transform node :ir1-phases)
   (let ((type (single-value-type (node-asserted-type node)))
         (shift (lvar-value amount)))
     (when (or (csubtypep type (specifier-type 'word))
@@ -2749,47 +2735,35 @@
       (give-up-ir1-transform))
     `(* integer ,(ash 1 shift))))
 
-(macrolet ((def (name fun type &optional (types `(,type ,type)))
-             `(when-vop-existsp (:translate ,name)
-                (defun ,name (x y type)
-                  (declare (type ,type x y))
-                  (let ((r (,fun x y)))
-                    (unless (typep r type)
-                      (error 'type-error :expected-type type :datum r))
-                    r))
-
-                (deftransform ,fun ((x y) ,types * :node node :important nil)
-                  (delay-ir1-transform node :optimize)
-                  (let ((dest (node-dest node))
-                        (target-type (specifier-type ',type))
-                        (type (single-value-type (node-derived-type node)))
-                        type-to-check)
-                    (if (and (cast-p dest)
-                             (cast-type-check dest)
-                             (types-equal-or-intersect target-type type)
-                             (not (csubtypep type target-type))
-                             (not (csubtypep type (specifier-type 'word)))
-                             (not (csubtypep type (specifier-type 'sb-vm:signed-word)))
-                             (csubtypep (setf type-to-check (single-value-type (cast-type-to-check dest))) target-type))
-                        `(,',name x y ',(type-specifier type-to-check))
-                        (give-up-ir1-transform))))
-
-                (deftransform ,name ((x y type-to-check) * * :node node)
-                  (let (type
-                        (type-to-check (lvar-value type-to-check))
-                        (sword (specifier-type ',type)))
-                    (cond ((or (csubtypep (setf type (two-arg-derive-type x y
-                                                                          #',(symbolicate fun '-derive-type-aux)
-                                                                          #',fun))
-                                          sword)
-                               (not (types-equal-or-intersect sword type)))
-                           `(the ,type-to-check (,',fun x y)))
-                          (t
+(macrolet ((def (name fun type &optional (types `(,type ,type)) swap)
+               (setf type (sb-int:ensure-list type))
+               `(when-vop-existsp (:translate ,name)
+                  (deftransform ,fun ((x y) ,types * :node node :important nil)
+                    (delay-ir1-transform node :ir1-phases)
+                    (let ((dest (node-dest node))
+                          (type (single-value-type (node-derived-type node)))
+                          type-to-check)
+                      (flet ((good-cast-p (target-type)
+                               (types-equal-or-intersect target-type type)
+                               (not (csubtypep type target-type))
+                               (csubtypep type-to-check target-type)))
+                       (if (and (cast-p dest)
+                                (cast-type-check dest)
+                                (not (csubtypep type (specifier-type 'word)))
+                                (not (csubtypep type (specifier-type 'sb-vm:signed-word)))
+                                (setf type-to-check (single-value-type (cast-type-to-check dest)))
+                                (or ,@(loop for type in type
+                                            collect `(good-cast-p (specifier-type ',type)))))
+                           `(,',name ,@',(if swap
+                                             `(y x)
+                                             `(x y))
+                                     ',(type-specifier type-to-check))
                            (give-up-ir1-transform))))))))
 
-
-  (def unsigned+signed + word (word sb-vm:signed-word))
-  (def unsigned-signed - word (word sb-vm:signed-word))
+  (def unsigned+signed + (word sb-vm:signed-word) (word sb-vm:signed-word))
+  (def unsigned+signed + (word sb-vm:signed-word) (sb-vm:signed-word word) t)
+  (def unsigned-signed - (word sb-vm:signed-word) (word sb-vm:signed-word))
+  (def signed-unsigned - (word sb-vm:signed-word) (sb-vm:signed-word word))
 
   (def signed* * sb-vm:signed-word)
   (def signed+ + sb-vm:signed-word)
@@ -2802,13 +2776,20 @@
   (def fixnum* * fixnum))
 
 (when-vop-existsp (:translate unsigned+signed)
-  (deftransform unsigned+signed
-      ((x y type-to-check) (word word t) * :node node :important nil)
-    `(the ,(lvar-value type-to-check) (+ x y)))
+  (defoptimizer (unsigned+signed derive-type) ((x y type-to-check))
+    (specifier-type (if (subtypep (lvar-value type-to-check) 'word)
+                        'word
+                        'sb-vm:signed-word)))
+  (defoptimizer (unsigned-signed derive-type) ((x y type-to-check))
+    (specifier-type (if (subtypep (lvar-value type-to-check) 'word)
+                        'word
+                        'sb-vm:signed-word))))
 
-  (deftransform unsigned-signed
-      ((x y type-to-check) (word word t) * :node node :important nil)
-    `(the ,(lvar-value type-to-check) (- x y))))
+(when-vop-existsp (:translate signed-unsigned)
+  (defoptimizer (signed-unsigned derive-type) ((x y type-to-check))
+    (specifier-type (if (subtypep (lvar-value type-to-check) 'word)
+                        'word
+                        'sb-vm:signed-word))))
 
 ;;; These must come before the ones below, so that they are tried
 ;;; first.
@@ -4118,6 +4099,12 @@
   (def > i f (integer * #.most-positive-fixnum) fixnum)
   (def < f i fixnum (integer * #.most-positive-fixnum)))
 
+(deftransform < ((x y) (integer (eql #.(1+ most-positive-fixnum))))
+  `(not (> x most-positive-fixnum)))
+
+(deftransform > ((x y) (integer (eql #.(1- most-negative-fixnum))))
+  `(not (< x most-negative-fixnum)))
+
 (deftransform = ((x y) (rational (constant-arg float)))
   "open-code RATIONAL to FLOAT comparison"
   (let ((y (lvar-value y)))
@@ -4129,6 +4116,22 @@
              (sb-xc:typep y 'ratio))
         nil
         `(= x ,y))))
+
+(deftransform = ((x y) (t (constant-arg integer)))
+  (let ((y (lvar-value y)))
+    (if (and (if (cast-p (lvar-uses x))
+                 ;; Only when X is already a number.
+                 (csubtypep (lvar-type (cast-value (lvar-uses x)))
+                            (specifier-type 'number))
+                 t)
+             (handler-case (not (sb-xc:= y (coerce y 'double-float)))
+               (floating-point-overflow ()
+                 t))
+             (handler-case (not (sb-xc:= y (coerce y 'single-float)))
+               (floating-point-overflow ()
+                 t)))
+        `(eql x y)
+        (give-up-ir1-transform))))
 
 (deftransform = ((x y) (integer (constant-arg ratio)))
   "constant-fold INTEGER to RATIO comparison"

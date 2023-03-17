@@ -3147,3 +3147,118 @@
    :block-compile t ; so the self call is recognized
    :load t)
   (assert (= (funcall 'delete-optional-dispatch-xep 3) 10)))
+
+
+(with-test (:name :dx-dont-propagate)
+  (ctu:file-compile
+   `((defmacro generalized-delete (item list test)
+       `(let ((the-list ,list))
+          (flet ((fun (y) (funcall ,test ,item y)))
+            (let ((input the-list))
+              (%%delete-impl #'fun input)))))
+
+     (defmacro %%delete-impl (predicate list)
+       `(let ((dummy (cons nil ,list)))
+          (declare (dynamic-extent dummy))
+          (do* ((prev dummy)
+                (cur (cdr prev) (cdr prev)))
+               ((null cur) (cdr dummy))
+            (if (funcall ,predicate (car cur))
+                (rplacd prev (cdr cur))
+                (pop prev)))))
+
+     (defun foo-assert (test expect actual)
+       (unless (funcall test expect actual)
+         (format t "stack-allocated-p=~S~%" (sb-ext:stack-allocated-p actual))
+         (error "assertion failed")))
+
+     ;; The dummy cons made by the DELETE-IMPL algorithm (using
+     ;; essentially the same technique as many list traversal macros in
+     ;; SBCL such as COLLECT). But The list made by (LIST 1) in this assertion
+     ;; does not want to be dynamic-extent.
+     (foo-assert #'equal (list 1) (generalized-delete 0 (list 1) #'=)))
+   :load t))
+
+(with-test (:name :new-inline-functional-type-conflict)
+  (ctu:file-compile
+   `((declaim (inline inline-fun))
+     (defun inline-fun (x)
+       x)
+
+     (defun new-inline-functional-type-conflict (m)
+       (declare (optimize space)
+                (integer m))
+       (inline-fun m)
+       (inline-fun m)
+       (funcall (if t #'inline-fun) 'a)))
+   :load t)
+  (assert (null (ctu:find-named-callees (symbol-function 'new-inline-functional-type-conflict))))
+  ;; We want to share the functional on space > speed, so we should
+  ;; have 3 code segments: one for
+  ;; NEW-INLINE-FUNCTIONAL-TYPE-CONFLICT's XEP, one for
+  ;; NEW-INLINE-FUNCTIONAL-TYPE-CONFLICT, and one for INLINE-FUN.
+  (assert (= 3 (length (sb-disassem::get-code-segments (sb-kernel::fun-code-header #'new-inline-functional-type-conflict)))))
+  (let ((type (sb-kernel:%simple-fun-type
+               (symbol-function 'new-inline-functional-type-conflict))))
+    ;; Either of these types should be OK.
+    (assert (or (ctype= type
+                        '(function (integer) (values (member a) &optional)))
+                (ctype= type
+                        '(function (integer) (values (or integer (member a)) &optional)))))))
+
+(with-test (:name :new-inline-functional-type-conflict.2)
+  (ctu:file-compile
+   `((declaim (inline inline-fun))
+     (defun inline-fun (x)
+       x)
+
+     (defun new-inline-functional-type-conflict.2 (m)
+       (declare (optimize space))
+       (print (list (inline-fun m)
+                    (inline-fun m)))
+       (funcall (if t #'inline-fun) 'a)))
+   :load t)
+  (assert (equal (ctu:find-named-callees (symbol-function 'new-inline-functional-type-conflict.2))
+                 (list #'print)))
+  ;; We want to share the functional on space > speed, so we should
+  ;; have 3 code segments: one for
+  ;; NEW-INLINE-FUNCTIONAL-TYPE-CONFLICT.2's XEP, one for
+  ;; NEW-INLINE-FUNCTIONAL-TYPE-CONFLICT.2, and one for INLINE-FUN.
+  (assert (= 3 (length (sb-disassem::get-code-segments (sb-kernel::fun-code-header #'new-inline-functional-type-conflict.2)))))
+  ;; We should have no type information from the arguments, because
+  ;; the functional is shared.
+  (let ((type (sb-kernel:%simple-fun-type
+               (symbol-function 'new-inline-functional-type-conflict.2))))
+    (assert (ctype= type '(function (t) (values t &optional))))))
+
+(with-test (:name :new-inline-functional-type-conflict.3)
+  (ctu:file-compile
+   `((declaim (inline inline-fun))
+     (defun inline-fun (x)
+       x)
+
+     (defun new-inline-functional-type-conflict.3 (m)
+       (declare (optimize space))
+       (when (integerp m)
+         (inline-fun m)
+         (inline-fun m)
+         (funcall (if (integerp m) #'inline-fun) 1)))
+     (assert (= (new-inline-functional-type-conflict.3 1) 1)))
+   :load t))
+
+
+(with-test (:name :new-inline-functional-type-conflict.4)
+  (ctu:file-compile
+   `((declaim (inline inline-fun))
+     (defun inline-fun (x)
+       (eval x)
+       t)
+
+     (defun test (m j)
+       (declare (optimize space))
+       (when (integerp m)
+         (inline-fun j)
+         (inline-fun j)
+         (funcall (if (integerp m) #'inline-fun) 2)))
+     (assert (eq (test 1 2) t)))
+   :load t))

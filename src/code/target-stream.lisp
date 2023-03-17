@@ -87,7 +87,7 @@
                             eof-value
                             recursive-p)
   (declare (type (or character boolean) peek-type) (explicit-check))
-  (stream-api-dispatch (stream (in-stream-from-designator stream))
+  (stream-api-dispatch (stream :input)
     :simple (let ((char (s-%peek-char stream peek-type eof-error-p eof-value)))
               ;; simple-streams -%PEEK-CHAR always ignored RECURSIVE-P
               ;; so I removed it from the call.
@@ -163,7 +163,7 @@
          (flet ((outfn (c)
                   (unless unread-p
                     (if (ansi-stream-p out)
-                        (funcall (ansi-stream-out out) out c)
+                        (funcall (ansi-stream-cout out) out c)
                         ;; gray-stream
                         (stream-write-char out c))))
                 (infn ()

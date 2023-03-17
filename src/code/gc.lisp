@@ -136,6 +136,7 @@ run in any thread.")
          nil)
         (t
          (flet ((perform-gc ()
+                  (declare (sb-c::tlab :system)) ; for *gc-epoch*
                   ;; Called from WITHOUT-GCING and WITHOUT-INTERRUPTS
                   ;; after the world has been stopped, but it's an
                   ;; awkwardly long piece of code to nest so deeply.
@@ -229,7 +230,8 @@ run in any thread.")
   ;; which is an arbitrary one. If those actions aquire any locks, or are sensitive
   ;; to the state of *ALLOW-WITH-INTERRUPTS*, any deadlocks of what-have-you
   ;; are user error. Hooks need to be sufficiently uncomplicated as to be harmless.
-  (call-hooks "after-GC" *after-gc-hooks* :on-error :warn))
+  (sb-vm:without-arena "post-gc"
+    (call-hooks "after-GC" *after-gc-hooks* :on-error :warn)))
 
 #-sb-thread
 (defun post-gc ()
