@@ -208,10 +208,9 @@
 (define-alien-variable "allocation_bitmap" (* unsigned-char))
 
 #+mark-region-gc
-(defun map-objects-in-non-contiguous-range (fun start end &optional strict-bound)
+(defun map-objects-in-discontiguous-range (fun start end generation-mask)
   (declare (type function fun)
            (type fixnum start end))
-  (declare (ignore strict-bound)) ; Meaningless for MR heap.
   (declare (dynamic-extent fun))
   (let* ((start (* start 2)) (end (* end 2)) ; Utter garbage conversion
          (first-byte (floor (- start dynamic-space-start)
@@ -233,7 +232,10 @@
                                (values list-pointer-lowtag (* 2 n-word-bytes))
                                (values widetag (primitive-object-size obj)))))
                        (aver (not (logtest (the fixnum size) lowtag-mask)))
-                       (funcall fun obj typecode size)))))))))
+                       ;; TODO: Each line has exactly one generation; should
+                       ;; check that in the outer loop instead.
+                       (when (logbitp (generation-of obj) generation-mask)
+                         (funcall fun obj typecode size))))))))))
 
 ;;; Access to the GENCGC page table for better precision in
 ;;; MAP-ALLOCATED-OBJECTS
@@ -418,17 +420,26 @@ We could try a few things to mitigate this:
           ;; type restriction on the first argument to LOGBITP.
           ;; Masking it to 3 bits fixes that, and allows using the other 5 bits
           ;; for something potentially.
+          #-mark-region-gc
           (when (and (logbitp (logand (slot (deref page-table start-page) 'gen) 7)
                               generation-mask)
                      (= (logand flags page-type-mask) page-type-constraint))
             ;; FIXME: should exclude (0 . 0) conses on PAGE_TYPE_{BOXED,UNBOXED}
             ;; resulting from zeroing the tail of a bignum or vector etc.
-            (#-mark-region-gc map-objects-in-range
-             #+mark-region-gc map-objects-in-non-contiguous-range
+            (map-objects-in-range
              fun
              (%make-lisp-obj (sap-int start))
              (%make-lisp-obj (sap-int end))
-             (< start-page initial-next-free-page))))))
+             (< start-page initial-next-free-page)))
+          #+mark-region-gc
+          (when (and (logbitp (logand (slot (deref page-table start-page) 'gen) 7)
+                              generation-mask)
+                     (= (logand flags page-type-mask) page-type-constraint))
+            (map-objects-in-discontiguous-range
+             fun
+             (%make-lisp-obj (sap-int start))
+             (%make-lisp-obj (sap-int end))
+             generation-mask)))))
     (setq start-page (1+ end-page))))
 
 ;; Users are often surprised to learn that a just-consed object can't
