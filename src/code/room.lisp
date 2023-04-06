@@ -431,10 +431,10 @@ We could try a few things to mitigate this:
              (%make-lisp-obj (sap-int start))
              (%make-lisp-obj (sap-int end))
              (< start-page initial-next-free-page)))
+          ;; Generations of pages are basically meaningless (except
+          ;; for pseudo-static pages) so we test generations of lines.
           #+mark-region-gc
-          (when (and (logbitp (logand (slot (deref page-table start-page) 'gen) 7)
-                              generation-mask)
-                     (= (logand flags page-type-mask) page-type-constraint))
+          (when (= (logand flags page-type-mask) page-type-constraint)
             (map-objects-in-discontiguous-range
              fun
              (%make-lisp-obj (sap-int start))
