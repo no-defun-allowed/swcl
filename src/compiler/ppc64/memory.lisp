@@ -12,13 +12,13 @@
 
 (in-package "SB-VM")
 
-(defun emit-gc-store-barrier (object cell-address temps &optional value-tn-ref value-tn)
+(defun emit-gengc-barrier (object cell-address temps &optional value-tn-ref value-tn)
   (aver (neq (car temps) cell-address)) ; LD would clobber the cell-address
   (when (require-gc-store-barrier-p object value-tn-ref value-tn)
     ;; (inst ld (car temps) thread-base-tn (ash thread-card-table-slot word-shift))
     ;; RLIDCL dest, source, (64-rightshift), (64-indexbits)
     (inst rldicl (car temps) (or cell-address object) (- 64 gencgc-card-shift)
-          (make-fixup nil :gc-barrier))
+          (make-fixup nil :card-table-index-mask))
     ;; THREAD-TN's low byte is 0.
     (inst stbx thread-base-tn card-table-base-tn (car temps))))
 
@@ -42,7 +42,7 @@
   (:vop-var vop)
   (:temporary (:sc non-descriptor-reg) t1)
   (:generator 4
-    (emit-gc-store-barrier object nil (list t1) (vop-nth-arg 1 vop) value)
+    (emit-gengc-barrier object nil (list t1) (vop-nth-arg 1 vop) value)
     (storew value object offset lowtag)))
 
 ;;;; Indexed references:
@@ -59,7 +59,7 @@
   (:policy :fast-safe)
   (:vop-var vop)
   (:generator 5
-   (emit-gc-store-barrier object nil (list temp) (vop-nth-arg 2 vop) value)
+   (emit-gengc-barrier object nil (list temp) (vop-nth-arg 2 vop) value)
    (sc-case index
     ((immediate)
      (let ((offset (- (ash (+ (tn-value index) offset) word-shift) lowtag)))
@@ -167,7 +167,7 @@
                      (inst addi temp index (- (ash offset word-shift) lowtag))))
               (inst add temp object temp)
               temp))))
-      (emit-gc-store-barrier object ea (list result temp) (vop-nth-arg 3 vop) new-value))
+      (emit-gengc-barrier object ea (list result temp) (vop-nth-arg 3 vop) new-value))
     (sc-case index
       ((immediate)
        (let ((offset (- (ash (+ (tn-value index) offset) word-shift) lowtag)))

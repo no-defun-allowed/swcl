@@ -86,7 +86,7 @@
     (inst shr :dword header n-fixnum-tag-bits)
     (instrument-alloc nil bytes node temp thread-tn)
     (pseudo-atomic (:thread-tn thread-tn)
-     (allocation nil bytes 0 result node temp thread-tn)
+     (allocation type bytes 0 result node temp thread-tn)
      (storew header result 0 0)
      (inst or :byte result other-pointer-lowtag))))
 
@@ -338,8 +338,8 @@
          (let ((ea (ea (- (* (+ ,offset addend) n-word-bytes) ,lowtag)
                            object index (index-scale n-word-bytes index))))
            ,@(when (eq type 'simple-vector)
-               '((emit-gc-store-barrier object ea val-temp (vop-nth-arg 2 vop) value)))
-           (gen-cell-set ea value val-temp))))
+               '((emit-gengc-barrier object ea val-temp (vop-nth-arg 2 vop) value)))
+           (emit-store ea value val-temp))))
      (define-vop (,(symbolicate name "-C") dvset)
        (:args (object :scs (descriptor-reg))
               (value :scs ,scs))
@@ -358,8 +358,8 @@
          ,@(unless (eq type 'simple-vector) '((unpoison-element object (+ index addend))))
          (let ((ea (ea (- (* (+ ,offset index addend) n-word-bytes) ,lowtag) object)))
            ,@(when (eq type 'simple-vector)
-               '((emit-gc-store-barrier object ea val-temp (vop-nth-arg 1 vop) value)))
-           (gen-cell-set ea value val-temp))))))
+               '((emit-gengc-barrier object ea val-temp (vop-nth-arg 1 vop) value)))
+           (emit-store ea value val-temp))))))
 (defmacro def-full-data-vector-frobs (type element-type &rest scs)
   `(progn
      (define-full-reffer+addend ,(symbolicate "DATA-VECTOR-REF-WITH-OFFSET/" type)

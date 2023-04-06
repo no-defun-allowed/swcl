@@ -82,7 +82,7 @@
 (defun %load-gmp ()
   (or (some #'try-load-shared-object
             #-(or win32 darwin) '("libgmp.so" "libgmp.so.10" "libgmp.so.3")
-            #+darwin '("libgmp.dylib" "libgmp.10.dylib" "libgmp.3.dylib")
+            #+darwin '("libgmp.dylib" "libgmp.10.dylib" "libgmp.3.dylib" #+arm64 "/opt/homebrew/lib/libgmp.dylib")
             #+win32 '("libgmp.dll" "libgmp-10.dll" "libgmp-3.dll"))
       (warn "GMP not loaded.")))
 
@@ -969,7 +969,7 @@ pre-allocated bignum. The allocated bignum-length must be (1+ COUNT)."
     (t
      (check-type power (integer #.(1+ most-negative-fixnum) #.most-positive-fixnum))
      (cond ((minusp power)
-            (/ (the integer (gmp-intexp base (- power)))))
+            (/ (gmp-intexp base (- power))))
            ((eql base 2)
             (mpz-mul-2exp 1 power))
            ((typep base 'ratio)

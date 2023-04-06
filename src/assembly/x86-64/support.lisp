@@ -67,9 +67,15 @@
 ;;; Save or restore all FPRs at the stack pointer as it existed just prior
 ;;; to the call to the asm routine.
 (defun call-fpr-save/restore-routine (selector)
-  (ecase selector
-    (:save (inst call (make-fixup 'fpr-save :assembly-routine)))
-    (:restore (inst call (make-fixup 'fpr-restore :assembly-routine)))))
+  (let ((routine (ecase selector
+                   (:save 'fpr-save)
+                   (:restore 'fpr-restore))))
+    (if (or (not (boundp 'sb-c:*component-being-compiled*))
+            (sb-c::code-immobile-p sb-c:*component-being-compiled*))
+        ;; direct call from asm routine or immobile code
+        (inst call (make-fixup routine :assembly-routine))
+        ;; indirect call from dynamic space
+        (inst call (ea (make-fixup routine :assembly-routine*))))))
 
 (defmacro regs-pushlist (&rest regs)
   `(progn ,@(mapcar (lambda (stem) `(inst push ,(symbolicate stem "-TN"))) regs)))
@@ -82,10 +88,20 @@
   ;;   C    = save GPRs that C call can change
   ;;   Lisp = save GPRs that lisp call can change
   (aver (member convention '(lisp c)))
+  (aver (eql card-table-reg 12)) ; change detector
   (let ((fpr-align 64)
         (except (ensure-list except))
-        (clobberables '(rax rbx rcx rdx rsi rdi r8 r9 r10 r11 r12 r13 r14 r15)))
+        (clobberables
+         `(rax rbx rcx rdx rsi rdi r8 r9 r10 r11
+           ;; 13 is usable only if not permanently wired to the thread base
+           #+gs-seg r13
+           r14 r15)))
     (aver (subsetp except clobberables)) ; Catch spelling mistakes
+    (when (member 'rax except)
+      ;; Since FPR-SAVE / -RESTORE utilize RAX, returning RAX from an assembly
+      ;; routine (by *not* preserving it) will be meaningless.
+      ;; You'd have to modify -SAVE / -RESTORE to avoid clobbering RAX.
+      (error "Excluding RAX from preserved GPRs probably will not do what you want."))
     (let* ((gprs ; take SET-DIFFERENCE with EXCEPT but in a predictable order
             (remove-if (lambda (x) (member x except))
                        (ecase convention

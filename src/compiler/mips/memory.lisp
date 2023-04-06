@@ -2,9 +2,9 @@
 
 ;;; You should generally put WITHOUT-SCHEDULING around this because the fixup patcher
 ;;; wants to see the two shifts as consecutive instructions.
-(defun emit-gc-store-barrier (object cell-address temp &optional value-tn-ref value-tn)
+(defun emit-gengc-barrier (object cell-address temp &optional value-tn-ref value-tn)
   (when (require-gc-store-barrier-p object value-tn-ref value-tn)
-    (inst sll temp (or cell-address object) (make-fixup nil :gc-barrier))
+    (inst sll temp (or cell-address object) (make-fixup nil :card-table-index-mask))
     (inst srl temp temp 0)
     (inst addu temp temp cardbase-tn)
     (inst sb zero-tn temp 0)))
@@ -29,5 +29,5 @@
   (:vop-var vop)
   (:generator 4
     (without-scheduling ()
-      (emit-gc-store-barrier object nil temp (vop-nth-arg 1 vop) value)
+      (emit-gengc-barrier object nil temp (vop-nth-arg 1 vop) value)
       (storew value object offset lowtag))))

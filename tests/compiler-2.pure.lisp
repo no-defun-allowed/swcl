@@ -3972,14 +3972,16 @@
                    (ctu:disassembly-lines
                     (checked-compile
                      `(lambda (l)
-                        (values-list l))))))
+                        (let (*)
+                          (values-list l)))))))
   (assert (not (find-if (lambda (line)
                           (search "BOGUS-ARG-TO-VALUES-LIST-ERROR" line :test #'equal))
                         (ctu:disassembly-lines
                          (checked-compile
                           `(lambda (l)
                              (declare (optimize (safety 0)))
-                             (values-list l))))))))
+                             (let (*)
+                               (values-list l)))))))))
 
 (with-test (:name :explicit-value-cell-top-level)
   (ctu:file-compile
@@ -4010,3 +4012,30 @@
                         (catch 'd
                           (lambda () #'f11))
                         (return #'f11)))))))))
+
+(with-test (:name :flushable-nil-funs)
+  (checked-compile-and-assert
+      ()
+      `(lambda (a b)
+         (eq (the (or) (car a))
+             (the (or) (car b))))))
+
+(with-test (:name :cmov-modifying-input)
+  (checked-compile-and-assert
+      ()
+      `(lambda (a b d)
+         (declare (double-float d))
+         (values (if (not (> d 10d0))
+                     b
+                     a)
+                 a))
+    ((1 2 1d0) (values 2 1))))
+
+(with-test (:name :ir1-optimize-return-type-widening)
+  (checked-compile-and-assert
+      ()
+      `(lambda (a b)
+         (flet ((f ()
+                  (ceiling a b)))
+           (values (the integer (f)))))
+    ((1 2) 1)))

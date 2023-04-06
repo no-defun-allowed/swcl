@@ -5,6 +5,33 @@
 
 (in-package "SB-VM")
 
+;;; The SYNCHRONOUS-TRAP routine has nearly the same effect as executing INT3
+;;; but is more friendly to gdb. There may be some subtle bugs with regard to
+;;; blocking/unblocking of async signals which arrive nearly around the same
+;;; time as a synchronous trap.
+#+sw-int-avoidance ; "software interrupt avoidance"
+(define-assembly-routine (synchronous-trap) ()
+  (inst pushf)
+  (inst push rbp-tn)
+  (inst mov rbp-tn rsp-tn)
+  (inst and rsp-tn (- 16))
+  (inst sub rsp-tn 8) ; PUSHing an odd number of GPRs
+  ;; Arrange in the utterly confusing order that a linux signal context has them
+  ;; so that we can memcpy() into a context. Push RBX twice to maintain alignment.
+  (regs-pushlist rcx rax rdx rbx rbx rsi rdi r15 r14 r13 r12 r11 r10 r9 r8)
+  ;;                             ^^^ technically this is the slot for RBP
+  (inst sub rsp-tn (* 16 16))
+  (dotimes (i 16) (inst movdqa (ea (* i 16) rsp-tn) (sb-x86-64-asm::get-fpr :xmm i)))
+  (inst lea rdi-tn (ea 24 rbp-tn)) ; stack-pointer at moment of "interrupt"
+  (inst mov rsi-tn rsp-tn)         ; pointer to saved CPU state
+  (inst call (make-fixup "synchronous_trap" :foreign))
+  (dotimes (i 16) (inst movdqa (sb-x86-64-asm::get-fpr :xmm i) (ea (* i 16) rsp-tn)))
+  (inst add rsp-tn (* 16 16))
+  (regs-poplist rcx rax rdx rbx rbx rsi rdi r15 r14 r13 r12 r11 r10 r9 r8)
+  (inst mov rsp-tn rbp-tn)
+  (inst pop rbp-tn)
+  (inst popf))
+
 (macrolet ((do-fprs (operation regset &aux (displacement 0))
              ;; The YMM case could be removed now I suppose, since we use XSAVE + XRSTOR
              (multiple-value-bind (mnemonic fpr-align)
@@ -31,35 +58,31 @@
     (do-fprs push :xmm)
     (inst ret)
     HAVE-YMM
-    ;; Apparently we must not clobber RDX here, though I'm not sure sure why not.
-    ;; We've saved the values from Lisp already. (Do we pass 3 C args somewhere though?)
-    ;; We can clobber RAX - the XMM-only case does - but I don't care to tweak
-    ;; the hardwired offsets that pertain to byte displacements from RSP.
-    (inst push rax-tn)
+    ;; Although most of the time RDX can be clobbered, some of the time it can't.
+    ;; If WITH-REGISTERS-PRESERVED wraps a lisp function to make it appear to preserve
+    ;; all registers, we obviously need to return its primary value in RDX.
+    ;; RAX need not be saved though.
     (inst push rdx-tn)
-    (inst mov rax-tn 7)
     (zeroize rdx-tn)
+    ;; After PUSH the save area is at RSP+16 with the return-PC at [RSP+8]
     ;; Zero the header
-    (loop for i from (+ 512 24) by 8
-          repeat 8
-          do
-          (inst mov (ea i rsp-tn) rdx-tn))
-    (inst xsave (ea 24 rsp-tn))
-    (inst pop rdx-tn)
-    (inst pop rax-tn))
+    (inst lea rax-tn (ea (+ 512 16) rsp-tn))
+    (dotimes (i 8)
+      (inst mov (ea (ash i word-shift) rax-tn) rdx-tn))
+    (inst mov rax-tn 7)
+    (inst xsave (ea 16 rsp-tn))
+    (inst pop rdx-tn))
 
   (define-assembly-routine (fpr-restore) ()
     (test-cpu-feature cpu-has-ymm-registers) (inst jmp :nz have-ymm)
     (do-fprs pop :xmm)
     (inst ret)
     HAVE-YMM
-    (inst push rax-tn)
     (inst push rdx-tn)
-    (inst mov rax-tn 7)
+    (inst mov rax-tn 7) ; OK to clobber RAX
     (zeroize rdx-tn)
-    (inst xrstor (ea 24 rsp-tn))
-    (inst pop rdx-tn)
-    (inst pop rax-tn)))
+    (inst xrstor (ea 16 rsp-tn))
+    (inst pop rdx-tn)))
 
 (define-assembly-routine (switch-to-arena (:return-style :raw)) ()
   (inst mov rsi-tn (ea rsp-tn)) ; explicitly  pass the return PC
@@ -215,3 +238,56 @@
     (inst mov rdx-tn (ea 16 rbp-tn)) ; arg
     (call-static-fun 'ensure-symbol-hash 1)
     (inst mov (ea 16 rbp-tn) rdx-tn))) ; result to arg passing loc
+
+;;; Perform a store to code, updating the GC card mark bit.
+;;; This has two additional complications beyond the ordinary
+;;; generational barrier:
+;;; 1. immobile code uses its own card table which maps linearly
+;;;    with the page index, unlike the dynamic space card table
+;;;    that has a different way of computing a card address.
+;;; 2. code objects are so seldom written that it behooves us to
+;;;    track within each object whether it has been written,
+;;;    thereby avoiding scanning of unwritten objects.
+;;;    This is especially important for immobile space where
+;;;    it is likely that new code will be co-located on a page
+;;;    with old code due to the non-moving allocator.
+(define-assembly-routine (code-header-set (:return-style :none)) ()
+  ;; stack: ret-pc, object, index, value-to-store
+  (symbol-macrolet ((object (ea 8 rsp-tn))
+                    (word-index (ea 16 rsp-tn))
+                    (newval (ea 24 rsp-tn))
+                    ;; these are declared as vop temporaries
+                    (rax rax-tn)
+                    (rdx rdx-tn)
+                    (rdi rdi-tn))
+    (pseudo-atomic ()
+      #+immobile-space
+      (progn
+        #-sb-thread
+        (let ((fixup (make-fixup "all_threads" :foreign-dataref)))
+          ;; Load THREAD-BASE-TN from the all_threads. Does not need to be spilled
+          ;; to stack, because we do do not give the register allocator access to it.
+          (inst mov thread-tn (rip-relative-ea fixup))
+          (inst mov thread-tn (ea thread-tn)))
+        (inst mov rax object)
+        (inst sub rax (thread-slot-ea thread-text-space-addr-slot))
+        (inst shr rax (1- (integer-length immobile-card-bytes)))
+        (inst cmp rax (thread-slot-ea thread-text-card-count-slot))
+        (inst jmp :ae try-dynamic-space)
+        (inst mov rdi (thread-slot-ea thread-text-card-marks-slot))
+        (inst bts :dword :lock (ea rdi-tn) rax)
+        (inst jmp store))
+      TRY-DYNAMIC-SPACE
+      (inst mov rax object)
+      (inst shr rax gencgc-card-shift)
+      (inst and :dword rax card-index-mask)
+      (inst mov :byte (ea gc-card-table-reg-tn rax) 0)
+      STORE
+      (inst mov rdi object)
+      (inst mov rdx word-index)
+      (inst mov rax newval)
+      ;; set 'written' flag in the code header
+      (inst or :byte :lock (ea (- 3 other-pointer-lowtag) rdi) #x40)
+      ;; store newval into object
+      (inst mov (ea (- other-pointer-lowtag) rdi rdx n-word-bytes) rax)))
+  (inst ret 24)) ; remove 3 stack args

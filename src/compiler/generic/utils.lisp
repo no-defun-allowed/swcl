@@ -95,28 +95,6 @@
      (- other-pointer-lowtag)
      (* fdefn-raw-addr-slot n-word-bytes)))
 
-;;; Various error-code generating helpers
-(defvar *adjustable-vectors*)
-
-(defmacro with-adjustable-vector ((var) &rest body)
-  `(let ((,var (or (pop *adjustable-vectors*)
-                   (make-array 16
-                               :element-type '(unsigned-byte 8)
-                               :fill-pointer 0
-                               :adjustable t))))
-     ;; Don't declare the length - if it gets adjusted and pushed back
-     ;; onto the freelist, it's anyone's guess whether it was expanded.
-     ;; This code was wrong for >12 years, so nobody must have needed
-     ;; more than 16 elements. Maybe we should make it nonadjustable?
-     (declare (type (vector (unsigned-byte 8)) ,var))
-     (setf (fill-pointer ,var) 0)
-     ;; No UNWIND-PROTECT here - semantics are unaffected by nonlocal exit,
-     ;; and this macro is about speeding up the compiler, not slowing it down.
-     ;; GC will clean up any debris, and since the vector does not point
-     ;; to anything, even an accidental promotion to a higher generation
-     ;; will not cause transitive garbage retention.
-     (prog1 (progn ,@body)
-       (push ,var *adjustable-vectors*))))
 
 ;;;; interfaces to IR2 conversion
 
@@ -181,10 +159,8 @@
 
 ;;; Make a TN to hold the number-stack frame pointer.  This is allocated
 ;;; once per component, and is component-live.
-(defun make-nfp-tn ()
-  #+c-stack-is-control-stack
-  (make-restricted-tn *fixnum-primitive-type* ignore-me-sc-number)
   #-c-stack-is-control-stack
+(defun make-nfp-tn ()
   (component-live-tn
    (make-wired-tn *fixnum-primitive-type* immediate-arg-scn nfp-offset)))
 
@@ -201,7 +177,7 @@
 
 (defun make-number-stack-pointer-tn ()
   #+c-stack-is-control-stack
-  (make-restricted-tn *fixnum-primitive-type* ignore-me-sc-number)
+  (make-restricted-tn *fixnum-primitive-type* any-reg-sc-number)
   #-c-stack-is-control-stack
   (make-normal-tn *fixnum-primitive-type*))
 
@@ -298,6 +274,12 @@
 (defun instance-tn-ref-p (tn-ref)
   (csubtypep (tn-ref-type tn-ref) (specifier-type 'instance)))
 
+;;; Note that this is a allowed to fail by returning NIL.
+;;; So it's really testing "CERTAINLY-STACK-CONSED-P", which is
+;;; T if and only if if knows, and NIL if it doesn't know,
+;;; or OBJECT is heap-consed.
+;;; In general this is a crummy way to deduce the object's creator,
+;;; because MOVE-OPERAND has a nasty way of interfering.
 (defun stack-consed-p (object)
   (let ((write (sb-c::tn-writes object))) ; list of write refs
     (when (or (not write)    ; grrrr, the only write is from a LOAD tn

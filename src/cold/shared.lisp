@@ -25,6 +25,12 @@
 (when (sb-sys:find-dynamic-foreign-symbol-address "show_gc_generation_throughput")
   (setf (extern-alien "show_gc_generation_throughput" int) 1))
 
+#+sbcl ; prevent "illegal to redefine standard type: RATIONAL" etc
+(when (member "SB-XC" (package-nicknames "CL") :test 'string=)
+  (sb-ext:unlock-package "CL")
+  (rename-package "CL" "COMMON-LISP" '("CL"))
+  (sb-ext:lock-package "CL"))
+
 (in-package "SB-COLD")
 
 (defun parse-make-host-parallelism (str)
@@ -304,6 +310,17 @@
           ;; Just print something and go on with life.
           (setq sb-xc:*features* (remove :int4-breakpoints sb-xc:*features*))
           (warn "Removed :INT4-BREAKPOINTS from target features"))
+        (when (target-featurep :x86-64)
+          (let ((int3-enable (target-featurep :int3-breakpoints))
+                (int4-enable (target-featurep :int4-breakpoints))
+                (ud2-enable (target-featurep :ud2-breakpoints)))
+            (when (or ud2-enable int4-enable)
+              (setq sb-xc:*features* (remove :int3-breakpoints sb-xc:*features*))
+              (when (and ud2-enable int4-enable)
+                (error "UD2-BREAKPOINTS and INT4-BREAKPOINTS are mutually exclusive choices")))
+            (unless (or int3-enable int4-enable ud2-enable)
+              ;; don't love the name, but couldn't think of a better one
+              (push :sw-int-avoidance sb-xc:*features*))))
         (when (or (target-featurep :arm64)
                   (and (target-featurep :x86-64)
                        (member :sse4 backend-subfeatures)))

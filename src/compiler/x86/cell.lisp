@@ -407,7 +407,8 @@
 (define-vop (closure-init)
   (:args (object :scs (descriptor-reg))
          (value :scs (descriptor-reg any-reg)))
-  (:info offset)
+  (:info offset dx)
+  (:ignore dx)
   (:generator 4
     (storew value object (+ closure-info-offset offset) fun-pointer-lowtag)))
 
@@ -484,7 +485,7 @@
       ;; Compute card mark index and touch the mark byte
       (inst mov card object)
       (inst shr card gencgc-card-shift)
-      (inst and card (make-fixup nil :gc-barrier))
+      (inst and card (make-fixup nil :card-table-index-mask))
       (inst mov (make-ea :byte :base table :index card) 1) ; CARD_MARKED
       ;; set 'written' flag in the code header
       ;; this doesn't need to use :LOCK because the only other writer

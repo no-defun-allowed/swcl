@@ -2968,8 +2968,7 @@ Legal values for OFFSET are -4, -8, -12, ..."
         (let ((entrypoint (lookup-assembler-reference (car item))))
           (write-wordindexed/raw asm-code (+ base index 1) entrypoint)
           #+immobile-space
-          (unless (member (car item) ; these can't be called from compiled Lisp
-                          '(sb-vm::fpr-save sb-vm::fpr-restore))
+          (progn
             (aver (< index (cold-vector-len *asm-routine-vector*)))
             (write-wordindexed/raw *asm-routine-vector*
                                    (+ sb-vm:vector-data-offset index) entrypoint)))
@@ -2996,7 +2995,7 @@ Legal values for OFFSET are -4, -8, -12, ..."
     (when (>= index end) (return))
     (binding* (((offset kind flavor)
                 (!unpack-fixup-info (descriptor-integer (svref fixups (incf index)))))
-               (name (cond ((member flavor '(:code-object :gc-barrier)) nil)
+               (name (cond ((member flavor '(:code-object :card-table-index-mask)) nil)
                            (t (svref fixups (incf index)))))
                (string
                 (when (and (descriptor-p name)
@@ -3019,7 +3018,7 @@ Legal values for OFFSET are -4, -8, -12, ..."
               (cold-layout-id (gethash (descriptor-bits (->layout name))
                                        *cold-layout-by-addr*)))
              ;; The machine-dependent code decides how to patch in 'nbits'
-             #+gencgc (:gc-barrier sb-vm::gencgc-card-table-index-nbits)
+             #+gencgc (:card-table-index-mask sb-vm::gencgc-card-table-index-nbits)
              (:immobile-symbol
               ;; an interned symbol is represented by its host symbol,
               ;; but an uninterned symbol is a descriptor.

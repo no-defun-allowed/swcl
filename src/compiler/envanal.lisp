@@ -32,10 +32,20 @@
                  (eq (functional-kind x) :deleted))
                (component-new-functionals component)))
   (setf (component-new-functionals component) ())
-  (mapc #'add-lambda-vars-and-let-vars-to-closures
-        (component-lambdas component))
+  (dolist (fun (component-lambdas component))
+    (compute-closure fun)
+    (dolist (let (lambda-lets fun))
+      (compute-closure let)))
 
   (find-non-local-exits component)
+  ;; Close over closures.
+  (dolist (fun (component-lambdas component))
+    (when (and (eq (functional-kind fun) :external)
+               (environment-closure (lambda-environment fun)))
+      (let ((enclose-env (get-node-environment (xep-enclose fun))))
+        (dolist (ref (leaf-refs fun))
+          (close-over fun (get-node-environment ref) enclose-env)))))
+
   (find-dynamic-extent-lvars component)
   (find-cleanup-points component)
   (tail-annotate component)
@@ -69,20 +79,18 @@
   (declare (type node node))
   (get-lambda-environment (node-home-lambda node)))
 
-;;; private guts of ADD-LAMBDA-VARS-AND-LET-VARS-TO-CLOSURES
-;;;
-;;; This is the old CMU CL COMPUTE-CLOSURE, which only works on
-;;; LAMBDA-VARS directly, not on the LAMBDA-VARS of LAMBDA-LETS. It
-;;; seems never to be valid to use this operation alone, so in SBCL,
-;;; it's private, and the public interface,
-;;; ADD-LAMBDA-VARS-AND-LET-VARS-TO-CLOSURES, always runs over all the
-;;; variables, not only the LAMBDA-VARS of CLAMBDA itself but also
-;;; the LAMBDA-VARS of CLAMBDA's LAMBDA-LETS.
-(defun %add-lambda-vars-to-closures (clambda &optional explicit-value-cell)
-  (let ((env (get-lambda-environment clambda))
+;;; Find any variables in FUN with references outside of the home
+;;; environment and close over them. If a closed-over variable is set,
+;;; then we set the INDIRECT flag so that we will know the closed over
+;;; value is really a pointer to the value cell. We also warn about
+;;; unreferenced variables here, just because it's a convenient place
+;;; to do it. We return true if we close over anything.
+(defun compute-closure (fun)
+  (declare (type clambda fun))
+  (let ((env (get-lambda-environment fun))
         (did-something nil))
-    (note-unreferenced-fun-vars clambda)
-    (dolist (var (lambda-vars clambda))
+    (note-unreferenced-fun-vars fun)
+    (dolist (var (lambda-vars fun))
       (dolist (ref (leaf-refs var))
         (let ((ref-env (get-node-environment ref)))
           (unless (eq ref-env env)
@@ -104,32 +112,9 @@
 
           (let ((set-env (get-node-environment set)))
             (unless (eq set-env env)
-              (setf did-something t
-                    (lambda-var-indirect var) t)
-              (when explicit-value-cell
-                (setf (lambda-var-explicit-value-cell var) t))
+              (setq did-something t)
+              (setf (lambda-var-indirect var) t)
               (close-over var set-env env))))))
-    did-something))
-
-;;; Find any variables in CLAMBDA -- either directly in LAMBDA-VARS or
-;;; in the LAMBDA-VARS of elements of LAMBDA-LETS -- with references
-;;; outside of the home environment and close over them. If a
-;;; closed-over variable is set, then we set the INDIRECT flag so that
-;;; we will know the closed over value is really a pointer to the
-;;; value cell. We also warn about unreferenced variables here, just
-;;; because it's a convenient place to do it. We return true if we
-;;; close over anything.
-(defun add-lambda-vars-and-let-vars-to-closures (clambda &optional explicit-value-cell)
-  (declare (type clambda clambda))
-  (let ((did-something nil))
-    (when (%add-lambda-vars-to-closures clambda explicit-value-cell)
-      (setf did-something t))
-    (dolist (lambda-let (lambda-lets clambda))
-      ;; There's no need to recurse through full COMPUTE-CLOSURE
-      ;; here, since LETS only go one layer deep.
-      (aver (null (lambda-lets lambda-let)))
-      (when (%add-lambda-vars-to-closures lambda-let explicit-value-cell)
-        (setf did-something t)))
     did-something))
 
 (defun xep-enclose (xep)
@@ -142,30 +127,12 @@
 ;;; reach the home environment, we stop propagating the closure.
 (defun close-over (thing ref-env home-env)
   (declare (type environment ref-env home-env))
-  (let ((flooded-envs nil))
-    (labels ((flood (flooded-env)
-               (unless (or (eql flooded-env home-env)
-                           (member flooded-env flooded-envs))
-                 (push flooded-env flooded-envs)
-                 (unless (memq thing (environment-closure flooded-env))
-                   (push thing (environment-closure flooded-env))
-                   (let ((lambda (environment-lambda flooded-env)))
-                     (cond ((eq (functional-kind lambda) :external)
-                            (let ((enclose-env (get-node-environment (xep-enclose lambda))))
-                              (flood enclose-env)
-                              (dolist (ref (leaf-refs lambda))
-                                (close-over lambda
-                                            (get-node-environment ref) enclose-env))))
-                           (t (dolist (ref (leaf-refs lambda))
-                                ;; FIXME: This assertion looks
-                                ;; reasonable, but does not work for
-                                ;; :CLEANUPs.
-                                #+nil
-                                (let ((dest (node-dest ref)))
-                                  (aver (basic-combination-p dest))
-                                  (aver (eq (basic-combination-kind dest) :local)))
-                                (flood (get-node-environment ref))))))))))
-      (flood ref-env)))
+  (cond ((eq ref-env home-env))
+        ((memq thing (environment-closure ref-env)))
+        (t
+         (push thing (environment-closure ref-env))
+         (dolist (ref (leaf-refs (environment-lambda ref-env)))
+           (close-over thing (get-node-environment ref) home-env))))
   (values))
 
 ;;; Determine whether it is possible for things that can be closed
@@ -378,12 +345,12 @@
                   (let ((enclose (xep-enclose (ref-leaf use))))
                     (cond ((enclose-cleanup enclose)
                            (setf (leaf-dynamic-extent (functional-entry-fun (ref-leaf use)))
-                                 'dynamic-extent))
+                                 'dynamic-extent-no-note))
                           (t
                            (unless cleanup
                              (setq cleanup (insert-dynamic-extent-cleanup node)))
-                           (let ((dx-info (make-dx-info :kind 'dynamic-extent :value arg
-                                                        :cleanup cleanup)))
+                           (let ((dx-info (make-dx-info :kind 'dynamic-extent-no-note
+                                                        :value arg :cleanup cleanup)))
                              (setf (lvar-dynamic-extent arg) dx-info)
                              (push dx-info (cleanup-nlx-info cleanup)))))))))))))
 

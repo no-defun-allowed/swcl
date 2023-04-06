@@ -1155,9 +1155,6 @@
       ;; it looks as though it's never interesting to get debug names
       ;; from them, so it's moot. -- WHN)
       (leaf-source-name leaf)))
-(defun leaf-%debug-name (leaf)
-  (when (functional-p leaf)
-    (functional-%debug-name leaf)))
 
 ;;; Is FUNCTIONAL LET-converted? (where we're indifferent to whether
 ;;; it returns one value or multiple values)
@@ -1229,15 +1226,8 @@
   ;; depends on in such a way that DFO shouldn't put them in separate
   ;; components.
   (calls-or-closes (make-sset) :type (or null sset))
-  ;; the TAIL-SET that this LAMBDA is in. This is null during creation.
-  ;;
-  ;; In CMU CL, and old SBCL, this was also NILed out when LET
-  ;; conversion happened. That caused some problems, so as of
-  ;; sbcl-0.pre7.37.flaky5.2 when I was trying to get the compiler to
-  ;; emit :EXTERNAL functions directly, and so now the value
-  ;; is no longer NILed out in LET conversion, but instead copied
-  ;; (so that any further optimizations on the rest of the tail
-  ;; set won't modify the value) if necessary.
+  ;; the TAIL-SET that this LAMBDA is in. This is null during creation
+  ;; and in let lambdas.
   (tail-set nil :type (or tail-set null))
   ;; the structure which represents the phsical environment that this
   ;; function's variables are allocated in. This is filled in by
@@ -1639,10 +1629,10 @@
   ;; assertion is satisfied:
   ;;
   ;; NIL
-  ;;    No type check is necessary (VALUE type is a subtype of the TYPE-TO-CHECK.)
+  ;;    No type check is necessary (proven type of VALUE is a subtype of the TYPE-TO-CHECK.)
   ;;
   ;; :EXTERNAL
-  ;;    Type check will be performed by NODE-DEST.
+  ;;    A type check will be performed by NODE-DEST.
   ;;
   ;; T
   ;;    A type check is needed.

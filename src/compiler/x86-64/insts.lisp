@@ -1722,7 +1722,7 @@
             ((or (integerp src)
                  (and (fixup-p src)
                       (memq (fixup-flavor src) '(:layout-id :layout :immobile-symbol
-                                                 :gc-barrier))))
+                                                 :card-table-index-mask))))
              (emit-prefixes segment dst nil size :lock (lockp prefix))
              (cond ((accumulator-p dst)
                     (emit-byte segment
@@ -2033,21 +2033,21 @@
 
 ;;;; bit manipulation
 
-(flet ((emit* (segment opcode dst src)
-         (let ((size (matching-operand-size dst src)))
+(flet ((emit* (segment opcode prefix dst src)
+         (let ((size (pick-operand-size prefix dst src)))
            (when (eq size :byte)
              (error "can't scan bytes: ~S" src))
            (emit-prefixes segment src dst size)
            (emit-bytes segment #x0F opcode)
            (emit-ea segment src dst))))
 
-  (define-instruction bsf (segment dst src)
+  (define-instruction bsf (segment &prefix prefix dst src)
     (:printer ext-reg-reg/mem-no-width ((op #xBC)))
-    (:emitter (emit* segment #xBC dst src)))
+    (:emitter (emit* segment #xBC prefix dst src)))
 
-  (define-instruction bsr (segment dst src)
+  (define-instruction bsr (segment &prefix prefix dst src)
     (:printer ext-reg-reg/mem-no-width ((op #xBD)))
-    (:emitter (emit* segment #xBD dst src))))
+    (:emitter (emit* segment #xBD prefix dst src))))
 
 (flet ((emit* (segment prefix src index opcode)
          (let ((size (pick-operand-size prefix src index)))
@@ -2244,6 +2244,19 @@
 
 ;;;; interrupt instructions
 
+;;; The default interrupt instruction is INT3 which signals SIGTRAP.
+;;; This makes for a lot of trouble when using gdb to debug lisp, because gdb really wants
+;;; to use SIGTRAP for itself. And allegedly there were OSes where SIGTRAP was unreliable
+;;; but I have never seen it, other than it being intercepted by gdb.
+;;; (Maybe that's what someone meant by "unreliable"?)
+;;; So depending on your requirement, SIGILL can be raised instead via either the INTO
+;;; instruction which is illegal on amd64, or UD2 for compabitility with 32-bit code.
+;;; UD2 is not needed on amd64 but is on 32-bit where INTO is a legal instruction.
+;;; However, if trying to debug code which also gets an "actual" SIGILL, this still poses
+;;; a problem for gdb. To workaround that we can emit a call to a asm routine which
+;;; has essentially the same effect as the signal.
+;;; Orthogonal to the preceding choices, INT1 can be used for pseudo-atomic-interrupted
+;;; but that doesn't work on all systems.
 (define-instruction break (segment &optional (code nil codep))
   (:printer byte-imm ((op #xCC)) :default :print-name 'int3 :control #'break-control)
   (:printer word-imm ((op #x0B0F)) :default :print-name 'ud2 :control #'break-control)
@@ -2251,6 +2264,11 @@
   ;; use of sigtrap and shortens the error break by 1 byte relative to UD2.
   (:printer byte-imm ((op #xCE)) :default :print-name 'into :control #'break-control)
   (:emitter
+   #+sw-int-avoidance ; emit CALL [EA] to skip over the trap instruction
+   (let ((where (ea (make-fixup 'sb-vm::synchronous-trap :assembly-routine*))))
+     (emit-prefixes segment where nil :do-not-set)
+     (emit-byte segment #xFF)
+     (emit-ea segment where #b010))
    #-ud2-breakpoints (emit-byte segment (or #+int4-breakpoints #xCE #xCC))
    #+ud2-breakpoints (emit-word segment #x0B0F)
    (when codep (emit-byte segment (the (unsigned-byte 8) code)))))
@@ -3324,7 +3342,7 @@
   (declare (type index offset))
   (let ((sap (code-instructions code)))
     (case flavor
-      (:gc-barrier ; the VALUE is nbits, so convert it to an AND mask
+      (:card-table-index-mask ; the VALUE is nbits, so convert it to an AND mask
        (setf (sap-ref-32 sap offset) (1- (ash 1 value))))
       (:layout-id ; layout IDs are signed quantities on x86-64
        (setf (signed-sap-ref-32 sap offset) value))
@@ -3367,7 +3385,7 @@
     (let* ((fixup (fixup-note-fixup note))
            (offset (fixup-note-position note))
            (flavor (fixup-flavor fixup)))
-      (cond ((eq flavor :gc-barrier) (push offset imm-fixups))
+      (cond ((eq flavor :card-table-index-mask) (push offset imm-fixups))
             #+immobile-space
             ((and (eq (fixup-note-kind note) :abs32)
                   (memq flavor ; these all point to fixedobj space

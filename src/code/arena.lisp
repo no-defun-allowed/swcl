@@ -56,6 +56,7 @@
          (bug "Arena token overflow. Need to implement double-precision count"))
         ((eql (arena-link arena) 0)) ; never used - do nothing
         (t
+         (aver (not (arena-hidden arena)))
          (alien-funcall (extern-alien "arena_release_memblks" (function void unsigned))
                         (get-lisp-obj-address arena))
          (setf (arena-bytes-wasted arena) 0)
@@ -80,9 +81,8 @@ one or more times, not to exceed MAX-EXTENSIONS times"
                 (alien-funcall (extern-alien "sbcl_new_arena" (function unsigned unsigned))
                                size))))
     (%set-instance-layout arena layout)
-    (setf (arena-max-extensions arena) max-extensions
+    (setf (arena-size-limit arena) (+ size (* max-extensions growth-amount))
           (arena-growth-amount arena) growth-amount
-          (arena-max-extensions arena) max-extensions
           (arena-index arena) index
           (arena-hidden arena) nil
           (arena-token arena) 1

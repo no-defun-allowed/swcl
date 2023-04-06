@@ -383,8 +383,14 @@ distinct from the global value. Can also be SETF."
     (logior-array-flags name sb-vm:+vector-shareable+)) ; Set "logically read-only" bit
   (let ((symbol
          (truly-the symbol
-          #+immobile-symbols (sb-vm::make-immobile-symbol name)
+          ;; If no immobile-space, easy: all symbols go in dynamic-space
           #-immobile-space (sb-vm::%%make-symbol name)
+          ;; If #+immobile-symbols, then uninterned symbols go in dynamic space, but
+          ;; interned symbols go in immobile space. Good luck IMPORTing an uninterned symbol-
+          ;; it'll work at least superficially, but if used as a code constant, the symbol's
+          ;; address may violate the assumption that it's an imm32 operand.
+          #+immobile-symbols
+          (if (eql kind 0) (sb-vm::%%make-symbol name) (sb-vm::make-immobile-symbol name))
           #+(and immobile-space (not immobile-symbols))
           (if (or (eql kind 1) ; keyword
                   (and (eql kind 2) ; random interned symbol
@@ -393,7 +399,9 @@ distinct from the global value. Can also be SETF."
                        (char= (char name (1- (length name))) #\*)))
               (sb-vm::make-immobile-symbol name)
               (sb-vm::%%make-symbol name)))))
-    (%set-symbol-package symbol nil)
+    ;; Compact-symbol (which is equivalent to #+64-bit) has the package already NIL
+    ;; because the PACKAGE-ID-BITS field defaults to 0.
+    #-compact-symbol (%set-symbol-package symbol nil)
     symbol))
 
 (defun get (symbol indicator &optional (default nil))
