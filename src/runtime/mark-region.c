@@ -192,7 +192,6 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
                                       int page_type, generation_index_t gen,
                                       page_index_t *start, page_index_t end) {
   gc_assert(gen != SCRATCH_GENERATION);
-  // printf("try_allocate_small_f_p(%lu, %d, %d, %ld, %ld)\n", nbytes, page_type, gen, *start, end);
  again:
   for (page_index_t where = *start; where < end; where++) {
     if (page_bytes_used(where) <= GENCGC_PAGE_BYTES - nbytes &&
@@ -207,8 +206,9 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
       page_table[where].gen = 0;
       set_page_scan_start_offset(where, 0);
       *start = where + 1;
-      // printf(" => %ld\n", where);
-      /* Update residency statistics */
+      /* Update residency statistics. mr_update_closed_region will
+       * enliven all lines on this page, so it's correct to set the
+       * page bytes used like this. */
       page_bytes_t used = page_bytes_used(where), claimed = GENCGC_PAGE_BYTES - used;
       bytes_allocated += claimed;
       generations[gen].bytes_allocated += claimed;
@@ -236,7 +236,6 @@ page_index_t try_allocate_large(uword_t nbytes,
                                 uword_t *largest_hole) {
   void set_allocation_bit_mark(void *address);
   gc_assert(gen != SCRATCH_GENERATION);
-  // printf("try_allocate_large(%lu, %d, %d, %ld, %ld)\n", nbytes, page_type, gen, *start, end);
   uword_t pages_needed = ALIGN_UP(nbytes, GENCGC_PAGE_BYTES) / GENCGC_PAGE_BYTES;
   uword_t remainder = nbytes % GENCGC_PAGE_BYTES;
   page_index_t where = *start;
@@ -258,7 +257,6 @@ page_index_t try_allocate_large(uword_t nbytes,
                                    GENCGC_PAGE_BYTES * (p - chunk_start));
       }
       *start = chunk_start + pages_needed;
-      // printf(" => %ld\n", chunk_start);
       set_allocation_bit_mark(page_address(chunk_start));
       bytes_allocated += nbytes;
       generations[gen].bytes_allocated += nbytes;
@@ -286,13 +284,12 @@ void mr_update_closed_region(struct alloc_region *region, generation_index_t gen
   page_index_t the_page = find_page_index(region->start_addr);
   if (!(page_table[the_page].type & OPEN_REGION_PAGE_FLAG))
     lose("Page %lu wasn't open", the_page);
-  // fprintf(stderr, "closing %lu gen %d\n", the_page, gen);
 
   /* Mark the lines as allocated. */
   unsigned char *lines = line_bytemap;
   for_lines_in_page (l, the_page) {
     /* Remember to copy mark bits set by GC and fresh bits set
-     * by allocator. */
+     * by the allocator. */
     unsigned char copied = COPY_MARK(lines[l], ENCODE_GEN(gen));
     lines[l] = UNMARK_GEN(lines[l]) ? lines[l] : copied;
   }
