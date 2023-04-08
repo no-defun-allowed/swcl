@@ -451,6 +451,7 @@
                      (assert (not found))
                      (assert (eq found node))))
                (setq node next)))))
+    #-mark-region-gc
     (assert (>= addr-change 24)))) ; seems about right
 
 ;;; SO-MAPLIST does not include deleted nodes.
