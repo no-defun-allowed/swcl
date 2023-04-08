@@ -4974,7 +4974,7 @@ void gc_allocate_ptes()
         /* the tune-able parameters */
         gen->bytes_consed_between_gc
             = bytes_consed_between_gcs/(os_vm_size_t)HIGHEST_NORMAL_GENERATION;
-        gen->number_of_gcs_before_promotion = 3;
+        gen->number_of_gcs_before_promotion = 1;
         gen->minimum_age_before_gc = 0.75;
     }
 
