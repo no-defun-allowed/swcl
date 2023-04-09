@@ -53,7 +53,7 @@
 
 /* Metering */
 static struct {
-  uword_t consider; uword_t scavenge;
+  uword_t consider; uword_t scavenge; uword_t prefix;
   uword_t trace; uword_t trace_alive; uword_t trace_running;
   uword_t sweep; uword_t weak; uword_t sweep_lines; uword_t sweep_pages;
   uword_t compact; uword_t raise;
@@ -68,10 +68,10 @@ static unsigned int collection = 0;
 
 void mr_print_meters() {
 #define NORM(x) (collection ? meters.x / collection : 0)
-  fprintf(stderr, "collection %d (%.0f%% compacting): %ldus consider %ld scavenge %ld trace (%ld alive %ld running) %ld sweep (%ld lines %ld pages) %ld compact %ld raise; %ldB fresh %ldpg pinned\n",
+  fprintf(stderr, "collection %d (%.0f%% compacting): %ldus consider %ld scavenge (%ld prefixes) %ld trace (%ld alive %ld running) %ld sweep (%ld lines %ld pages) %ld compact %ld raise; %ldB fresh %ldpg pinned\n",
           collection,
           collection ? 100.0 *  (float)meters.compacts / collection : 0.0,
-          NORM(consider), NORM(scavenge),
+          NORM(consider), NORM(scavenge), NORM(prefix),
           NORM(trace), NORM(trace_alive), NORM(trace_running),
           NORM(sweep), NORM(sweep_lines), NORM(sweep_pages),
           NORM(compact), NORM(raise), NORM(fresh_pointers), NORM(pinned_pages));
@@ -163,6 +163,12 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
       region->start_addr = line_address(chunk_start);
       region->free_pointer = line_address(chunk_start) + nbytes;
       region->end_addr = line_address(chunk_end);
+      /* Rather odd to fill in the bytemap here and in
+       * mr_update_closed_region. This is nice to ensure things
+       * are immediately visible, m_u_c_r ensures we round off
+       * properly. Do we need to round off then? Perhaps bump
+       * bytes used here for each chunk; we have exclusive access
+       * to the page and its state in the page table.. */
       for (line_index_t c = chunk_start; c < chunk_end; c++)
         line_bytemap[c] = FRESHEN_GEN(0);
       return 1;
@@ -525,8 +531,8 @@ static void trace_step() {
   boolean did_anything = 0;
   uword_t backoff = 1;
   while (atomic_load(&blocks_in_flight)) {
-    /* Spin if we're out of work, since there isn't anything more
-     * intelligent we can do, I think. */
+    /* Back off if we're out of work, since there isn't anything
+     * more intelligent we can do, I think. */
     struct Qblock *block;
     if (!work_to_do(&block)) {
       usleep(backoff);
@@ -993,7 +999,7 @@ static uword_t root_objects_checked = 0, dirty_root_objects = 0;
 CPU_SPLIT
 static void scavenge_root_gens_worker() {
   page_index_t claim, limit;
-  uword_t local_root_objects_checked = 0, local_dirty_root_objects = 0;
+  uword_t local_root_objects_checked = 0, local_dirty_root_objects = 0, prefixes_checked = 0;
   for_each_claim (claim, limit) {
     for (page_index_t i = claim; i < limit; i++) {
       unsigned char page_type = page_table[i].type & PAGE_TYPE_MASK;
@@ -1037,9 +1043,9 @@ static void scavenge_root_gens_worker() {
         lispobj *start = (lispobj*)page_address(i);
         int first_card = page_to_card_index(i);
         line_index_t first_line = address_line(start);
-        /* Now that cards are as large as lines, we can blast through
+        /* As cards are as large as lines, we can blast through
          * and make a bitmap of interesting objects to scavenge. */
-        unsigned char mask[GENCGC_PAGE_BYTES / LINE_SIZE];
+        unsigned char mask[CARDS_PER_PAGE];
         unsigned char *cards = gc_card_mark + first_card,
                       *lines = line_bytemap + first_line;
         int gen = generation_to_collect;
@@ -1050,25 +1056,44 @@ static void scavenge_root_gens_worker() {
         /* Reset mark, which scavenging might re-instate. */
         for (unsigned int n = 0; n < CARDS_PER_PAGE; n++)
           cards[n] = (cards[n] == STICKY_MARK) ? STICKY_MARK : CARD_UNMARKED;
-        uword_t *words = (uword_t*)mask;
-        uword_t first_allocation_word = mark_bitmap_word_index(start);
-        for (unsigned int n = 0; n < GENCGC_PAGE_BYTES / LINE_SIZE / N_WORD_BYTES; n++) {
-          uword_t word = words[n] & allocation_bitmap[first_allocation_word + n];
-          while (word) {
-            unsigned char bit = __builtin_ctzl(word);
-            int offset = bit + n * N_WORD_BITS;
-            lispobj *where = (lispobj*)(start + 2 * offset);
-            local_root_objects_checked++;
+
+        unsigned char *allocations = (unsigned char*)allocation_bitmap;
+        line_index_t last_seen = -1;
+        for (unsigned int n = 0; n < CARDS_PER_PAGE; n++)
+          if (mask[n]) {
+            line_index_t this_line = address_line(start) + n;
+            unsigned char a = allocations[this_line], this_gen = DECODE_GEN(line_bytemap[this_line]);
             dirty = 0;
-            scavenge_root_object(DECODE_GEN(line_bytemap[address_line(where)]), where);
-            if (dirty) { update_card_mark(addr_to_card_index(where), 1); local_dirty_root_objects++; }
-            word &= ~(1UL << bit);
+            /* Check if there's a new->old word belonging to a
+             * SIMPLE-VECTOR overlapping this card. */
+            for (int word = 0; word < 2 * (a ? 8 : __builtin_ctzl(a)); word++)
+              if (gc_gen_of(start[WORDS_PER_CARD * n + word], PSEUDO_STATIC_GENERATION) < this_gen) {
+                prefixes_checked++;
+                lispobj *before = find_object((uword_t)line_address(this_line), (uword_t)page_address(i));
+                /* Check if we already scavenged this vector before, too. */
+                if (before
+                    && widetag_of(before) == SIMPLE_VECTOR_WIDETAG
+                    && address_line(before) > last_seen)
+                    scavenge_root_object(this_gen, before);
+                /* Always dirty this card regardless of avoiding a
+                 * re-scan or not, as we already found an interesting
+                 * pointer. */
+                dirty = 1;
+                break;
+              }
+            while (a) {
+              int bit = __builtin_ctzl(a);
+              scavenge_root_object(this_gen, start + WORDS_PER_CARD * n + 2 * bit);
+              a &= ~(1 << bit);
+            }
+            update_card_mark(first_card + n, dirty);
+            last_seen = this_line;
           }
-        }
       }
     }
   }
   dirty_generation_source = 0;
+  atomic_fetch_add(&meters.prefix, prefixes_checked);
   atomic_fetch_add(&root_objects_checked, local_root_objects_checked);
   atomic_fetch_add(&dirty_root_objects, local_dirty_root_objects);
 }

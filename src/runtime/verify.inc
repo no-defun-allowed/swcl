@@ -198,18 +198,13 @@ verify_pointer(lispobj thing, lispobj *where, struct verify_state *state)
         /* The WP criteria are:
          *  - CONS marks the exact card since it can't span cards
          *  - SIMPLE-VECTOR marks the card containing the cell with the old->young pointer.
-         *    (The mark-region GC can mark the header as well of small vectors; it doesn't care.)
          *  - Everything else marks the object header -OR- the card with the pointer.
          *    (either/or because Lisp marks the header card,
          *     but the collector marks the cell's card.) */
         int marked = card_markedp(where)
 #ifdef LISP_FEATURE_SOFT_CARD_MARKS
         || (state->object_header
-#ifdef LISP_FEATURE_MARK_REGION_GC
-            && !page_single_obj_p(find_page_index(state->object_addr))
-#else
             && header_widetag(state->object_header) != SIMPLE_VECTOR_WIDETAG
-#endif
             && card_markedp(state->object_addr))
 #endif
         ;

@@ -120,18 +120,11 @@ objects, and mark the new objects. Similar to sweeping, it is possible
 to use blending to compute a bitmap of only old objects, by only
 retaining bytes from the allocation bitmap that reside on older lines.
 
-The write barrier for mark-region collection has been extended for
-simple vectors. Unlike the barrier for the copying collector, which
-dirties only the card the slot is on, the write barrier dirties both the
-start and the dirty card. The intent is that scavenging pages
-containing small objects doesn't have to bother with dirty cards
-appearing in the middle of objects, but scavenging pages containing
-a single (large) object can pick just the lines that need to be dirtied.
-The drawbacks are, of course, that now two lines are dirtied rather
-than one, effectively doubling write barrier overhead, and the
-first line of every large simple vector has to be scavenged for no
-reason (but that is preferable to the loss of precision with larger
-cards, to be fair).
+In order to support the write barrier for SIMPLE-VECTORs writing any
+card, scavenging also searches the space between the start of a card
+and the first object for pointers to younger objects. If any are found,
+scavenging then tries to find a SIMPLE-VECTOR before, and then
+scavenges that vector and dirties the card.
 
 Compacting
 ----------
