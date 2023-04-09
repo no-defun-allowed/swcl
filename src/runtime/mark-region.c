@@ -1066,7 +1066,7 @@ static void scavenge_root_gens_worker() {
             dirty = 0;
             /* Check if there's a new->old word belonging to a
              * SIMPLE-VECTOR overlapping this card. */
-            for (int word = 0; word < 2 * (a ? 16 : __builtin_ctzl(a)); word++)
+            for (int word = 0; word < 2 * (a ? 8 : __builtin_ctzl(a)); word++)
               if (gc_gen_of(start[WORDS_PER_CARD * n + word], PSEUDO_STATIC_GENERATION) < this_gen) {
                 prefixes_checked++;
                 lispobj *before = find_object((uword_t)line_address(this_line), (uword_t)page_address(i));
