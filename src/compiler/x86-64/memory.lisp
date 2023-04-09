@@ -51,12 +51,7 @@
     ;; I'd like to measure to see if using a register is actually better.
     ;; If all threads store 0, it might be easier on the CPU's store buffer.
     ;; Otherwise, it has to remember who "wins". 0 makes it indifferent.
-    (inst mov :byte (ea gc-card-table-reg-tn scratch-reg) 0)
-    ;; Dirty the first card, too, so that we don't have to look for the
-    ;; start based on a dirty card possibly being interior to a small
-    ;; simple vector.
-    #+mark-region-gc
-    (when cell-address (emit-gengc-barrier object nil scratch-reg value-tn-ref value-tn))))
+    (inst mov :byte (ea gc-card-table-reg-tn scratch-reg) 0)))
 
 (defun emit-store (ea value val-temp)
   (sc-case value

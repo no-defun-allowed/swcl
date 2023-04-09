@@ -53,7 +53,7 @@
 
 /* Metering */
 static struct {
-  uword_t consider; uword_t scavenge;
+  uword_t consider; uword_t scavenge; uword_t prefix;
   uword_t trace; uword_t trace_alive; uword_t trace_running;
   uword_t sweep; uword_t weak; uword_t sweep_lines; uword_t sweep_pages;
   uword_t compact; uword_t raise;
@@ -68,10 +68,10 @@ static unsigned int collection = 0;
 
 void mr_print_meters() {
 #define NORM(x) (collection ? meters.x / collection : 0)
-  fprintf(stderr, "collection %d (%.0f%% compacting): %ldus consider %ld scavenge %ld trace (%ld alive %ld running) %ld sweep (%ld lines %ld pages) %ld compact %ld raise; %ldB fresh %ldpg pinned\n",
+  fprintf(stderr, "collection %d (%.0f%% compacting): %ldus consider %ld scavenge (%ld prefixes) %ld trace (%ld alive %ld running) %ld sweep (%ld lines %ld pages) %ld compact %ld raise; %ldB fresh %ldpg pinned\n",
           collection,
           collection ? 100.0 *  (float)meters.compacts / collection : 0.0,
-          NORM(consider), NORM(scavenge),
+          NORM(consider), NORM(scavenge), NORM(prefix),
           NORM(trace), NORM(trace_alive), NORM(trace_running),
           NORM(sweep), NORM(sweep_lines), NORM(sweep_pages),
           NORM(compact), NORM(raise), NORM(fresh_pointers), NORM(pinned_pages));
@@ -999,7 +999,7 @@ static uword_t root_objects_checked = 0, dirty_root_objects = 0;
 CPU_SPLIT
 static void scavenge_root_gens_worker() {
   page_index_t claim, limit;
-  uword_t local_root_objects_checked = 0, local_dirty_root_objects = 0;
+  uword_t local_root_objects_checked = 0, local_dirty_root_objects = 0, prefixes_checked = 0;
   for_each_claim (claim, limit) {
     for (page_index_t i = claim; i < limit; i++) {
       unsigned char page_type = page_table[i].type & PAGE_TYPE_MASK;
@@ -1058,22 +1058,42 @@ static void scavenge_root_gens_worker() {
           cards[n] = (cards[n] == STICKY_MARK) ? STICKY_MARK : CARD_UNMARKED;
 
         unsigned char *allocations = (unsigned char*)allocation_bitmap;
+        line_index_t last_seen = -1;
         for (unsigned int n = 0; n < CARDS_PER_PAGE; n++)
           if (mask[n]) {
             line_index_t this_line = address_line(start) + n;
             unsigned char a = allocations[this_line], this_gen = DECODE_GEN(line_bytemap[this_line]);
             dirty = 0;
+            /* Check if there's a new->old word belonging to a
+             * SIMPLE-VECTOR overlapping this card. */
+            for (int word = 0; word < 2 * (a ? 16 : __builtin_ctzl(a)); word++)
+              if (gc_gen_of(start[WORDS_PER_CARD * n + word], PSEUDO_STATIC_GENERATION) < this_gen) {
+                prefixes_checked++;
+                lispobj *before = find_object((uword_t)line_address(this_line), (uword_t)page_address(i));
+                /* Check if we already scavenged this vector before, too. */
+                if (before
+                    && widetag_of(before) == SIMPLE_VECTOR_WIDETAG
+                    && address_line(before) > last_seen)
+                    scavenge_root_object(this_gen, before);
+                /* Always dirty this card regardless of avoiding a
+                 * re-scan or not, as we already found an interesting
+                 * pointer. */
+                dirty = 1;
+                break;
+              }
             while (a) {
               int bit = __builtin_ctzl(a);
               scavenge_root_object(this_gen, start + WORDS_PER_CARD * n + 2 * bit);
               a &= ~(1 << bit);
             }
             update_card_mark(first_card + n, dirty);
+            last_seen = this_line;
           }
       }
     }
   }
   dirty_generation_source = 0;
+  atomic_fetch_add(&meters.prefix, prefixes_checked);
   atomic_fetch_add(&root_objects_checked, local_root_objects_checked);
   atomic_fetch_add(&dirty_root_objects, local_dirty_root_objects);
 }
