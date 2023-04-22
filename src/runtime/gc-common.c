@@ -1877,7 +1877,6 @@ static void pair_follow_fps(lispobj ht_entry[2])
 void cull_weak_hash_tables(int (*alivep[4])(lispobj,lispobj))
 {
     struct hash_table *table, *next;
-
     for (table = weak_hash_tables; table != NULL; table = next) {
         next = (struct hash_table *)table->next_weak_hash_table;
         NON_FAULTING_STORE(table->next_weak_hash_table = NIL,
