@@ -164,6 +164,15 @@ void AMD64_SYSV_ABI sbcl_delete_arena(lispobj arena_taggedptr)
     ARENA_DISPOSE_MEMORY(arena, arena->uw_original_size);
 }
 
+static page_index_t close_heap_region(struct alloc_region* r, int page_type) {
+    page_index_t result = -1;
+    if (r->start_addr) {
+        result = find_page_index(r->start_addr);
+        gc_close_region(r, page_type);
+    }
+    return result;
+}
+
 void AMD64_SYSV_ABI switch_to_arena(lispobj arena_taggedptr,
                      __attribute__((unused)) lispobj* ra) // return address
 {
@@ -180,7 +189,8 @@ void AMD64_SYSV_ABI switch_to_arena(lispobj arena_taggedptr,
     struct extra_thread_data *extra_data = thread_extra_data(th);
     if (arena) { // switching from the dynamic space to an arena
         if (th->arena)
-            lose("arena error: can't switch from %p to %p", (void*)th->arena, arena);
+            lose("arena error: can't switch from %p to %p", (void*)th->arena,
+                 (void*)arena_taggedptr);
         // Page table lock guards the arena chain, as well as the page table
         acquire_gc_page_table_lock();
         // See if this arena has ever been switched to,
@@ -190,8 +200,10 @@ void AMD64_SYSV_ABI switch_to_arena(lispobj arena_taggedptr,
             arena_chain = arena_taggedptr;
         }
         // Close only the non-system regions
-        if (th->mixed_tlab.start_addr) gc_close_region(&th->mixed_tlab, PAGE_TYPE_MIXED);
-        if (th->cons_tlab.start_addr) gc_close_region(&th->cons_tlab, PAGE_TYPE_CONS);
+        thread_extra_data(th)->mixed_page_hint =
+            close_heap_region(&th->mixed_tlab, PAGE_TYPE_MIXED);
+        thread_extra_data(th)->cons_page_hint =
+            close_heap_region(&th->cons_tlab, PAGE_TYPE_CONS);
         release_gc_page_table_lock();
 #if 0 // this causes a data race, the very thing it's trying to avoid
         int arena_index = fixnum_value(arena->index);
@@ -406,8 +418,9 @@ void gc_scavenge_arenas()
                 do {
                     // The block is its own lower bound for scavenge.
                     // Its first 4 words look like fixnums, so no need to skip 'em.
-                    fprintf(stderr, "Arena @ %p: scavenging %p..%p\n",
-                            a, block, block->freeptr);
+                    if (gencgc_verbose)
+                        fprintf(stderr, "Arena @ %p: scavenging %p..%p\n",
+                                a, block, block->freeptr);
 #ifdef LISP_FEATURE_MARK_REGION_GC
                     mr_trace_bump_range((lispobj*)block, (lispobj*)block->freeptr);
 #else
@@ -524,14 +537,18 @@ int find_dynspace_to_arena_ptrs(lispobj arena, lispobj result_buffer)
         /* This produces false positives, don't return potential pointers, but instead print them.
          * Using the output, you can try to probe the suspect memory with SB-VM:HEXDUMP */
         if (th == get_sb_vm_thread()) {
-          scan_thread_control_stack(&arena, // = the approximate stack pointer
-                                    th->control_stack_end,
-                                    th->lisp_thread);
+            scan_thread_control_stack(&arena, // = the approximate stack pointer
+                                      th->control_stack_end,
+                                      th->lisp_thread);
         } else {
-          int ici = fixnum_value(read_TLS(FREE_INTERRUPT_CONTEXT_INDEX, th));
-          if (ici != 1) lose("can't find interrupt context");
-          lispobj sp = *os_context_register_addr(nth_interrupt_context(0, th), reg_SP);
-          scan_thread_control_stack((lispobj*)sp, th->control_stack_end, th->lisp_thread);
+#ifdef LISP_FEATURE_SB_SAFEPOINT
+            lispobj *sp = os_get_csp(th);
+#else
+            int ici = fixnum_value(read_TLS(FREE_INTERRUPT_CONTEXT_INDEX, th));
+            if (ici != 1) lose("can't find interrupt context");
+            lispobj sp = *os_context_register_addr(nth_interrupt_context(0, th), reg_SP);
+#endif
+            scan_thread_control_stack((lispobj*)sp, th->control_stack_end, th->lisp_thread);
         }
 #endif
         scan_thread_words((lispobj*)th->binding_stack_start,

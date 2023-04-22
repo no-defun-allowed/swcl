@@ -1036,25 +1036,17 @@
 (declaim (inline barvector))
 (defun barvector (x y z)
   (make-array 3 :initial-contents (list x y z)))
-(with-test (:name :dx-compiler-notes
-            :fails-on (and))
+(with-test (:name :dx-compiler-notes)
   (flet ((assert-notes (j lambda)
            (let ((notes (nth 4 (multiple-value-list (checked-compile lambda))))) ; TODO
              (unless (= (length notes) j)
                (error "Wanted ~S notes, got ~S for~%   ~S"
                       j (length notes) lambda)))))
-    ;; These ones should complain.
-    (assert-notes 1 `(lambda (x)
-                       (let ((v (make-array x)))
+    ;; This should complain.
+    (assert-notes 1 `(lambda ()
+                       (let ((v (make-array (1+ #.sb-vm::+backend-page-bytes+))))
                          (declare (dynamic-extent v))
-                         (length v))))
-    (assert-notes 2 `(lambda (x)
-                       (let ((y (if (plusp x)
-                                    (true x)
-                                    (true (- x)))))
-                         (declare (dynamic-extent y))
-                         (print y)
-                         nil)))
+                         (print (sb-ext:stack-allocated-p v)))))
     ;; These ones should not complain.
     (assert-notes 0 `(lambda (name)
                        (with-alien
@@ -1819,28 +1811,22 @@
   (assert (equal (known-function-autodx 3 4 (list 1 2 3 4)) '(1 2 3 3)))
   (assert-no-consing (known-function-autodx 3 4 nil)))
 
-;;; It's difficult to isolate the runtime effect of no consing for the
-;;; closure in this case, so just check we don't get a note about
-;;; stack allocation at compile time.
-(with-test (:name :auto-dx-known-functions-too.transform)
-  (checked-compile-and-assert
-   (:allow-notes nil
-    :optimize '(:speed 1))
-   '(lambda (y list)
-     (map 'vector (lambda (x) (+ x y)) list))
-   ((3 '(1 2 3 4)) #(4 5 6 7) :test #'equalp)))
+(defun known-function-autodx-transform (x list)
+  (map nil (lambda (y) (+ x y)) list))
 
-(defun known-function-autodx-transform (array x list)
+(with-test (:name :auto-dx-known-functions-too.transform)
+  (assert-no-consing (known-function-autodx-transform 3 '(1 2 3 4))))
+
+(defun known-function-autodx-transform-2 (array x list)
   (map-into array (lambda (y) (+ x y)) list)
   array)
 
-#+(or) ;; this test doesn't work on some platforms for some
-       ;; reason. maybe because of the assert no consing?
 (with-test (:name :auto-dx-known-functions-too.transform-2)
   (let ((array (make-array 4)))
     (declare (dynamic-extent array))
-    (assert (equalp (known-function-autodx-transform array 3 (list 1 2 3 4)) #(4 5 6 7)))
-    (assert-no-consing (known-function-autodx-transform array 3 nil))))
+    (assert (equalp (known-function-autodx-transform-2 array 3 '(1 2 3 4)) #(4 5 6 7)))
+    #+(or) ; appears to not work on some platforms for some reason?
+    (assert-no-consing (known-function-autodx-transform-2 array 3 '(1 2 3 4)))))
 
 (defun auto-dx-cleaned-up-too-many-times (off array)
   (let ((acc 0))

@@ -14,12 +14,28 @@
 
 (test-util:with-test (:name :arena-huge-object)
   ;; This arena can grow to 10 MiB.
-  (let ((a (sb-vm:new-arena 1048576 1048576 9)))
+  (let ((a (new-arena 1048576 1048576 9)))
     ;; 4 arrays of about 2MiB each should fit in the allowed space
     (dotimes (i 4)
       (test-util:opaque-identity
-       (sb-vm:with-arena (a) (make-array 2097152 :element-type '(unsigned-byte 8)))))
-    (sb-vm:destroy-arena a)))
+       (with-arena (a) (make-array 2097152 :element-type '(unsigned-byte 8)))))
+    (destroy-arena a)))
+
+(test-util:with-test (:name :disassembler)
+  (let ((a (new-arena 1048576)))
+    (with-arena (a) (sb-disassem:get-inst-space))
+    (assert (null (c-find-heap->arena)))
+    (destroy-arena a)))
+
+(test-util:with-test (:name :no-arena-symbol-property)
+  (let* ((a (new-arena 1048576))
+         (copy-of-foo
+          (with-arena (a)
+            (setf (get 'testsym 'fooprop) 9)
+            (copy-symbol 'testsym t))))
+    (test-util:opaque-identity copy-of-foo)
+    (assert (not (c-find-heap->arena)))
+    (destroy-arena a)))
 
 #+nil
 (test-util:with-test (:name :arena-alloc-waste-reduction)
@@ -101,20 +117,22 @@
             (unless (and (heap-allocated-p line) (not (points-to-arena line)))
               (hexdump line 2 nil)
               (error "~S has ~S" symbol line)))))))
-  #-win32 ; finder crashes (same reason for the :skipped-on below I guess)
   (let ((finder-result (c-find-heap->arena)))
     (assert (null finder-result))))
 
 (defun test-with-open-file ()
-  (with-open-file (stream (format nil "/proc/~A/stat" (sb-unix:unix-getpid))
-                          :if-does-not-exist nil)
+  ;; Force allocation of a new BUFFER containing a new SAP,
+  ;; and thereby a new finalizer (a closure) so that the test can
+  ;; ascertain that none of those went to the arena.
+  (setq sb-impl::*available-buffers* nil)
+  (with-open-file (stream *load-pathname*)
     (if stream
         (let ((pn (pathname stream)))
           (values pn (namestring pn) (read-line stream nil)))
         (values nil nil nil))))
 
 (defvar *answerstring*)
-(test-util:with-test (:name :with-open-stream :skipped-on (:not :linux))
+(test-util:with-test (:name :with-open-stream)
   (multiple-value-bind (pathname namestring answer)
       (with-arena (*arena*) (test-with-open-file))
     (when pathname
@@ -231,7 +249,7 @@
 (defvar ptr1 (cons (f arena1) 'foo))
 (defvar ptr2 (g arena2))
 
-(test-util:with-test (:name :find-ptrs-all-arenas :skipped-on :win32)
+(test-util:with-test (:name :find-ptrs-all-arenas)
   (let ((result (c-find-heap->arena)))
     ;; There should be a cons pointing to ARENA1,
     ;; the cons which happens to be in PTR1
@@ -241,7 +259,7 @@
     ;; There should not be anything else
     (assert (= (length result) 2))))
 
-(test-util:with-test (:name :find-ptrs-specific-arena :skipped-on :win32)
+(test-util:with-test (:name :find-ptrs-specific-arena)
   (let ((result (c-find-heap->arena arena1)))
     (assert (equal result (list ptr1))))
   (let ((result (c-find-heap->arena arena2)))
@@ -336,7 +354,7 @@
            (dolist (x *bunch-of-objects*)
              (when (typep x spec)
                (incf result)))))
-    (sb-vm:with-arena (arena)
+    (with-arena (arena)
       (let ((specs (get-bunch-of-type-specs)))
         (dolist (spec1 specs)
           (dolist (spec2 specs)
@@ -344,12 +362,10 @@
             (try `(or ,spec1 ,spec2))
             (try `(and ,spec1 (not ,spec2)))
             (try `(or ,spec1 (not ,spec2))))))))
-  (assert (not (sb-vm:c-find-heap->arena arena)))
+  (assert (not (c-find-heap->arena arena)))
   result)
-(test-util:with-test (:name :ctype-cache
-                      ;; don't have time to figure out the 'c-find-heap->arena' crashes
-                      :skipped-on :win32)
-  (let ((arena (sb-vm:new-arena 1048576)))
+(test-util:with-test (:name :ctype-cache)
+  (let ((arena (new-arena 1048576)))
     (ctype-operator-tests arena)))
 
 ;;;;
@@ -363,8 +379,7 @@
         (let ((sym (intern str *newpkg*)))
           (assert (heap-allocated-p sym))
           (assert (heap-allocated-p (symbol-name sym)))))))
-  #-win32
-  (assert (not (sb-vm:c-find-heap->arena *arena*))))
+  (assert (not (c-find-heap->arena *arena*))))
 
 (test-util:with-test (:name :intern-a-bunch)
   (let ((old-n-cells
@@ -399,7 +414,7 @@
   (let ((val (with-arena (*arena*)
                (slot-value *condition* 'b))))
     (assert (pathnamep val))
-    (assert (not (sb-vm:points-to-arena *condition*)))))
+    (assert (not (points-to-arena *condition*)))))
 
 (test-util:with-test (:name :gc-epoch-not-in-arena)
   (with-arena (*arena*) (gc))
@@ -551,7 +566,7 @@
                                  (not (heap-allocated-p r))
                                  (add-to-result obj r))
                         (return-from done)))))
-        (sb-vm:map-allocated-objects
+        (map-allocated-objects
          (lambda (obj type size)
            (declare (ignore type size))
            (block done
@@ -559,7 +574,7 @@
                (t
                 :extend
                 (case (widetag-of obj)
-                  (#.sb-vm:value-cell-widetag
+                  (#.value-cell-widetag
                    (visit (value-cell-ref obj)))
                   (t
                    (warn "Unknown widetag ~x" (widetag-of obj))))))))

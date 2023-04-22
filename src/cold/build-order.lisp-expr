@@ -189,6 +189,7 @@
  ("src/compiler/info-vector" :c-headers)
  ("src/compiler/globaldb" :c-headers)
  ("src/compiler/generic/objdef" :c-headers)
+ ("src/code/lockfree-list" :c-headers)
 
  ("src/compiler/generic/vm-array" :c-headers)
  ("src/code/primordial-type" :c-headers)
@@ -328,6 +329,7 @@
  ("src/code/float"           :not-host)
  ("src/code/irrat"           :not-host)
 
+ ("src/code/alloc"           :not-host) ; for ALLOCATE-SYSTEM-MEMORY in make-buffer
  ("src/code/fd-stream"       :not-host)
  ("src/code/target-char"     :not-host)
  ("src/code/stream"          :not-host)
@@ -488,7 +490,7 @@
  #+android ("src/code/android-os" :not-host)
  #+sunos ("src/code/sunos-os" :not-host)
  #+bsd   ("src/code/bsd-os"   :not-host)
- #+linux ("src/code/linux-os" :not-host)
+ #+(and linux (not android)) ("src/code/linux-os" :not-host)
  #+haiku ("src/code/haiku-os" :not-host)
  #+win32 ("src/code/win32-os" :not-host)
 
@@ -522,7 +524,6 @@
 
  ("src/code/late-extensions") ; needs condition system
 
- ("src/code/alloc"             :not-host) ; needs foo-SPACE-START
  ("src/code/brothertree"       :not-host)
  #+metaspace ("src/code/metaspace" :not-host)
  ("src/code/simple-fun"        :not-host) ; function slot accessors

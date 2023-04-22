@@ -251,12 +251,16 @@
   (inst jmp :e undefined)
 
   (inst pop (ea n-word-bytes rbp-tn))
-  (emit-error-break nil error-trap (error-number-or-lose 'sb-kernel::object-not-callable-error)
-                    (list fun)))
+  (cerror-call nil 'sb-kernel::object-not-callable-error fun)
+  (inst push (ea n-word-bytes rbp-tn))
+  (%lea-for-lowtag-test fdefn fun fun-pointer-lowtag)
+  (inst test :byte rbx-tn lowtag-mask)
+  (inst jmp :nz (make-fixup 'call-symbol :assembly-routine))
+  (inst jmp (ea (- (* closure-fun-slot n-word-bytes) fun-pointer-lowtag) fun)))
 
 
 (define-assembly-routine (throw
-                          (:return-style :raw))
+                          (:return-style :full-call-no-return))
                          ((:arg target (descriptor-reg any-reg) rdx-offset)
                           (:arg start any-reg rbx-offset)
                           (:arg count any-reg rcx-offset)
@@ -266,7 +270,6 @@
   (declare (ignore start count bsp-temp))
 
   (load-tl-symbol-value catch *current-catch-block*)
-
   LOOP
 
   (let ((error (gen-label)))
@@ -284,17 +287,11 @@
     (inst jmp :z error))
 
   (inst cmp target (object-slot-ea catch catch-block-tag-slot 0))
-  (inst jmp :e EXIT)
+  ;; Here RAX points to catch block containing symbol pointed to by RDX.
+  (inst jmp :e (make-fixup 'unwind :assembly-routine))
 
   (loadw catch catch catch-block-previous-catch-slot)
-  (inst jmp LOOP)
-
-  EXIT
-
-  ;; Here RAX points to catch block containing symbol pointed to by RDX.
-  ;; An extra RET gets stuffed after the JMP, but oh well. You can't just change
-  ;; the :return-style to :none because that also affects the call sequence.
-  (inst jmp (make-fixup 'unwind :assembly-routine)))
+  (inst jmp LOOP))
 
 ;;; Simply return and enter the loop in UNWIND instead of calling
 ;;; UNWIND directly

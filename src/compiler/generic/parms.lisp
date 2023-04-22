@@ -237,6 +237,9 @@
     #+sb-thread sb-thread::*starting-threads*
     *free-tls-index* ; always exists for benefit of C runtime
 
+    #+(and x86-64 sb-thread (not gs-seg))
+    sb-aprof::*n-profile-sites*
+
     ;; runtime linking of lisp->C calls (regardless of whether
     ;; the C function is in a dynamic shared object or not)
     +required-foreign-symbols+

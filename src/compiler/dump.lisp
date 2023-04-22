@@ -1241,6 +1241,9 @@
     ;; So these go on the stack last, i.e. nearest the top.
     ;; Reversing sorts the entry points in ascending address order
     ;; except possibly when there are multiple entry points to one routine
+    (unless (= (length (remove-duplicates (mapcar 'car routines)))
+               (length routines))
+      (error "Duplicated asm routine name"))
     (dolist (routine (reverse routines))
       (dump-object (car routine) file)
       (dump-integer (+ (label-position (cadr routine)) (caddr routine))
@@ -1474,3 +1477,21 @@
   (dump-object namestring file)
   (dump-object cc file)
   (dump-fop 'fop-record-code-coverage file))
+
+(defun dump-emitted-full-calls (hash-table fasl)
+  (let ((list (%hash-table-alist hash-table)))
+    #+sb-xc-host ; enforce host-insensitive reproducible ordering
+    (labels ((symbol< (a b)
+               (cond ((string< a b) t)
+                     ((string= a b)
+                      ;; this does find a few pairs of lookalikes
+                      (string< (cl:package-name (sb-xc:symbol-package a))
+                               (cl:package-name (sb-xc:symbol-package b))))))
+             (fname< (a b)
+               (cond ((and (atom a) (atom b)) (symbol< a b))
+                     ((atom a) t) ; symbol < list
+                     ((atom b) nil) ; opposite
+                     ((symbol< (cadr a) (cadr b))))))
+      (setq list (sort list #'fname< :key #'car)))
+    (dump-object list fasl)
+    (dump-fop 'fop-note-full-calls fasl)))

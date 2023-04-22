@@ -31,31 +31,6 @@
     (format stream "~d keys, ~d bins" (so-count self)
             (length (car (so-bins self))))))
 
-;;; A split-order dummy node has only a hash. Hashes of dummy nodes are unique.
-;;; The least-significant-bit in the hash of a dummy node is 0, and in an ordinary
-;;; node it is 1, so that there always exists a dummy node whose hash is less
-;;; than that of an ordinary node.
-(defstruct (so-node (:conc-name nil)
-                    (:include list-node)
-                    (:copier nil)
-                    (:constructor %make-so-dummy-node (node-hash)))
-  (node-hash 0 :type fixnum :read-only t))
-;;; An ordinary node has a key and hash. Keys are unique but hashes can be nonunique,
-;;; though uniqueness will improve efficiency of the algorithms.
-;;; The ordering is primarily based on hash, using key as a tiebreaker,
-;;; so there is a total ordering even if there are hash collisions.
-(defstruct (so-key-node
-            (:conc-name nil)
-            (:include so-node)
-            (:copier nil)
-            (:constructor %make-so-set-node (node-hash so-key)))
-  (so-key (missing-arg))) ; should be readonly. DO NOT MUTATE without extreme care
-(defstruct (so-data-node
-            (:conc-name nil)
-            (:include so-key-node)
-            (:copier nil)
-            (:constructor %make-so-map-node (node-hash so-key so-data)))
-  (so-data nil))
 (defmethod print-object ((self so-key-node) stream)
   (print-unreadable-object (self stream :type t :identity t)
     (format stream "hash=~x key=~a~@[ val=~a~]"
@@ -443,3 +418,23 @@
     (when (> (atomic-incf (so-count table)) (so-threshold table))
       (so-expand-bins table bins)))
   node)
+
+(defun c-so-find/addr (solist key)
+  (let ((bins (so-bins solist)))
+    ;; Technically this needs to inhibit GC or else use immobile objects
+    ;; for all list nodes, but it's good enough for now.
+    (sb-sys:with-pinned-objects (solist bins (car bins) key)
+      (let ((result
+             (sb-alien:alien-funcall
+              (sb-alien:extern-alien "split_ordered_list_find"
+                                     (function sb-alien:unsigned
+                                               sb-alien:unsigned sb-alien:unsigned))
+              (logandc2 (get-lisp-obj-address solist) sb-vm:lowtag-mask)
+              (get-lisp-obj-address key))))
+        (unless (= result 0)
+          ;; need to be unsafe here, otherwise might get
+          ;; "<integer> is not a valid argument to SB-KERNEL:MAKE-LISP-OBJ"
+          ;; because the allocation region wasn't closed.
+          ;; Would it better for tests to close the region? Maybe,
+          ;; but we can't count on everybody doing that.
+          (%make-lisp-obj (logior result sb-vm:instance-pointer-lowtag)))))))

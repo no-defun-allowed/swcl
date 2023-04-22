@@ -28,6 +28,7 @@
 #include "arch.h"
 #include "genesis/compiled-debug-fun.h"
 #include "genesis/compiled-debug-info.h"
+#include "genesis/hash-table.h"
 #include "genesis/package.h"
 #include "genesis/static-symbols.h"
 #include "genesis/primitive-objects.h"
@@ -479,10 +480,7 @@ stack_pointer_p(struct thread* thread, void *p)
 static int
 ra_pointer_p (struct thread* th, void *ra)
 {
-  /* the check against 4096 is still a mystery to everyone interviewed about
-   * it, but recent changes to sb-sprof seem to suggest that such values
-   * do occur sometimes. */
-  return ((uword_t) ra) > 4096 && !stack_pointer_p (th, ra);
+  return !stack_pointer_p (th, ra);
 }
 
 static int NO_SANITIZE_MEMORY
@@ -498,6 +496,7 @@ x86_call_context (struct thread* th, void *fp, void **ra, void **ocfp)
   c_ocfp    = *((void **) fp);
   c_ra      = *((void **) fp + 1);
 
+  // frame is valid even if the return address is bogus
   c_valid_p = (c_ocfp > fp
                && stack_pointer_p(th, c_ocfp)
                && ra_pointer_p(th, c_ra));
@@ -534,6 +533,29 @@ describe_thread_state(void)
     printf("Pending handler = %p\n", data->pending_handler);
 }
 
+static char* asm_routine_name(char* pc)
+{
+    struct code *c = (void*)asm_routines_start;
+    int offset = pc - code_text_start(c);
+    struct hash_table* ht = (void*)native_pointer(c->debug_info);
+    struct vector* v = (void*)native_pointer(ht->pairs);
+    int len = vector_len(v);
+    int i;
+    for (i = 2; i < len; i += 2) {
+        if (lowtag_of(v->data[i+1]) != LIST_POINTER_LOWTAG) continue;
+        struct cons* c = CONS(v->data[i+1]);
+        struct cons* cdr = CONS(c->cdr);
+        int from_byteindex = fixnum_value(c->car);
+        int to_byteindex = fixnum_value(cdr->car);
+        if (offset >= from_byteindex && offset <= to_byteindex) {
+            struct symbol* sym = SYMBOL(v->data[i]);
+            struct vector* string = VECTOR(decode_symbol_name(sym->name));
+            return (char*)string->data;
+        }
+    }
+    return "?";
+}
+
 static void print_backtrace_frame(char *pc, void *fp, int i, FILE *f) {
 #ifdef BACKTRACE_SHOW_FRAME_SIZE
     // This display is a little confusing.  It's the size of the frame that this
@@ -548,7 +570,7 @@ static void print_backtrace_frame(char *pc, void *fp, int i, FILE *f) {
         if (df)
             print_entry_name(df->name, f);
         else if (pc >= (char*)asm_routines_start && pc < (char*)asm_routines_end)
-            fprintf(f, "(assembly routine)");
+            fprintf(f, "%s (asm)", asm_routine_name(pc));
         else
             fprintf(f, "{code_serialno=%x}", code_serialno(code));
     } else if (gc_managed_heap_space_p((uword_t)pc)) {
