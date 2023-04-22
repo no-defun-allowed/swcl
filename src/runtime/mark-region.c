@@ -1063,6 +1063,7 @@ static void scavenge_root_gens_worker() {
           if (mask[n]) {
             line_index_t this_line = address_line(start) + n;
             unsigned char a = allocations[this_line], this_gen = DECODE_GEN(line_bytemap[this_line]);
+            boolean worked = 0;
             dirty = 0;
             /* Check if there's a new->old word belonging to a
              * SIMPLE-VECTOR overlapping this card. */
@@ -1074,20 +1075,28 @@ static void scavenge_root_gens_worker() {
                 if (before
                     && widetag_of(before) == SIMPLE_VECTOR_WIDETAG
                     && address_line(before) > last_seen)
-                    scavenge_root_object(this_gen, before);
+                  scavenge_root_object(this_gen, before);
                 /* Always dirty this card regardless of avoiding a
                  * re-scan or not, as we already found an interesting
                  * pointer. */
-                dirty = 1;
+                dirty = 1, worked = 1;
                 break;
               }
             while (a) {
+              worked = 1;
               int bit = __builtin_ctzl(a);
               scavenge_root_object(this_gen, start + WORDS_PER_CARD * n + 2 * bit);
               a &= ~(1 << bit);
             }
             update_card_mark(first_card + n, dirty);
-            last_seen = this_line;
+            /* Only advance last_seen if we did any work here.
+             * If we always advance, we can confuse prefix scanning.
+             * Suppose a simple-vector spans cards 0, 1 and 2, and 1
+             * and 2 are dirtied. Card 1 has no interesting pointers on it,
+             * but sets last_seen = 1. Then we don't search the prefix of 2
+             * because address_line(before) == 0 which is less than 1. So
+             * we need last_seen to actually reflect the work we did. */
+            if (worked) last_seen = this_line;
           }
       }
     }
