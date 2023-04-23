@@ -313,18 +313,12 @@ static boolean object_marked_p(lispobj object) {
   uword_t bit_index = index % N_WORD_BITS, word_index = index / N_WORD_BITS;
   return ANY(mark_bitmap[word_index] & ((uword_t)(1) << bit_index));
 }
-static boolean set_mark_bit(lispobj object, boolean mark_allocation) {
+static boolean set_mark_bit(lispobj object) {
   uword_t index = (uword_t)((object - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS);
   uword_t bit_index = index % N_WORD_BITS, word_index = index / N_WORD_BITS;
   uword_t bit = ((uword_t)(1) << bit_index);
   /* Avoid doing an atomic op if we're obviously not going to win it. */
   if (mark_bitmap[word_index] & bit) return 0;
-  /* If the mark bit was set, someone else must have already updated
-   * the allocation bitmap; updating the allocation bitmap happens before
-   * updating the mark bitmap in set_mark_bit, and happens long before
-   * anything else in compute_allocations. */
-  if (mark_allocation)
-    atomic_fetch_or(allocation_bitmap + word_index, bit);
   /* Return if we claimed successfully i.e. the bit was 0 before. */
   return !ANY(atomic_fetch_or(mark_bitmap + word_index, bit) & bit);
 }
@@ -431,9 +425,8 @@ static void mark(lispobj object, lispobj *where, enum source source_type) {
       object = make_lispobj(base, OTHER_POINTER_LOWTAG);
     }
     log_slot(object, where, source_object, source_type);
-    boolean set_allocation = IS_FRESH(line_bytemap[address_line(np)]);
     /* Enqueue onto mark queue */
-    if (set_mark_bit(object, set_allocation)) {
+    if (set_mark_bit(object)) {
       if (!output_block || output_block->count == QBLOCK_CAPACITY) {
         struct Qblock *next = grab_qblock();
         if (output_block) {
@@ -486,8 +479,7 @@ static void trace_object(lispobj object) {
         /* Inlined logic from mark() */
         log_slot(c->cdr, &c->cdr, native_pointer(object), SOURCE_NORMAL);
         if (!pointer_survived_gc_yet(next)) {
-          boolean set_allocation = IS_FRESH(line_bytemap[address_line(np)]);
-          if (set_mark_bit(next, set_allocation)) {
+          if (set_mark_bit(next)) {
             if (listp(next))
               mark_cons_line(CONS(next));
             else
@@ -940,7 +932,7 @@ void mr_preserve_range(lispobj *from, sword_t nwords) {
  * allocate into pages we intend to evacuate. */
 void mr_preserve_leaf(lispobj obj) {
   if (is_lisp_pointer(obj) && in_dynamic_space(obj)) {
-    set_mark_bit(obj, 1);
+    set_mark_bit(obj);
     lispobj *n = native_pointer(obj);
     mark_lines(n);
   }
