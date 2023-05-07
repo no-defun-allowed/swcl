@@ -290,12 +290,21 @@
                           sb-xc:*features*))
              (arch (target-platform-keyword)))
         ;; Win32 conditionally adds :sb-futex in grovel-features.sh
-        (when (target-featurep '(:and :sb-thread (:or :linux :freebsd)))
+        ;; Futexes aren't available in all macos versions, but they are available in all versions that support arm, so always enable them there
+        (when (target-featurep '(:and :sb-thread (:or :linux :freebsd :openbsd (:and :darwin :arm64))))
           (pushnew :sb-futex sb-xc:*features*))
+        ;; If may not be the best idea to put clock_gettime calls around every
+        ;; futex_wait if the OS/libc you're building for does not have a vdso entry point.
+        ;; So leave this out unless enabled explicitly and/or I gather more data on
+        ;; its performance impact.
+        #+nil
+        (when (target-featurep '(:and :sb-futex :x86-64 :linux))
+          (pushnew :futex-wait-metric sb-xc:*features*))
         (when (target-featurep :immobile-space)
-          (when (member :sb-thread sb-xc:*features*)
-            (pushnew :system-tlabs sb-xc:*features*))
-          (pushnew :compact-instance-header sb-xc:*features*)
+          (when (target-featurep :x86-64)
+            (when (member :sb-thread sb-xc:*features*)
+              (pushnew :system-tlabs sb-xc:*features*))
+            (pushnew :compact-instance-header sb-xc:*features*))
           (pushnew :immobile-code sb-xc:*features*))
         (when (target-featurep :64-bit)
           (push :compact-symbol sb-xc:*features*))
@@ -382,10 +391,8 @@
           ":IMMOBILE-CODE requires :IMMOBILE-SPACE feature")
          ("(and immobile-symbols (not immobile-space))"
           ":IMMOBILE-SYMBOLS requires :IMMOBILE-SPACE feature")
-         ("(and system-tlabs (or (not sb-thread) (not immobile-space)))"
-          ;; I don't think it really reqires immobile-space but I haven't tried
-          ;; it and I don't care to support that.
-          ":SYSTEM-TLABS requires SB-THREAD and IMMOBILE-SPACE")
+         ("(and system-tlabs (not sb-thread))"
+          ":SYSTEM-TLABS requires SB-THREAD")
          ("(and sb-futex (not sb-thread))"
           "Can't enable SB-FUTEX on platforms lacking thread support")
          ;; There is still hope to make multithreading on DragonFly x86-64
@@ -769,6 +776,9 @@
              (search "src/code/arena" stem)
              (search "src/code/avltree" stem)
              (search "src/code/brothertree" stem)
+             (search "src/code/early-classoid" stem)
+             (search "src/code/type-class" stem)
+             (search "src/code/class" stem)
              (search "src/code/debug" stem) ; also matches debug-{info,int,var-io}
              (search "src/code/early-defmethod" stem)
              (search "src/code/final" stem)

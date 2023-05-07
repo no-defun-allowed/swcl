@@ -346,7 +346,7 @@ sufficiently motivated to do lengthy fixes."
   (clrhash sb-c::*emitted-full-calls*) ; Don't immortalize compiler's scratchpad
   ;; Perform static linkage. Functions become un-statically-linked
   ;; on demand, for TRACE, redefinition, etc.
-  #+immobile-code (sb-vm::statically-link-core)
+  #+(and immobile-code x86-64) (sb-vm::statically-link-core)
   (finalizers-deinit)
   ;; Try to shrink the pathname cache. It might be largely nulls
   (rebuild-pathname-cache)
@@ -665,22 +665,21 @@ sb-c::
        :immobile))
 
     (let* ((n (length ordering))
-           (array (make-alien int (1+ (* n 2)))))
+           (array (make-alien unsigned (1+ (* n 2)))))
       (loop for i below n
-            do (setf (deref array (* i 2))
-                     (get-lisp-obj-address (aref ordering i))))
+            do (setf (deref array (* i 2)) (get-lisp-obj-address (aref ordering i))))
       (setf (deref array (* n 2)) 0) ; null-terminate the array
       (setf (extern-alien "code_component_order" unsigned)
             (sap-int (alien-value-sap array)))))
 
   (multiple-value-bind (index relocs) (collect-immobile-code-relocs)
     (let* ((n (length index))
-           (array (make-alien int n)))
+           (array (make-alien unsigned n)))
       (dotimes (i n) (setf (deref array i) (aref index i)))
       (setf (extern-alien "immobile_space_reloc_index" unsigned)
             (sap-int (alien-value-sap array))))
     (let* ((n (length relocs))
-           (array (make-alien int n)))
+           (array (make-alien unsigned n)))
       (dotimes (i n) (setf (deref array i) (aref relocs i)))
       (setf (extern-alien "immobile_space_relocs" unsigned)
             (sap-int (alien-value-sap array))))))

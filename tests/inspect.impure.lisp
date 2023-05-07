@@ -77,3 +77,28 @@
   (let* ((array (make-array '(3 3) :element-type nil))
          (result (test-inspect array)))
     (assert (search "ARRAY of NIL" result))))
+
+(defclass standard-object-with-unbound-slot ()
+  (foo))
+
+(with-test (:name (inspect standard-object unbound-slot))
+  (let* ((object (make-instance 'standard-object-with-unbound-slot))
+         (result (test-inspect object)))
+    (assert (search "#<unbound slot>" result))))
+
+(defstruct (structure-with-unbound-slot
+             (:constructor make-structure-with-unbound-slot (&aux foo)))
+  foo)
+
+(with-test (:name (inspect standard-object unbound-slot))
+  (let* ((object (make-structure-with-unbound-slot))
+         (result (test-inspect object)))
+    (assert (search "#<unbound slot>" result))))
+
+(define-condition condition-with-unbound-slot ()
+  (foo))
+
+(with-test (:name (inspect condition unbound-slot))
+  (let* ((object (make-condition 'condition-with-unbound-slot))
+         (result (test-inspect object)))
+    (assert (search "#<unbound slot>" result))))

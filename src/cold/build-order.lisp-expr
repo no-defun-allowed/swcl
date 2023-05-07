@@ -524,7 +524,7 @@
 
  ("src/code/late-extensions") ; needs condition system
 
- ("src/code/brothertree"       :not-host)
+ ("src/code/brothertree" :c-headers)
  #+metaspace ("src/code/metaspace" :not-host)
  ("src/code/simple-fun"        :not-host) ; function slot accessors
  ("src/code/eval"              :not-host) ; uses INFO, wants compiler macro
@@ -556,7 +556,7 @@
  ("src/code/early-step")                  ; target-thread needs *STEP-OUT*
 
  ("src/code/gc"                :not-host)
- ("src/code/avltree"           :not-host)
+ ("src/code/avltree"           :c-headers)
  ("src/code/target-thread"     :not-host)
 
  ("src/code/error-error" :not-host) ; needs WITH-STANDARD-IO-SYNTAX macro
@@ -617,7 +617,7 @@
 ;;; make-target-2 build steps
 (("src/code/early-ntrace" ; lets PCL hook into tracing
   "src/code/room" ; for MAP-ALLOCATED-OBJECTS
-  #+immobile-code "src/code/immobile-space" ; needs src/code/room
+  #+(and x86-64 immobile-code) "src/code/immobile-space" ; needs src/code/room
   ;; Delay (re)defining WARN until after remove-static-links works.
   ;; The definition in cold-error is good enough for self-build.
   "src/code/warm-error"

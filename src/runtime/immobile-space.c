@@ -45,12 +45,12 @@
 #define _FORTIFY_SOURCE 0
 #endif
 
-#include "brothertree.h"
 #include "code.h"
 #include "forwarding-ptr.h"
 #include "gc.h"
 #include "gc-internal.h"
 #include "gc-private.h"
+#include "genesis/brothertree.h"
 #include "genesis/cons.h"
 #include "genesis/gc-tables.h"
 #include "genesis/hash-table.h"
@@ -168,8 +168,6 @@ static const unsigned block_header_prev_free_bit = 1 << 9;
  * So there's really no need to do anything about it.
 static const unsigned block_header_oversized = 1 << 10;
 */
-
-#define IMMOBILE_CARD_SHIFT 12
 void *tlsf_alloc_codeblob(tlsf_t tlsf, int requested_nwords)
 {
     // The size we request is 1 word less, because the allocator's block header
@@ -186,7 +184,7 @@ void *tlsf_alloc_codeblob(tlsf_t tlsf, int requested_nwords)
     lispobj* end = (lispobj*)c + nwords;
     if (end > text_space_highwatermark) text_space_highwatermark = end;
     // Adjust the scan start if this became the lowest addressable in-use block on its page
-    low_page_index_t tlsf_page = ((char*)c - (char*)tlsf_mem_start) >> IMMOBILE_CARD_SHIFT;
+    low_page_index_t tlsf_page = ((char*)c - (char*)tlsf_mem_start) / IMMOBILE_CARD_BYTES;
     int offset = (uword_t)c & (IMMOBILE_CARD_BYTES-1);
     if (offset < tlsf_page_sso[tlsf_page]) tlsf_page_sso[tlsf_page] = offset;
     text_page_genmask[find_text_page_index(c)] |= 1;
@@ -224,7 +222,7 @@ void tlsf_unalloc_codeblob(tlsf_t tlsf, struct code* code)
         gc_assert(!((uword_t)text_space_highwatermark & LOWTAG_MASK));
     }
     // See if the page scan start needs to change
-    low_page_index_t tlsf_page = ((char*)code - (char*)tlsf_mem_start) >> IMMOBILE_CARD_SHIFT;
+    low_page_index_t tlsf_page = ((char*)code - (char*)tlsf_mem_start) / IMMOBILE_CARD_BYTES;
     int offset = (uword_t)code & (IMMOBILE_CARD_BYTES-1);
     if (offset == tlsf_page_sso[tlsf_page]) {
         lispobj* next = end;
@@ -234,7 +232,7 @@ void tlsf_unalloc_codeblob(tlsf_t tlsf, struct code* code)
         }
         // If the next used block is on the same page, then it becomes the page scan start
         // even if it the ending sentinel block (which counts as "used").
-        if ((((uword_t)next ^ (uword_t)code) >> IMMOBILE_CARD_SHIFT) == 0) {
+        if ((((uword_t)next ^ (uword_t)code) / IMMOBILE_CARD_BYTES) == 0) {
             tlsf_page_sso[tlsf_page] = (uword_t)next & (IMMOBILE_CARD_BYTES-1);
         } else {
             tlsf_page_sso[tlsf_page] = USHRT_MAX;
@@ -521,7 +519,7 @@ lispobj* search_immobile_code(char* ptr) {
     } else if (ptr < (char*)text_space_highwatermark) {
         lispobj node = brothertree_find_lesseql((uword_t)ptr,
                                                 SYMBOL(IMMOBILE_CODEBLOB_TREE)->value);
-        if (node != NIL) candidate = (lispobj*)((struct binary_node*)INSTANCE(node))->key;
+        if (node != NIL) candidate = (lispobj*)((struct binary_node*)INSTANCE(node))->uw_key;
     }
     if (candidate && widetag_of(candidate) == CODE_HEADER_WIDETAG) {
         int nwords = code_total_nwords((struct code*)candidate);
@@ -1290,7 +1288,7 @@ void prepare_immobile_space_for_final_gc()
     SYMBOL(IMMOBILE_CODEBLOB_TREE)->value = NIL;
 }
 
-int* code_component_order;
+uword_t* code_component_order;
 
 int compute_codeblob_offsets_nwords(int* pcount)
 {
@@ -1509,20 +1507,13 @@ static lispobj adjust_fun_entrypoint(lispobj raw_addr)
  * and return the layout's address in tempspace. */
 static struct layout* fix_object_layout(lispobj* obj)
 {
-    // This works on instances, funcallable instances (and/or closures)
-    // but the latter only if the layout is in the header word.
-#ifdef LISP_FEATURE_COMPACT_INSTANCE_HEADER
-    gc_assert(widetag_of(obj) == INSTANCE_WIDETAG
-              || widetag_of(obj) == FUNCALLABLE_INSTANCE_WIDETAG
-              || widetag_of(obj) == CLOSURE_WIDETAG);
-#else
-    gc_assert(widetag_of(obj) == INSTANCE_WIDETAG);
+#ifndef LISP_FEATURE_COMPACT_INSTANCE_HEADER
+    // Without compact instance headers, there are no layouts in immobile-space,
+    return LAYOUT(layout_of(obj));
 #endif
+    gc_assert(instanceoid_widetag_p(widetag_of(obj)));
     lispobj layout = layout_of(obj);
     if (layout == 0) return 0;
-#ifdef LISP_FEATURE_METASPACE
-    return LAYOUT(layout);
-#else
     if (forwarding_pointer_p(native_pointer(layout))) { // usually
         layout = forwarding_pointer_value(native_pointer(layout));
         layout_of(obj) = layout;
@@ -1531,7 +1522,6 @@ static struct layout* fix_object_layout(lispobj* obj)
     gc_assert(header_widetag(native_layout->header) == INSTANCE_WIDETAG);
     gc_assert(layoutp(make_lispobj(native_layout, INSTANCE_POINTER_LOWTAG)));
     return native_layout;
-#endif
 }
 
 static void apply_absolute_fixups(lispobj, struct code*);
@@ -1575,7 +1565,9 @@ static void fixup_space(lispobj* where, size_t n_words)
           // Fixup the constant pool.
           code = (struct code*)where;
           adjust_words(where+2, code_header_words(code)-2);
+#ifdef LISP_FEATURE_X86_64
           apply_absolute_fixups(code->fixups, code);
+#endif
           break;
         case CLOSURE_WIDETAG:
           where[1] = adjust_fun_entrypoint(where[1]);
@@ -1647,8 +1639,8 @@ static void fixup_space(lispobj* where, size_t n_words)
     }
 }
 
-int* immobile_space_reloc_index;
-int* immobile_space_relocs;
+uword_t* immobile_space_reloc_index;
+uword_t* immobile_space_relocs;
 
 // Take and return an untagged pointer, or 0 if the object did not survive GC.
 static lispobj* get_load_address(lispobj* old)
@@ -1776,7 +1768,7 @@ static void defrag_immobile_space(boolean verbose)
 {
     int i;
 
-    int *components = code_component_order;
+    uword_t *components = code_component_order;
 
     // Count the number of symbols, fdefns, and layouts that will be relocated
     int obj_type_histo[64];
@@ -1824,9 +1816,6 @@ static void defrag_immobile_space(boolean verbose)
             } while (NEXT_FIXEDOBJ(obj, obj_spacing) <= limit);
         }
     }
-#ifndef LISP_FEATURE_METASPACE
-    gc_assert(obj_type_histo[INSTANCE_WIDETAG/4]);
-#endif
 
     // Calculate space needed for fixedobj pages after defrag.
     // page order is: layouts, symbols, fdefns.
@@ -1869,7 +1858,7 @@ static void defrag_immobile_space(boolean verbose)
 #else
         for (i=0 ; components[i*2] ; ++i) {
 #endif
-            lispobj* addr = (lispobj*)(long)components[i*2];
+            lispobj* addr = (lispobj*)components[i*2];
             gc_assert(lowtag_of((lispobj)addr) == OTHER_POINTER_LOWTAG);
             addr = native_pointer((lispobj)addr);
             int widetag = widetag_of(addr);

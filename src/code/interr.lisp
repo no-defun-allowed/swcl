@@ -457,7 +457,7 @@
                              type
                              nil))))
 
-(sb-c::when-vop-existsp (:translate sb-c::unsigned+)
+(sb-c::when-vop-existsp (:translate overflow+)
   (flet ((err (x of cf)
            (let* ((raw-x (car *current-internal-error-args*))
                   (signed (= (sb-c:sc+offset-scn raw-x) sb-vm:signed-reg-sc-number)))
@@ -469,7 +469,7 @@
                                 (of
                                  (ldb (byte sb-vm:n-word-bits 0) x))
                                 (t
-                                 (bug "flags")))
+                                 x))
                           (cond (cf
                                  (dpb 1 (byte 1 sb-vm:n-word-bits) x))
                                 (of

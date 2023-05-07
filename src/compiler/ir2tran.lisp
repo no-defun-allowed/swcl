@@ -595,20 +595,25 @@
            (type template template))
   (collect ((info-args))
     (let ((last nil)
-          (first nil))
+          (first nil)
+          (info-arg-count (template-info-arg-count template)))
       (do ((args args (cdr args))
            (types (template-arg-types template) (cdr types)))
           ((null args))
         (let ((type (first types))
               (arg (first args)))
-          (if (and (consp type) (eq (car type) ':constant))
-              (info-args (lvar-value arg))
-              (let ((ref (reference-tn (lvar-tn node block arg) nil)))
-                (setf (tn-ref-type ref) (lvar-type arg))
-                (if last
-                    (setf (tn-ref-across last) ref)
-                    (setf first ref))
-                (setq last ref)))))
+          (cond ((or (and (consp type) (eq (car type) ':constant))
+                     (and (not type)
+                          (> info-arg-count 0)))
+                 (decf info-arg-count)
+                 (info-args (lvar-value arg)))
+                (t
+                 (let ((ref (reference-tn (lvar-tn node block arg) nil)))
+                   (setf (tn-ref-type ref) (lvar-type arg))
+                   (if last
+                       (setf (tn-ref-across last) ref)
+                       (setf first ref))
+                   (setq last ref))))))
 
       (values (the (or tn-ref null) first) (info-args)))))
 
@@ -779,23 +784,19 @@
 ;;; IR1 conversion. The only difference between this and the function
 ;;; case of IR2-CONVERT-TEMPLATE is that there can be codegen-info
 ;;; arguments.
-(defoptimizer (%%primitive ir2-convert) ((template info &rest args) call block)
+(defoptimizer (%%primitive ir2-convert) ((template &rest args) call block)
   (let* ((template (lvar-value template))
-         (info (lvar-value info))
          (lvar (node-lvar call))
          (rtypes (template-result-types template))
          (results (make-template-result-tns call lvar rtypes))
          (r-refs (reference-tn-list results t)))
     (multiple-value-bind (args info-args)
-        (reference-args call block (cddr (combination-args call)) template)
+        (reference-args call block (cdr (combination-args call)) template)
       (aver (not (template-more-results-type template)))
       (aver (not (template-conditional-p template)))
-      (aver (null info-args))
-
-      (if info
-          (emit-template call block template args r-refs info)
+      (if info-args
+          (emit-template call block template args r-refs info-args)
           (emit-template call block template args r-refs))
-
       (move-lvar-result call block results lvar)))
   (values))
 
@@ -1138,7 +1139,7 @@
                        nargs (emit-step-p node)
                        #+call-symbol
                        (fun-tn-type fun-lvar fun-tn)))
-                #-immobile-code
+                #-(and x86-64 immobile-code)
                 ((eq fun-tn named)
                  (vop* static-tail-call-named node block
                        (old-fp return-pc pass-refs) ; args
@@ -1147,14 +1148,14 @@
                 (fixed-args-p
                  (when-vop-existsp (:named sb-vm::fixed-tail-call-named)
                   (vop* sb-vm::fixed-tail-call-named node block
-                        (#-immobile-code fun-tn old-fp return-pc pass-refs) ; args
+                        (#-(and x86-64 immobile-code) fun-tn old-fp return-pc pass-refs) ; args
                         (nil)           ; results
-                        nargs #+immobile-code named (emit-step-p node))))
+                        nargs #+(and x86-64 immobile-code) named (emit-step-p node))))
                 (t
                  (vop* tail-call-named node block
-                       (#-immobile-code fun-tn old-fp return-pc pass-refs) ; args
+                       (#-(and x86-64 immobile-code) fun-tn old-fp return-pc pass-refs) ; args
                        (nil)            ; results
-                       nargs #+immobile-code named (emit-step-p node))))))) ; info
+                       nargs #+(and x86-64 immobile-code) named (emit-step-p node))))))) ; info
   (values))
 
 (defun fixed-args-state (node)
@@ -1223,7 +1224,7 @@
                      arg-locs nargs nvals (emit-step-p node)
                      #+call-symbol
                      (fun-tn-type fun-lvar fun-tn)))
-              #-immobile-code
+              #-(and x86-64 immobile-code)
               ((eq fun-tn named)
                (vop* static-call-named node block
                      (fp args)
@@ -1233,15 +1234,15 @@
               (fixed-args-p
                (when-vop-existsp (:named sb-vm::fixed-call-named)
                  (vop* sb-vm::fixed-call-named node block
-                       (fp #-immobile-code fun-tn args) ; args
+                       (fp #-(and x86-64 immobile-code) fun-tn args) ; args
                        (loc-refs)                       ; results
-                       arg-locs nargs #+immobile-code named nvals ; info
+                       arg-locs nargs #+(and x86-64 immobile-code) named nvals ; info
                        (emit-step-p node))))
               (t
                (vop* call-named node block
-                     (fp #-immobile-code fun-tn args) ; args
+                     (fp #-(and x86-64 immobile-code) fun-tn args) ; args
                      (loc-refs)                       ; results
-                     arg-locs nargs #+immobile-code named nvals ; info
+                     arg-locs nargs #+(and x86-64 immobile-code) named nvals ; info
                      (emit-step-p node))))
         (move-lvar-result node block locs lvar))))
   (values))
@@ -1262,7 +1263,7 @@
                      arg-locs nargs (emit-step-p node)
                      #+call-symbol
                      (fun-tn-type fun-lvar fun-tn)))
-              #-immobile-code
+              #-(and x86-64 immobile-code)
               ((eq fun-tn named)
                (vop* static-multiple-call-named node block
                   (fp args)
@@ -1271,9 +1272,9 @@
                   (emit-step-p node)))
               (t
                (vop* multiple-call-named node block
-                  (fp #-immobile-code fun-tn args)     ; args
-                  (loc-refs)                            ; results
-                  arg-locs nargs #+immobile-code named ; info
+                  (fp #-(and x86-64 immobile-code) fun-tn args)     ; args
+                  (loc-refs)                                        ; results
+                  arg-locs nargs #+(and x86-64 immobile-code) named ; info
                   (emit-step-p node)))))))
   (values))
 
@@ -1326,22 +1327,14 @@
             ;; The low bit indicates whether any not-NOTINLINE call was seen.
             ;; The next-lowest bit is magic. Refer to %COMPILER-DEFMACRO
             ;; and WARN-IF-INLINE-FAILED/CALL for the pertinent logic.
-            (setf cell (list (logior 4 inlineable-bit))
-                  (get-emitted-full-calls fname) cell)
-            (incf (car cell) (+ 4 (if (oddp (car cell)) 0 inlineable-bit))))
+            (setf cell (logior 4 inlineable-bit))
+            (incf cell (+ 4 (if (oddp cell) 0 inlineable-bit))))
+        (setf (get-emitted-full-calls fname) cell)
         ;; If the full call was wanted, don't record anything.
         ;; (This was originally for debugging SBCL self-compilation)
         (when inlineable-p
           (unless *failure-p*
-            (warn-if-inline-failed/call fname (node-lexenv node) cell))
-          (case *track-full-called-fnames*
-            (:detailed
-             (when (boundp '*compile-file-pathname*)
-               (pushnew *compile-file-pathname* (cdr cell)
-                        :test #'equal)))
-            (:very-detailed
-             (pushnew (component-name *component-being-compiled*)
-                      (cdr cell) :test #'equalp))))))
+            (warn-if-inline-failed/call fname (node-lexenv node) cell)))))
 
     ;; Special mode, usually only for the cross-compiler
     ;; and only with the feature enabled.

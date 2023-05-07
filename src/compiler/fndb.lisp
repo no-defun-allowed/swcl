@@ -458,11 +458,12 @@
 (defknown lognot (integer) integer (movable foldable flushable))
 (defknown logtest (integer integer) boolean (movable foldable flushable commutative))
 (defknown logbitp (unsigned-byte integer) boolean (movable foldable flushable))
-(defknown ash (integer integer) integer
+(defknown (ash ash-inverted) (integer integer) integer
   (movable foldable flushable))
 (defknown %ash/right ((or word sb-vm:signed-word) (mod #.sb-vm:n-word-bits))
   (or word sb-vm:signed-word)
   (movable foldable flushable always-translatable))
+
 (defknown (logcount integer-length) (integer) bit-index
   (movable foldable flushable))
 ;;; FIXME: According to the ANSI spec, it's legal to use any
@@ -1915,7 +1916,7 @@
 (defknown %continue-unwind () nil)
 (defknown %throw (t &rest t) nil) ; This is MV-called.
 (defknown %nlx-entry (t) *)
-(defknown %%primitive (t t &rest t) *)
+(defknown %%primitive (t &rest t) *)
 (defknown %pop-values (t) t)
 (defknown %nip-values (t t &rest t) (values))
 (defknown %dummy-dx-alloc (t t) t)
@@ -2240,27 +2241,7 @@
   (defknown round-single (single-float #1#) single-float
       (foldable flushable movable always-translatable)))
 
-(defknown fixnum*
-  (fixnum fixnum t)
-  fixnum
-  (movable always-translatable))
-
-(defknown (signed* signed+ signed-)
-  (sb-vm:signed-word sb-vm:signed-word t)
-  sb-vm:signed-word
-  (movable always-translatable))
-
-(defknown (unsigned* unsigned+ unsigned-)
-  (word word t)
-  word
-  (movable always-translatable))
-
-(defknown (unsigned+signed unsigned-signed)
-  (word sb-vm:signed-word t)
-  integer
-  (movable always-translatable))
-
-(defknown (signed-unsigned)
-  (sb-vm:signed-word word t)
+(defknown (overflow* overflow+ overflow-)
+  (integer integer t)
   integer
   (movable always-translatable))

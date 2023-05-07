@@ -176,23 +176,6 @@
       (when rax-save (inst pop rax-tn))
       (emit-label skip-instrumentation))))
 
-(defun system-tlab-p (type node)
-  #-system-tlabs (declare (ignore type node))
-  #+system-tlabs
-  (or sb-c::*force-system-tlab*
-      (and (sb-kernel::wrapper-p type)
-           (let ((typename (classoid-name (wrapper-classoid type))))
-             (or (sb-xc:subtypep typename 'ctype)
-                 (eq typename 'sb-thread::avlnode))))
-      (and node
-           (named-let search-env ((env (sb-c::node-lexenv node)))
-             (dolist (data (sb-c::lexenv-user-data env)
-                           (and (sb-c::lexenv-parent env)
-                                (search-env (sb-c::lexenv-parent env))))
-               (when (and (eq (first data) :declare)
-                          (eq (second data) 'sb-c::tlab))
-                 (return (eq (third data) :system))))))))
-
 ;;; An arbitrary marker for the cons primitive-type, not to be confused
 ;;; with the CONS-TYPE in our type-algebraic sense. Mostly just informs
 ;;; the allocator to use cons_tlab.
@@ -879,8 +862,8 @@
         (if stack-allocate-p
             (stack-allocation bytes fun-pointer-lowtag result)
             (allocation closure-widetag bytes fun-pointer-lowtag result node temp thread-tn))
-        (storew* #-immobile-space header ; write the widetag and size
-                 #+immobile-space        ; ... plus the layout pointer
+        (storew* #-compact-instance-header header ; write the widetag and size
+                 #+compact-instance-header        ; ... plus the layout pointer
                  (let ((layout #-sb-thread (static-symbol-value-ea 'function-layout)
                                #+sb-thread (thread-slot-ea thread-function-layout-slot)))
                    (cond ((typep header '(unsigned-byte 16))
@@ -945,7 +928,6 @@
       ;; the header is written so that displacement can be 0.
       (cond (stack-allocate-p
              (stack-allocation bytes (if type 0 lowtag) result))
-            #+immobile-space
             ((eql type funcallable-instance-widetag)
              (inst push bytes)
              (invoke-asm-routine 'call 'alloc-funinstance vop)
@@ -996,7 +978,6 @@
   (:args (extra :scs (any-reg)))
   (:arg-types positive-fixnum)
   (:info name words type lowtag stack-allocate-p)
-  (:ignore name)
   (:results (result :scs (descriptor-reg) :from (:eval 1)))
   (:temporary (:sc unsigned-reg :from :eval :to (:eval 1)) bytes)
   (:temporary (:sc unsigned-reg :from :eval :to :result) header)
@@ -1006,6 +987,11 @@
   (:node-var node)
   (:vop-var vop)
   (:generator 50
+   (when (eq name '%make-funcallable-instance)
+     ;; %MAKE-FUNCALLABLE-INSTANCE needs to allocate to pages of code,
+     ;; which it failed to do if the var-alloc translation was invoked.
+     ;; But it seems we never need this! (so is it FIXME or isn't it?)
+     (error "can't %MAKE-FUNCALLABLE-INSTANCE of unknown length"))
    (let ((remain-pseudo-atomic (eq (car (last (vop-codegen-info vop))) :pseudo-atomic)))
    ;; With the exception of bignums, these objects have effectively
    ;; 32-bit headers because the high 4 byes contain a layout pointer.

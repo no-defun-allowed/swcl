@@ -868,14 +868,14 @@ there"))))
     (let ((str (with-standard-io-syntax
                  (write-to-string x :pretty t :readably nil))))
       (assert (search "#<SB-KERNEL:INSTANCE {" str))))
-  (let ((x (sb-kernel:%make-funcallable-instance 5)))
+  (let ((x (test-util::make-funcallable-instance 5)))
     (let ((str (write-to-string x :pretty nil)))
       (assert (search "#<SB-KERNEL:FUNCALLABLE-INSTANCE {" str)))))
 
 (with-test (:name :functionless-funcallable-instance)
   (let ((x (sb-pcl::%make-standard-funcallable-instance
             #()
-            #-compact-instance-header #xdead)))
+            #-executable-funinstances #xdead)))
     (assert (search "#<SB-PCL::STANDARD-FUNCALLABLE-INSTANCE"
                     (write-to-string x :pretty nil))))) ; should not crash
 

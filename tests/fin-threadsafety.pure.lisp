@@ -34,7 +34,7 @@
   ;; the funcallable-instance implementation used not to be threadsafe
   ;; against setting the funcallable-instance function to a closure
   ;; (because the code and lexenv were set separately).
-  (let ((fun (sb-kernel:%make-funcallable-instance 0))
+  (let ((fun (test-util::make-funcallable-instance 0))
         (stop nil)
         (condition nil))
     ;; If the %FUN-LAYOUT were unset or its bitmap were 0, then the
@@ -49,7 +49,7 @@
     ;; GENERIC-FUNCTION is ok even though this is not an instance of it.
     ;; I _think_ this makes the test reliable with pre_verify_gen_0 enabled.
     (sb-kernel:%set-fun-layout fun (sb-kernel:find-layout 'generic-function))
-    #+compact-instance-header (sb-vm::write-funinstance-prologue fun)
+    #+executable-funinstances (sb-vm::write-funinstance-prologue fun)
     (setf (sb-kernel:%funcallable-instance-fun fun) #'closure-one)
     (flet ((changer ()
              (loop (sb-thread:barrier (:read))
