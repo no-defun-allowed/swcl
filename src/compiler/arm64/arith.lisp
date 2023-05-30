@@ -147,38 +147,43 @@
 
 (defmacro define-binop (translate untagged-penalty op
                         &key
-                             (constant-test 'encode-logical-immediate)
-                             (constant-fixnum-test 'fixnum-encode-logical-immediate)
-                             swap
-                             (constant-op op)
-                             (constant-transform 'identity))
+                          (constant-test 'encode-logical-immediate)
+                          (constant-fixnum-test 'fixnum-encode-logical-immediate)
+                          swap
+                          (constant-op op)
+                          (constant-transform 'identity)
+                          negative-op)
   `(progn
      (define-vop (,(symbolicate 'fast- translate '/fixnum=>fixnum)
                   fast-fixnum-binop)
        (:translate ,translate)
        (:generator 2
-                   ,(if swap
-                        `(inst ,op r y x)
-                        `(inst ,op r x y))))
+         ,(if swap
+              `(inst ,op r y x)
+              `(inst ,op r x y))))
      (define-vop (,(symbolicate 'fast- translate '-c/fixnum=>fixnum)
-                    fast-fixnum-binop-c)
+                  fast-fixnum-binop-c)
        ,(if swap
             `(:arg-types (:constant (satisfies ,constant-fixnum-test))
                          tagged-num)
             `(:arg-types tagged-num
                          (:constant (satisfies ,constant-fixnum-test))))
-         (:translate ,translate)
-         (:generator 1
-                     (inst ,constant-op r x (,constant-transform (fixnumize y)))))
+       (:translate ,translate)
+       (:generator 1
+         (cond ,@(and negative-op
+                      `(((minusp y)
+                         (inst ,negative-op r x (,constant-transform (fixnumize (- y)))))))
+               (t
+                (inst ,constant-op r x (,constant-transform (fixnumize y)))))))
      (define-vop (,(symbolicate 'fast- translate '/signed=>signed)
                   fast-signed-binop)
        (:translate ,translate)
        (:generator ,(1+ untagged-penalty)
-                   ,(if swap
-                        `(inst ,op r y x)
-                        `(inst ,op r x y))))
+         ,(if swap
+              `(inst ,op r y x)
+              `(inst ,op r x y))))
      (define-vop (,(symbolicate 'fast- translate '-c/signed=>signed)
-                   fast-signed-binop-c)
+                  fast-signed-binop-c)
        (:translate ,translate)
        ,(if swap
             `(:arg-types (:constant (satisfies ,constant-test))
@@ -186,16 +191,20 @@
             `(:arg-types signed-num
                          (:constant (satisfies ,constant-test))))
        (:generator ,untagged-penalty
-                   (inst ,constant-op r x (,constant-transform y))))
+         (cond ,@(and negative-op
+                      `(((minusp y)
+                         (inst ,negative-op r x (,constant-transform (- y))))))
+               (t
+                (inst ,constant-op r x (,constant-transform y))))))
      (define-vop (,(symbolicate 'fast- translate '/unsigned=>unsigned)
                   fast-unsigned-binop)
        (:translate ,translate)
        (:generator ,(1+ untagged-penalty)
-                   ,(if swap
-                        `(inst ,op r y x)
-                        `(inst ,op r x y))))
+         ,(if swap
+              `(inst ,op r y x)
+              `(inst ,op r x y))))
      (define-vop (,(symbolicate 'fast- translate '-c/unsigned=>unsigned)
-                   fast-unsigned-binop-c)
+                  fast-unsigned-binop-c)
        (:translate ,translate)
        ,(if swap
             `(:arg-types (:constant (satisfies ,constant-test))
@@ -203,10 +212,16 @@
             `(:arg-types unsigned-num
                          (:constant (satisfies ,constant-test))))
        (:generator ,untagged-penalty
-                   (inst ,constant-op r x (,constant-transform y))))))
+         (cond ,@(and negative-op
+                      `(((minusp y)
+                         (inst ,negative-op r x (,constant-transform (- y))))))
+               (t
+                (inst ,constant-op r x (,constant-transform y))))))))
 
-(define-binop + 4 add :constant-test add-sub-immediate-p :constant-fixnum-test fixnum-add-sub-immediate-p)
-(define-binop - 4 sub :constant-test add-sub-immediate-p :constant-fixnum-test fixnum-add-sub-immediate-p)
+(define-binop + 4 add :constant-test abs-add-sub-immediate-p :constant-fixnum-test fixnum-abs-add-sub-immediate-p
+  :negative-op sub)
+(define-binop - 4 sub :constant-test abs-add-sub-immediate-p :constant-fixnum-test fixnum-abs-add-sub-immediate-p
+  :negative-op add)
 (define-binop logand 2 and)
 (define-binop logior 2 orr)
 (define-binop logxor 2 eor)
@@ -1788,7 +1803,7 @@
   (:result-types signed-num)
   (:policy :fast-safe)
   (:vop-var vop)
-  (:generator 2
+  (:generator 3
     (let* ((*location-context* (unless (eq type 'fixnum)
                                  type))
            (error (generate-error-code vop 'sb-kernel::mul-overflow-error r high)))
@@ -1808,6 +1823,26 @@
                (inst smulh high x y))))
       (inst cmp high (asr r 63))
       (inst b :ne error))))
+
+(define-vop (overflow*-signed=>unsigned)
+  (:translate overflow*)
+  (:args (x :scs (signed-reg))
+         (y :scs (signed-reg ;; immediate
+                             )))
+  (:arg-types signed-num signed-num)
+  (:info type)
+  (:temporary (:sc signed-reg) high)
+  (:results (r :scs (unsigned-reg) :from :load))
+  (:result-types unsigned-num)
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:generator 2
+    (let* ((*location-context* (unless (eq type 'fixnum)
+                                 type))
+           (error (generate-error-code vop 'sb-kernel::mul-overflow2-error x y)))
+      (inst mul r x y)
+      (inst smulh high x y)
+      (inst cbnz high error))))
 
 (define-vop (overflow*-unsigned)
   (:translate overflow*)
@@ -1841,26 +1876,60 @@
                (inst umulh high x y))))
       (inst cbnz high error))))
 
-(define-vop (overflow*-unsigned=>signed)
+(define-vop (overflow*-signed-unsigned=>unsigned)
   (:translate overflow*)
-  (:args (x :scs (unsigned-reg))
+  (:args (x :scs (signed-reg))
          (y :scs (unsigned-reg ;; immediate
                   )))
-  (:arg-types unsigned-num unsigned-num)
+  (:arg-types signed-num unsigned-num)
+  (:info type)
+  (:temporary (:sc unsigned-reg) high)
+  (:results (r :scs (unsigned-reg) :from :load))
+  (:result-types unsigned-num)
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:generator 5
+    (let* ((*location-context* (unless (eq type 'fixnum)
+                                 type))
+           (error (generate-error-code vop 'sb-kernel::mul-overflow2-error x y)))
+      (assemble ()
+        (inst cbz y SKIP)
+        (inst tbnz* x 63 error)
+        SKIP
+        (inst mul r x y)
+        (inst umulh high x y)
+        (inst cbnz high error)))))
+
+(define-vop (overflow*-signed-unsigned=>signed)
+  (:translate overflow*)
+  (:args (x :scs (signed-reg))
+         (y :scs (unsigned-reg ;; immediate
+                  )))
+  (:arg-types signed-num unsigned-num)
   (:info type)
   (:temporary (:sc unsigned-reg) high)
   (:results (r :scs (signed-reg) :from :load))
   (:result-types signed-num)
   (:policy :fast-safe)
   (:vop-var vop)
-  (:generator 3
+  (:generator 6
     (let* ((*location-context* (unless (eq type 'fixnum)
                                  type))
-           (error (generate-error-code vop 'sb-kernel::mul-overflow-error r high)))
-      (inst mul r x y)
-      (inst umulh high x y)
-      (inst cbnz high error)
-      (inst tbnz* r 63 error))))
+           (error (generate-error-code vop 'sb-kernel::mul-overflow2-error x y)))
+      (assemble ()
+        (inst mul r x y)
+        (inst smulh high x y)
+        (inst tbz* y 63 SKIP)
+        (inst cbz x DONE)
+        (inst cmn x 1)
+        (inst b :ne error)
+        (inst cmp r y)
+        (inst b :eq DONE)
+        (inst b error)
+        SKIP
+        (inst cmp high (asr r 63))
+        (inst b :ne error)
+        DONE))))
 
 (define-vop (overflow+-signed)
   (:translate overflow+)
@@ -1896,7 +1965,7 @@
   (:result-types unsigned-num)
   (:policy :fast-safe)
   (:vop-var vop)
-  (:generator 3
+  (:generator 5
     (let* ((*location-context* (unless (eq type 'fixnum)
                                  type))
            (error (generate-error-code vop 'sb-kernel::add-sub-overflow-error
@@ -1939,7 +2008,7 @@
   (:result-types unsigned-num)
   (:policy :fast-safe)
   (:vop-var vop)
-  (:generator 2
+  (:generator 8
     (let* ((*location-context* (unless (eq type 'fixnum)
                                  type))
            (error (generate-error-code vop 'sb-kernel::add-sub-overflow-error r)))
@@ -1975,7 +2044,7 @@
   (:result-types signed-num)
   (:policy :fast-safe)
   (:vop-var vop)
-  (:generator 2
+  (:generator 5
     (let* ((*location-context* (unless (eq type 'fixnum)
                                  type))
            (error (generate-error-code vop 'sb-kernel::signed-unsigned-add-overflow-error r)))
@@ -2037,7 +2106,7 @@
   (:result-types signed-num)
   (:policy :fast-safe)
   (:vop-var vop)
-  (:generator 3
+  (:generator 5
     (let* ((*location-context* (unless (eq type 'fixnum)
                                  type))
            (error (generate-error-code vop 'sb-kernel::sub-overflow2-error x y)))
@@ -2057,7 +2126,7 @@
   (:result-types signed-num)
   (:policy :fast-safe)
   (:vop-var vop)
-  (:generator 2
+  (:generator 5
     (let* ((*location-context* (unless (eq type 'fixnum)
                                  type))
            (error (generate-error-code vop 'sb-kernel::signed-unsigned-add-overflow-error r)))
@@ -2077,7 +2146,7 @@
   (:result-types signed-num)
   (:policy :fast-safe)
   (:vop-var vop)
-  (:generator 2
+  (:generator 5
     (let* ((*location-context* (unless (eq type 'fixnum)
                                  type))
            (error (generate-error-code vop 'sb-kernel::sub-overflow2-error x y)))
@@ -2105,6 +2174,27 @@
       (inst tbnz* x 63 error)
       (inst b :lo error))))
 
+(define-vop (overflow-signed=>unsigned)
+  (:translate overflow-)
+  (:args (x :scs (signed-reg) :to :save)
+         (y :scs (signed-reg) :to :save))
+  (:arg-types signed-num signed-num)
+  (:info type)
+  (:temporary (:scs (unsigned-reg)) temp)
+  (:results (r :scs (unsigned-reg)))
+  (:result-types unsigned-num)
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:generator 3
+    (let* ((*location-context* (unless (eq type 'fixnum)
+                                 type))
+           (error (generate-error-code vop 'sb-kernel::sub-overflow2-error x y)))
+      (inst asr temp x 63)
+      (inst asr tmp-tn y 63)
+      (inst subs r x y)
+      (inst sbc temp temp tmp-tn)
+      (inst tbnz* temp 0 error))))
+
 (define-vop (overflow-unsigned-signed=>unsigned)
   (:translate overflow-)
   (:args (x :scs (unsigned-reg) :to :result)
@@ -2116,7 +2206,7 @@
   (:result-types unsigned-num)
   (:policy :fast-safe)
   (:vop-var vop)
-  (:generator 2
+  (:generator 7
     (let* ((*location-context* (unless (eq type 'fixnum)
                                  type))
            (error (generate-error-code vop 'sb-kernel::add-sub-overflow-error r)))
@@ -2142,6 +2232,265 @@
             (inst subs r x y)
             (inst b :cc error)
             done)))))
+
+(define-vop (overflow+t)
+  (:translate overflow+)
+  (:args (x :scs (descriptor-reg))
+         (y :scs (any-reg signed-reg)))
+  (:arg-types t tagged-num)
+  (:info type)
+  (:results (r :scs (any-reg) :from :load))
+  (:result-types tagged-num)
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:generator 2
+    (let* ((*location-context* (unless (eq type 'fixnum)
+                                 type))
+           (error (generate-error-code vop 'sb-kernel::add-overflow2-error x y)))
+      (inst tbnz x 0 error)
+      (inst adds r x (if (sc-is y any-reg)
+                         y
+                         (lsl y n-fixnum-tag-bits)))
+      (inst b :vs error))))
+
+(define-vop (overflow-ash-signed)
+  (:translate overflow-ash)
+  (:args (number :scs (signed-reg))
+         (amount :scs (unsigned-reg signed-reg immediate)))
+  (:arg-types signed-num untagged-num)
+  (:arg-refs nil amount-ref)
+  (:info type)
+  (:results (r :scs (signed-reg) :from :load))
+  (:result-types signed-num)
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:generator 3
+    (let* ((*location-context* (unless (eq type 'fixnum)
+                                 type))
+           (amount-error amount)
+           (error (generate-error-code+
+                   (when (sc-is amount immediate)
+                     (setf amount (tn-value amount)
+                           amount-error
+                           (make-random-tn :kind :normal
+                                           :sc (sc-or-lose (if (typep amount 'word)
+                                                               'unsigned-reg
+                                                               'signed-reg))
+                                           :offset (tn-offset tmp-tn)))
+                     (lambda ()
+                       (load-immediate-word amount-error amount)))
+                   vop 'sb-kernel::ash-overflow2-error number amount-error))
+           (fits (csubtypep (tn-ref-type amount-ref)
+                            (specifier-type `(integer -63 63)))))
+      (cond ((numberp amount)
+             (cond ((minusp amount)
+                    (setf amount (max (- amount) 63))
+                    (inst lsr r number amount))
+                   ((> amount 63)
+                    (inst cbnz number error)
+                    (move r number))
+                   ((zerop amount)
+                    (move r number))
+                   (t
+                    (inst lsl r number amount)
+                    (inst asr tmp-tn number (- 64 amount))
+                    (inst cmp tmp-tn (asr r 63))
+                    (inst b :ne error))))
+            ((sc-is amount unsigned-reg)
+             (unless fits
+               (move r number)
+               (inst cbz number done)
+               (inst cmp amount n-word-bits)
+               (inst b :ge error))
+             (inst neg tmp-tn amount)
+             (inst lsl r number amount)
+             (inst cbz amount done)
+             (inst asr tmp-tn number tmp-tn)
+             (inst cmp tmp-tn (asr r 63))
+             (inst b :ne error))
+            (t
+             (inst neg tmp-tn amount)
+             (cond (fits
+                    (inst asr r number tmp-tn))
+                   (t
+                    (inst cmp tmp-tn n-word-bits)
+                    (inst csinv r tmp-tn zr-tn :lo)
+                    (inst asr r number r)))
+             (inst cmp amount 0)
+             (inst b :le done)
+             (unless fits
+               (inst cbz number done)
+               (inst cmp amount n-word-bits)
+               (inst b :ge error))
+             (inst lsl r number amount)
+             (inst asr tmp-tn number tmp-tn) ;; a negated shift is the same as (- 64 shift)
+             (inst cmp tmp-tn (asr r 63))
+             (inst b :ne error))))
+    done))
+
+(define-vop (overflow-ash-fixnum overflow-ash-signed)
+  (:translate overflow-ash)
+  (:args (number :scs (any-reg))
+         (amount :scs (unsigned-reg immediate)))
+  (:arg-types tagged-num unsigned-num)
+  (:results (r :scs (any-reg) :from :load))
+  (:result-types tagged-num)
+  (:variant-cost 1))
+
+(define-vop (overflow-ash-unsigned)
+  (:translate overflow-ash)
+  (:args (number :scs (unsigned-reg))
+         (amount :scs (unsigned-reg signed-reg immediate)))
+  (:arg-types unsigned-num untagged-num)
+  (:arg-refs nil amount-ref)
+  (:info type)
+  (:results (r :scs (unsigned-reg) :from :load))
+  (:result-types unsigned-num)
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:variant-vars signed)
+  (:generator 2
+    (let* ((*location-context* (unless (eq type 'fixnum)
+                                 type))
+           (amount-error amount)
+           (error (generate-error-code+
+                   (when (sc-is amount immediate)
+                     (setf amount (tn-value amount)
+                           amount-error
+                           (make-random-tn :kind :normal
+                                           :sc (sc-or-lose (if (typep amount 'word)
+                                                               'unsigned-reg
+                                                               'signed-reg))
+                                           :offset (tn-offset tmp-tn)))
+                     (lambda ()
+                       (load-immediate-word amount-error amount)))
+                   vop 'sb-kernel::ash-overflow2-error number amount-error))
+           (fits (csubtypep (tn-ref-type amount-ref)
+                            (specifier-type `(integer -63 63)))))
+      (when signed
+        (inst tbnz number 63 error))
+      (cond ((numberp amount)
+             (cond ((< amount -63)
+                    (inst mov r 0))
+                   ((minusp amount)
+                    (setf amount (max (- amount) 63))
+                    (inst asr r number amount))
+                   ((> amount 63)
+                    (inst cbnz number error)
+                    (move r number))
+                   ((zerop amount)
+                    (move r number))
+                   (t
+                    (inst lsl r number amount)
+                    (inst asr tmp-tn number (- 64 amount))
+                    (inst cbnz tmp-tn error))))
+            ((sc-is amount unsigned-reg)
+             (unless fits
+               (move r number)
+               (inst cbz number done)
+               (inst cmp amount n-word-bits)
+               (inst b :ge error))
+             (inst neg tmp-tn amount)
+             (inst lsl r number amount)
+             (inst cbz amount done)
+             (inst asr tmp-tn number tmp-tn)
+             (inst cbnz tmp-tn error))
+            (t
+             (inst neg tmp-tn amount)
+             (cond (fits
+                    (inst asr r number tmp-tn))
+                   (t
+                    (inst cmp tmp-tn n-word-bits)
+                    (inst csinv r tmp-tn zr-tn :lo)
+                    (inst csel r number zr-tn :lo)
+                    (inst lsr r r tmp-tn)))
+             (inst cmp amount 0)
+             (inst b :le done)
+             (unless fits
+               (inst cbz number done)
+               (inst cmp amount n-word-bits)
+               (inst b :ge error))
+             (inst lsl r number amount)
+             (inst asr tmp-tn number tmp-tn)
+             (inst cbnz tmp-tn error))))
+    done))
+
+(define-vop (overflow-ash-signed=>unsigned overflow-ash-unsigned)
+  (:translate overflow-ash)
+  (:args (number :scs (signed-reg))
+         (amount :scs (unsigned-reg signed-reg immediate)))
+  (:arg-types signed-num untagged-num)
+  (:variant t)
+  (:variant-cost 4))
+
+(define-vop (overflow-t)
+  (:translate overflow-)
+  (:args (x :scs (descriptor-reg))
+         (y :scs (any-reg signed-reg)))
+  (:arg-types t tagged-num)
+  (:info type)
+  (:results (r :scs (any-reg) :from :load))
+  (:result-types tagged-num)
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:generator 2
+    (let* ((*location-context* (unless (eq type 'fixnum)
+                                 type))
+           (error (generate-error-code vop 'sb-kernel::sub-overflow2-error x y)))
+      (inst tbnz x 0 error)
+      (inst subs r x (if (sc-is y any-reg)
+                         y
+                         (lsl y n-fixnum-tag-bits)))
+      (inst b :vs error))))
+
+(define-vop (overflow*t)
+  (:translate overflow*)
+  (:args (x :scs (descriptor-reg))
+         (y :scs (signed-reg immediate)))
+  (:arg-types t tagged-num)
+  (:info type)
+  (:temporary (:sc signed-reg
+               :unused-if
+               (or (not (sc-is y immediate))
+                   (and (plusp (tn-value y))
+                        (= (logcount (tn-value y)) 1))))
+              temp)
+  (:results (r :scs (any-reg) :from :load))
+  (:result-types tagged-num)
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:generator 2
+    (let* ((*location-context* (unless (eq type 'fixnum)
+                                 type))
+           (value (and (sc-is y immediate)
+                       (tn-value y)))
+           (shift (and value
+                       (plusp value)
+                       (= (logcount value) 1)
+                       (1- (integer-length value))))
+           (error (generate-error-code+ (cond (shift
+                                               (setf y r)
+                                               (lambda ()
+                                                 (load-immediate-word y (fixnumize value))))
+                                              (value
+                                               (setf y temp)
+                                               (load-immediate-word y value)
+                                               nil))
+                                        vop
+                                        'sb-kernel::mul-overflow2-error x y)))
+      (inst tbnz x 0 error)
+      (cond ((eql shift 0)
+             (move r x))
+            (shift
+             (inst lsl r x shift)
+             (inst asr tmp-tn x (- 64 shift))
+             (inst cmp tmp-tn (asr r 63))
+             (inst b :ne error))
+            (t
+             (inst smulh tmp-tn x y)
+             (inst mul r x y)
+             (inst cmp tmp-tn (asr r 63))
+             (inst b :ne error))))))
 
 (define-vop (signum-signed signed-unop)
   (:args (x :scs (signed-reg any-reg) :target res))

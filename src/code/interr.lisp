@@ -344,7 +344,7 @@
                              (sb-di:error-context))))
              (condition
                (make-condition (if (and (%instancep object)
-                                        (wrapper-invalid (%instance-wrapper object)))
+                                        (layout-invalid (%instance-layout object)))
                                    ;; Signaling LAYOUT-INVALID is dubious, but I guess it provides slightly
                                    ;; more information in that it says that the object may have at some point
                                    ;; been TYPE. Anyway, it's not wrong - it's a subtype of TYPE-ERROR.
@@ -354,8 +354,8 @@
                                :expected-type (typecase type
                                                 (classoid-cell
                                                  (classoid-cell-name type))
-                                                (wrapper
-                                                 (wrapper-proper-name type))
+                                                (layout
+                                                 (layout-proper-name type))
                                                 (t
                                                  type))
                                :context (and (not (integerp context))
@@ -442,10 +442,7 @@
     (declare (ignorable raw-low raw-high))
     (let ((type (or (sb-di:error-context)
                     'fixnum)))
-      (object-not-type-error #+x86-64
-                             (* low high)
-                             #-x86-64
-                             (if (memq (sb-c:sc+offset-scn raw-low) `(,sb-vm:any-reg-sc-number
+      (object-not-type-error (if (memq (sb-c:sc+offset-scn raw-low) `(,sb-vm:any-reg-sc-number
                                                                       ,sb-vm:descriptor-reg-sc-number))
                                  (ash (logior
                                        (ash high sb-vm:n-word-bits)
@@ -481,7 +478,7 @@
       (multiple-value-bind (of cf) (sb-vm::context-overflow-carry-flags *current-internal-error-context*)
         (err x of cf)))
 
-   #+x86-64
+    #+x86-64
     (deferr sub-overflow-error (x)
       (multiple-value-bind (of cf) (sb-vm::context-overflow-carry-flags *current-internal-error-context*)
         (err x of (not cf)))))
@@ -503,10 +500,33 @@
                                        (dpb 1 (byte 1 sb-vm:n-word-bits) x))))
                              type nil)))
 
+  (deferr add-overflow2-error (x y)
+    (let ((type (or (sb-di:error-context)
+                    'fixnum)))
+      (if (numberp x)
+          (object-not-type-error (+ x y) type nil)
+          (object-not-type-error x 'number nil))))
+
   (deferr sub-overflow2-error (x y)
     (let ((type (or (sb-di:error-context)
                     'fixnum)))
-      (object-not-type-error (- x y) type nil))))
+      (if (numberp x)
+          (object-not-type-error (- x y) type nil)
+          (object-not-type-error x 'number nil))))
+
+  (deferr mul-overflow2-error (x y)
+    (let ((type (or (sb-di:error-context)
+                    'fixnum)))
+      (if (numberp x)
+          (object-not-type-error (* x y) type nil)
+          (object-not-type-error x 'number nil))))
+
+  (deferr ash-overflow2-error (x y)
+    (let ((type (or (sb-di:error-context)
+                    'fixnum)))
+      (if (numberp x)
+          (object-not-type-error (ash x y) type nil)
+          (object-not-type-error x 'number nil)))))
 
 ;;;; INTERNAL-ERROR signal handler
 

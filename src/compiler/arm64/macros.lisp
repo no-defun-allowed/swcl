@@ -164,8 +164,7 @@
       (load-immediate-word tmp-tn size)
       (inst mov tmp-tn size))
   (let ((asm-routine (if (eq type 'list) 'list-alloc-tramp 'alloc-tramp)))
-    (load-inline-constant alloc-tn `(:fixup ,asm-routine :assembly-routine)))
-  (inst blr alloc-tn)
+    (invoke-asm-routine asm-routine alloc-tn))
   (inst b back-label))
 
 ;;; Leaves the untagged pointer in TMP-TN,
@@ -276,11 +275,16 @@
     (emit-alignment 2)))
 
 (defun generate-error-code (vop error-code &rest values)
+  (apply #'generate-error-code+ nil vop error-code values))
+
+(defun generate-error-code+ (preamble-emitter vop error-code &rest values)
   "Generate-Error-Code Error-code Value*
   Emit code for an error with the specified Error-Code and context Values."
   (assemble (:elsewhere)
     (let ((start-lab (gen-label)))
       (emit-label start-lab)
+      (when preamble-emitter
+        (funcall preamble-emitter))
       (emit-error-break vop
                         (if (eq error-code 'invalid-arg-count-error)
                             invalid-arg-count-trap

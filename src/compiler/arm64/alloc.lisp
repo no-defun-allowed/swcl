@@ -87,7 +87,7 @@
   (:translate make-fdefn)
   (:generator 37
     (with-fixed-allocation (result lr fdefn-widetag fdefn-size)
-      (load-inline-constant temp '(:fixup undefined-tramp :assembly-routine))
+      (load-asm-routine temp 'undefined-tramp)
       (storew name result fdefn-name-slot other-pointer-lowtag)
       (storew null-tn result fdefn-fun-slot other-pointer-lowtag)
       (storew temp result fdefn-raw-addr-slot other-pointer-lowtag))))
@@ -134,7 +134,7 @@
   (:args)
   (:results (result :scs (any-reg)))
   (:generator 1
-    (load-inline-constant result '(:fixup funcallable-instance-tramp :assembly-routine))))
+    (load-asm-routine result 'funcallable-instance-tramp)))
 
 (define-vop (fixed-alloc)
   (:args)
@@ -171,3 +171,31 @@
     (pseudo-atomic (lr)
       (allocation nil bytes lowtag result :flag-tn lr)
       (storew header result 0 lowtag))))
+
+#+immobile-space
+(define-vop (!alloc-immobile-fixedobj)
+  (:args (size-class :scs (any-reg) :target c-arg1)
+         (nwords :scs (any-reg) :target c-arg2)
+         (header :scs (any-reg) :target c-arg3))
+  (:results (result :scs (descriptor-reg)))
+  (:save-p t)
+  (:temporary (:sc unsigned-reg :from (:argument 0) :to :eval :offset nl0-offset) c-arg1)
+  (:temporary (:sc unsigned-reg :from (:argument 1) :to :eval :offset nl1-offset) c-arg2)
+  (:temporary (:sc unsigned-reg :from (:argument 2) :to :eval :offset nl2-offset) c-arg3)
+  (:temporary (:sc non-descriptor-reg :offset lr-offset) lr)
+  (:temporary (:sc any-reg :offset r9-offset) cfunc)
+  (:temporary (:sc unsigned-reg :from :eval :to (:result 0) :offset nl0-offset) nl0)
+  (:temporary (:sc control-stack :offset nfp-save-offset) nfp-save)
+  (:vop-var vop)
+  (:generator 50
+   (let ((cur-nfp (current-nfp-tn vop)))
+     (when cur-nfp
+       (store-stack-tn nfp-save cur-nfp))
+     (move c-arg1 size-class)
+     (move c-arg2 nwords)
+     (move c-arg3 header)
+     (load-foreign-symbol cfunc "alloc_immobile_fixedobj")
+     (invoke-foreign-routine "call_into_c" lr)
+     (when cur-nfp
+       (load-stack-tn cur-nfp nfp-save))
+     (move result nl0))))

@@ -264,7 +264,7 @@
  ("src/compiler/proclaim" :c-headers)
 
  ("src/compiler/constantp" :c-headers)
- ("src/compiler/deftype" :c-headers)     ; on host for SB-XC:DEFTYPE
+ ("src/code/deftype" :c-headers)     ; on host for SB-XC:DEFTYPE
  ("src/code/type" :c-headers)
  ("src/compiler/generic/vm-type" :c-headers)
  ("src/code/pred" :not-host)
@@ -525,7 +525,6 @@
  ("src/code/late-extensions") ; needs condition system
 
  ("src/code/brothertree" :c-headers)
- #+metaspace ("src/code/metaspace" :not-host)
  ("src/code/simple-fun"        :not-host) ; function slot accessors
  ("src/code/eval"              :not-host) ; uses INFO, wants compiler macro
  ("src/code/toplevel"          :not-host)

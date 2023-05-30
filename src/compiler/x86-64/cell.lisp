@@ -513,11 +513,6 @@
 
 ;;;; fdefinition (FDEFN) objects
 
-;;; IR2-CONVERT-GLOBAL-VAR makes direct use of this vop by name,
-;;; so even though it has a :ref-trans in objdef, we also need the vop.
-(define-vop (fdefn-fun cell-ref)        ; /pfw - alpha
-  (:variant fdefn-fun-slot other-pointer-lowtag))
-
 (define-vop (safe-fdefn-fun)
   (:translate safe-fdefn-fun)
   (:policy :fast-safe)
@@ -789,9 +784,6 @@
     (storew rbp-tn object (+ closure-info-offset offset) fun-pointer-lowtag)))
 
 ;;;; value cell hackery
-
-(define-vop (value-cell-ref cell-ref)
-  (:variant value-cell-value-slot other-pointer-lowtag))
 
 (define-vop (value-cell-set cell-set)
   (:variant value-cell-value-slot other-pointer-lowtag))

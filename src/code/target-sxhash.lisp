@@ -64,7 +64,7 @@
   ;; It would probably be simple to eliminate this as a special case
   ;; by ensuring that instances of LAYOUT commence life with a trailing
   ;; hash slot and the SB-VM:HASH-SLOT-PRESENT-FLAG set.
-  (when (typep instance 'sb-vm:layout)
+  (when (typep instance 'layout)
     ;; This might be wrong if the clos-hash was clobbered to 0
     (return-from %instance-sxhash (layout-clos-hash instance)))
   ;; Non-simple cases: no hash slot, and either unhashed or hashed-not-moved.
@@ -443,13 +443,13 @@
                          (let ((cplx (%raw-instance-ref/complex-double key i)))
                            ,(mix-float '(realpart cplx) $0d0)
                            ,(mix-float '(imagpart cplx) $0d0)))))))
-         (let* ((wrapper (%instance-wrapper key))
-                (result (wrapper-clos-hash wrapper)))
+         (let* ((layout (%instance-layout key))
+                (result (layout-clos-hash layout)))
            (declare (type fixnum result))
            (when (plusp depthoid)
              (let ((max-iterations depthoid)
                    (depthoid (1- depthoid))
-                   (dd (wrapper-dd wrapper)))
+                   (dd (layout-dd layout)))
                (declare (index max-iterations))
                (if (/= (sb-kernel::dd-bitmap dd) +layout-all-tagged+)
                    (let ((slots (dd-slots dd)))
@@ -573,19 +573,3 @@
 ;;; Not needed post-build
 (clear-info :function :inlining-data '%sxhash-simple-substring)
 
-(defun show-hashed-instances ()
-  (flet ((foo (legend pred)
-           (format t "~&Instances in ~a state:~%" legend)
-           (sb-vm:map-allocated-objects pred :all)))
-    (foo "HASHED+MOVED"
-         (lambda (obj type size)
-           (declare (ignore size))
-           (when (and (= type sb-vm:instance-widetag)
-                      (logbitp 9 (instance-header-word obj)))
-             (format t "~x ~s~%" (get-lisp-obj-address obj) obj))))
-    (foo "HASHED (unmoved)"
-         (lambda (obj type size)
-           (declare (ignore size))
-           (when (and (= type sb-vm:instance-widetag)
-                      (= (ldb (byte 2 8) (instance-header-word obj)) 1))
-             (format t "~x ~s~%" (get-lisp-obj-address obj) obj))))))

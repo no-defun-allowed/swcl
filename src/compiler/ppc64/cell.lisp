@@ -294,8 +294,6 @@
 
 ;;;; Fdefinition (fdefn) objects.
 
-(define-vop (fdefn-fun cell-ref) ; does not translate anything
-  (:variant fdefn-fun-slot other-pointer-lowtag))
 (define-vop (untagged-fdefn-fun cell-ref) ; does not translate anything
   (:variant fdefn-fun-slot 0))
 
@@ -470,9 +468,6 @@
     (storew cfp-tn object (+ closure-info-offset offset) fun-pointer-lowtag)))
 
 ;;;; Value Cell hackery.
-
-(define-vop (value-cell-ref cell-ref)
-  (:variant value-cell-value-slot other-pointer-lowtag))
 
 (define-vop (value-cell-set cell-set)
   (:variant value-cell-value-slot other-pointer-lowtag))

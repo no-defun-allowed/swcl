@@ -100,8 +100,6 @@
   (:translate symbol-global-value))
 
 ;;;; FDEFINITION (fdefn) objects.
-(define-vop (fdefn-fun cell-ref)
-  (:variant fdefn-fun-slot other-pointer-lowtag))
 
 (define-vop (safe-fdefn-fun)
   (:translate safe-fdefn-fun)
@@ -245,9 +243,6 @@
     (storew cfp-tn object (+ closure-info-offset offset) fun-pointer-lowtag)))
 
 ;;;; value cell hackery.
-
-(define-vop (value-cell-ref cell-ref)
-  (:variant value-cell-value-slot other-pointer-lowtag))
 
 (define-vop (value-cell-set cell-set)
   (:variant value-cell-value-slot other-pointer-lowtag))

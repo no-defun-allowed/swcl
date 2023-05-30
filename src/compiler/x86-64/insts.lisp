@@ -320,22 +320,24 @@
   :printer #'print-xmmreg/mem)
 
 (defconstant-eqx +conditions+
+  ;; The first element in each row is the one we disassemble as.
+  ;; Always prefer the one without a negation in it if there is a choice.
   '((:o . 0)
     (:no . 1)
     (:b . 2) (:nae . 2) (:c . 2)
-    (:nb . 3) (:ae . 3) (:nc . 3)
+    (:ae . 3) (:nb . 3) (:nc . 3)
     (:eq . 4) (:e . 4) (:z . 4)
     (:ne . 5) (:nz . 5)
     (:be . 6) (:na . 6)
-    (:nbe . 7) (:a . 7)
+    (:a . 7) (:nbe . 7)
     (:s . 8)
     (:ns . 9)
     (:p . 10) (:pe . 10)
-    (:np . 11) (:po . 11)
+    (:po . 11) (:np . 11)
     (:l . 12) (:nge . 12)
-    (:nl . 13) (:ge . 13)
+    (:ge . 13) (:nl . 13)
     (:le . 14) (:ng . 14)
-    (:nle . 15) (:g . 15))
+    (:g . 15) (:nle . 15))
   #'equal)
 (defconstant-eqx +condition-name-vec+
   (let ((vec (make-array 16 :initial-element nil)))
@@ -1400,9 +1402,9 @@
   (:printer reg/mem-imm ((op '(#b1100011 #b000))))
   (:emitter
    (let ((size (pick-operand-size prefix dst src)))
-     (emit-mov segment size (sized-thing dst size) (sized-thing src size)))))
+     (emit-mov-instruction segment size (sized-thing dst size) (sized-thing src size)))))
 
-(defun emit-mov (segment size dst src)
+(defun emit-mov-instruction (segment size dst src)
   (cond ((gpr-p dst)
             (cond ((integerp src)
                    ;; We want to encode the immediate using the fewest bytes possible.

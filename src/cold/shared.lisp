@@ -383,8 +383,6 @@
           ;; It sorta kinda works to have both, but there should be no need,
           ;; and it's not really supported.
           "At most one interpreter can be selected")
-         ("(and immobile-space (not x86-64))"
-          ":IMMOBILE-SPACE is supported only on x86-64")
          ("(and compact-instance-header (not immobile-space))"
           ":COMPACT-INSTANCE-HEADER requires :IMMOBILE-SPACE feature")
          ("(and immobile-code (not immobile-space))"
@@ -847,7 +845,7 @@
                ((and structure-object (not package))
                 (let ((type-name (string (type-of x))))
                   ;; This "LAYOUT" refers to *our* object, not host-sb-kernel:layout.
-                  (unless (member type-name '("WRAPPER" "LAYOUT" "FLOAT" "COMPLEXNUM")
+                  (unless (member type-name '("LAYOUT" "FLOAT" "COMPLEXNUM")
                                   :test #'string=)
                     ;(Format t "visit a ~/host-sb-ext:print-symbol-with-prefix/~%" (type-of x))
                     ;; This generalizes over any structure. I need it because we

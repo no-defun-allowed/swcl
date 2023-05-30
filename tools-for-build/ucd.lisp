@@ -82,7 +82,42 @@
                (t (write-byte inbyte ,out))))))
        (with-open-file (,s (make-pathname :name ,name :type "txt"
                                           :defaults *output-directory*))
-         ,@body))))
+         (multiple-value-prog1
+             (progn
+               ,@body)
+           (unless (eql (peek-char nil ,s nil nil) nil)
+             (error "Unread data in data file: ~S" ,name)))))))
+
+(defmacro with-input-arbitrary-utf8-file ((s name) &body body)
+  ;; KLUDGE: the emoji data includes literal emoji; likewise the
+  ;; confusables.  We just remove all high-bit stuff, on the
+  ;; assumption that the actual data is still ASCII.
+  (let ((in (gensym "IN"))
+        (out (gensym "OUT")))
+    `(progn
+       (with-open-file (,in (make-pathname :name ,name :type "txt"
+                                           :defaults *unicode-character-database*)
+                            :element-type '(unsigned-byte 8))
+         (setf (gethash (format nil "tools-for-build/~A.txt" ,name) *ucd-inputs*) 'used)
+         (with-open-file (,out (make-pathname :name ,name :type "txt"
+                                              :defaults *output-directory*)
+                               :element-type '(unsigned-byte 8)
+                               :direction :output
+                               :if-exists :supersede
+                               :if-does-not-exist :create)
+           (setf (gethash (format nil "output/~A.txt" ,name) *ucd-outputs*) 'made)
+           (do ((inbyte (read-byte ,in nil nil) (read-byte ,in nil nil)))
+               ((null inbyte) nil)
+             (cond
+               ((>= inbyte #x7f) nil)
+               (t (write-byte inbyte ,out))))))
+       (with-open-file (,s (make-pathname :name ,name :type "txt"
+                                          :defaults *output-directory*))
+         (multiple-value-prog1
+             (progn
+               ,@body)
+           (unless (eql (peek-char nil ,s nil nil) nil)
+             (error "Unread data in data file: ~S" ,name)))))))
 
 (defmacro with-output-dat-file ((s name) &body body)
   `(with-open-file (,s (make-pathname :name ,name :type "dat"
@@ -334,12 +369,30 @@ Length should be adjusted when the standard changes.")
            (when (ordered-ranges-member code-point vector)
              (gethash class *bidi-classes*))))
     (cond
-      ((in #(#x0600 #x07BF #x0860 #x086F #x08A0 #x08FF
-             #xFB50 #xFDCF #xFDF0 #xFDFF #xFE70 #xFEFF
-             #x1EE00 #x1EEFF) "AL"))
-      ((in #(#x0590 #x05FF #x07C0 #x085F #x0870 #x089F
-             #xFB1D #xFB4F #x10800 #x10FFF #x1E800 #x1EDFF
-             #x1EF00 #x1EFFF) "R"))
+      ((in #(#x0600 #x07BF
+             #x0860 #x08FF
+             #xFB50 #xFDCF
+             #xFDF0 #xFDFF
+             #xFE70 #xFEFF
+             #x10D00 #x10D3F
+             #x10EC0 #x10EFF
+             #x10F30 #x10F6F
+             #x1EC70 #x1ECBF
+             #x1ED00 #x1ED4F
+             #x1EE00 #x1EEFF)
+           "AL"))
+      ((in #(#x0590 #x05FF
+             #x07C0 #x085F
+             #xFB1D #xFB4F
+             #x10800 #x10CFF
+             #x10D40 #x10EBF
+             #x10F00 #x10F2F
+             #x10F70 #x10FFF
+             #x1E800 #x1EC6F
+             #x1ECC0 #x1ECFF
+             #x1ED50 #x1EDFF
+             #x1EF00 #x1EFFF)
+           "R"))
       ((in #(#x20A0 #x20CF) "ET"))
       ;; BN is non-characters and default-ignorable.
       ;; Default-ignorable will be dealt with elsewhere
@@ -353,7 +406,7 @@ Length should be adjusted when the standard changes.")
       (t (error "Somehow we've gone too far in unallocated bidi determination")))))
 
 (defun complete-misc-table ()
-  (loop for code-point from 0 to #x10FFFF do ; Flood-fil unallocated codepoints
+  (loop for code-point from 0 to #x10FFFF do ; Flood-fill unallocated codepoints
        (unless (second (multiple-value-list (gethash code-point *ucd-entries*)))
          (let* ((unallocated-misc
                  ;; unallocated characters have a GC of "Cn", aren't digits
@@ -749,7 +802,23 @@ Length should be adjusted when the standard changes.")
     (parse-property s :nfkd-qc)
     (parse-property s) ;; NFKC_QC Comments
     (parse-property s :nfkc-qc)
-    (parse-property s :nfkc-qc-maybe))
+    (parse-property s :nfkc-qc-maybe)
+    (parse-property s) ;; Expands_On_NFD
+    (parse-property s) ;; Expands_On_NFC
+    (parse-property s) ;; Expands_On_NFKD
+    (parse-property s) ;; Expands_On_NFKC
+    (parse-property s) ;; NFKC_CF
+    (parse-property s)) ;; Changes_When_NFKC_Casefolded
+
+  (with-input-arbitrary-utf8-file (s "emoji-data")
+    (parse-property s) ;; Initial comments
+    (parse-property s :emoji)
+    (parse-property s :emoji-presentation)
+    (parse-property s :emoji-modifier)
+    (parse-property s :emoji-modifier-base)
+    (parse-property s :emoji-component)
+    (parse-property s :extended-pictographic))
+
   (setf **proplist-properties** (nreverse **proplist-properties**))
   (values))
 
@@ -789,7 +858,7 @@ Length should be adjusted when the standard changes.")
 
 ;;; Other properties
 (defparameter *confusables*
-  (with-input-txt-file (stream "ConfusablesEdited")
+  (with-input-arbitrary-utf8-file (stream "confusables")
     (read-line stream)
     (loop for line = (read-line stream nil nil)
           while line

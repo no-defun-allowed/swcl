@@ -322,9 +322,6 @@
 
 ;;;; Fdefinition (fdefn) objects.
 
-(define-vop (fdefn-fun cell-ref)
-  (:variant fdefn-fun-slot other-pointer-lowtag))
-
 (define-vop (safe-fdefn-fun)
   (:translate safe-fdefn-fun)
   (:policy :fast-safe)
@@ -354,7 +351,7 @@
     (load-type type function (- fun-pointer-lowtag))
     (inst cmp type simple-fun-widetag)
     (inst b :eq SIMPLE-FUN)
-    (load-inline-constant lip '(:fixup closure-tramp :assembly-routine))
+    (load-asm-routine lip 'closure-tramp)
     SIMPLE-FUN
     (storew lip fdefn fdefn-raw-addr-slot other-pointer-lowtag)
     (storew function fdefn fdefn-fun-slot other-pointer-lowtag)
@@ -367,7 +364,7 @@
   (:temporary (:scs (non-descriptor-reg)) temp)
   (:generator 38
     (storew null-tn fdefn fdefn-fun-slot other-pointer-lowtag)
-    (load-inline-constant temp '(:fixup undefined-tramp :assembly-routine))
+    (load-asm-routine temp 'undefined-tramp)
     (storew temp fdefn fdefn-raw-addr-slot other-pointer-lowtag)))
 
 
@@ -395,8 +392,7 @@
       (inst ldr (32-bit-reg tls-index) (tls-index-of symbol))
       (inst cbnz (32-bit-reg tls-index) TLS-INDEX-VALID)
       (move alloc-tls-symbol symbol)
-      (load-inline-constant lr '(:fixup alloc-tls-index :assembly-routine))
-      (inst blr lr)
+      (invoke-asm-routine 'alloc-tls-index lr)
       TLS-INDEX-VALID
       (inst ldr alloc-tls-symbol (@ thread-tn tls-index))
       (inst stp alloc-tls-symbol tls-index
@@ -566,9 +562,6 @@
 
 ;;;; Value Cell hackery.
 
-(define-vop (value-cell-ref cell-ref)
-  (:variant value-cell-value-slot other-pointer-lowtag))
-
 (define-vop (value-cell-set cell-set)
   (:variant value-cell-value-slot other-pointer-lowtag))
 
@@ -632,19 +625,52 @@
   (:temporary (:scs (non-descriptor-reg)) temp card)
   (:temporary (:sc non-descriptor-reg) pa-flag)
   (:generator 10
-    (load-inline-constant temp `(:fixup "gc_card_table_mask" :foreign-dataref))
-    (inst ldr temp (@ temp))
+    (load-foreign-symbol temp "gc_card_table_mask" :dataref t)
     (inst ldr (32-bit-reg temp) (@ temp)) ; 4-byte int
     (pseudo-atomic (pa-flag)
+      #+immobile-space
+      (progn
+        #-sb-thread
+        (error "doesn't work yet")
+        (loadw temp thread-tn thread-text-space-addr-slot)
+        (inst sub temp object temp)
+        (inst lsr card temp (1- (integer-length immobile-card-bytes)))
+        (loadw temp thread-tn thread-text-card-count-slot)
+        (inst cmp card temp)
+        (inst b :hs try-dynamic-space)
+        (loadw temp thread-tn thread-text-card-marks-slot)
+
+        ;; compute &((unsigned long*)text_page_touched_bits)[page_index/64]
+        (inst lsr pa-flag card 6)
+        (inst lsl pa-flag pa-flag 3)
+        (inst add temp temp pa-flag)
+
+        ;; compute 1U << (page_index & 63)
+        (inst mov pa-flag 1)
+        (inst and card card 63)
+        (inst lsl pa-flag pa-flag card)
+
+        (cond ((member :arm-v8.1 *backend-subfeatures*)
+               (inst ldset pa-flag pa-flag temp))
+              (t
+               (let ((loop (gen-label)))
+                 (emit-label LOOP)
+                 (inst ldaxr card temp)
+                 (inst orr card card pa-flag)
+                 (inst stlxr pa-flag card temp)
+                 (inst cbnz (32-bit-reg pa-flag) LOOP))))
+        (inst b store))
+      TRY-DYNAMIC-SPACE
       ;; Compute card mark index
       (inst lsr card object gencgc-card-shift)
       (inst and card card temp)
       ;; Load mark table base
-      (load-inline-constant temp `(:fixup "gc_card_mark" :foreign-dataref))
-      (inst ldr temp (@ temp))
+      (load-foreign-symbol temp "gc_card_mark" :dataref t)
       (inst ldr temp (@ temp))
       ;; Touch the card mark byte.
       (inst strb null-tn (@ temp card))
+
+      STORE
       ;; set 'written' flag in the code header
       ;; If two threads get here at the same time, they'll write the same byte.
       (let ((byte (- #+big-endian 4 #+little-endian 3 other-pointer-lowtag)))

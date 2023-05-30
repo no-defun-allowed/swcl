@@ -85,6 +85,10 @@
 (defun emit-constant (value)
   (constant-tn (find-constant value)))
 
+(defmacro emit-value-cell-ref (node block cell result)
+  `(vop slot ,node ,block ,cell 'value-cell-ref sb-vm:value-cell-value-slot
+        sb-vm:other-pointer-lowtag ,result))
+
 ;;; Convert a REF node. The reference must not be delayed.
 (defun ir2-convert-ref (node block)
   (declare (type ref node) (type ir2-block block))
@@ -99,7 +103,7 @@
              (explicit (lambda-var-explicit-value-cell leaf)))
          (cond
            ((and indirect explicit)
-            (vop value-cell-ref node block tn res))
+            (emit-value-cell-ref node block tn res))
            ((and indirect
                  (not (eq (node-environment node)
                           (lambda-environment (lambda-var-home leaf)))))
@@ -180,7 +184,8 @@
                     (vop sb-vm::safe-untagged-fdefn-fun node block fdefn-tn res))
                 #-untagged-fdefns
                 (if unsafe
-                    (vop fdefn-fun node block fdefn-tn res)
+                    (vop slot node block fdefn-tn 'fdefn-fun sb-vm:fdefn-fun-slot
+                         sb-vm:other-pointer-lowtag res)
                     (vop safe-fdefn-fun node block fdefn-tn res)))))))))
 
 ;;; some sanity checks for a CLAMBDA passed to IR2-CONVERT-CLOSURE
@@ -1943,7 +1948,7 @@ not stack-allocated LVAR ~S." source-lvar)))))
          (temp (make-stack-pointer-tn))
          (value (exit-value node)))
     (if (nlx-info-safe-p nlx)
-        (vop value-cell-ref node block loc temp)
+        (emit-value-cell-ref node block loc temp)
         (emit-move node block loc temp))
     (if value
         (let ((locs (ir2-lvar-locs (lvar-info value))))

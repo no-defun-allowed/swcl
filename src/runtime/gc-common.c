@@ -870,15 +870,10 @@ scav_instance(lispobj *where, lispobj header)
     // writing it back if and only if it changed.
     lispobj layoutptr = instance_layout(where);
     if (!layoutptr) return total_nwords; // instance can't point to any data yet
-#ifdef LISP_FEATURE_METASPACE
-    struct layout *layout = LAYOUT(layoutptr); // layouts never move in metaspace
-    scav1(&layout->friend, layout->friend);
-#else
     lispobj old = layoutptr;
     scav1(&layoutptr, layoutptr);
     if (layoutptr != old) instance_layout(where) = layoutptr;
     struct layout *layout = LAYOUT(layoutptr);
-#endif
     struct bitmap bitmap = get_layout_bitmap(layout);
     sword_t mask = bitmap.bits[0]; // there's always at least 1 bitmap word
 
@@ -953,15 +948,10 @@ scav_funinstance(lispobj *where, lispobj header)
     // writing it back if and only if it changed.
     lispobj layoutptr = funinstance_layout(where);
     if (!layoutptr) return 1 + (nslots | 1); // skip, instance can't point to data
-#ifdef LISP_FEATURE_METASPACE
-    struct layout * layout = LAYOUT(layoutptr);
-    scav1(&layout->friend, layout->friend);
-#else
     // This handles compact or non-compact layouts with indifference.
     lispobj old = layoutptr;
     scav1(&layoutptr, layoutptr);
     if (layoutptr != old) funinstance_layout(where) = layoutptr;
-#endif
     struct funcallable_instance* fin = (void*)where;
 #ifdef LISP_FEATURE_EXECUTABLE_FUNINSTANCES
     lispobj* firstword = &fin->function;

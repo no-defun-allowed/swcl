@@ -297,15 +297,6 @@ void execute_full_mark_phase()
         gc_enqueue(obj);
         where += listp(obj) ? 2 : headerobj_size(where);
     }
-#ifdef LISP_FEATURE_METASPACE
-    where = (lispobj*)METASPACE_START;
-    end = (lispobj*)READ_ONLY_SPACE_END;
-    while (where < end) {
-        lispobj obj = compute_lispobj(where);
-        gc_enqueue(obj);
-        where += listp(obj) ? 2 : headerobj_size(where);
-    }
-#endif
     gc_mark_obj(lisp_package_vector);
     gc_mark_obj(lisp_init_function);
     gc_mark_obj(gc_object_watcher);

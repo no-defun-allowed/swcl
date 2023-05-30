@@ -73,11 +73,7 @@
                                            closure-extra-data-indicator))))
                        #+compact-instance-header ; copy the layout
                        (setf (sap-ref-32 sap 4) ; ASSUMPTION: little-endian
-                             (logior (get-lisp-obj-address
-                                      (wrapper-friend ,(find-layout 'function)))))
-                       #+metaspace ; copy the CODE (not accessible by index-ref)
-                       (setf (sap-ref-lispobj sap (ash sb-vm::closure-code-slot sb-vm:word-shift))
-                             (sb-vm::%closure-code closure)))))
+                             (logior (get-lisp-obj-address ,(find-layout 'function)))))))
                 (%closure-index-set copy j (%closure-index-ref closure j)))))
 
   ;; This is factored out because of a cutting-edge implementation
@@ -587,13 +583,13 @@
         (fdefn (find-or-create-fdefn symbol)))
 
     ;; In most cases, install the guard closure in the usual way.
-    #-immobile-code (setf (fdefn-fun fdefn) closure)
+    #-(and x86-64 immobile-code) (setf (fdefn-fun fdefn) closure)
 
     ;; Do something slightly different for immobile code: fmakunbound, assigning
     ;; FUN = NIL and RAW-ADDR = UNDEFINED-TRAMP; then overwrite the NIL with the
     ;; above closure. This is better than assigning a closure, because closures
     ;; require a new closure-calling trampoline to be consed.
-    #+immobile-code
+    #+(and x86-64 immobile-code)
     (progn (fdefn-makunbound fdefn)
            (%primitive sb-vm::set-undefined-fdefn-fun fdefn closure))
 

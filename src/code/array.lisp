@@ -396,6 +396,15 @@
           (recurse (%array-data x))
           (truly-the (integer 128 255) result))))))
 
+(declaim (ftype (sfunction (array) (values (integer 128 255) (unsigned-byte 8)))
+                array-underlying-widetag-and-shift))
+(defun array-underlying-widetag-and-shift (array)
+  (declare (explicit-check))
+  (let ((widetag (array-underlying-widetag array)))
+    (values widetag
+            (truly-the (unsigned-byte 8)
+                       (aref %%simple-array-n-bits-shifts%% widetag)))))
+
 ;; Complain in various ways about wrong MAKE-ARRAY and ADJUST-ARRAY arguments,
 ;; returning the two initialization arguments needed for DATA-VECTOR-FROM-INITS.
 ;; This is an unhygienic macro which would be a MACROLET other than for
@@ -452,10 +461,9 @@
 (defun %save-displaced-new-array-backpointer (array data)
   (flet ((purge (pointers)
            (remove-if-not #'weak-pointer-value pointers)))
-    (when (array-header-p data)
-      (setf (%array-displaced-from data)
-            (cons (make-weak-pointer array)
-                  (purge (%array-displaced-from data)))))))
+    (setf (%array-displaced-from data)
+          (cons (make-weak-pointer array)
+                (purge (%array-displaced-from data))))))
 
 (defmacro populate-dimensions (header list-or-index rank)
   `(if (listp ,list-or-index)
@@ -565,7 +573,8 @@
              (cond (displaced-to
                     (setf (%array-displacement array) (or displaced-index-offset 0))
                     (setf (%array-displaced-p array) t)
-                    (%save-displaced-new-array-backpointer array data))
+                    (when (adjustable-array-p data)
+                      (%save-displaced-new-array-backpointer array data)))
                    (t
                     (setf (%array-displaced-p array) nil)))
              (populate-dimensions array dimensions array-rank)
@@ -1043,6 +1052,7 @@ of specialized arrays is supported."
 
 (defun array-element-type (array)
   "Return the type of the elements of the array"
+  (declare (explicit-check array))
   (truly-the (or list symbol)
              (widetag->element-type (array-underlying-widetag array))))
 
@@ -1848,7 +1858,7 @@ function to be removed without further warning."
                                     body))
                             (setf (svref ,table-name ,typecode) #',fun-name))))
        (defmacro ,dispatch-name (&rest args)
-         (check-type (first args) symbol)
+         (aver (symbolp (first args)))
          (let ((tag (gensym "TAG")))
            `(funcall
              (truly-the function
