@@ -5,6 +5,7 @@
 #include "lispobj.h"
 #include "gc-assert.h"
 #include "gc-internal.h"
+#include "gc-private.h"
 #include "gencgc-internal.h"
 #include "gencgc-private.h"
 #include "queue.h"
@@ -12,6 +13,8 @@
 #include "queue-suballocator.h"
 #include "incremental-compact.h"
 #include "walk-heap.h"
+
+#include "genesis/gc-tables.h"
 
 /* Maximum ratio between pages used and pages "needed" to compact. */
 float page_overhead_threshold = 1.3;
@@ -83,9 +86,11 @@ void consider_compaction(generation_index_t gen) {
 
 /* Remset */
 
-static lispobj tag_source(lispobj *where, enum source s) {
-  return make_lispobj(where, (int)s);
-}
+/* We cram a source into the low bits of a pointer, to save space in the
+ * remset. */
+static inline lispobj tag_source(lispobj *where, enum source s) { return (lispobj)where | (lispobj)s; }
+static inline enum source source_from_tagged(lispobj t) { return t & 7; }
+static inline lispobj *lispobj_from_tagged(lispobj t) { return (lispobj*)(t &~ 7); }
 
 static _Thread_local struct Qblock *remset_block = NULL;
 
@@ -110,6 +115,35 @@ void log_relevant_slot(lispobj *where, lispobj *source_object, enum source sourc
 }
 
 /* Compacting */
+static void move_objects() {
+  /* Note that this function is very un-thread-safe; in theory you could
+   * parallelise copying, but we'd need to have copying synchronise correctly.
+   * And early experiements in parallel copying suggested we're bottlenecked
+   * by refilling TLABs too. */
+  for (page_index_t p = 0; p < page_table_pages; p++)
+    if (target_pages[p]) {
+      lispobj *end = (lispobj*)page_address(p + 1);
+      /* Move every object in this page in the right generation. */
+      for (lispobj *where = next_object((lispobj*)page_address(p), 0, end);
+           where;
+           /* We install forwarding pointers, so we'll conservatively assume
+            * the object is at least two words large. */
+           where = next_object(where, 2, end)) {
+        if (gc_gen_of((lispobj)where, -1) == target_generation) {
+          lispobj bogus = compute_lispobj(where);
+          scavenge(&bogus, 1);
+        }
+      }
+      /* Free all lines we just copied from. */
+      for_lines_in_page (l, p)
+        if (DECODE_GEN(line_bytemap[l]) == target_generation) {
+          line_bytemap[l] = 0;
+          set_page_bytes_used(p, page_bytes_used(p - LINE_SIZE));
+          generations[target_generation].bytes_allocated -= LINE_SIZE;
+          bytes_allocated -= LINE_SIZE;
+        }
+    }
+}
 
 static void count_pages() {
   uword_t bytes = 0, objects = 0, tags[16] = { 0 };

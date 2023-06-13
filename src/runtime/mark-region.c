@@ -39,7 +39,7 @@
 
 //#define DEBUG
 //#define LOG_COLLECTIONS
-//#define COMPACT
+#define COMPACT
 
 /* The idea of the mark-region collector is to avoid copying where
  * possible, and instead reclaim as much memory in-place as possible.
@@ -424,7 +424,9 @@ static void mark(lispobj object, lispobj *where, enum source source_type) {
       lispobj *base = fun_code_header(np);
       object = make_lispobj(base, OTHER_POINTER_LOWTAG);
     }
+#ifdef COMPACT
     log_slot(object, where, source_object, source_type);
+#endif
     /* Enqueue onto mark queue */
     if (set_mark_bit(object)) {
       if (!output_block || output_block->count == QBLOCK_CAPACITY) {
@@ -466,7 +468,9 @@ static void trace_object(lispobj object) {
     struct cons *c = CONS(object);
     mark(c->car, &c->car, SOURCE_NORMAL);
     lispobj next = c->cdr;
-    /* Tail-recurse on the cdr, unless we're recording dirty cards. */
+    /* "Tail-recurse" on the cdr, unless we're recording dirty cards.
+     * This saves us from continuously writing into grey blocks,
+     * but loses memory parallelism. */
     if (is_lisp_pointer(next)) {
       if (!dirty_generation_source) {
         /* Fix up embedded simple-fun objects. */
@@ -476,8 +480,10 @@ static void trace_object(lispobj object) {
           next = make_lispobj(base, OTHER_POINTER_LOWTAG);
           np = base;
         }
+#ifdef COMPACT
         /* Inlined logic from mark() */
         log_slot(c->cdr, &c->cdr, native_pointer(object), SOURCE_NORMAL);
+#endif
         if (!pointer_survived_gc_yet(next)) {
           if (set_mark_bit(next)) {
             if (listp(next))
@@ -615,6 +621,8 @@ void compute_allocations(void *address) {
   /* Don't unfreshen lines when the mutator could still be
    * allocating into them. Forgetting this causes
    * brothertree.impure.lisp to fail. */
+  /* TODO: We can unfreshen if the page is not in a TLAB, right?
+   * But I daren't race if another thread begins allocating into the page. */
   boolean unfreshen = gc_active_p;
   /* Find the last previous unfresh line. */
   for (start = l; start != first_line - 1 && IS_FRESH(line_bytemap[start]); start--)
