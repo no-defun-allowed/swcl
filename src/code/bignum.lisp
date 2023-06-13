@@ -27,8 +27,8 @@
 ;;;       bignum-element-type bignum-index %allocate-bignum
 ;;;       %bignum-length %bignum-set-length %bignum-ref %bignum-set
 ;;;       %digit-0-or-plusp %add-with-carry %subtract-with-borrow
-;;;       %multiply-and-add %multiply %lognot %logand %logior %logxor
-;;;       %fixnum-to-digit %bigfloor %fixnum-digit-with-correct-sign %ashl
+;;;       %multiply-and-add %multiply
+;;;       %bigfloor %fixnum-digit-with-correct-sign %ashl
 ;;;       %ashr %digit-logical-shift-right))
 
 ;;; The following interfaces will either be assembler routines or code
@@ -57,12 +57,6 @@
 ;;;       %LOGNOT
 ;;;    Shifting (in place)
 ;;;       %NORMALIZE-BIGNUM-BUFFER
-;;;    Relational operators:
-;;;       %LOGAND
-;;;       %LOGIOR
-;;;       %LOGXOR
-;;;    LDB
-;;;       %FIXNUM-TO-DIGIT
 ;;;    TRUNCATE
 ;;;       %BIGFLOOR
 ;;;
@@ -227,26 +221,6 @@
   (declare (type bignum bignum))
   (%bignum-0-or-plusp bignum (%bignum-length bignum)))
 
-;;; Each of these does the digit-size unsigned op.
-(declaim (inline %logand %logior %logxor))
-(defun %logand (a b)
-  (declare (type bignum-element-type a b))
-  (logand a b))
-(defun %logior (a b)
-  (declare (type bignum-element-type a b))
-  (logior a b))
-(defun %logxor (a b)
-  (declare (type bignum-element-type a b))
-  (logxor a b))
-
-;;; This takes a fixnum and sets it up as an unsigned digit-size
-;;; quantity.
-;;; The stub function is needed for constant-folding, or where vops don't exist
-(defun %fixnum-to-digit (x)
-  (declare (fixnum x))
-  #+(or arm arm64) (logand x (1- (ash 1 digit-size))) ; missing the vops
-  #-(or arm arm64) (%fixnum-to-digit x))
-
 ;;; This returns 0 or "-1" depending on whether the bignum is positive. This
 ;;; is suitable for infinite sign extension to complete additions,
 ;;; subtractions, negations, etc. This cannot return a -1 represented as
@@ -261,6 +235,9 @@
 (defun (setf %bignum-ref) (val bignum index)
   (%bignum-set bignum index val) ; valueless
   val)
+
+(defmacro %lognot (x)
+  `(ldb (byte digit-size 0) (lognot ,x)))
 
 (declaim (optimize (speed 3) (safety 0)))
 
@@ -531,7 +508,7 @@
       (negate-bignum-in-place result))
     (%normalize-bignum result (1+ bignum-len))))
 
-(sb-c::unless-vop-existsp (:translate sb-c::fixnum*)
+(sb-c::unless-vop-existsp (:named sb-vm::*/signed=>integer)
   (defun multiply-fixnums (a b)
     (declare (fixnum a b))
     (declare (muffle-conditions compiler-note)) ; returns lispobj, so what.
@@ -622,17 +599,15 @@
 ;;; target compiler, it can deduce the return type fine, but without
 ;;; it, we pay a heavy price in BIGNUM-GCD when compiled by the
 ;;; cross-compiler. -- CSR, 2004-07-19
-(declaim (ftype (sfunction (bignum bignum-length bignum bignum-length)
+(declaim (ftype (sfunction (bignum bignum)
                            (and unsigned-byte fixnum))
                 bignum-factors-of-two))
-(defun bignum-factors-of-two (a len-a b len-b)
-  (declare (type bignum-length len-a len-b) (type bignum a b))
-  (do ((i 0 (1+ i))
-       (end (min len-a len-b)))
-      ((= i end) (error "Unexpected zero bignums?"))
-    (declare (type bignum-index i)
-             (type bignum-length end))
-    (let ((or-digits (%logior (%bignum-ref a i) (%bignum-ref b i))))
+(defun bignum-factors-of-two (a b)
+  (declare (type bignum a b))
+  (do ((i 0 (1+ i)))
+      (())
+    (declare (type bignum-index i))
+    (let ((or-digits (logior (%bignum-ref a i) (%bignum-ref b i))))
       (unless (zerop or-digits)
         (return (do ((j 0 (1+ j))
                      (or-digits or-digits (%ashr or-digits 1)))
@@ -765,12 +740,13 @@
 (declaim (inline make-small-bignum))
 (defun make-small-bignum (fixnum)
   (let ((res (%allocate-bignum 1)))
-    (setf (%bignum-ref res 0) (%fixnum-to-digit fixnum))
+    (setf (%bignum-ref res 0)
+          (ldb (byte digit-size 0) (truly-the fixnum fixnum)))
     res))
 
 ;; When the larger number is less than this many bignum digits long, revert
 ;; to old algorithm.
-(define-load-time-global *accelerated-gcd-cutoff* 3)
+(defconstant accelerated-gcd-cutoff 3)
 
 ;;; Alternate between k-ary reduction with the help of
 ;;; REDUCED-RATIO-MOD and digit modulus reduction via DMOD. Once the
@@ -787,18 +763,15 @@
          (v1 (if (bignum-plus-p v0)
                  v0
                  (negate-bignum v0 nil))))
-    (if (zerop v1)
-        (return-from bignum-gcd u1))
-    (when (> u1 v1)
+    (when (plusp (bignum-compare u1 v1))
       (rotatef u1 v1))
-    (let ((n (mod v1 u1)))
+    (let ((n (rem v1 u1)))
+      (when (eql n 0)
+        (return-from bignum-gcd (%normalize-bignum u1
+                                                   (%bignum-length u1))))
       (setf v1 (if (fixnump n)
                    (make-small-bignum n)
                    n)))
-    (if (and (= 1 (%bignum-length v1))
-             (zerop (%bignum-ref v1 0)))
-        (return-from bignum-gcd (%normalize-bignum u1
-                                                   (%bignum-length u1))))
     (let* ((buffer-len (+ 2 (%bignum-length u1)))
            (u (%allocate-bignum buffer-len))
            (u-len (%bignum-length u1))
@@ -809,8 +782,7 @@
            (tmp2 (%allocate-bignum buffer-len))
            (tmp2-len 0)
            (factors-of-two
-            (bignum-factors-of-two u1 (%bignum-length u1)
-                                   v1 (%bignum-length v1))))
+            (bignum-factors-of-two u1 v1)))
       (declare (type (or null bignum-length)
                      buffer-len u-len v-len tmp1-len tmp2-len))
       (bignum-replace u u1)
@@ -823,7 +795,7 @@
             (make-gcd-bignum-odd v
                                  (bignum-buffer-ashift-right v v-len
                                                              factors-of-two)))
-      (loop until (or (< u-len *accelerated-gcd-cutoff*)
+      (loop until (or (< u-len accelerated-gcd-cutoff)
                       (not v-len)
                       (zerop v-len)
                       (and (= 1 v-len)
@@ -907,8 +879,7 @@
                           (b-buffer len-b b)
                           (res-buffer (max len-a len-b)))
       (let* ((factors-of-two
-              (bignum-factors-of-two a-buffer len-a
-                                     b-buffer len-b))
+              (bignum-factors-of-two a-buffer b-buffer))
              (len-a (make-gcd-bignum-odd
                      a-buffer
                      (bignum-buffer-ashift-right a-buffer len-a
@@ -1079,7 +1050,7 @@
          ,termination
        (declare (type bignum-index i j))
        (setf (%bignum-ref ,(if result result source) j)
-             (%logior (%digit-logical-shift-right (%bignum-ref ,source i)
+             (logior (%digit-logical-shift-right (%bignum-ref ,source i)
                                                   ,start-pos)
                       (%ashl (%bignum-ref ,source (1+ i))
                              high-bits-in-first-digit))))))
@@ -1215,7 +1186,7 @@
              (%normalize-bignum res res-len)))
       (declare (type bignum-index i j))
       (setf (%bignum-ref res j)
-            (%logior (%digit-logical-shift-right (%bignum-ref bignum i)
+            (logior (%digit-logical-shift-right (%bignum-ref bignum i)
                                                  remaining-bits)
                      (%ashl (%bignum-ref bignum (1+ i)) n-bits))))))
 
@@ -1472,7 +1443,7 @@
   (dotimes (i len-a)
     (declare (type bignum-index i))
     (setf (%bignum-ref res i)
-          (%logand (%bignum-ref a i) (%bignum-ref b i))))
+          (logand (%bignum-ref a i) (%bignum-ref b i))))
   (%normalize-bignum res len-a))
 
 ;;; This takes a shorter bignum, a and len-a, that is negative. Because this
@@ -1484,7 +1455,7 @@
   (dotimes (i len-a)
     (declare (type bignum-index i))
     (setf (%bignum-ref res i)
-          (%logand (%bignum-ref a i) (%bignum-ref b i))))
+          (logand (%bignum-ref a i) (%bignum-ref b i))))
   (do ((i len-a (1+ i)))
       ((= i len-b))
     (declare (type bignum-index i))
@@ -1521,7 +1492,7 @@
   (dotimes (i len-a)
     (declare (type bignum-index i))
     (setf (%bignum-ref res i)
-          (%logior (%bignum-ref a i) (%bignum-ref b i))))
+          (logior (%bignum-ref a i) (%bignum-ref b i))))
   (do ((i len-a (1+ i)))
       ((= i len-b))
     (declare (type bignum-index i))
@@ -1537,7 +1508,7 @@
   (dotimes (i len-a)
     (declare (type bignum-index i))
     (setf (%bignum-ref res i)
-          (%logior (%bignum-ref a i) (%bignum-ref b i))))
+          (logior (%bignum-ref a i) (%bignum-ref b i))))
   (do ((i len-a (1+ i))
        (sign (%sign-digit a len-a)))
       ((= i len-b))
@@ -1564,12 +1535,12 @@
   (dotimes (i len-a)
     (declare (type bignum-index i))
     (setf (%bignum-ref res i)
-          (%logxor (%bignum-ref a i) (%bignum-ref b i))))
+          (logxor (%bignum-ref a i) (%bignum-ref b i))))
   (do ((i len-a (1+ i))
        (sign (%sign-digit a len-a)))
       ((= i len-b))
     (declare (type bignum-index i))
-    (setf (%bignum-ref res i) (%logxor sign (%bignum-ref b i))))
+    (setf (%bignum-ref res i) (logxor sign (%bignum-ref b i))))
   (%normalize-bignum res len-b))
 
 ;;;; There used to be a bunch of code to implement "efficient" versions of LDB

@@ -685,13 +685,13 @@
 
 ;;; See whether the interval X contains the number P, taking into
 ;;; account that the interval might not be closed.
-(defun interval-contains-p (p x)
+(defun interval-contains-p (p interval)
   (declare (type number p)
-           (type interval x))
-  ;; Does the interval X contain the number P?  This would be a lot
+           (type interval interval))
+  ;; Does the interval INTERVAL contain the number P?  This would be a lot
   ;; easier if all intervals were closed!
-  (let ((lo (interval-low x))
-        (hi (interval-high x)))
+  (let ((lo (interval-low interval))
+        (hi (interval-high interval)))
     (cond ((and lo hi)
            ;; The interval is bounded
            (if (and (sb-xc:<= (type-bound-number lo) p)
@@ -1833,7 +1833,9 @@
            (defun ,r-aux (number-type divisor-type)
              (let* ((divisor-interval
                      (numeric-type->interval divisor-type))
-                    (rem (,r-name divisor-interval))
+                    (number-interval
+                      (numeric-type->interval number-type))
+                    (rem (,r-name number-interval divisor-interval))
                     (result-type (rem-result-type number-type divisor-type)))
                (multiple-value-bind (class format)
                    (ecase result-type
@@ -1930,9 +1932,7 @@
            +
            (type-bound-number hi))))))
 
-(defun floor-rem-bound (div)
-  ;; The remainder depends only on the divisor. Try to get the
-  ;; correct sign for the remainder if we can.
+(defun floor-rem-bound (num div)
   (case (interval-range-info div)
     (+
      ;; The divisor is always positive.
@@ -1943,6 +1943,12 @@
          ;; The remainder never contains the upper bound. However,
          ;; watch out for the case where the high limit is zero!
          (setf (interval-high rem) (list (interval-high rem))))
+       ;; The remainder can't be greater than the number
+       ;; if it's getting truncated towards zero.
+       (when (and (eq (interval-range-info num) '+)
+                  (numberp (interval-high num))
+                  (interval-contains-p (interval-high num) rem))
+         (setf (interval-high rem) (interval-high num)))
        rem))
     (-
      ;; The divisor is always negative.
@@ -1951,6 +1957,12 @@
        (when (numberp (interval-low rem))
          ;; The remainder never contains the lower bound.
          (setf (interval-low rem) (list (interval-low rem))))
+       ;; The remainder can't be greater than the number
+       ;; if it's getting truncated towards zero.
+       (when (and (eq (interval-range-info num) '-)
+                  (numberp (interval-low num))
+                  (interval-contains-p (interval-low num) rem))
+         (setf (interval-low rem) (interval-low num)))
        rem))
     (otherwise
      ;; The divisor can be positive or negative. All bets off. The
@@ -2026,9 +2038,7 @@
            +
            (type-bound-number hi))))))
 
-(defun ceiling-rem-bound (div)
-  ;; The remainder depends only on the divisor. Try to get the
-  ;; correct sign for the remainder if we can.
+(defun ceiling-rem-bound (num div)
   (case (interval-range-info div)
     (+
      ;; Divisor is always positive. The remainder is negative.
@@ -2039,14 +2049,27 @@
          ;; The remainder never contains the upper bound. However,
          ;; watch out for the case when the upper bound is zero!
          (setf (interval-low rem) (list (interval-low rem))))
+       ;; The remainder can't be greater than the number
+       ;; if it's getting truncated towards zero.
+       (when (and (eq (interval-range-info num) '-)
+                  (numberp (interval-low num))
+                  (interval-contains-p (interval-low num) rem))
+         (setf (interval-low rem) (interval-low num)))
        rem))
     (-
-     ;; Divisor is always negative. The remainder is positive
      (let ((rem (interval-abs div)))
+       ;; Divisor is always negative. The remainder is positive
        (setf (interval-low rem) 0)
        (when (numberp (interval-high rem))
          ;; The remainder never contains the lower bound.
-         (setf (interval-high rem) (list (interval-high rem))))
+         (setf (interval-high rem)
+               (list (interval-high rem))))
+       ;; The remainder can't be greater than the number
+       ;; if it's getting truncated towards zero.
+       (when (and (eq (interval-range-info num) '+)
+                  (numberp (interval-high num))
+                  (interval-contains-p (interval-high num) rem))
+         (setf (interval-high rem) (interval-high num)))
        rem))
     (otherwise
      ;; The divisor can be positive or negative. All bets off. The
@@ -2120,9 +2143,9 @@
     (+
      (case (interval-range-info div)
        (+
-        (floor-rem-bound div))
+        (floor-rem-bound num div))
        (-
-        (ceiling-rem-bound div))
+        (ceiling-rem-bound num div))
        (otherwise
         (destructuring-bind (neg pos) (interval-split 0 div t t)
           (interval-merge-pair (truncate-rem-bound num neg)
@@ -2130,9 +2153,9 @@
     (-
      (case (interval-range-info div)
        (+
-        (ceiling-rem-bound div))
+        (ceiling-rem-bound num div))
        (-
-        (floor-rem-bound div))
+        (floor-rem-bound num div))
        (otherwise
         (destructuring-bind (neg pos) (interval-split 0 div t t)
           (interval-merge-pair (truncate-rem-bound num neg)
@@ -2425,60 +2448,45 @@
     (xform spec env int '%deposit-field newbyte)))
 
 (defoptimizer (%ldb derive-type) ((size posn num))
-  (let ((size (lvar-type size)))
-    (if (and (numeric-type-p size)
-             (csubtypep size (specifier-type 'integer)))
-        (let ((size-high (numeric-type-high size)))
-          (if (and size-high (<= size-high sb-vm:n-word-bits))
-              (specifier-type `(unsigned-byte* ,size-high))
-              (specifier-type 'unsigned-byte)))
+  (let ((size-high (nth-value 1 (integer-type-numeric-bounds (lvar-type size)))))
+    (if size-high
+        (if (<= size-high sb-vm:n-word-bits)
+            (specifier-type `(unsigned-byte* ,size-high))
+            (specifier-type 'unsigned-byte))
         *universal-type*)))
 
 (defoptimizer (%mask-field derive-type) ((size posn num))
-  (let ((size (lvar-type size))
-        (posn (lvar-type posn)))
-    (if (and (numeric-type-p size)
-             (csubtypep size (specifier-type 'integer))
-             (numeric-type-p posn)
-             (csubtypep posn (specifier-type 'integer)))
-        (let ((size-high (numeric-type-high size))
-              (posn-high (numeric-type-high posn)))
-          (if (and size-high posn-high
-                   (<= (+ size-high posn-high) sb-vm:n-word-bits))
-              (specifier-type `(unsigned-byte* ,(+ size-high posn-high)))
-              (specifier-type 'unsigned-byte)))
-        *universal-type*)))
+  (let ((size-high (nth-value 1 (integer-type-numeric-bounds (lvar-type size))))
+        (posn-high (nth-value 1 (integer-type-numeric-bounds (lvar-type posn)))))
+    (if (and size-high posn-high
+             (<= (+ size-high posn-high) sb-vm:n-word-bits))
+        (specifier-type `(unsigned-byte* ,(+ size-high posn-high)))
+        (specifier-type 'unsigned-byte))))
 
 (defun %deposit-field-derive-type-aux (size posn int)
-  (let ((size (lvar-type size))
-        (posn (lvar-type posn))
+  (let ((size-high (nth-value 1 (integer-type-numeric-bounds (lvar-type size))))
+        (posn-high (nth-value 1 (integer-type-numeric-bounds (lvar-type posn))))
         (int (lvar-type int)))
-    (when (and (numeric-type-p size)
-               (numeric-type-p posn)
-               (numeric-type-p int))
-      (let ((size-high (numeric-type-high size))
-            (posn-high (numeric-type-high posn))
-            (high (numeric-type-high int))
-            (low (numeric-type-low int)))
-        (when (and size-high posn-high high low
-                   ;; KLUDGE: we need this cutoff here, otherwise we
-                   ;; will merrily derive the type of %DPB as
-                   ;; (UNSIGNED-BYTE 1073741822), and then attempt to
-                   ;; canonicalize this type to (INTEGER 0 (1- (ASH 1
-                   ;; 1073741822))), with hilarious consequences.  We
-                   ;; cutoff at 4*SB-VM:N-WORD-BITS to allow inference
-                   ;; over a reasonable amount of shifting, even on
-                   ;; the alpha/32 port, where N-WORD-BITS is 32 but
-                   ;; machine integers are 64-bits.  -- CSR,
-                   ;; 2003-09-12
-                   (<= (+ size-high posn-high) (* 4 sb-vm:n-word-bits)))
-          (let ((raw-bit-count (max (integer-length high)
-                                    (integer-length low)
-                                    (+ size-high posn-high))))
-            (specifier-type
-             (if (minusp low)
-                 `(signed-byte ,(1+ raw-bit-count))
-                 `(unsigned-byte* ,raw-bit-count)))))))))
+    (multiple-value-bind (low high) (integer-type-numeric-bounds int)
+      (when (and size-high posn-high high low
+                 ;; KLUDGE: we need this cutoff here, otherwise we
+                 ;; will merrily derive the type of %DPB as
+                 ;; (UNSIGNED-BYTE 1073741822), and then attempt to
+                 ;; canonicalize this type to (INTEGER 0 (1- (ASH 1
+                 ;; 1073741822))), with hilarious consequences.  We
+                 ;; cutoff at 4*SB-VM:N-WORD-BITS to allow inference
+                 ;; over a reasonable amount of shifting, even on
+                 ;; the alpha/32 port, where N-WORD-BITS is 32 but
+                 ;; machine integers are 64-bits.  -- CSR,
+                 ;; 2003-09-12
+                 (<= (+ size-high posn-high) (* 4 sb-vm:n-word-bits)))
+        (let ((raw-bit-count (max (integer-length high)
+                                  (integer-length low)
+                                  (+ size-high posn-high))))
+          (specifier-type
+           (if (minusp low)
+               `(signed-byte ,(1+ raw-bit-count))
+               `(unsigned-byte* ,raw-bit-count))))))))
 
 (defoptimizer (%dpb derive-type) ((newbyte size posn int))
   (%deposit-field-derive-type-aux size posn int))
@@ -2486,7 +2494,7 @@
 (defoptimizer (%deposit-field derive-type) ((newbyte size posn int))
   (%deposit-field-derive-type-aux size posn int))
 
-(deftransform %ldb ((size posn int) (fixnum fixnum integer) word)
+(deftransform %ldb ((size posn int) (fixnum fixnum integer) word :node node)
   "convert to inline logical operations"
   (let ((width (and (constant-lvar-p size)
                     (constant-lvar-p posn)
@@ -2503,6 +2511,21 @@
                  (posn (lvar-value posn)))
              `(logand (ash (logand int most-positive-word) ,(- posn))
                       ,(ash most-positive-word (- size sb-vm:n-word-bits)))))
+          ((let* ((size-max (nth-value 1 (integer-type-numeric-bounds (lvar-type size))))
+                  (posn-max (nth-value 1 (integer-type-numeric-bounds (lvar-type posn))))
+                  (width (and size-max posn-max
+                              (+ size-max posn-max))))
+             (cond ((not width) nil)
+                   ((<= width sb-vm:n-fixnum-bits)
+                    `(logand (ash (mask-signed-field sb-vm:n-fixnum-bits int) (- posn))
+                             (ash ,most-positive-word (- size ,sb-vm:n-word-bits))))
+                   ((<= width sb-vm:n-word-bits)
+                    `(logand (ash (logand int most-positive-word) (- posn))
+                             (ash ,most-positive-word (- size ,sb-vm:n-word-bits)))))))
+          ((not (or (csubtypep (lvar-type int) (specifier-type 'sb-vm:signed-word))
+                    (csubtypep (lvar-type int) (specifier-type 'word))))
+           (delay-ir1-transform node :ir1-phases)
+           (give-up-ir1-transform "not a word-sized integer"))
           (t
            `(logand (ash int (- posn))
                     (ash ,most-positive-word (- size ,sb-vm:n-word-bits)))))))
@@ -2634,18 +2657,28 @@
     (two-arg-derive-type n shift #'%ash/right-derive-type-aux #'%ash/right)))
 
 (defmacro combination-typed-p (node name &rest types)
-  `(and (combination-p ,node)
-        (eql (lvar-fun-name (combination-fun ,node)) ',name)
-        (let ((args (combination-args ,node)))
-          ,@(loop for type in types
-                  collect
-                  `(let ((arg (pop args)))
-                     (and arg
-                          ,(if (typep type '(cons (eql :or)))
-                               `(or ,@(loop for type in (cdr type)
-                                            collect
-                                            `(csubtypep (lvar-type arg) (specifier-type ',type))))
-                               `(csubtypep (lvar-type arg) (specifier-type ',type)))))))))
+  (labels ((gen (type)
+             (typecase type
+               ((cons (eql :or))
+                `(or ,@(loop for type in (cdr type)
+                             collect
+                             (gen type))))
+               ((cons (eql :and))
+                `(and ,@(loop for type in (cdr type)
+                              collect
+                              (gen type))))
+               ((cons (eql :not))
+                `(not ,(gen (cadr type))))
+               (t
+                `(csubtypep (lvar-type arg) (specifier-type ',type))))))
+    `(and (combination-p ,node)
+          (eql (lvar-fun-name (combination-fun ,node)) ',name)
+          (let ((args (combination-args ,node)))
+            ,@(loop for type in types
+                    collect
+                    `(let ((arg (pop args)))
+                       (and arg
+                            ,(gen type))))))))
 
 (when-vop-existsp (:translate ash-inverted)
   (defun ash-inverted (integer amount)
@@ -2666,8 +2699,9 @@
                (setf truly-type t))
               (t
                (give-up-ir1-transform))))
-      (cond ((combination-typed-p use %negate (:or word
-                                                   sb-vm:signed-word))
+      (cond ((combination-typed-p use %negate (:and (:not (integer * 0))
+                                                    (:or word
+                                                         sb-vm:signed-word)))
              (splice-fun-args amount '%negate 1)
              (if truly-type
                  `(truly-the word (ash-inverted integer amount))
@@ -2690,8 +2724,9 @@
                (setf truly-type t))
               (t
                (give-up-ir1-transform))))
-      (cond ((combination-typed-p use %negate (:or word
-                                                   sb-vm:signed-word))
+      (cond ((combination-typed-p use %negate (:and (:not (integer * 0))
+                                                    (:or word
+                                                         sb-vm:signed-word)))
              (splice-fun-args amount '%negate 1)
              (if truly-type
                  `(truly-the sb-vm:signed-word (ash-inverted integer amount))
@@ -2796,20 +2831,19 @@
     `(ash x ,len)))
 
 ;;; * deals better with ASH that overflows
-(unless-vop-existsp (:translate overflow-ash)
-  (deftransform ash ((integer amount) ((or word sb-vm:signed-word)
-                                       (constant-arg (integer 1 *))) *
-                     :important nil
-                     :node node)
-    ;; Give modular arithmetic optimizers a chance
-    (delay-ir1-transform node :ir1-phases)
-    (let ((type (single-value-type (node-asserted-type node)))
-          (shift (lvar-value amount)))
-      (when (or (csubtypep type (specifier-type 'word))
-                (csubtypep type (specifier-type 'sb-vm:signed-word))
-                (>= shift sb-vm:n-word-bits))
-        (give-up-ir1-transform))
-      `(* integer ,(ash 1 shift)))))
+(deftransform ash ((integer amount) ((or word sb-vm:signed-word)
+                                     (constant-arg (integer 1 *))) *
+                   :important nil
+                   :node node)
+  ;; Give modular arithmetic optimizers a chance
+  (delay-ir1-transform node :ir1-phases)
+  (let ((type (single-value-type (node-asserted-type node)))
+        (shift (lvar-value amount)))
+    (when (or (csubtypep type (specifier-type 'word))
+              (csubtypep type (specifier-type 'sb-vm:signed-word))
+              (>= shift sb-vm:n-word-bits))
+      (give-up-ir1-transform))
+    `(* integer ,(ash 1 shift))))
 
 (defun cast-or-check-bound-type (lvar &optional fixnum)
   (let ((dest (lvar-dest lvar)))
@@ -2855,6 +2889,7 @@
              for (x-type y-type cast-type) = (fun-type-required (vop-info-type vop))
              when (and (csubtypep result-type (single-value-type (fun-type-returns (vop-info-type vop))))
                        (neq x-type *universal-type*)
+                       (neq y-type *universal-type*)
                        (or (and (subp x x-type)
                                 (subp y y-type))
                            (and swap
@@ -2884,14 +2919,19 @@
                  * :node node :important nil)
   (overflow-transform 'overflow-ash x y node nil))
 
-(defun overflow-transform-unknown-x (name x y node)
+(defun overflow-transform-unknown-x (name x y node &optional swap)
   (delay-ir1-transform node :ir1-phases)
   (let ((type (single-value-type (node-derived-type node)))
-        (x-type (lvar-type x)))
+        (x-type (lvar-type x))
+        (y-type (lvar-type y)))
     (when (or (csubtypep type (specifier-type 'word))
               (csubtypep type (specifier-type 'sb-vm:signed-word))
-              (csubtypep x-type (specifier-type 'word))
-              (csubtypep x-type (specifier-type 'sb-vm:signed-word)))
+              (if swap
+                  (or
+                   (csubtypep y-type (specifier-type 'word))
+                   (csubtypep y-type (specifier-type 'sb-vm:signed-word)))
+                  (or (csubtypep x-type (specifier-type 'word))
+                      (csubtypep x-type (specifier-type 'sb-vm:signed-word)))))
       (give-up-ir1-transform))
     (let* ((vops (fun-info-templates (fun-info-or-lose name)))
            (cast (or (cast-or-check-bound-type (node-lvar node) t)
@@ -2901,7 +2941,9 @@
         (unless (and (fixnump cast-low)
                      (fixnump cast-high))
           (give-up-ir1-transform))
-        (multiple-value-bind (y-low y-high) (integer-type-numeric-bounds (lvar-type y))
+        (multiple-value-bind (y-low y-high) (if swap
+                                                (integer-type-numeric-bounds x-type)
+                                                (integer-type-numeric-bounds y-type))
           (unless (and (fixnump y-low)
                        (fixnump y-high))
             (give-up-ir1-transform))
@@ -2912,8 +2954,11 @@
                        (and (> y-low distance-high)
                             (< y-high distance-low)))
                       (overflow-
-                       (and (> (- y-high) distance-high)
-                            (< (- y-low) distance-low)))
+                       (if swap
+                           (and (< y-high (+ (1+ most-positive-fixnum) cast-low))
+                                (> y-low (+ (1- most-negative-fixnum) cast-high)))
+                           (and (> (- y-high) distance-high)
+                                (< (- y-low) distance-low))))
                       (overflow*
                        (or (> y-low 0)
                            (< y-high -1))))
@@ -2932,8 +2977,10 @@
                             (sb-xc:typep value type)))))))
             (loop for vop in vops
                   for (x-type y-type cast-type) = (fun-type-required (vop-info-type vop))
-                  when (and (eq x-type *universal-type*)
-                            (csubtypep result-type (single-value-type (fun-type-returns (vop-info-type vop))))
+                  when (and (csubtypep result-type (single-value-type (fun-type-returns (vop-info-type vop))))
+                            (if swap
+                                (eq y-type *universal-type*)
+                                (eq x-type *universal-type*))
                             (and (subp x x-type)
                                  (subp y y-type)))
                   return `(%primitive ,(vop-info-name vop)
@@ -2961,42 +3008,103 @@
                  * :node node :important nil)
   (overflow-transform-unknown-x 'overflow- x y node))
 
-;;; These must come before the ones below, so that they are tried
-;;; first.
-(deftransform floor ((number divisor))
-  `(multiple-value-bind (tru rem) (truncate number divisor)
-     (if (and (not (zerop rem))
-              (if (minusp divisor)
-                  (plusp number)
-                  (minusp number)))
-         (values (1- tru) (+ rem divisor))
-         (values tru rem))))
+(deftransform - ((x y) ((or word sb-vm:signed-word) t)
+                 * :node node :important nil)
+  (overflow-transform-unknown-x 'overflow- x y node t))
 
-(deftransform ceiling ((number divisor))
-  `(multiple-value-bind (tru rem) (truncate number divisor)
-     (if (and (not (zerop rem))
-              (if (minusp divisor)
-                  (minusp number)
-                  (plusp number)))
-         (values (+ tru 1) (- rem divisor))
-         (values tru rem))))
+(defun overflow-transform-1 (name x node)
+  (delay-ir1-transform node :ir1-phases)
+  (let ((type (single-value-type (node-derived-type node))))
+    (when (or (csubtypep type (specifier-type 'word))
+              (csubtypep type (specifier-type 'sb-vm:signed-word)))
+      (give-up-ir1-transform))
+    (unless (and (or (csubtypep (lvar-type x) (specifier-type 'word))
+                     (csubtypep (lvar-type x) (specifier-type 'sb-vm:signed-word))))
+      (give-up-ir1-transform))
+    (let* ((vops (fun-info-templates (fun-info-or-lose name)))
+           (cast (or (cast-or-check-bound-type (node-lvar node))
+                     (give-up-ir1-transform)))
+           (result-type (type-intersection type cast)))
+      (loop for vop in vops
+            for (x-type cast-type) = (fun-type-required (vop-info-type vop))
+            when (and (csubtypep result-type (single-value-type (fun-type-returns (vop-info-type vop))))
+                      (neq x-type *universal-type*)
+                      (csubtypep (lvar-type x) x-type))
+            return `(%primitive ,(vop-info-name vop) x ',(type-specifier cast))
+            finally (give-up-ir1-transform)))))
 
-;;; Float precision prevents from doing the same
-(deftransform floor ((number divisor) (rational rational))
-  `(multiple-value-bind (tru rem) (truncate number divisor)
-     (if (if (minusp divisor)
-             (> rem 0)
-             (< rem 0))
-         (values (1- tru) (+ rem divisor))
-         (values tru rem))))
+(deftransform %negate ((x) ((or word sb-vm:signed-word))
+                       * :node node :important nil)
+  (overflow-transform-1 'overflow-negate x node))
 
-(deftransform ceiling ((number divisor) (rational rational))
-  `(multiple-value-bind (tru rem) (truncate number divisor)
-     (if (if (minusp divisor)
-             (< rem 0)
-             (> rem 0))
-         (values (+ tru 1) (- rem divisor))
-         (values tru rem))))
+(defun template-translates (fun-name args result-type)
+  (let ((vops (fun-info-templates (fun-info-or-lose fun-name))))
+    (flet ((subp (lvar type)
+             (cond
+               ((not (constant-type-p type))
+                (csubtypep (lvar-type lvar) type))
+               ((not (constant-lvar-p lvar))
+                nil)
+               (t
+                (let ((value (lvar-value lvar))
+                      (type (type-specifier (constant-type-type type))))
+                  (if (typep type '(cons (eql satisfies)))
+                      (funcall (second type) value)
+                      (sb-xc:typep value type)))))))
+      (loop for vop in vops
+            for params = (fun-type-required (vop-info-type vop))
+            thereis (and (= (length args)
+                            (length params))
+                         (csubtypep result-type (single-value-type (fun-type-returns (vop-info-type vop))))
+                         (loop for param in params
+                               for arg in args
+                               always (subp arg param)))))))
+
+(deftransform floor ((number divisor) (integer integer) * :node node)
+  (let ((truncate-type (truncate-derive-type-optimizer node)))
+    (if (template-translates 'truncate (combination-args node) (single-value-type truncate-type))
+        `(multiple-value-bind (tru rem) (truncate number divisor)
+           (if (if (minusp divisor)
+                   (> rem 0)
+                   (< rem 0))
+               (values (1- tru) (+ rem divisor))
+               (values tru rem)))
+        (give-up-ir1-transform))))
+
+(deftransform ceiling ((number divisor) (integer integer) * :node node)
+  (let ((truncate-type (truncate-derive-type-optimizer node)))
+    (if (template-translates 'truncate (combination-args node) (single-value-type truncate-type))
+        `(multiple-value-bind (tru rem) (truncate number divisor)
+           (if (if (minusp divisor)
+                   (< rem 0)
+                   (> rem 0))
+               (values (+ tru 1) (- rem divisor))
+               (values tru rem)))
+        (give-up-ir1-transform))))
+
+(macrolet ((def (number-type divisor-type)
+             `(progn
+                (deftransform floor ((number divisor) (,number-type ,divisor-type) * :node node)
+                  `(let ((divisor (coerce divisor ',',number-type)))
+                     (multiple-value-bind (tru rem) (truncate number divisor)
+                       (if (and (not (zerop rem))
+                                (if (minusp divisor)
+                                    (plusp number)
+                                    (minusp number)))
+                           (values (1- tru) (+ rem divisor))
+                           (values tru rem)))))
+
+                (deftransform ceiling ((number divisor) (,number-type ,divisor-type) * :node node)
+                  `(let ((divisor (coerce divisor ',',number-type)))
+                     (multiple-value-bind (tru rem) (truncate number divisor)
+                       (if (and (not (zerop rem))
+                                (if (minusp divisor)
+                                    (minusp number)
+                                    (plusp number)))
+                           (values (+ tru 1) (- rem divisor))
+                           (values tru rem))))))))
+  (def double-float (or float integer))
+  (def single-float (or single-float integer)))
 
 (deftransform rem ((number divisor))
   `(nth-value 1 (truncate number divisor)))
@@ -3008,8 +3116,6 @@
 ;;; mask. If CEILING, add in (1- (ABS Y)), do FLOOR and correct a
 ;;; remainder.
 (flet ((frob (y ceil-p)
-         (unless (constant-lvar-p y)
-           (give-up-ir1-transform))
          (let* ((y (lvar-value y))
                 (y-abs (abs y))
                 (len (1- (integer-length y-abs))))
@@ -3024,10 +3130,10 @@
                               (- (- (logand (- x) ,mask)) ,delta))
                      `(values (ash x ,shift)
                               (- (logand x ,mask) ,delta))))))))
-  (deftransform floor ((x y) (integer integer) *)
+  (deftransform floor ((x y) (integer (constant-arg integer)) *)
     "convert division by 2^k to shift"
     (frob y nil))
-  (deftransform ceiling ((x y) (integer integer) *)
+  (deftransform ceiling ((x y) (integer (constant-arg integer)) *)
     "convert division by 2^k to shift"
     (frob y t)))
 
@@ -3222,8 +3328,10 @@
                                 (constant-arg sb-vm:signed-word))
                          *
                          :policy (and (> speed compilation-speed)
-                                      (> speed space)))
+                                      (> speed space))
+                         :node node)
    "convert integer division to multiplication"
+   (delay-ir1-transform node :ir1-phases)
    (let* ((y      (lvar-value y))
           (abs-y  (abs y))
           (x-type (lvar-type x)))
@@ -3238,7 +3346,7 @@
              (values (1- sb-vm:n-word-bits)
                      (expt 2 (1- sb-vm:n-word-bits))))
          ;; Division by zero, one or powers of two is handled elsewhere.
-         (when (or (zerop (logand y (1- y)))
+         (when (or (zerop (logand abs-y (1- abs-y)))
                    ;; Leave it for the unsigned transform
                    (and (plusp y)
                         (not (types-equal-or-intersect x-type
@@ -3283,8 +3391,10 @@
 (deftransform truncate ((x y) (word (constant-arg word))
                         *
                         :policy (and (> speed compilation-speed)
-                                     (> speed space)))
+                                     (> speed space))
+                        :node node)
   "convert integer division to multiplication"
+  (delay-ir1-transform node :ir1-phases)
   (let* ((y      (lvar-value y))
          (x-type (lvar-type x))
          (max-x  (or (and (numeric-type-p x-type)
@@ -3475,6 +3585,18 @@
   (def * x (%negate x))
   (def / x (%negate x))
   (def expt x (/ 1 x)))
+
+(deftransform + ((x y) (number number))
+  (cond ((splice-fun-args y '%negate 1 nil)
+         `(- x y))
+        ((splice-fun-args x '%negate 1 nil)
+         `(- y x))
+        (t
+         (give-up-ir1-transform))))
+
+(deftransform - ((x y) (number number))
+  (splice-fun-args y '%negate 1)
+  `(+ x y))
 
 ;;; Fold (expt x n) into multiplications for small integral values of
 ;;; N; convert (expt x 1/2) to sqrt.
@@ -4253,7 +4375,7 @@
   (def >= > floor))
 
 (macrolet ((def (name x y type-x type-y)
-             `(deftransform ,name ((,x ,y) (,type-x ,type-y) * :node node)
+             `(deftransform ,name ((,x ,y) (,type-x ,type-y) * :node node :important nil)
                 (cond ((or (csubtypep (lvar-type i) (specifier-type 'word))
                            (csubtypep (lvar-type i) (specifier-type 'sb-vm:signed-word)))
                        (give-up-ir1-transform))
@@ -4270,10 +4392,10 @@
   (def > i f (integer * #.most-positive-fixnum) fixnum)
   (def < f i fixnum (integer * #.most-positive-fixnum)))
 
-(deftransform < ((x y) (integer (eql #.(1+ most-positive-fixnum))))
+(deftransform < ((x y) (integer (eql #.(1+ most-positive-fixnum))) * :important nil)
   `(not (> x most-positive-fixnum)))
 
-(deftransform > ((x y) (integer (eql #.(1- most-negative-fixnum))))
+(deftransform > ((x y) (integer (eql #.(1- most-negative-fixnum))) * :important nil)
   `(not (< x most-negative-fixnum)))
 
 (deftransform = ((x y) (rational (constant-arg float)))

@@ -1311,7 +1311,7 @@
    (:start (inhibit-flushing index 0))
    (:end (inhibit-flushing sequence-end nil)))
   simple-string (flushable)
-  :derive-type (sequence-result-nth-arg 0 :preserve-dimensions t))
+  :derive-type (sequence-result-nth-arg 0 :preserve-dimensions t :string-designator t))
 
 (defknown (nstring-upcase nstring-downcase nstring-capitalize)
   ((modifying string) &key (:start index) (:end sequence-end))
@@ -1953,6 +1953,12 @@
 (defknown hairy-data-vector-set (array index t) t (no-verify-arg-count))
 (defknown hairy-data-vector-ref/check-bounds (array index) t (foldable no-verify-arg-count))
 (defknown hairy-data-vector-set/check-bounds (array index t) t (no-verify-arg-count))
+
+(defknown vector-hairy-data-vector-ref (vector index) t (foldable flushable no-verify-arg-count))
+(defknown vector-hairy-data-vector-set (vector index t) t (no-verify-arg-count))
+(defknown vector-hairy-data-vector-ref/check-bounds (vector index) t (foldable no-verify-arg-count))
+(defknown vector-hairy-data-vector-set/check-bounds (vector index t) t (no-verify-arg-count))
+
 (defknown %caller-frame () t (flushable))
 (defknown %caller-pc () system-area-pointer (flushable))
 (defknown %with-array-data (array index (or index null))
@@ -2108,7 +2114,7 @@
 (defknown %program-error (&optional t &rest t) nil ())
 (defknown compiler-error (t &rest t) nil ())
 (defknown (compiler-warn compiler-style-warn) (t &rest t) (values) ())
-(defknown (compiler-mumble note-lossage note-unwinnage) (string &rest t) (values) ())
+(defknown (compiler-mumble note-lossage note-unwinnage) (format-control &rest t) (values) ())
 (defknown (compiler-notify maybe-compiler-notify) ((or format-control symbol) &rest t)
   (values)
   ())
@@ -2243,5 +2249,10 @@
 (defknown (overflow* overflow+ overflow-
            overflow-ash)
   (integer integer t)
+  integer
+  (movable always-translatable))
+
+(defknown overflow-negate
+  (integer t)
   integer
   (movable always-translatable))

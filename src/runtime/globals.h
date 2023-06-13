@@ -45,6 +45,10 @@ extern int foreign_function_call_active;
 extern os_vm_size_t dynamic_space_size;
 extern os_vm_size_t thread_control_stack_size;
 
+#ifdef LISP_FEATURE_RELOCATABLE_STATIC_SPACE
+extern uword_t STATIC_SPACE_START, STATIC_SPACE_END;
+#endif
+
 #ifndef LISP_FEATURE_DARWIN_JIT
 extern uword_t READ_ONLY_SPACE_START, READ_ONLY_SPACE_END;
 #endif
@@ -71,13 +75,6 @@ extern os_vm_address_t alloc_profile_buffer;
 extern lispobj alloc_profile_data; // Lisp SIMPLE-VECTOR
 
 extern lispobj arena_chain;
-
-#ifdef LISP_FEATURE_WIN32
-#define ENVIRON _environ
-#else
-#define ENVIRON environ
-#endif
-extern char **ENVIRON;
 
 #if !defined(LISP_FEATURE_SB_THREAD)
 extern lispobj *current_control_stack_pointer;

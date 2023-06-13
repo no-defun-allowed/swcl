@@ -52,17 +52,6 @@
   (aver (= thread-tot-bytes-alloc-unboxed-slot
            (1+ thread-tot-bytes-alloc-boxed-slot))))
 
-;;; the #+allocator metrics histogram contains an exact count
-;;; for all sizes up to (* cons-size n-word-bytes histogram-small-bins).
-;;; Larger allocations are grouped by the binary log of the size.
-;;; It seems that 99.5% of all allocations are less than the small bucket limit,
-;;; making the histogram fairly exact except for the tail.
-(defparameter *consing-histo* nil)
-(defconstant non-small-bucket-offset
-  (+ histogram-small-bins
-     (- (integer-length (* sb-vm::histogram-small-bins
-                           sb-vm:cons-size sb-vm:n-word-bytes)))))
-
 ;;; Emit counter increments for SB-APROF. SCRATCH-REGISTERS is either a TN
 ;;; or list of TNs that can be used to store into the profiling data.
 ;;; We pick one of the available TNs to use for addressing the data buffer.
@@ -85,51 +74,66 @@
   ;; so we may as well take advantage of this fact to load the temp reg
   ;; here, if provided, rather than spewing more #+gs-seg tests around.
   #+gs-seg (when thread-temp (inst rdgsbase thread-temp))
-  #+allocator-metrics
-  (let ((use-size-temp (not (typep size '(or (signed-byte 32) tn))))
-        (tally (gen-label))
-        (inexact (gen-label)))
-    (cond ((tn-p type) ; from ALLOCATE-VECTOR-ON-HEAP
-           ;; Constant huge size + unknown type can't occur.
-           (aver (not use-size-temp))
-           (inst cmp :byte type simple-vector-widetag)
-           (inst set :ne temp)
-           (inst and :dword temp 1)
-           (inst add :qword
-                 (ea thread-segment-reg
-                     (ash thread-tot-bytes-alloc-boxed-slot word-shift)
-                     thread-tn temp 8)
-                 size))
-          (t
-           (inst add :qword
-                 (thread-slot-ea (if (alloc-unboxed-p type)
-                                     thread-tot-bytes-alloc-unboxed-slot
-                                     thread-tot-bytes-alloc-boxed-slot))
-                 (cond (use-size-temp (inst mov temp size) temp)
-                       (t size)))))
-    (cond ((tn-p size)
-           (inst cmp size (* histogram-small-bins 16))
-           (inst jmp :g inexact)
-           (inst mov :dword temp size)
-           (inst shr :dword temp (1+ word-shift))
-           (inst dec :dword temp)
-           (inst jmp tally)
-           (emit-label inexact)
-           (inst bsr temp size)
-           ;; bsr returns 1 less than INTEGER-LENGTH
-           (inst add :dword temp (1+ non-small-bucket-offset))
-           (emit-label tally)
-           (inst inc :qword (ea thread-segment-reg
-                                (ash thread-obj-size-histo-slot word-shift)
-                                thread-tn temp 8)))
-          (t
-           (let* ((n-conses (/ size (* sb-vm:cons-size sb-vm:n-word-bytes)))
-                  (bucket (if (<= n-conses histogram-small-bins)
-                              (1- n-conses)
-                              (+ (integer-length size)
-                                 non-small-bucket-offset))))
-             (inst inc :qword
-                   (thread-slot-ea (+ thread-obj-size-histo-slot bucket)))))))
+  (when (member :allocation-size-histogram sb-xc:*features*)
+    (let ((use-size-temp (not (typep size '(or (signed-byte 32) tn)))))
+      ;; Sum up the sizes of boxed vs unboxed allocations.
+      (cond ((tn-p type) ; from ALLOCATE-VECTOR-ON-HEAP
+             ;; Constant huge size + unknown type can't occur.
+             (aver (not use-size-temp))
+             (inst cmp :byte type simple-vector-widetag)
+             (inst set :ne temp)
+             (inst and :dword temp 1)
+             (inst add :qword
+                   (ea thread-segment-reg
+                       (ash thread-tot-bytes-alloc-boxed-slot word-shift)
+                       thread-tn temp 8)
+                   size))
+            (t
+             (inst add :qword
+                   (thread-slot-ea (if (alloc-unboxed-p type)
+                                       thread-tot-bytes-alloc-unboxed-slot
+                                       thread-tot-bytes-alloc-boxed-slot))
+                   (cond (use-size-temp (inst mov temp size) temp)
+                         (t size)))))
+      (cond ((tn-p size)
+             (assemble ()
+               ;; optimistically assume it's a small object, so just divide
+               ;; the size by the size of a cons to get a (1-based) index.
+               (inst mov :dword temp size)
+               (inst shr :dword temp (1+ word-shift))
+               ;; now see if the computed index is in range
+               (inst cmp size (* n-histogram-bins-small 16))
+               (inst jmp :le OK)
+               ;; oversized. Compute the log2 of the size
+               (inst bsr :dword temp size)
+               ;; array of counts ... | array of sizes ...
+               (inst add :qword (ea (ash (+ thread-allocator-histogram-slot
+                                            1
+                                            (- first-large-histogram-bin-log2size)
+                                            n-histogram-bins-small
+                                            n-histogram-bins-large)
+                                         word-shift)
+                                    thread-tn temp 8)
+                     size)
+               ;; not sure why this is "2" and not "1" in the fudge factor!!
+               ;; (but the assertions come out right)
+               (inst add :dword temp
+                     (+ (- first-large-histogram-bin-log2size) n-histogram-bins-small 2))
+               OK
+               (inst inc :qword (ea thread-segment-reg
+                                    (ash (1- thread-allocator-histogram-slot) word-shift)
+                                    thread-tn temp 8))))
+            ((<= size (* sb-vm:cons-size sb-vm:n-word-bytes n-histogram-bins-small))
+             (let ((index (1- (/ size (* sb-vm:cons-size sb-vm:n-word-bytes)))))
+               (inst inc :qword (thread-slot-ea (+ thread-allocator-histogram-slot index)))))
+            (t
+             (let ((index (- (integer-length size) first-large-histogram-bin-log2size)))
+               (inst add :qword (thread-slot-ea (+ thread-allocator-histogram-slot
+                                                   n-histogram-bins-small
+                                                   n-histogram-bins-large index))
+                     size)
+               (inst inc :qword (thread-slot-ea (+ thread-allocator-histogram-slot
+                                                   n-histogram-bins-small index))))))))
   (when (policy node (> sb-c::instrument-consing 1))
     (when (tn-p size)
       (aver (not (location= size temp))))
@@ -226,8 +230,11 @@
                                              thread-cons-tlab-slot
                                              thread-mixed-tlab-slot))))
                            (thread-slot-ea slot #+gs-seg thread-temp))
-                         #-sb-thread (ea (if (eql type +cons-primtype+)
-                                             cons-region mixed-region)))
+                         #-sb-thread
+                         (ea (+ static-space-start
+                                (if (eql type +cons-primtype+)
+                                    cons-region-offset
+                                    mixed-region-offset))))
            (end-addr (ea (sb-x86-64-asm::ea-segment free-pointer)
                          (+ n-word-bytes (ea-disp free-pointer))
                          (ea-base free-pointer))))
@@ -314,6 +321,13 @@
       (when init
         (funcall init)))))
 
+(defun list-ctor-push-elt (x scratch)
+  (inst push (if (sc-is x immediate)
+                 (let ((bits (encode-value-if-immediate x)))
+                   (or (plausible-signed-imm32-operand-p bits)
+                       (progn (inst mov scratch bits) scratch)))
+                 x)))
+
 ;;;; CONS, ACONS, LIST and LIST*
 (macrolet ((pop-arg (ref)
              `(prog1 (tn-ref-tn ,ref) (setf ,ref (tn-ref-across ,ref))))
@@ -348,33 +362,51 @@
                   (setf prev-constant immediate-value)))))
 
 (define-vop (cons)
-  (:args (car :scs (any-reg descriptor-reg constant immediate))
-         (cdr :scs (any-reg descriptor-reg constant immediate)))
+  (:args (car :scs (any-reg descriptor-reg constant immediate control-stack))
+         (cdr :scs (any-reg descriptor-reg constant immediate control-stack)))
   (:temporary (:sc unsigned-reg :to (:result 0) :target result) alloc)
-  (:temporary (:sc unsigned-reg :to (:result 0)) temp)
+  (:temporary (:sc unsigned-reg :to (:result 0)
+               :unused-if (node-stack-allocate-p (sb-c::vop-node vop)))
+              temp)
   (:results (result :scs (descriptor-reg)))
   #+gs-seg (:temporary (:sc unsigned-reg :offset 15) thread-tn)
+  (:vop-var vop)
   (:node-var node)
   (:generator 10
-    (let ((stack-allocate-p (node-stack-allocate-p node))
-          (nbytes (* cons-size n-word-bytes))
-          (prev-constant temp)) ;; a non-eq initial value
-      (unless stack-allocate-p
-        (instrument-alloc +cons-primtype+ nbytes node (list temp alloc) thread-tn))
-      (pseudo-atomic (:elide-if stack-allocate-p :thread-tn thread-tn)
-        (if stack-allocate-p
-            (stack-allocation nbytes 0 alloc)
-            (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn))
-        (store-slot car alloc cons-car-slot 0)
-        (store-slot cdr alloc cons-cdr-slot 0)
-        (if (location= alloc result)
-            (inst or :byte alloc list-pointer-lowtag)
-            (inst lea result (ea list-pointer-lowtag alloc)))))))
+    (cond
+      ((node-stack-allocate-p node)
+       (inst and rsp-tn (lognot lowtag-mask))
+       (cond ((and (sc-is car immediate) (sc-is cdr immediate)
+                   (typep (encode-value-if-immediate car) '(signed-byte 8))
+                   (typep (encode-value-if-immediate cdr) '(signed-byte 8)))
+              ;; (CONS 0 0) takes just 4 bytes to encode the PUSHes (for example)
+              (inst push (encode-value-if-immediate cdr))
+              (inst push (encode-value-if-immediate car)))
+             ((and (sc-is car immediate) (sc-is cdr immediate)
+                   (eql (encode-value-if-immediate car) (encode-value-if-immediate cdr)))
+              (inst mov alloc (encode-value-if-immediate cdr))
+              (inst push alloc)
+              (inst push alloc))
+             (t
+              (list-ctor-push-elt cdr alloc)
+              (list-ctor-push-elt car alloc)))
+       (inst lea result (ea list-pointer-lowtag rsp-tn)))
+      (t
+       (let ((nbytes (* cons-size n-word-bytes))
+             (prev-constant temp)) ;; a non-eq initial value
+         (instrument-alloc +cons-primtype+ nbytes node (list temp alloc) thread-tn)
+         (pseudo-atomic (:thread-tn thread-tn)
+           (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn)
+           (store-slot car alloc cons-car-slot 0)
+           (store-slot cdr alloc cons-cdr-slot 0)
+           (if (location= alloc result)
+               (inst or :byte alloc list-pointer-lowtag)
+               (inst lea result (ea list-pointer-lowtag alloc)))))))))
 
 (define-vop (acons)
-  (:args (key :scs (any-reg descriptor-reg constant immediate))
-         (val :scs (any-reg descriptor-reg constant immediate))
-         (tail :scs (any-reg descriptor-reg constant immediate)))
+  (:args (key :scs (any-reg descriptor-reg constant immediate control-stack))
+         (val :scs (any-reg descriptor-reg constant immediate control-stack))
+         (tail :scs (any-reg descriptor-reg constant immediate control-stack)))
   (:temporary (:sc unsigned-reg :to (:result 0)) alloc)
   (:temporary (:sc unsigned-reg :to (:result 0) :target result) temp)
   (:results (result :scs (descriptor-reg)))
@@ -404,32 +436,41 @@
 ;;; CONS-2 is similar to ACONS, except that instead of producing
 ;;;  ((X . Y) . Z) it produces (X Y . Z)
 (define-vop (cons-2)
-  (:args (car :scs (any-reg descriptor-reg constant immediate))
-         (cadr :scs (any-reg descriptor-reg constant immediate))
-         (cddr :scs (any-reg descriptor-reg constant immediate)))
+  (:args (car :scs (any-reg descriptor-reg constant immediate control-stack))
+         (cadr :scs (any-reg descriptor-reg constant immediate control-stack))
+         (cddr :scs (any-reg descriptor-reg constant immediate control-stack)))
   (:temporary (:sc unsigned-reg :to (:result 0) :target result) alloc)
-  (:temporary (:sc unsigned-reg :to (:result 0)) temp)
+  (:temporary (:sc unsigned-reg :to (:result 0)
+               :unused-if (node-stack-allocate-p (sb-c::vop-node vop)))
+              temp)
   (:results (result :scs (descriptor-reg)))
   #+gs-seg (:temporary (:sc unsigned-reg :offset 15) thread-tn)
+  (:vop-var vop)
   (:node-var node)
   (:generator 10
-    (let ((stack-allocate-p (node-stack-allocate-p node))
-          (nbytes (* cons-size 2 n-word-bytes))
-          (prev-constant temp))
-      (unless stack-allocate-p
-        (instrument-alloc +cons-primtype+ nbytes node (list temp alloc) thread-tn))
-      (pseudo-atomic (:elide-if stack-allocate-p :thread-tn thread-tn)
-        (if stack-allocate-p
-            (stack-allocation nbytes 0 alloc)
-            (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn))
-        (store-slot car alloc cons-car-slot 0)
-        (store-slot cadr alloc (+ 2 cons-car-slot) 0)
-        (store-slot cddr alloc (+ 2 cons-cdr-slot) 0)
-        (inst lea temp (ea (+ 16 list-pointer-lowtag) alloc))
-        (store-slot temp alloc cons-cdr-slot 0)
-        (if (location= alloc result)
-            (inst or :byte alloc list-pointer-lowtag)
-            (inst lea result (ea list-pointer-lowtag alloc)))))))
+    (cond
+      ((node-stack-allocate-p node)
+       (inst and rsp-tn (lognot lowtag-mask))
+       (list-ctor-push-elt cddr alloc)
+       (list-ctor-push-elt cadr alloc)
+       (inst lea alloc (ea list-pointer-lowtag rsp-tn))
+       (inst push alloc) ; cdr of the first cons
+       (list-ctor-push-elt car alloc)
+       (inst lea result (ea list-pointer-lowtag rsp-tn)))
+      (t
+       (let ((nbytes (* cons-size 2 n-word-bytes))
+             (prev-constant temp))
+         (instrument-alloc +cons-primtype+ nbytes node (list temp alloc) thread-tn)
+         (pseudo-atomic (:thread-tn thread-tn)
+           (allocation +cons-primtype+ nbytes 0 alloc node temp thread-tn)
+           (store-slot car alloc cons-car-slot 0)
+           (store-slot cadr alloc (+ 2 cons-car-slot) 0)
+           (store-slot cddr alloc (+ 2 cons-cdr-slot) 0)
+           (inst lea temp (ea (+ 16 list-pointer-lowtag) alloc))
+           (store-slot temp alloc cons-cdr-slot 0)
+           (if (location= alloc result)
+               (inst or :byte alloc list-pointer-lowtag)
+               (inst lea result (ea list-pointer-lowtag alloc)))))))))
 
 (define-vop (list)
   (:args (things :more t :scs (descriptor-reg any-reg constant immediate)))
@@ -880,21 +921,37 @@
 
 ;;; The compiler likes to be able to directly make value cells.
 (define-vop (make-value-cell)
-  (:args (value :scs (descriptor-reg any-reg) :to :result))
+  (:args (value :scs (descriptor-reg any-reg immediate constant) :to :result))
   (:results (result :scs (descriptor-reg) :from :eval))
   #+gs-seg (:temporary (:sc unsigned-reg :offset 15) thread-tn)
   (:info stack-allocate-p)
   (:node-var node)
   (:generator 10
-    (cond (stack-allocate-p
-           (stack-allocation (pad-data-block value-cell-size) other-pointer-lowtag result)
-           (let ((header (compute-object-header value-cell-size value-cell-widetag)))
-             (storew header result 0 other-pointer-lowtag)
-             (storew value result value-cell-value-slot other-pointer-lowtag)))
-          (t
-           (alloc-other value-cell-widetag value-cell-size result node nil thread-tn
-                        (lambda ()
-                          (storew value result value-cell-value-slot other-pointer-lowtag)))))))
+    (let ((data (if (sc-is value immediate)
+                    (let ((bits (encode-value-if-immediate value)))
+                      (if (integerp bits)
+                          (constantize bits)
+                          bits)) ; could be a fixup
+                    value)))
+      (cond (stack-allocate-p
+             ;; No regression test got here. Therefore I think there's no such thing as a
+             ;; dynamic-extent value cell. It makes sense that there isn't: DX closures
+             ;; would just reference their frame, wouldn't they?
+             (inst and rsp-tn (lognot lowtag-mask)) ; align
+             (inst push data)
+             (inst push (compute-object-header value-cell-size value-cell-widetag))
+             (inst lea result (ea other-pointer-lowtag rsp-tn)))
+            (t
+             (alloc-other value-cell-widetag value-cell-size result node nil thread-tn
+              (lambda ()
+                (if (sc-case value
+                     (immediate
+                      (unless (integerp data) (inst push data) t))
+                     (constant
+                      (inst push value) t)
+                     (t nil))
+                    (inst pop (object-slot-ea result value-cell-value-slot other-pointer-lowtag))
+                    (storew data result value-cell-value-slot other-pointer-lowtag)))))))))
 
 ;;;; automatic allocators for primitive objects
 

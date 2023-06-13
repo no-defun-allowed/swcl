@@ -179,6 +179,13 @@
   (:arg-types signed-num unsigned-num)
   (:translate logand))
 
+(define-vop (fast-logand-c/signed-unsigned=>unsigned fast-logand-c/unsigned=>unsigned)
+  (:args (x :scs (signed-reg) :target r))
+  (:arg-types signed-num (:constant (eql #.most-positive-word)))
+  (:ignore y)
+  (:generator 1
+    (move r x)))
+
 ;;; Truncate
 
 ;; This doesn't work for some reason.
@@ -975,19 +982,6 @@
   (:result-types unsigned-num unsigned-num)
   (:generator 40
     (emit-multiply x y hi lo)))
-
-(define-vop (bignum-lognot lognot-mod32/unsigned=>unsigned)
-  (:translate sb-bignum:%lognot))
-
-(define-vop (fixnum-to-digit)
-  (:translate sb-bignum:%fixnum-to-digit)
-  (:policy :fast-safe)
-  (:args (fixnum :scs (any-reg)))
-  (:arg-types tagged-num)
-  (:results (digit :scs (unsigned-reg)))
-  (:result-types unsigned-num)
-  (:generator 1
-    (inst sra digit fixnum n-fixnum-tag-bits)))
 
 (define-vop (bignum-floor)
   (:translate sb-bignum:%bigfloor)

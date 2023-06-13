@@ -220,12 +220,11 @@ static void inflate_core_bytes(int fd, os_vm_offset_t offset,
 }
 #endif
 
-#define MAX_SPACE_RELOCATION_RANGES 4
 struct heap_adjust {
     struct range {
         lispobj start, end;
         sword_t delta;
-    } range[MAX_SPACE_RELOCATION_RANGES];
+    } range[MAX_CORE_SPACE_ID+1];
     int n_ranges;
     int n_relocs_abs; // absolute
     int n_relocs_rel; // relative
@@ -272,7 +271,6 @@ set_adjustment(struct heap_adjust* adj,
     sword_t delta = len ? actual_addr - desired_addr : 0;
     if (!delta) return;
     int j = adj->n_ranges;
-    gc_assert(j < MAX_SPACE_RELOCATION_RANGES);
     adj->range[j].start = (lispobj)desired_addr;
     adj->range[j].end   = (lispobj)desired_addr + len;
     adj->range[j].delta = delta;
@@ -605,6 +603,12 @@ static void relocate_heap(struct heap_adjust* adj)
     /* We need a correct page_table_pages in order to walk the heap. */
     page_table_pages = dynamic_space_size / GENCGC_PAGE_BYTES;
 #endif
+#ifdef LISP_FEATURE_RELOCATABLE_STATIC_SPACE
+    relocate_space(READ_ONLY_SPACE_START, read_only_space_free_pointer, adj);
+    // Relocate the CAR slot of nil-as-a-list, which needs to point to
+    // itself.
+    adjust_pointers((void*)(NIL - LIST_POINTER_LOWTAG), 1, adj);
+#endif
     relocate_space(NIL_SYMBOL_SLOTS_START, (lispobj*)NIL_SYMBOL_SLOTS_END, adj);
     relocate_space(STATIC_SPACE_OBJECTS_START, static_space_free_pointer, adj);
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
@@ -805,9 +809,12 @@ process_directory(int count, struct ndir_entry *entry,
             lose("unknown space ID %ld addr %p", id, (void*)addr);
 
 #ifdef LISP_FEATURE_DARWIN_JIT
-        int enforce_address = (id == STATIC_CORE_SPACE_ID) || (id == READ_ONLY_CORE_SPACE_ID);
+        int enforce_address = (id == READ_ONLY_CORE_SPACE_ID);
 #else
-        int enforce_address = id == STATIC_CORE_SPACE_ID;
+        int enforce_address = 0;
+#endif
+#ifndef LISP_FEATURE_RELOCATABLE_STATIC_SPACE
+        enforce_address |= (id == STATIC_CORE_SPACE_ID);
 #endif
 
         // We'd like to enforce proper alignment of 'addr' but there's
@@ -826,22 +833,38 @@ process_directory(int count, struct ndir_entry *entry,
                  (unsigned long)dynamic_space_size >> 10);
         }
 #ifndef LISP_FEATURE_DARWIN_JIT
+#ifdef LISP_FEATURE_RELOCATABLE_STATIC_SPACE
+        if (id == READ_ONLY_CORE_SPACE_ID || id == STATIC_CORE_SPACE_ID) {
+#else
         if (id == READ_ONLY_CORE_SPACE_ID) {
-            if (len) // There is no "nominal" size of readonly space, so give it a size
+#endif
+            if (len) // There is no "nominal" size of static or
+                     // readonly space, so give them a size
                 spaces[id].desired_size = len;
-            else // Assign some address, so free_pointer does enclose [0 .. addr+0]
+            else { // Assign some address, so free_pointer does enclose [0 .. addr+0]
+                if (id == STATIC_CORE_SPACE_ID)
+                    lose("Static space size is 0?");
                 READ_ONLY_SPACE_START = READ_ONLY_SPACE_END = addr;
+            }
         }
 #endif
         if (len != 0) {
             spaces[id].len = len;
-            // Try to map at address requested by the core file.
             size_t request = spaces[id].desired_size;
             int sub_2gb_flag = (request & 1);
             request &= ~(size_t)1;
+            // Try to map at address requested by the core file unless ASLR.
+#ifdef LISP_FEATURE_ASLR
+            addr = 0;
+#endif
             addr = (uword_t)reserve_space(id, sub_2gb_flag ? MOVABLE_LOW : MOVABLE,
                                           (os_vm_address_t)addr, request);
             switch (id) {
+            case STATIC_CORE_SPACE_ID:
+#ifdef LISP_FEATURE_RELOCATABLE_STATIC_SPACE
+                STATIC_SPACE_START = addr;
+                STATIC_SPACE_END = addr + len;
+#endif
 #ifndef LISP_FEATURE_DARWIN_JIT
             case READ_ONLY_CORE_SPACE_ID:
                 READ_ONLY_SPACE_START = addr;
@@ -851,8 +874,10 @@ process_directory(int count, struct ndir_entry *entry,
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
             case IMMOBILE_FIXEDOBJ_CORE_SPACE_ID:
             case IMMOBILE_TEXT_CORE_SPACE_ID:
+#ifdef LISP_FEATURE_X86_64
                 if (addr + request > 0x80000000)
                     lose("Won't map immobile space above 2GB");
+#endif
                 if (id == IMMOBILE_FIXEDOBJ_CORE_SPACE_ID)
                     FIXEDOBJ_SPACE_START = addr;
                 else
@@ -927,6 +952,11 @@ process_directory(int count, struct ndir_entry *entry,
     set_adjustment(adj, DYNAMIC_SPACE_START, // actual
                    spaces[DYNAMIC_CORE_SPACE_ID].base, // expected
                    spaces[DYNAMIC_CORE_SPACE_ID].len);
+#ifdef LISP_FEATURE_RELOCATABLE_STATIC_SPACE
+    set_adjustment(adj, STATIC_SPACE_START, // actual
+                   spaces[STATIC_CORE_SPACE_ID].base, // expected
+                   spaces[STATIC_CORE_SPACE_ID].len);
+#endif
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
     if (lisp_code_in_elf() && TEXT_SPACE_START != spaces[IMMOBILE_TEXT_CORE_SPACE_ID].base) {
         lose("code-in-elf + PIE not supported");

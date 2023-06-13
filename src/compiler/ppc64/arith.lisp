@@ -240,6 +240,19 @@
   (define-const-logop logior 2 ori oris or)
   (define-const-logop logxor 2 xori xoris xor))
 
+(define-vop (fast-logand/signed-unsigned=>unsigned fast-logand/unsigned=>unsigned)
+  (:args (x :scs (signed-reg) :target r)
+         (y :scs (unsigned-reg) :target r))
+  (:arg-types signed-num unsigned-num))
+
+(define-vop (fast-logand-c/signed-unsigned=>unsigned fast-logand/unsigned=>unsigned)
+  (:args (x :scs (signed-reg) :target r))
+  (:arg-types signed-num (:constant (eql #.most-positive-word)))
+  (:info y)
+  (:ignore y)
+  (:generator 1
+    (move r x)))
+
 (define-vop (fast-*/fixnum=>fixnum fast-fixnum-binop)
   (:temporary (:scs (non-descriptor-reg)) temp)
   (:translate *)
@@ -1015,19 +1028,6 @@
   (:generator 15
     (inst mulhdu temp x y)
     (inst clrrdi hi temp n-fixnum-tag-bits)))
-
-(define-vop (bignum-lognot lognot-mod64/unsigned=>unsigned)
-  (:translate sb-bignum:%lognot))
-
-(define-vop (fixnum-to-digit)
-  (:translate sb-bignum:%fixnum-to-digit)
-  (:policy :fast-safe)
-  (:args (fixnum :scs (any-reg)))
-  (:arg-types tagged-num)
-  (:results (digit :scs (unsigned-reg)))
-  (:result-types unsigned-num)
-  (:generator 1
-    (inst sradi digit fixnum n-fixnum-tag-bits)))
 
 ;;; Algorithm from page 74 of of Power ISA version 2.07
 ;;; under "Programming Note" for the divweu instruction

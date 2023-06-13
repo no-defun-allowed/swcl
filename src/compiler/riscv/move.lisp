@@ -27,7 +27,8 @@
                           character-widetag)))
       (structure-object
        (if (eq val sb-lockless:+tail+)
-           (inst addi y null-tn (- sb-vm::lockfree-list-tail-value sb-vm:nil-value))
+           (inst addi y null-tn (- lockfree-list-tail-value-offset
+                                   nil-value-offset))
            (bug "immediate structure-object ~S" val))))))
 
 (define-move-fun (load-number 1) (vop x y)
@@ -50,12 +51,7 @@
       (short-immediate
        (loadw y code-tn (tn-offset x) other-pointer-lowtag))
       (u+i-immediate
-       (multiple-value-bind (u i)
-           (u-and-i-inst-immediate offset)
-         ;; Should be GC safe.
-         (inst lui y u)
-         (inst add lip-tn code-tn y)
-         (inst #-64-bit lw #+64-bit ld y lip-tn i))))))
+       (inst load-far-constant y x)))))
 
 (define-move-fun (load-stack 5) (vop x y)
   ((control-stack) (any-reg descriptor-reg))

@@ -329,8 +329,7 @@
        (cond
          ((or (valid-funtype `((constant-arg (mod ,n-word-bits)) signed-word) '*)
               (valid-funtype `((constant-arg (mod ,n-word-bits)) word) '*))
-          (values :transform '(lambda (index integer)
-                               (%logbitp integer index))))
+          (values :direct nil))
          (t (values :default nil))))
       (%ldb
        (flet ((validp (type)
@@ -348,8 +347,7 @@
                                     n-word-bits)))))))
          (if (or (validp 'word)
                  (validp 'signed-word))
-             (values :transform '(lambda (size posn integer)
-                                  (%%ldb integer size posn)))
+             (values :direct nil)
              (values :default nil))))
       (%dpb
        (flet ((validp (type result-type)
@@ -360,14 +358,22 @@
                                result-type)))
          (if (or (validp 'signed-word 'signed-word)
                  (validp 'word 'word))
-             (values :transform '(lambda (newbyte size posn integer)
-                                  (%%dpb newbyte size posn integer)))
+             (values :direct nil)
              (values :default nil))))
       (signum
        (if (or (valid-funtype '(signed-word) '*)
                (valid-funtype '(word) '*))
            (values :direct nil)
            (values :default nil)))
+      (truncate
+       (destructuring-bind (n &optional d) (sb-c::basic-combination-args node)
+         (if (and d
+                  (constant-lvar-p d)
+                  (power-of-two-p (lvar-value d))
+                  (and (csubtypep (sb-c::lvar-type n) (specifier-type 'signed-word))
+                       (not (csubtypep (sb-c::lvar-type n) (specifier-type 'word)))))
+             (values :direct nil)
+             (values :default nil))))
       (t (values :default nil)))))
 
 (defun primitive-type-indirect-cell-type (ptype)
@@ -399,4 +405,5 @@
         bic-encode-immediate
         bic-fixnum-encode-immediate
         logical-immediate-or-word-mask
-        sb-arm64-asm::ldr-str-offset-encodable))
+        sb-arm64-asm::ldr-str-offset-encodable
+        power-of-two-p))

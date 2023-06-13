@@ -183,20 +183,20 @@
         (inst add result-tn tmp-tn lowtag))
       (let ((alloc (gen-label))
             #+sb-thread (tlab (if (eq type 'list) thread-cons-tlab-slot thread-mixed-tlab-slot))
-            #-sb-thread (region (if (eq type 'list) cons-region mixed-region))
+            #-sb-thread (region-offset (if (eq type 'list)
+                                           cons-region-offset
+                                           mixed-region-offset))
             (back-from-alloc (gen-label)))
         #-sb-thread
         (progn
-          ;; load-pair can't base off null-tn because the displacement
-          ;; has to be a multiple of 8
-          (load-immediate-word flag-tn region)
-          (inst ldp result-tn flag-tn (@ flag-tn 0)))
+          (loadw result-tn null-tn 0 (- nil-value-offset region-offset))
+          (loadw flag-tn null-tn 1 (- nil-value-offset region-offset)))
         #+sb-thread
         (inst ldp tmp-tn flag-tn (@ thread-tn (* n-word-bytes tlab)))
         (inst add result-tn tmp-tn (add-sub-immediate size result-tn))
         (inst cmp result-tn flag-tn)
         (inst b :hi ALLOC)
-        #-sb-thread (inst str result-tn (@ null-tn (load-store-offset (- region nil-value))))
+        #-sb-thread (inst str result-tn (@ null-tn (load-store-offset (- region-offset nil-value-offset))))
         #+sb-thread (storew result-tn thread-tn tlab)
 
         (emit-label BACK-FROM-ALLOC)
@@ -347,7 +347,7 @@
              `((:translate ,translate)))
      (:policy :fast-safe)
      (:args (object :scs (descriptor-reg))
-            (index :scs (any-reg immediate)))
+            (index :scs (any-reg unsigned-reg signed-reg immediate)))
      (:arg-types ,type tagged-num)
      (:temporary (:scs (non-descriptor-reg)
                   :unused-if (sc-is index immediate)) lip)
@@ -360,7 +360,9 @@
                                      (- (ash (+ ,offset (tn-value index)) word-shift)
                                         ,lowtag)))))
          (t
-          (inst add lip object (lsl index (- word-shift n-fixnum-tag-bits)))
+          (inst add lip object (lsl index (- word-shift (if (sc-is index any-reg)
+                                                            n-fixnum-tag-bits
+                                                            0))))
           (loadw value lip ,offset ,lowtag))))))
 
 (defmacro define-full-setter (name type offset lowtag scs el-type
@@ -370,7 +372,7 @@
              `((:translate ,translate)))
      (:policy :fast-safe)
      (:args (object :scs (descriptor-reg))
-            (index :scs (any-reg immediate))
+            (index :scs (any-reg unsigned-reg signed-reg immediate))
             (value :scs (,@scs zero)))
      (:arg-types ,type tagged-num ,el-type)
      (:temporary (:scs (non-descriptor-reg)
@@ -382,7 +384,9 @@
                                      (- (ash (+ ,offset (tn-value index)) word-shift)
                                         ,lowtag)))))
          (t
-          (inst add lip object (lsl index (- word-shift n-fixnum-tag-bits)))
+          (inst add lip object (lsl index (- word-shift (if (sc-is index any-reg)
+                                                            n-fixnum-tag-bits
+                                                            0))))
           (storew value lip ,offset ,lowtag))))))
 
 (defmacro define-partial-reffer (name type size signed offset lowtag scs
@@ -392,7 +396,7 @@
              `((:translate ,translate)))
      (:policy :fast-safe)
      (:args (object :scs (descriptor-reg))
-            (index :scs (any-reg unsigned-reg immediate)))
+            (index :scs (any-reg unsigned-reg signed-reg immediate)))
      (:arg-types ,type tagged-num)
      (:results (value :scs ,scs))
      (:result-types ,el-type)
@@ -421,9 +425,8 @@
                                                (- (* ,offset n-word-bytes) ,lowtag))))))
                  (t
                   (let ((shift ,shift))
-                    (sc-case index
-                      (any-reg
-                       (decf shift n-fixnum-tag-bits)))
+                    (when (sc-is index any-reg)
+                      (decf shift n-fixnum-tag-bits))
                     (inst add lip object (if (minusp shift)
                                              (asr index (- shift))
                                              (lsl index shift)))
@@ -443,7 +446,7 @@
       (:args ,@(when setf-p
                  value)
              (object :scs (descriptor-reg))
-             (index :scs (any-reg unsigned-reg immediate))
+             (index :scs (any-reg unsigned-reg signed-reg immediate))
              ,@(unless setf-p
                  value))
       (:arg-types ,@(when setf-p
@@ -476,9 +479,8 @@
                                                 (- (* ,offset n-word-bytes) ,lowtag))))))
                   (t
                    (let ((shift ,shift))
-                     (sc-case index
-                       (any-reg
-                        (decf shift n-fixnum-tag-bits)))
+                     (when (sc-is index any-reg)
+                       (decf shift n-fixnum-tag-bits))
                      (inst add lip object (if (minusp shift)
                                               (asr index (- shift))
                                               (lsl index shift)))

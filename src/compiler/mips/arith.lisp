@@ -150,6 +150,18 @@
 (define-binop logand 1 3 and (unsigned-byte 14) (unsigned-byte 16))
 (define-binop logxor 1 3 xor (unsigned-byte 14) (unsigned-byte 16))
 
+(define-vop (fast-logand/signed-unsigned=>unsigned fast-logand/unsigned=>unsigned)
+  (:args (x :scs (signed-reg) :target r)
+         (y :scs (unsigned-reg) :target r))
+  (:arg-types signed-num unsigned-num))
+
+(define-vop (fast-logand-c/signed-unsigned=>unsigned fast-logand-c/unsigned=>unsigned)
+  (:args (x :scs (signed-reg) :target r))
+  (:arg-types signed-num (:constant (eql #.most-positive-word)))
+  (:ignore y)
+  (:generator 1
+    (move r x)))
+
 ;;; No -C/ VOPs for LOGNOR because the NOR instruction doesn't take
 ;;; immediate args.  -- CSR, 2003-09-11
 (define-vop (fast-lognor/fixnum=>fixnum fast-fixnum-binop)
@@ -793,19 +805,6 @@
     (inst multu x y)
     (inst mflo lo)
     (inst mfhi hi)))
-
-(define-vop (bignum-lognot lognot-mod32/unsigned=>unsigned)
-  (:translate sb-bignum:%lognot))
-
-(define-vop (fixnum-to-digit)
-  (:translate sb-bignum:%fixnum-to-digit)
-  (:policy :fast-safe)
-  (:args (fixnum :scs (any-reg)))
-  (:arg-types tagged-num)
-  (:results (digit :scs (unsigned-reg)))
-  (:result-types unsigned-num)
-  (:generator 1
-    (inst sra digit fixnum n-fixnum-tag-bits)))
 
 (define-vop (bignum-floor)
   (:translate sb-bignum:%bigfloor)

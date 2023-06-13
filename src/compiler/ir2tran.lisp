@@ -26,7 +26,7 @@
 ;;; Determine whether we should emit a single-stepper breakpoint
 ;;; around a call / before a vop.
 (defun emit-step-p (node)
-  (if (and (policy node (> insert-step-conditions 1))
+  (if (and (policy node (= insert-step-conditions 3))
            (typep node 'combination))
       (combination-step-info node)
       nil))
@@ -1109,7 +1109,7 @@
   (let ((fun-info (combination-fun-info combination)))
     (declare (ignorable fun-info))
     (and #+(or arm64 x86-64)
-         (or (policy combination (> insert-step-conditions 1))
+         (or (policy combination (= insert-step-conditions 3))
              (and
               (combination-pass-nargs combination)
               (not (and (eq (combination-kind combination) :known)
@@ -1868,9 +1868,7 @@ not stack-allocated LVAR ~S." source-lvar)))))
     ;; If only one exists, it's DYNBIND.
     ;; Even if the backend supports load-time TLS index assignment,
     ;; there might be only one vop.
-    (macrolet ((doit (bind dynbind)
-                 (if (gethash 'bind *backend-parsed-vops*) bind dynbind)))
-      (doit
+    (if-vop-existsp (:named bind)
        (progn
          ;; Inform later SYMBOL-VALUE calls that they can
          ;; assume a nonzero tls-index.
@@ -1883,7 +1881,7 @@ not stack-allocated LVAR ~S." source-lvar)))))
          (emit-constant name)
          (vop bind node block (lvar-tn node block value) name))
        (vop dynbind node block (lvar-tn node block value)
-            (emit-constant name))))))
+            (emit-constant name)))))
 
 (defoptimizer (%special-unbind ir2-convert) ((&rest symbols) node block)
   (if-vop-existsp (:named sb-c:unbind-n)

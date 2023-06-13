@@ -236,8 +236,14 @@
 (define-vop (fast-logand/signed-unsigned=>unsigned fast-logand/unsigned=>unsigned)
   (:args (x :scs (signed-reg) :target r)
          (y :scs (unsigned-reg) :target r))
-  (:arg-types signed-num unsigned-num)
-  (:translate logand))
+  (:arg-types signed-num unsigned-num))
+
+(define-vop (fast-logand-c/signed-unsigned=>unsigned fast-logand-c/unsigned=>unsigned)
+  (:args (x :scs (signed-reg) :target r))
+  (:arg-types signed-num (:constant (eql #.most-positive-word)))
+  (:ignore y)
+  (:generator 1
+    (move r x)))
 
 (define-source-transform logeqv (&rest args)
   (if (oddp (length args))
@@ -884,9 +890,6 @@
   (:generator 15
     (inst umull lo temp x y)
     (inst bic hi temp fixnum-tag-mask)))
-
-(define-vop (bignum-lognot lognot-mod32/unsigned=>unsigned)
-  (:translate sb-bignum:%lognot))
 
 (define-vop (bignum-floor)
   (:translate sb-bignum:%bigfloor)

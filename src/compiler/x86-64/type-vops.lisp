@@ -366,7 +366,11 @@
 ;; the header of which must not overlap the static alloc regions
 #-sb-thread
 (aver (>= (- non-negative-fixnum-mask-constant-wired-address (* 2 n-word-bytes))
-          (+ (max boxed-region cons-region mixed-region) (* 3 n-word-bytes))))
+          (+ static-space-start
+             (max boxed-region-offset
+                  cons-region-offset
+                  mixed-region-offset)
+             (* 3 n-word-bytes))))
 
 ;;; An (unsigned-byte 64) can be represented with either a positive
 ;;; fixnum, a bignum with exactly one positive digit, or a bignum with
@@ -374,19 +378,26 @@
 (define-vop (unsigned-byte-64-p type-predicate)
   (:translate unsigned-byte-64-p)
   (:generator 10
-    (let ((not-target (gen-label))
-          (single-word (gen-label))
-          (fixnum-p (types-equal-or-intersect (tn-ref-type args) (specifier-type 'fixnum))))
+    (let* ((not-target (gen-label))
+           (single-word (gen-label))
+           (fixnum-p (types-equal-or-intersect (tn-ref-type args) (specifier-type 'fixnum)))
+           (not-signed-byte-64-p (not (types-equal-or-intersect (tn-ref-type args) (specifier-type 'signed-word))))
+           (unsigned-p (or not-signed-byte-64-p
+                           (not (types-equal-or-intersect (tn-ref-type args) (specifier-type '(integer * -1)))))))
       (multiple-value-bind (yep nope)
           (if not-p
               (values not-target target)
               (values target not-target))
         (when fixnum-p
-          ;; Is it a fixnum with the sign bit clear?
-          (inst test (ea non-negative-fixnum-mask-constant-wired-address) value)
-          (inst jmp :z yep))
+          (cond (unsigned-p
+                 (inst test :byte value fixnum-tag-mask)
+                 (inst jmp :z yep))
+                (t ;; Is it a fixnum with the sign bit clear?
+                 (inst test (ea non-negative-fixnum-mask-constant-wired-address) value)
+                 (inst jmp :z yep))))
         (cond ((fixnum-or-other-pointer-tn-ref-p args t)
-               (when fixnum-p
+               (when (and fixnum-p
+                          (not unsigned-p))
                  (inst test :byte value fixnum-tag-mask)
                  (inst jmp :z nope)))
               (t
@@ -395,9 +406,12 @@
                (inst jmp :ne nope)))
         ;; Get the header.
         (loadw temp value 0 other-pointer-lowtag)
-        ;; Is it one?
-        (inst cmp temp (bignum-header-for-length 1))
-        (inst jmp :e single-word)
+        (unless not-signed-byte-64-p
+          ;; Is it one?
+          (inst cmp temp (bignum-header-for-length 1))
+          (inst jmp :e (if unsigned-p
+                           yep
+                           single-word)))
         ;; If it's other than two, we can't be an (unsigned-byte 64)
         ;: Leave TEMP holding 0 in the affirmative case.
         (inst sub temp (bignum-header-for-length 2))
@@ -405,15 +419,19 @@
         ;; Compare the second digit to zero (in TEMP).
         (inst cmp (object-slot-ea value (1+ bignum-digits-offset) other-pointer-lowtag)
               temp)
-        (inst jmp :z yep) ; All zeros, its an (unsigned-byte 64).
-        (inst jmp nope)
+        (cond (unsigned-p
+               (inst jmp (if not-p :nz :z) target))
+              (t
+               (inst jmp :z yep) ; All zeros, its an (unsigned-byte 64).
+               (inst jmp nope)))
 
-        (emit-label single-word)
-        ;; Get the single digit.
-        (loadw temp value bignum-digits-offset other-pointer-lowtag)
-        ;; positive implies (unsigned-byte 64).
-        (inst test temp temp)
-        (inst jmp (if not-p :s :ns) target)
+        (unless unsigned-p
+          (emit-label single-word)
+          ;; Get the single digit.
+          (loadw temp value bignum-digits-offset other-pointer-lowtag)
+          ;; positive implies (unsigned-byte 64).
+          (inst test temp temp)
+          (inst jmp (if not-p :s :ns) target))
 
         (emit-label not-target)))))
 
@@ -932,15 +950,14 @@
 (define-vop (load-other-pointer-widetag)
   (:args (value :scs (any-reg descriptor-reg)))
   (:arg-refs args)
-  (:info not-other-pointer-label null-label)
+  (:info not-other-pointer-label null-label zero-extend)
   (:results (r :scs (unsigned-reg)))
   (:result-types unsigned-num)
   (:generator 1
-    ;; FIXME: can we pass T as the 2nd arg to OTHER-POINTER-TN-REF-P here?
-    ;; I'm confused as to the intent of NULL-LABEL.
-    ;; Must branching occur if nil, or _may_ branching occur?
-    (cond ((other-pointer-tn-ref-p args)
-           (inst mov :byte r (ea (- other-pointer-lowtag) value)))
+    (cond ((other-pointer-tn-ref-p args (not null-label))
+           (if zero-extend
+               (inst movzx '(:byte :dword) r (ea (- other-pointer-lowtag) value))
+               (inst mov :byte r (ea (- other-pointer-lowtag) value))))
           (t
            (when null-label
              (inst cmp value nil-value)
@@ -948,7 +965,9 @@
            (%lea-for-lowtag-test r value other-pointer-lowtag :qword)
            (inst test :byte r lowtag-mask)
            (inst jmp :nz not-other-pointer-label)
-           (inst mov :byte r (ea r))))))
+           (if zero-extend
+               (inst movzx '(:byte :dword) r (ea r))
+               (inst mov :byte r (ea r)))))))
 
 (define-vop (test-widetag)
   (:args (value :scs (unsigned-reg) :target temp))

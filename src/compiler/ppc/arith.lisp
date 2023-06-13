@@ -417,6 +417,18 @@
 (!define-const-logop logior 2 ori oris)
 (!define-const-logop logxor 2 xori xoris)
 
+(define-vop (fast-logand/signed-unsigned=>unsigned fast-logand/unsigned=>unsigned)
+  (:args (x :scs (signed-reg) :target r)
+         (y :scs (unsigned-reg) :target r))
+  (:arg-types signed-num unsigned-num))
+
+(define-vop (fast-logand-c/signed-unsigned=>unsigned fast-logand-c/unsigned=>unsigned)
+  (:args (x :scs (signed-reg) :target r))
+  (:arg-types signed-num (:constant (eql #.most-positive-word)))
+  (:ignore y)
+  (:generator 1
+    (move r x)))
+
 (define-vop (fast-*/fixnum=>fixnum fast-fixnum-binop)
   (:temporary (:scs (non-descriptor-reg)) temp)
   (:translate *)
@@ -1147,19 +1159,6 @@
     (inst mulhwu temp x y)
     (inst lr mask fixnum-tag-mask)
     (inst andc hi temp mask)))
-
-(define-vop (bignum-lognot lognot-mod32/unsigned=>unsigned)
-  (:translate sb-bignum:%lognot))
-
-(define-vop (fixnum-to-digit)
-  (:translate sb-bignum:%fixnum-to-digit)
-  (:policy :fast-safe)
-  (:args (fixnum :scs (any-reg)))
-  (:arg-types tagged-num)
-  (:results (digit :scs (unsigned-reg)))
-  (:result-types unsigned-num)
-  (:generator 1
-    (inst srawi digit fixnum n-fixnum-tag-bits)))
 
 (define-vop (bignum-floor)
   (:translate sb-bignum:%bigfloor)

@@ -532,7 +532,7 @@
                  bits)))
           (structure-object
            (if (eq val sb-lockless:+tail+)
-               (progn (aver tag) sb-vm::lockfree-list-tail-value)
+               (progn (aver tag) (+ static-space-start lockfree-list-tail-value-offset))
                (bug "immediate structure-object ~S" val)))))
       tn))
 
@@ -610,8 +610,17 @@
        (if (or
             (valid-funtype '((mod 64) word) '*)
             (valid-funtype '((mod 64) signed-word) '*))
-           (values :transform '(lambda (index integer) (%logbitp index integer)))
+           (values :direct nil)
            (values :default nil)))
+      (truncate
+       (destructuring-bind (n &optional d) (sb-c::basic-combination-args node)
+         (if (and d
+                  (constant-lvar-p d)
+                  (power-of-two-p (lvar-value d))
+                  (and (csubtypep (sb-c::lvar-type n) (specifier-type 'signed-word))
+                       (not (csubtypep (sb-c::lvar-type n) (specifier-type 'word)))))
+             (values :direct nil)
+             (values :default nil))))
       (t
        (values :default nil)))))
 
@@ -632,3 +641,7 @@
     ;; By design they are also (i.e. must be) nonvolatile aross C call.
     (aver (not (logbitp 12 locs)))
     #-gs-seg (aver (not (logbitp 13 locs)))))
+
+#+sb-xc-host
+(setq *backend-cross-foldable-predicates*
+      '(power-of-two-p))

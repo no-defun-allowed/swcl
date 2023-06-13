@@ -4495,9 +4495,9 @@ extern int finalizer_thread_runflag;
 # define THREAD_ALLOC_REGION(threadvar,slot) &threadvar-> slot ##_tlab
 #else
 # define THREAD_ALLOC_REGION(threadvar,slot) main_thread_ ##slot ##_region
-#define main_thread_mixed_region (struct alloc_region*)STATIC_SPACE_START
-#define main_thread_cons_region (1+main_thread_mixed_region)
-#define main_thread_boxed_region (2+main_thread_mixed_region)
+#define main_thread_mixed_region (struct alloc_region*)(STATIC_SPACE_START + MIXED_REGION_OFFSET)
+#define main_thread_cons_region (struct alloc_region*)(STATIC_SPACE_START + CONS_REGION_OFFSET)
+#define main_thread_boxed_region (struct alloc_region*)(STATIC_SPACE_START + BOXED_REGION_OFFSET)
 #endif
 
 /* GC all generations newer than last_gen, raising the objects in each
@@ -5239,7 +5239,7 @@ lispobj AMD64_SYSV_ABI alloc_code_object(unsigned total_words, unsigned boxed)
     sword_t nbytes = total_words * N_WORD_BYTES;
     /* Allocations of code are all serialized. We might also acquire
      * free_pages_lock depending on availability of space in the region */
-    int result = mutex_acquire(&code_allocator_lock);
+    __attribute__((unused)) int result = mutex_acquire(&code_allocator_lock);
     gc_assert(result);
     struct code *code =
         (void*)lisp_alloc(nbytes >= LARGE_OBJECT_SIZE, code_region, nbytes, PAGE_TYPE_CODE, th);
@@ -5286,7 +5286,7 @@ lispobj AMD64_SYSV_ABI alloc_code_object(unsigned total_words, unsigned boxed)
 NO_SANITIZE_MEMORY lispobj AMD64_SYSV_ABI alloc_funinstance(sword_t nbytes)
 {
     struct thread *th = get_sb_vm_thread();
-    int result = mutex_acquire(&code_allocator_lock);
+    __attribute__((unused)) int result = mutex_acquire(&code_allocator_lock);
     gc_assert(result);
     void* mem = lisp_alloc(0, code_region, nbytes, PAGE_TYPE_CODE, th);
     result = mutex_release(&code_allocator_lock);
@@ -5735,7 +5735,11 @@ gc_and_save(char *filename, boolean prepend_runtime, boolean purify,
             boolean save_runtime_options, boolean compressed,
             int compression_level, int application_type)
 {
-#if defined LISP_FEATURE_SPARC && defined LISP_FEATURE_LINUX
+    // FIXME: Instead of disabling purify for static space relocation,
+    // we should make r/o space read-only after fixing up pointers to
+    // static space instead.
+#if ((defined LISP_FEATURE_SPARC && defined LISP_FEATURE_LINUX) || \
+     (defined LISP_FEATURE_RELOCATABLE_STATIC_SPACE))
     /* OS says it'll give you the memory where you want, then it says
      * it won't map over it from the core file.  That's news to me.
      * Fragment of output from 'strace -e mmap2 src/runtime/sbcl --core output/sbcl.core':

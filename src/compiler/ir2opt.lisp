@@ -1047,11 +1047,14 @@
     (let (vops
           stop
           null
-          (value (tn-ref-tn (vop-args vop))))
+          (value (tn-ref-tn (vop-args vop)))
+          zero-extend)
       (labels ((good-vop-p (vop)
                  (and (singleton-p (ir2block-predecessors (vop-block vop)))
                       (or (getf sb-vm::*other-pointer-type-vops* (vop-name vop))
-                          (eq (vop-name vop) '%other-pointer-subtype-p))
+                          (eq (vop-name vop) '%other-pointer-subtype-p)
+                          (and (eq (vop-name vop) '%other-pointer-widetag)
+                               (setf zero-extend t)))
                       (eq (tn-ref-tn (vop-args vop)) value)))
                (chain (vop &optional (collect t))
                  (let ((next (branch-destination vop nil)))
@@ -1090,7 +1093,8 @@
                                  vop
                                  (list (ir2-block-label stop)
                                        (and null
-                                            (ir2-block-label (vop-block null)))))
+                                            (ir2-block-label (vop-block null)))
+                                       #+x86-64 zero-extend))
             (update-block-succ block
                                (cons stop
                                      (ir2block-successors block)))
@@ -1102,18 +1106,25 @@
                                    (third info)
                                    (getf sb-vm::*other-pointer-type-vops* (vop-name vop)))
                     do
-                    (let ((next (vop-next vop)))
-                      (when (and next
-                                 (eq (vop-name next) 'branch-if))
-                        (setf info (vop-codegen-info next))
-                        (delete-vop next))
-                      (emit-and-insert-vop (vop-node vop)
-                                           (vop-block vop)
-                                           test-vop
-                                           (reference-tn widetag nil)
-                                           nil
-                                           vop
-                                           (list (first info) (second info) tags)))
+                    (if (eq (vop-name vop) '%other-pointer-widetag)
+                        (emit-and-insert-vop (vop-node vop)
+                                             (vop-block vop)
+                                             (template-or-lose 'move)
+                                             (reference-tn widetag nil)
+                                             (reference-tn (tn-ref-tn (vop-results vop )) t)
+                                             vop)
+                        (let ((next (vop-next vop)))
+                          (when (and next
+                                     (eq (vop-name next) 'branch-if))
+                            (setf info (vop-codegen-info next))
+                            (delete-vop next))
+                          (emit-and-insert-vop (vop-node vop)
+                                               (vop-block vop)
+                                               test-vop
+                                               (reference-tn widetag nil)
+                                               nil
+                                               vop
+                                               (list (first info) (second info) tags))))
                     (delete-vop vop)))))))
     nil)
 
@@ -1250,6 +1261,42 @@
           (delete-vop return))
         nil))))
 
+;; Try to combine consecutive uses of %INSTANCE-SET. This can't be
+;; done prior to selecting representations because
+;; SELECT-REPRESENTATIONS might insert some things like
+;; MOVE-FROM-DOUBLE which makes the "consecutive" vops no longer
+;; consecutive.
+;; It seems like this should also supplant the #+arm64 hack in GENERATE-CODE.
+(when-vop-existsp (:named sb-vm::instance-set-multiple)
+  (defoptimizer (vop-optimize sb-vm::instance-index-set select-representations) (vop)
+    (let ((instance (tn-ref-tn (vop-args vop)))
+          (this vop)
+          (pairs))
+      (loop
+       (let ((index (tn-ref-tn (tn-ref-across (vop-args this)))))
+         (unless (constant-tn-p index) (return))
+         (push (cons (tn-value index) (tn-ref-tn (sb-vm::vop-nth-arg 2 this)))
+               pairs))
+       (let ((next (vop-next this)))
+         (unless (and next
+                      (eq (vop-name next) 'sb-vm::instance-index-set)
+                      (eq (tn-ref-tn (vop-args next)) instance))
+           (return))
+         (setq this next)))
+      (when (cdr pairs)                 ; if at least 2
+        (setq pairs (nreverse pairs))
+        (let ((new (emit-and-insert-vop
+                    (vop-node vop) (vop-block vop)
+                    (template-or-lose 'sb-vm::instance-set-multiple)
+                    (reference-tn-list (cons instance (mapcar #'cdr pairs)) nil)
+                    nil vop (list (mapcar #'car pairs)))))
+          (loop (let ((next (vop-next vop)))
+                  (delete-vop vop)
+                  (pop pairs)
+                  (setq vop next))
+                (unless pairs (return)))
+          new)))))
+
 (defun very-temporary-p (tn)
   (let ((writes (tn-writes tn))
         (reads (tn-reads tn)))
@@ -1317,52 +1364,6 @@
                                 (and without-stage
                                      (funcall it vop))))
                           (vop-next vop)))))))
-
-(defun merge-instance-set-vops (vop)
-  (let ((instance (tn-ref-tn (vop-args vop)))
-        (this vop)
-        (pairs))
-    (loop
-       (let ((index (tn-ref-tn (tn-ref-across (vop-args this)))))
-         (unless (constant-tn-p index) (return))
-         (push (cons (tn-value index) (tn-ref-tn (sb-vm::vop-nth-arg 2 this)))
-               pairs))
-       (let ((next (vop-next this)))
-         (unless (and next
-                      (eq (vop-name next) 'sb-vm::instance-index-set)
-                      (eq (tn-ref-tn (vop-args next)) instance))
-           (return))
-         (setq this next)))
-    (unless (cdr pairs) ; if at least 2
-      (return-from merge-instance-set-vops nil))
-    (setq pairs (nreverse pairs))
-    (let ((new (emit-and-insert-vop
-                (vop-node vop) (vop-block vop)
-                (template-or-lose 'sb-vm::instance-set-multiple)
-                (reference-tn-list (cons instance (mapcar #'cdr pairs)) nil)
-                nil vop (list (mapcar #'car pairs)))))
-      (loop (let ((next (vop-next vop)))
-              (delete-vop vop)
-              (pop pairs)
-              (setq vop next))
-            (unless pairs (return)))
-      new)))
-
-(defun ir2-optimize-stores (component)
-  ;; This runs after representation selection. It's the same as RUN-VOP-OPTIMIZERS,
-  ;; but with hardcoded vop names and function to call.
-  ;; It seems like this should also supplant the #+arm64 hack in GENERATE-CODE.
-  (do-ir2-blocks (block component)
-    (let ((vop (ir2-block-start-vop block)))
-      (loop (unless vop (return))
-            (let ((optimizer
-                   (case (vop-name vop)
-                     (sb-vm::instance-index-set
-                      (when (gethash 'sb-vm::instance-set-multiple
-                                     *backend-parsed-vops*)
-                        'merge-instance-set-vops)))))
-              (setq vop (or (awhen optimizer (funcall it vop))
-                            (vop-next vop))))))))
 
 ;;; These are the acceptable vops in a sequence that can be brought together
 ;;; under one pseudo-atomic invocation. In general any vop that does not
@@ -1475,6 +1476,91 @@
             ;; As long as we don't re-process an allocation vop, all it well.
             (setq vop (vop-next vop)))))))
 
+;;; If a constant is already loaded into a register use that register.
+(defun optimize-constant-loads (component)
+  (let* ((register-sb (sb-or-lose 'sb-vm::registers))
+         (loaded-constants
+           (make-array (sb-size register-sb)
+                       :initial-element nil)))
+    (do-ir2-blocks (block component)
+      (fill loaded-constants nil)
+      (do ((vop (ir2-block-start-vop block) (vop-next vop)))
+          ((null vop))
+        (labels ((register-p (tn)
+                   (and (tn-p tn)
+                        (not (eq (tn-kind tn) :unused))
+                        (eq (sc-sb (tn-sc tn)) register-sb)))
+                 (constant-eql-p (a b)
+                   (or (eq a b)
+                       (and (eq (sc-name (tn-sc a)) 'constant)
+                            (eq (tn-sc a) (tn-sc b))
+                            (eql (tn-offset a) (tn-offset b)))))
+                 (remove-constant (tn)
+                   (when (register-p tn)
+                     (setf (svref loaded-constants (tn-offset tn)) nil)))
+                 (remove-written-tns ()
+                   (cond ((memq (vop-info-save-p (vop-info vop))
+                                '(t :force-to-stack))
+                          (fill loaded-constants nil))
+                         (t
+                          (do ((ref (vop-results vop) (tn-ref-across ref)))
+                              ((null ref))
+                            (remove-constant (tn-ref-tn ref))
+                            (remove-constant (tn-ref-load-tn ref)))
+                          (do ((ref (vop-temps vop) (tn-ref-across ref)))
+                              ((null ref))
+                            (remove-constant (tn-ref-tn ref)))
+                          (do ((ref (vop-args vop) (tn-ref-across ref)))
+                              ((null ref))
+                            (remove-constant (tn-ref-load-tn ref))))))
+                 (compatible-scs-p (a b)
+                   (or (eql a b)
+                       (and (eq (sc-name a) 'sb-vm::control-stack)
+                            (eq (sc-name b) 'sb-vm::descriptor-reg))
+                       (and (eq (sc-name b) 'sb-vm::control-stack)
+                            (eq (sc-name a) 'sb-vm::descriptor-reg))))
+                 (find-constant-tn (constant sc)
+                   (loop for (saved-constant . tn) across loaded-constants
+                         when (and saved-constant
+                                   (constant-eql-p saved-constant constant)
+                                   (compatible-scs-p (tn-sc tn) sc))
+                         return tn)))
+          (case (vop-name vop)
+            ((move sb-vm::move-arg)
+             (let* ((args (vop-args vop))
+                    (results (vop-results vop))
+                    (x (tn-ref-tn args))
+                    (x-load-tn (tn-ref-load-tn args))
+                    (y (tn-ref-tn results))
+                    constant)
+               (cond ((or (eq (sc-name (tn-sc x)) 'null)
+                          (not (eq (tn-kind x) :constant)))
+                      (remove-written-tns))
+                     ((setf constant (find-constant-tn x (tn-sc y)))
+                      (when (register-p y)
+                        (setf (svref loaded-constants (tn-offset y))
+                              (cons x y)))
+                      ;; XOR is more compact on x86oids and many
+                      ;; RISCs have a zero register
+                      (unless (and (constant-p (tn-leaf x))
+                                   (eql (tn-value x) 0)
+                                   (register-p y))
+                        (change-tn-ref-tn args constant)
+                        (setf (tn-ref-load-tn args) nil)))
+                     ((register-p y)
+                      (setf (svref loaded-constants (tn-offset y))
+                            (cons x y)))
+                     ((and x-load-tn
+                           (or (not (tn-ref-load-tn results))
+                               (location= (tn-ref-load-tn results)
+                                          x-load-tn)))
+                      (setf (svref loaded-constants (tn-offset x-load-tn))
+                            (cons x x-load-tn)))
+                     (t
+                      (remove-written-tns)))))
+            (t
+             (remove-written-tns))))))))
+
 (defun ir2-optimize (component &optional stage)
   (let ((*2block-info* (make-hash-table :test #'eq)))
     (initialize-ir2-blocks-flow-info component)
@@ -1489,13 +1575,7 @@
        ;; Give the optimizers a second opportunity to alter newly inserted vops
        ;; by looking for patterns that have a shorter expression as a single vop.
        (run-vop-optimizers component stage t)
-       (delete-unused-ir2-blocks component)
-       ;; Try to combine consecutive uses of %INSTANCE-SET.
-       ;; This can't be done prior to selecting representations
-       ;; because SELECT-REPRESENTATIONS might insert some
-       ;; things like MOVE-FROM-DOUBLE which makes the
-       ;; "consecutive" vops no longer consecutive.
-       (ir2-optimize-stores component))
+       (delete-unused-ir2-blocks component))
       (t
        (when (and *compiler-trace-output*
                   (member :pre-ir2-optimize *compile-trace-targets*))

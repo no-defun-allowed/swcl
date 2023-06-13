@@ -384,7 +384,10 @@ during backtrace.
   ;; regardless of whether the object being tested is known to be a symbol.
   ;; Accessing the hash requires masking off bits to yield a fixnum result,
   ;; all the more so if the object is any random type.
+  #-relocatable-static-space
   (hash :set-trans %set-symbol-hash)
+  #+relocatable-static-space
+  unused
   (value :init :unbound
          :set-trans %set-symbol-global-value
          :set-known ())
@@ -412,6 +415,8 @@ during backtrace.
         :type (or instance list)
         :init :null)
   (name :init :arg #-compact-symbol :ref-trans #-compact-symbol symbol-name)
+  #+relocatable-static-space
+  (hash :set-trans %set-symbol-hash)
   #-compact-symbol
   (package-id :type index ; actually 16 bits. (Could go in the header)
               :ref-trans symbol-package-id
@@ -499,7 +504,16 @@ during backtrace.
   (assign-header-slot-indices))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
-(defconstant histogram-small-bins 32)) ; for consing size histogram
+  ;; allocator histogram capacity
+  (defconstant n-histogram-bins-small 32)
+  (defconstant n-histogram-bins-large 32))
+;;; the #+allocation-size-histogram has an exact count of objects allocated
+;;; for all sizes up to (* cons-size n-word-bytes n-histogram-bins-small).
+;;; Larger allocations are grouped by the binary log of the size.
+;;; It seems that 99.5% of all allocations are less than the small bucket limit,
+;;; making the histogram exact except for the tail.
+(defconstant first-large-histogram-bin-log2size
+  (integer-length (* n-histogram-bins-small cons-size n-word-bytes)))
 
 ;;; this isn't actually a lisp object at all, it's a c structure that lives
 ;;; in c-land.  However, we need sight of so many parts of it from Lisp that
@@ -610,8 +624,11 @@ during backtrace.
   (et-allocator-mutex-acq) ; elapsed times
   (et-find-freeish-page)
   (et-bzeroing)
-  (obj-size-histo :c-type "size_histogram"
-                  :length #.(+ histogram-small-bins n-word-bits))
+  (allocator-histogram :c-type "size_histogram"
+                       ;; small bins store just a count
+                       ;; large bins store a count and size
+                       :length #.(+ (* 2 n-histogram-bins-large)
+                                    n-histogram-bins-small))
 
   ;; The *current-thread* MUST be the last slot in the C thread structure.
   ;; It it the only slot that needs to be noticed by the garbage collector.
@@ -664,25 +681,26 @@ during backtrace.
 
 ) ; end PROGN
 
+;;; The offset of NIL in static space, including the tag.
+(defconstant nil-value-offset
+  (+ ;; Make space for the different regions, if they exist.
+     ;; If you change this, then also change zero_all_free_ranges() in
+     ;; gencgc.
+     #+(and gencgc (not sb-thread) (not 64-bit))
+     (* 10 n-word-bytes)
+     ;; This offset of #x100 has to do with some edge cases where a vop
+     ;; might treat UNBOUND-MARKER as a pointer. So it has an address
+     ;; that is somewhere near NIL which makes it sort of "work"
+     ;; to dereference it. See git rev f1a956a6a771 for more info.
+     #+64-bit #x100
+     ;; magic padding because of NIL's symbol/cons-like duality
+     (* 2 n-word-bytes)
+     list-pointer-lowtag))
+
 ;;; The definitions below want to use ALIGN-UP, which is not defined
 ;;; in time to put these in early-objdef, but it turns out that we don't
 ;;; need them there.
-(defconstant nil-value
-    (+ static-space-start
-       ;; mixed_region precedes NIL
-       ;; 10 is the number of words to reserve at the beginning of static space
-       ;; prior to the words of NIL.
-       ;; If you change this, then also change MAKE-NIL-DESCRIPTOR in genesis,
-       ;; and zero_all_free_ranges() in gencgc.
-       #+(and gencgc (not sb-thread) (not 64-bit)) (ash 10 word-shift)
-       ;; This offset of #x100 has to do with some edge cases where a vop
-       ;; might treat UNBOUND-MARKER as a pointer. So it has an address
-       ;; that is somewhere near NIL which makes it sort of "work"
-       ;; to dereference it. See git rev f1a956a6a771 for more info.
-       #+64-bit #x100
-       ;; magic padding because of NIL's symbol/cons-like duality
-       (* 2 n-word-bytes)
-       list-pointer-lowtag))
+(#-relocatable-static-space defconstant #+relocatable-static-space define-symbol-macro nil-value (+ static-space-start nil-value-offset))
 
 #+sb-xc-host (defun get-nil-taggedptr () nil-value)
 
@@ -711,8 +729,8 @@ during backtrace.
 ;;; nil-as-a-list. So subtract the lowtag and then go back one more word.
 ;;; This address is NOT double-lispword-aligned, but the scavenge method
 ;;; does not assert that.
-(defconstant nil-symbol-slots-start
-  (- nil-value list-pointer-lowtag n-word-bytes))
+(defconstant nil-symbol-slots-offset
+  (- nil-value-offset list-pointer-lowtag n-word-bytes))
 
 ;;; NIL as a symbol contains the usual number of words for a symbol,
 ;;; aligned to a double-lispword. This will NOT end at a double-lispword boundary.
@@ -723,8 +741,9 @@ during backtrace.
 ;;; count because of the assertion in heap_scavenge that the scan ends as expected,
 ;;; and scavenge methods must return an even number because nothing can be smaller
 ;;; than 1 cons cell or not a multiple thereof.
-(defconstant nil-symbol-slots-end
-  (+ nil-symbol-slots-start (ash (align-up symbol-size 2) word-shift)))
+(defconstant nil-symbol-slots-end-offset
+  (+ nil-symbol-slots-offset
+     (ash (align-up symbol-size 2) word-shift)))
 
 ;;; This constant is the number of words to report that NIL consumes
 ;;; when Lisp asks for its primitive-object-size. So we say that it consumes
@@ -735,10 +754,11 @@ during backtrace.
 ;;; Basically skip over MIXED-REGION (if it's in static space) and NIL.
 ;;; Or: go to NIL's header word, subtract 1 word, and add in the physical
 ;;; size of NIL in bytes that we report for primitive-object-size.
-(defconstant static-space-objects-start
-  (+ nil-symbol-slots-start (ash (1- sizeof-nil-in-words) word-shift)))
+(defconstant static-space-objects-offset
+  (+ nil-symbol-slots-offset
+     (ash (1- sizeof-nil-in-words) word-shift)))
 
-(defconstant lockfree-list-tail-value
-  (+ static-space-objects-start
+(defconstant lockfree-list-tail-value-offset
+  (+ static-space-objects-offset
      (* (length +static-symbols+) (ash (align-up symbol-size 2) word-shift))
      instance-pointer-lowtag))

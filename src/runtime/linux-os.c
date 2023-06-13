@@ -24,7 +24,6 @@
 #include <sys/param.h>
 #include <sys/file.h>
 #include "sbcl.h"
-#include "./signal.h"
 #include "os.h"
 #include "arch.h"
 #include "globals.h"
@@ -32,7 +31,6 @@
 #include "interr.h"
 #include "lispregs.h"
 #include "runtime.h"
-#include "genesis/cons.h"
 #include "genesis/static-symbols.h"
 #include "genesis/fdefn.h"
 
@@ -225,23 +223,9 @@ futex_wait(int *lock_word, int oldval, long sec, unsigned long usec)
     struct mutex* m = (void*)((char*)lock_word - offsetof(struct mutex,state));
     char *name = m->name != NIL ? (char*)VECTOR(m->name)->data : "(unnamed)";
 #endif
-    if (sec<0) { // unbounded wait
+  if (sec<0) {
       lisp_mutex_event1("start futex wait", name);
-      // a mutex is profiled if its %NAME is a cons. %NAME is 1 word past the lock_word
-      lispobj name = ((uword_t*)lock_word)[1];
-      if (listp(name) && name != NIL && fixnump(CONS(name)->cdr)) {
-            struct timespec start_time, end_time;
-            clock_gettime(CLOCK_MONOTONIC, &start_time);
-            t = sys_futex(lock_word, futex_wait_op(), oldval, 0);
-            clock_gettime(CLOCK_MONOTONIC, &end_time);
-            // if my calculation is correct, this won't overflow for 146 years
-            // (most-positive-fixnum / nanoseconds-per-year)
-            long delta = (end_time.tv_nsec - start_time.tv_nsec)
-                         + (end_time.tv_sec - start_time.tv_sec) * 1000000000;
-            __sync_fetch_and_add(&CONS(name)->cdr, make_fixnum(delta));
-      } else {
-            t = sys_futex(lock_word, futex_wait_op(), oldval, 0);
-      }
+      t = sys_futex(lock_word, futex_wait_op(), oldval, 0);
   }
   else {
       timeout.tv_sec = sec;
@@ -291,6 +275,7 @@ void os_init()
 # define ALLOW_PERSONALITY_CHANGE 0
 #endif
 
+extern char **environ;
 int os_preinit(char *argv[], char *envp[])
 {
 #ifdef LISP_FEATURE_RISCV
@@ -362,6 +347,7 @@ int os_preinit(char *argv[], char *envp[])
             char runtime[PATH_MAX+1];
             int i = readlink("/proc/self/exe", runtime, PATH_MAX);
             if (i != -1) {
+                // Why is this needed? env surely was initialized from environ wasn't it?
                 environ = envp;
                 setenv("SBCL_IS_RESTARTING", "T", 1);
                 runtime[i] = '\0';

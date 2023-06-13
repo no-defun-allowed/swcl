@@ -6,10 +6,6 @@
 (defvar *compile-files-p* nil)
 (load (merge-pathnames "src/cold/warm.lisp" *load-pathname*))
 
-(with-open-file (stream "output/asm-routines.txt" :direction :output
-                        :if-does-not-exist :create :if-exists :supersede)
-  (sb-c:dis sb-fasl:*assembler-routines* stream))
-
 ;; sb-xref-for-internals is actively harmful to tree-shaking.
 ;; Remove some symbols to make the hide-packages test pass.
 #+sb-xref-for-internals
@@ -76,7 +72,7 @@
            ;; I would argue that this should not be exposed,
            ;; but I would also anticipate blowback from removing it.
            :CHENEYGC :GENCGC ; GC: pick one and only one
-           :ARENA-ALLOCATOR
+           :ARENA-ALLOCATOR :ALLOCATION-SIZE-HISTOGRAM
            ;; Can't use s-l-a-d :compression safely without it
            :SB-CORE-COMPRESSION
            ;; Features that are also in *FEATURES-POTENTIALLY-AFFECTING-FASL-FORMAT*

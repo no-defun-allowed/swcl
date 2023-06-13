@@ -237,30 +237,33 @@
          ;; deemed unreachable?
          (and
           (almost-immediately-used-p lvar cast)
-
           (cond ((and (lvar-fun-is (combination-fun dest)
                                    '(hairy-data-vector-set/check-bounds
                                      hairy-data-vector-ref/check-bounds
                                      hairy-data-vector-ref
                                      hairy-data-vector-set))
-                      (eql (car (combination-args dest))
-                           lvar))
-                 ;; These functions work on all arrays, but the error
-                 ;; message is about vectors, which is used more frequently.
-                 (csubtypep (specifier-type 'vector)
-                            (single-value-type (cast-type-to-check cast))))
+                      (eq (car (combination-args dest)) lvar)
+                      (type= (specifier-type 'vector)
+                             (single-value-type (cast-type-to-check cast))))
+                 (change-full-call dest
+                                   (getf '(hairy-data-vector-set/check-bounds vector-hairy-data-vector-set/check-bounds
+                                           hairy-data-vector-ref/check-bounds vector-hairy-data-vector-ref/check-bounds
+                                           hairy-data-vector-ref vector-hairy-data-vector-ref
+                                           hairy-data-vector-set vector-hairy-data-vector-set)
+                                         (lvar-fun-name (combination-fun dest) t))))
                 #+(or arm64 x86-64)
-                ((lvar-fun-is (combination-fun dest)
-                              '(values-list)))
+                ((lvar-fun-is (combination-fun dest) '(values-list)))
                 ;; Not great
-                ((lvar-fun-is (combination-fun dest)
-                              '(%%primitive))
+                ((lvar-fun-is (combination-fun dest) '(%%primitive))
                  (destructuring-bind (vop &rest args) (combination-args dest)
                    (and (constant-lvar-p vop)
-                        (memq (vop-info-name (lvar-value vop)) '(sb-vm::overflow+t
-                                                                 sb-vm::overflow-t
-                                                                 sb-vm::overflow*t))
-                        (eq lvar (car args)))))
+                        (let ((name (vop-info-name (lvar-value vop))))
+                          (or (and (memq name '(sb-vm::overflow+t
+                                                sb-vm::overflow-t
+                                                sb-vm::overflow*t))
+                                   (eq lvar (car args)))
+                              (and (memq name '(sb-vm::overflow-t-y))
+                                   (eq lvar (cadr args))))))))
                 (t
                  (values-subtypep (lvar-externally-checkable-type lvar)
                                   (cast-type-to-check cast))))))))
