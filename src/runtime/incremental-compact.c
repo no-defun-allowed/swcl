@@ -57,16 +57,22 @@ static boolean should_compact(char *why) {
   float ratio = (float)(pages * GENCGC_PAGE_BYTES) / bytes;
   if (ratio > page_overhead_threshold)
     fprintf(stderr, "%s, ratio = %.2f\n", why, ratio);
+  else
+    fprintf(stderr, "ratio = %.2f\n", ratio);
   return ratio > page_overhead_threshold;
 }
 
 static void pick_targets() {
   uword_t bytes_moving = 0, pages_moving = 0;
   page_index_t p = page_table_pages - 1;
+  /* Ideally we'd like to avoid selecting pinned pages here, but the phase
+   * ordering is tricky. We need to know (an over-estimation of) the pages
+   * to move for mark() to log, we only find out which pages are pinned
+   * while marking from the roots. */
   while (bytes_moving < bytes_to_copy) {
     if (!page_single_obj_p(p) &&
         !page_free_p(p) &&
-        !gc_page_pins[p] &&
+        page_table[p].gen < PSEUDO_STATIC_GENERATION &&
         (float)(page_bytes_used(p)) / GENCGC_PAGE_BYTES < page_utilisation_threshold) {
       bytes_moving += page_bytes_used(p);
       pages_moving++;
@@ -116,14 +122,15 @@ void commit_thread_local_remset() {
  * We could figure out the start of an object from its slot, but I'd
  * prefer not to.
  */
-void log_relevant_slot(lispobj *where, lispobj *source_object, enum source source_type) {
+void log_relevant_slot(lispobj *slot, lispobj *source, enum source source_type) {
   if (!remset_block) remset_block = suballoc_allocate(&remset_suballocator);
   if (remset_block->count == QBLOCK_CAPACITY) {
     commit_thread_local_remset();
     remset_block = suballoc_allocate(&remset_suballocator);
   }
-  remset_block->elements[remset_block->count++] = tag_source(where, source_type);
-  remset_block->elements[remset_block->count++] = (lispobj)source_object;
+  remset_block->elements[remset_block->count] = tag_source(slot, source_type);
+  remset_block->elements[remset_block->count+1] = (lispobj)source;
+  remset_block->count += 2;
 }
 
 /* Compacting */
@@ -135,7 +142,7 @@ static void move_objects() {
    * But early experiements in parallel copying suggested we're bottlenecked
    * by refilling TLABs too. */
   for (page_index_t p = 0; p < page_table_pages; p++)
-    if (target_pages[p]) {
+    if (target_pages[p] & !gc_page_pins[p]) {
       lispobj *end = (lispobj*)page_address(p + 1);
       /* Move every object in this page in the right generation. */
       for (lispobj *where = next_object((lispobj*)page_address(p), 0, end);
@@ -155,16 +162,21 @@ static void move_objects() {
           line_bytemap[l] = 0;
           decrement++;
         }
-      set_page_bytes_used(p, page_bytes_used(p - LINE_SIZE * decrement));
+      set_page_bytes_used(p, page_bytes_used(p) - LINE_SIZE * decrement);
       generations[target_generation].bytes_allocated -= LINE_SIZE * decrement;
       bytes_allocated -= LINE_SIZE * decrement;
+      if (page_words_used(p) == 0) {
+        page_table[p].type = FREE_PAGE_FLAG;
+        page_table[p].scan_start_offset_ = 0;
+      }
     }
 }
 
 /* Fix up the address of a slot, when the object containing the slot
  * may have been forwarded. */
 static inline lispobj *forward_slot(lispobj *slot, lispobj *source) {
-  return (lispobj*)(follow_fp((lispobj)source) + ((lispobj)slot - (lispobj)source));
+  lispobj *forwarded_source = native_pointer(follow_fp((lispobj)source));
+  return (lispobj*)((lispobj)forwarded_source + ((lispobj)slot - (lispobj)source));
 }
 
 static void fix_slot(lispobj *slot, lispobj *source, enum source source_type) {
@@ -174,8 +186,12 @@ static void fix_slot(lispobj *slot, lispobj *source, enum source source_type) {
     *slot = follow_maybe_fp(*slot);
     if (widetag_of(source) == SIMPLE_VECTOR_WIDETAG &&
         vector_flagp(*source, VectorHashing)) {
-      /* Tell any hash tables with address-based hashes to rehash. */
+      /* Tell any hash tables to rehash. This causes unnecessary rehashing,
+       * but we compact infrequently and incrementally, so it shouldn't
+       * hurt much. */
       /* TODO: should "rehash a hash table" be part of the source type? */
+      struct vector* kv_vector = (struct vector*)source;
+      KV_PAIRS_REHASH(kv_vector->data) |= make_fixnum(1);
     }
     break;
   case SOURCE_ZERO_TAG:
@@ -207,38 +223,30 @@ static void fix_slot(lispobj *slot, lispobj *source, enum source source_type) {
   }
 }
 
-static void count_pages() {
-  uword_t bytes = 0, objects = 0, tags[16] = { 0 };
-  for (page_index_t p = 0; p < page_table_pages; p++)
-    if (target_pages[p]) {
-      lispobj *limit = (lispobj*)page_address(p + 1);
-      for (lispobj *where = next_object((lispobj*)page_address(p), 0, limit);
-           where;
-           where = next_object(where, object_size(where), limit))
-        if (gc_gen_of((lispobj)where, 0) <= target_generation) {
-          bytes += N_WORD_BYTES * object_size(where);
-          objects++;
-        }
+static void fix_slots() {
+  int c = 0;
+  for (; remset; remset = remset->next) {
+    for (int n = 0; n < remset->count; n += 2) {
+      lispobj *slot = lispobj_from_tagged(remset->elements[n]),
+              *source = (lispobj*)remset->elements[n + 1];
+      enum source source_type = source_from_tagged(remset->elements[n]);
+      fprintf(stderr, "slot=%p source=%p type=%d\n", slot, source, source_type);
+      fix_slot(slot, source, source_type);
+      c++;
     }
-  uword_t pointers = 0;
-  for (struct Qblock *b = remset; b; b = b->next) {
-    pointers += b->count / 2;
-    for (int i = 0; i < b->count; i++)
-      tags[b->elements[i] & 7]++;
   }
-  fprintf(stderr, "gen %d: Saw %ld pointers, copied %ld bytes %ld objects, %.1f pointers/object\n",
-          target_generation, pointers, bytes, objects, objects ? (float)pointers/objects : 0);
-  for (uword_t tag = 0; tag < 16; tag++)
-    if (tags[tag])
-      fprintf(stderr, "tag #%ld on %ld pointers\n", tag, tags[tag]);
+  fprintf(stderr, "Fixed %d slots\n", c);
 }
 
 void run_compaction() {
   if (compacting) {
     /* Check again, in case fragmentation somehow improves.
      * Not likely, but it's a cheap test which avoids effort. */
-    if (should_compact("Performing compaction"))
-      count_pages();
+    if (should_compact("Performing compaction")) {
+      move_objects();
+      fix_slots();
+      should_compact("I just moved, but still");
+    }
     memset(target_pages, 0, page_table_pages);
     remset = NULL;
     suballoc_release(&remset_suballocator);

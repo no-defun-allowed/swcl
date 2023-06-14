@@ -140,7 +140,13 @@ static inline void scav1(lispobj* addr, lispobj object)
      * Therefore, when the object is in from_space, we incur one fewer branch */
 
     page_index_t page = find_page_index((void*)object);
+#ifndef LISP_FEATURE_MARK_REGION_GC
     if (page_table[page].gen == from_space) {
+#else
+      /* The incremental compactor only calls scavenge (then scav1) with
+       * pointers of the right generation. */
+      {
+#endif
             if (forwarding_pointer_p(native_pointer(object)))
                 *addr = forwarding_pointer_value(native_pointer(object));
             else if (!pinned_p(object, page))
@@ -2779,7 +2785,11 @@ void scan_finalizers()
             // is a GC-use field. In 64-bit, that field fits in the header.
             memset(&weakptr->next, 0, 2*N_WORD_BYTES); // Will crash without this
 #endif
+#ifdef LISP_FEATURE_MARK_REGION_GC
+            set_allocation_bit_mark(weakptr);
+#else
             if (!compacting_p()) gc_mark_obj(make_lispobj(weakptr, OTHER_POINTER_LOWTAG));
+#endif
             push_in_lockfree_list(SYMBOL(FINALIZER_REHASHLIST),
                                   this, make_lispobj(weakptr, OTHER_POINTER_LOWTAG),
                                   this->data);

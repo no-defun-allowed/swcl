@@ -860,7 +860,6 @@ static void __attribute__((noinline)) sweep_pages() {
       next_free_page = p + 1;
     }
   }
-  reset_pinned_pages();
 }
 
 static void __attribute__((noinline)) sweep() {
@@ -1148,14 +1147,14 @@ void mr_pre_gc(generation_index_t generation) {
           generations[generation].bytes_allocated >> 20,
           bytes_allocated >> 20);
 #endif
-#ifdef COMPACT
-  METER(consider, consider_compaction(generation));
-#endif
   generation_to_collect = generation;
   reset_statistics();
 }
 
 void mr_collect_garbage(boolean raise) {
+#ifdef COMPACT
+  METER(consider, consider_compaction(generation_to_collect));
+#endif
   if (generation_to_collect != PSEUDO_STATIC_GENERATION) {
     METER(scavenge, mr_scavenge_root_gens());
   }
@@ -1182,6 +1181,7 @@ void mr_collect_garbage(boolean raise) {
 #endif
   if (gencgc_verbose) mr_print_meters();
   memset(allow_free_pages, 0, sizeof(allow_free_pages));
+  reset_pinned_pages();
 }
 
 void zero_all_free_ranges() {
