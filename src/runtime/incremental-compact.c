@@ -8,13 +8,16 @@
 #include "gc-private.h"
 #include "gencgc-internal.h"
 #include "gencgc-private.h"
+#include "forwarding-ptr.h"
 #include "queue.h"
 #include "tiny-lock.h"
 #include "queue-suballocator.h"
 #include "incremental-compact.h"
 #include "walk-heap.h"
 
+#include "genesis/closure.h"
 #include "genesis/gc-tables.h"
+#include "genesis/symbol.h"
 
 /* Maximum ratio between pages used and pages "needed" to compact. */
 float page_overhead_threshold = 1.3;
@@ -104,6 +107,15 @@ void commit_thread_local_remset() {
   }
 }
 
+/* We need to know which object a slot resides in for two reasons:
+ * - If the object has been moved, we need to adjust the location of
+ *   the slot to update accordingly. We assume the slot does not move
+ *   w.r.t the object, which seems fine to do.
+ * - We need to inform some hash tables that they need to be rehashed,
+ *   if we just invalidated some address-based hash.
+ * We could figure out the start of an object from its slot, but I'd
+ * prefer not to.
+ */
 void log_relevant_slot(lispobj *where, lispobj *source_object, enum source source_type) {
   if (!remset_block) remset_block = suballoc_allocate(&remset_suballocator);
   if (remset_block->count == QBLOCK_CAPACITY) {
@@ -116,9 +128,11 @@ void log_relevant_slot(lispobj *where, lispobj *source_object, enum source sourc
 
 /* Compacting */
 static void move_objects() {
-  /* Note that this function is very un-thread-safe; in theory you could
-   * parallelise copying, but we'd need to have copying synchronise correctly.
-   * And early experiements in parallel copying suggested we're bottlenecked
+  /* Note that this function is very un-thread-safe; list linearisation
+   * can cause a thread to copy any objects. But if it weren't for list
+   * linearisation, no synchronisation between threads mightn't be needed, as
+   * each thread would be confined to the pages it claimed.
+   * But early experiements in parallel copying suggested we're bottlenecked
    * by refilling TLABs too. */
   for (page_index_t p = 0; p < page_table_pages; p++)
     if (target_pages[p]) {
@@ -135,14 +149,62 @@ static void move_objects() {
         }
       }
       /* Free all lines we just copied from. */
+      uword_t decrement = 0;
       for_lines_in_page (l, p)
         if (DECODE_GEN(line_bytemap[l]) == target_generation) {
           line_bytemap[l] = 0;
-          set_page_bytes_used(p, page_bytes_used(p - LINE_SIZE));
-          generations[target_generation].bytes_allocated -= LINE_SIZE;
-          bytes_allocated -= LINE_SIZE;
+          decrement++;
         }
+      set_page_bytes_used(p, page_bytes_used(p - LINE_SIZE * decrement));
+      generations[target_generation].bytes_allocated -= LINE_SIZE * decrement;
+      bytes_allocated -= LINE_SIZE * decrement;
     }
+}
+
+/* Fix up the address of a slot, when the object containing the slot
+ * may have been forwarded. */
+static inline lispobj *forward_slot(lispobj *slot, lispobj *source) {
+  return (lispobj*)(follow_fp((lispobj)source) + ((lispobj)slot - (lispobj)source));
+}
+
+static void fix_slot(lispobj *slot, lispobj *source, enum source source_type) {
+  slot = forward_slot(slot, source);
+  switch (source_type) {
+  case SOURCE_NORMAL:
+    *slot = follow_maybe_fp(*slot);
+    if (widetag_of(source) == SIMPLE_VECTOR_WIDETAG &&
+        vector_flagp(*source, VectorHashing)) {
+      /* Tell any hash tables with address-based hashes to rehash. */
+      /* TODO: should "rehash a hash table" be part of the source type? */
+    }
+    break;
+  case SOURCE_ZERO_TAG:
+    /* follow_maybe_fp doesn't care what the tag is, just that it
+     * satisfies is_lisp_pointer. */
+    *slot = (lispobj)native_pointer(follow_maybe_fp(*slot | INSTANCE_POINTER_LOWTAG));
+    break;
+  case SOURCE_CLOSURE: {
+    /* SOURCE_CLOSURE can only be the source type of the taggedptr of
+     * a closure. */
+    struct closure *closure = (struct closure*)source;
+    closure->fun = fun_self_from_taggedptr(follow_fp(fun_taggedptr_from_self(closure->fun)));
+    break;
+  }
+  case SOURCE_SYMBOL_NAME: {
+    /* SOURCE_SYMBOL_NAME can only be the source type of the s->name
+     * slot. */
+    struct symbol *s = (struct symbol*)source;
+    set_symbol_name(s, follow_fp(decode_symbol_name(s->name)));
+    break;
+  }
+  case SOURCE_FDEFN_RAW: {
+    /* SOURCE_FDEFN_RAW can only be the source type of the fdefn->raw_addr
+     * slot. */
+    struct fdefn *f = (struct fdefn*)source;
+    lispobj obj = decode_fdefn_rawfun(f);
+    f->raw_addr += (sword_t)(follow_fp(obj) - obj);
+  }
+  }
 }
 
 static void count_pages() {

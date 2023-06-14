@@ -1166,7 +1166,7 @@ void mr_collect_garbage(boolean raise) {
   if (compacting) meters.compacts++;
   METER(compact, run_compaction());
 #endif
-  /* scan_finalizers check forwarding pointers, so we need to
+  /* scan_finalizers checks forwarding pointers, so we need to
    * ensure it is called after compaction. */
   scan_finalizers();
   if (raise) {

@@ -52,7 +52,7 @@ static void USING_LAYOUT(lispobj layout, lispobj* where, int nslots)
         lispobj next = node->_node_next;
         // ignore if 0
         if (fixnump(next) && next)
-            ACTION(next|INSTANCE_POINTER_LOWTAG, &node->_node_next, SOURCE_ZERO_INSTANCE_TAG);
+            ACTION(next|INSTANCE_POINTER_LOWTAG, &node->_node_next, SOURCE_ZERO_TAG);
     }
     struct bitmap bitmap = get_layout_bitmap(LAYOUT(layout));
     int i;
@@ -144,7 +144,7 @@ static void TRACE_NAME(lispobj* where)
             enum source source = SOURCE_NORMAL;
             if (where >= fdefns_start && where < fdefns_end) {
                 word |= OTHER_POINTER_LOWTAG;
-                source = SOURCE_ZERO_OTHER_TAG;
+                source = SOURCE_ZERO_TAG;
             }
             ACTION(word, where, source);
             ++where;
