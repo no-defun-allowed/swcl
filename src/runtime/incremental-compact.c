@@ -157,9 +157,11 @@ static void move_objects() {
       }
       /* Free all lines we just copied from. */
       uword_t decrement = 0;
+      char *allocation = (char*)allocation_bitmap;
       for_lines_in_page (l, p)
         if (DECODE_GEN(line_bytemap[l]) == target_generation) {
           line_bytemap[l] = 0;
+          allocation[l] = 0;
           decrement++;
         }
       set_page_bytes_used(p, page_bytes_used(p) - LINE_SIZE * decrement);
@@ -210,6 +212,10 @@ static void fix_slot(lispobj *slot, lispobj *source, enum source source_type) {
     /* SOURCE_SYMBOL_NAME can only be the source type of the s->name
      * slot. */
     struct symbol *s = (struct symbol*)source;
+    fprintf(stderr, "symbol name at %p: %lx -> %lx\n",
+            source,
+            decode_symbol_name(s->name),
+            follow_fp(decode_symbol_name(s->name)));
     set_symbol_name(s, follow_fp(decode_symbol_name(s->name)));
     break;
   }
@@ -230,12 +236,10 @@ static void fix_slots() {
       lispobj *slot = lispobj_from_tagged(remset->elements[n]),
               *source = (lispobj*)remset->elements[n + 1];
       enum source source_type = source_from_tagged(remset->elements[n]);
-      fprintf(stderr, "slot=%p source=%p type=%d\n", slot, source, source_type);
       fix_slot(slot, source, source_type);
       c++;
     }
   }
-  fprintf(stderr, "Fixed %d slots\n", c);
 }
 
 void run_compaction() {
@@ -245,6 +249,7 @@ void run_compaction() {
     if (should_compact("Performing compaction")) {
       move_objects();
       fix_slots();
+      gc_close_collector_regions(0);
       should_compact("I just moved, but still");
     }
     memset(target_pages, 0, page_table_pages);

@@ -12,6 +12,8 @@ lock_t failure_lock = LOCK_INITIALIZER;
 #define unlock() (void)(0)
 #endif
 
+#define ERROR_LIMIT 25
+
 static int
 is_in_stack_space(lispobj ptr)
 {
@@ -113,7 +115,7 @@ verify_pointer(lispobj thing, lispobj *where, struct verify_state *state)
     // boolean strict_containment = state->flags & VERIFY_FINAL;
 
 #define FAIL_IF(cond, why) \
-    if (cond) { if (++state->nerrors > 25) return 1; note_failure(thing,where,state,why); }
+    if (cond) { if (++state->nerrors >= ERROR_LIMIT) return 1; note_failure(thing,where,state,why); }
 
     if (!is_lisp_pointer(thing)) {
         FAIL_IF(!is_lisp_immediate(thing), "strange non-pointer");
@@ -523,6 +525,8 @@ int verify_heap(__attribute__((unused)) lispobj* cur_thread_approx_stackptr,
         if (verify((lispobj)th->binding_stack_start,
                    (lispobj*)get_binding_stack_pointer(th), &state,
                    VERIFYING_UNFORMATTED)) goto out;
+        if (verbose)
+            fprintf(stderr, " [thread TLS]");
         if (verify((lispobj)&th->lisp_thread,
                    (lispobj*)(SymbolValue(FREE_TLS_INDEX,0) + (char*)th), &state,
                    VERIFYING_UNFORMATTED))

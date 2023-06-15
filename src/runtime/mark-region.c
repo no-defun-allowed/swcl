@@ -1149,12 +1149,13 @@ void mr_pre_gc(generation_index_t generation) {
 #endif
   generation_to_collect = generation;
   reset_statistics();
+#ifdef COMPACT
+  if (generation != PSEUDO_STATIC_GENERATION)
+    METER(consider, consider_compaction(generation_to_collect));
+#endif
 }
 
 void mr_collect_garbage(boolean raise) {
-#ifdef COMPACT
-  METER(consider, consider_compaction(generation_to_collect));
-#endif
   if (generation_to_collect != PSEUDO_STATIC_GENERATION) {
     METER(scavenge, mr_scavenge_root_gens());
   }
@@ -1162,8 +1163,10 @@ void mr_collect_garbage(boolean raise) {
   METER(trace, trace_everything());
   METER(sweep, sweep());
 #ifdef COMPACT
-  if (compacting) meters.compacts++;
-  METER(compact, run_compaction());
+  if (compacting) {
+    meters.compacts++;
+    METER(compact, run_compaction());
+  }
 #endif
   /* scan_finalizers checks forwarding pointers, so we need to
    * ensure it is called after compaction. */
