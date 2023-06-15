@@ -979,10 +979,11 @@ static void watch_deferred(lispobj *where, uword_t start, uword_t end) {
   generation_index_t gen = dirty_generation_source;
   for (uword_t i = start; i < end; i++) {
     if (is_lisp_pointer(where[i])) {
+#ifdef COMPACT
       log_slot(where[i], where + i, where, SOURCE_NORMAL);
+#endif
       if (gc_gen_of(where[i], 0) < gen) {
         dirty = 1;
-        return;
       }
     }
   }
@@ -1262,7 +1263,7 @@ void find_references_to(lispobj something) {
  * numbers generation and occupancy. */
 void draw_page_table(int from, int to) {
   for (int i = from; i < to; i++) {
-    if (i % 50 == 0) fprintf(stderr, "\n%4d ", i);
+    if (i % 50 == 0) fprintf(stderr, "\n%6d ", i);
     fprintf(stderr,
             "\033[%c;9%cm%c%c%c\033[0m",
             (page_table[i].type & SINGLE_OBJECT_FLAG) ? '1' : '0',
