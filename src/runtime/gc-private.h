@@ -36,14 +36,6 @@ gc_general_alloc(struct alloc_region* region, sword_t nbytes, int page_type)
 #endif
     void *new_obj = region->free_pointer;
     void *new_free_pointer = (char*)new_obj + nbytes;
-    /* In #+mark-region-gc the allocator produces fresh lines, so
-     * we don't strictly need to set the allocation bit here. But
-     * otherwise we don't have (to care about?) fresh lines
-     * after GC. (I think cull_weak_hash_table_bucket produces
-     * fresh lines, but the function also sets mark bits, so it doesn't
-     * matter.) And note that compacting happens after sweeping, so
-     * we do need to set allocation bits and not mark bits here.
-     */
     lispobj *address;
     // Large objects will never fit in a region, so we automatically dtrt
     if (new_free_pointer < region->end_addr) {

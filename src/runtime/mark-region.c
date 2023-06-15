@@ -170,7 +170,7 @@ boolean try_allocate_small(sword_t nbytes, struct alloc_region *region,
        * bytes used here for each chunk; we have exclusive access
        * to the page and its state in the page table.. */
       for (line_index_t c = chunk_start; c < chunk_end; c++)
-        line_bytemap[c] = FRESHEN_GEN(0);
+        line_bytemap[c] = gc_active_p ? 0 : FRESHEN_GEN(0);
       return 1;
     }
     if (chunk_end == end) return 0;

@@ -213,10 +213,6 @@ static void fix_slot(lispobj *slot, lispobj *source, enum source source_type) {
     /* SOURCE_SYMBOL_NAME can only be the source type of the s->name
      * slot. */
     struct symbol *s = (struct symbol*)source;
-    fprintf(stderr, "symbol name at %p: %lx -> %lx\n",
-            source,
-            decode_symbol_name(s->name),
-            follow_fp(decode_symbol_name(s->name)));
     set_symbol_name(s, follow_fp(decode_symbol_name(s->name)));
     break;
   }
