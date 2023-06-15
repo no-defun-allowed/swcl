@@ -31,7 +31,7 @@ generation_index_t minimum_compact_gen = 1;
 static generation_index_t target_generation;
 /* A queue of interesting slots. */
 static struct Qblock *remset;
-static lock_t remset_lock;
+static lock_t remset_lock = LOCK_INITIALIZER;
 static struct suballocator remset_suballocator = SUBALLOCATOR_INITIALIZER("compaction remset");
 boolean compacting;
 unsigned char *target_pages;
@@ -134,6 +134,13 @@ void log_relevant_slot(lispobj *slot, lispobj *source, enum source source_type) 
 }
 
 /* Compacting */
+static void apply_pins() {
+  /* Now that we know which pages are pinned, we should update the targeted
+   * pages for compaction. */
+  for (page_index_t p = 0; p < page_table_pages; p++)
+    target_pages[p] &= !gc_page_pins[p];
+}
+
 static void move_objects() {
   /* Note that this function is very un-thread-safe; list linearisation
    * can cause a thread to copy any objects. But if it weren't for list
@@ -142,7 +149,7 @@ static void move_objects() {
    * But early experiements in parallel copying suggested we're bottlenecked
    * by refilling TLABs too. */
   for (page_index_t p = 0; p < page_table_pages; p++)
-    if (target_pages[p] & !gc_page_pins[p]) {
+    if (target_pages[p]) {
       lispobj *end = (lispobj*)page_address(p + 1);
       /* Move every object in this page in the right generation. */
       for (lispobj *where = next_object((lispobj*)page_address(p), 0, end);
@@ -244,9 +251,10 @@ void run_compaction() {
     /* Check again, in case fragmentation somehow improves.
      * Not likely, but it's a cheap test which avoids effort. */
     if (should_compact("Performing compaction")) {
+      apply_pins();
       move_objects();
-      fix_slots();
       gc_close_collector_regions(0);
+      fix_slots();
       should_compact("I just moved, but still");
     }
     memset(target_pages, 0, page_table_pages);
