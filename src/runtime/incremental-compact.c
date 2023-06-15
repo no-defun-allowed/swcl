@@ -183,6 +183,7 @@ static inline lispobj *forward_slot(lispobj *slot, lispobj *source) {
 
 static void fix_slot(lispobj *slot, lispobj *source, enum source source_type) {
   slot = forward_slot(slot, source);
+  source = native_pointer(follow_fp((lispobj)source));
   switch (source_type) {
   case SOURCE_NORMAL:
     *slot = follow_maybe_fp(*slot);
