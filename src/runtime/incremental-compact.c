@@ -100,7 +100,8 @@ void consider_compaction(generation_index_t gen) {
 static inline lispobj tag_source(lispobj *where, enum source s) { return (lispobj)where | (lispobj)s; }
 static inline enum source source_from_tagged(lispobj t) { return t & 7; }
 static inline lispobj *lispobj_from_tagged(lispobj t) { return (lispobj*)(t &~ 7); }
-
+/* Each tracing thread records sources into thread-local blocks, like they
+ * do with grey objects. */
 static _Thread_local struct Qblock *remset_block = NULL;
 
 void commit_thread_local_remset() {
@@ -123,8 +124,7 @@ void commit_thread_local_remset() {
  * prefer not to.
  */
 void log_relevant_slot(lispobj *slot, lispobj *source, enum source source_type) {
-  if (!remset_block) remset_block = suballoc_allocate(&remset_suballocator);
-  if (remset_block->count == QBLOCK_CAPACITY) {
+  if (!remset_block || remset_block->count == QBLOCK_CAPACITY) {
     commit_thread_local_remset();
     remset_block = suballoc_allocate(&remset_suballocator);
   }

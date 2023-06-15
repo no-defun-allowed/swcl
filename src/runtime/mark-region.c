@@ -191,6 +191,9 @@ boolean try_allocate_small_after_region(sword_t nbytes, struct alloc_region *reg
 /* We try not to allocate small objects from free pages, to reduce
  * fragmentation. Something like "wilderness preservation". */
 boolean allow_free_pages[16] = {0};
+void set_all_allow_free_pages(boolean value) {
+  for (int i = 0; i < 16; i++) allow_free_pages[i] = value;
+}
 
 /* try_allocate_small_from_pages updates the start pointer to after the
  * claimed page. */
@@ -929,7 +932,11 @@ void mr_preserve_ambiguous(uword_t address) {
  * Used for scanning thread-local storage for roots. */
 void mr_preserve_range(lispobj *from, sword_t nwords) {
   for (sword_t n = 0; n < nwords; n++) {
-    mark(from[n], from + n, SOURCE_NORMAL);
+    /* XXX: Somehow some TLS goes away and causes the
+     * compactor to segfault upon trying to fix the TLS slot.
+     * What gives? */
+    mr_preserve_ambiguous(from[n]);
+    //mark(from[n], from + n, SOURCE_NORMAL);
   }
 }
 
@@ -1184,7 +1191,7 @@ void mr_collect_garbage(boolean raise) {
           next_free_page, raise ? ", raised" : "");
 #endif
   if (gencgc_verbose) mr_print_meters();
-  memset(allow_free_pages, 0, sizeof(allow_free_pages));
+  set_all_allow_free_pages(0);
   reset_pinned_pages();
 }
 
