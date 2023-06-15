@@ -54,6 +54,7 @@
 #include "search.h"
 #include "murmur_hash.h"
 #include "mark-region.h"
+#include "incremental-compact.h"
 #include "walk-heap.h"
 
 #ifdef LISP_FEATURE_SPARC
@@ -1785,6 +1786,11 @@ cull_weak_hash_table_bucket(struct hash_table *hash_table,
                 cons->car = ((index << 14) | bucket) << N_FIXNUM_TAG_BITS;
             }
             cons->cdr = hash_table->smashed_cells;
+#ifdef LISP_FEATURE_MARK_REGION_GC
+            /* We just created a pointer that the incremental compactor
+             * doesn't know about yet, so maybe log it. */
+            log_slot(cons->cdr, &cons->cdr, (lispobj*)cons, SOURCE_NORMAL);
+#endif
             // Lisp code must atomically pop the list whereas this C code
             // always wins and does not need compare-and-swap.
             notice_pointer_store(hash_table, &hash_table->smashed_cells);
@@ -1898,6 +1904,11 @@ void cull_weak_hash_tables(int (*alivep[4])(lispobj,lispobj))
         hopscotch_reset(&weak_objects);
     // Close the region used when pushing into hash_table->smashed_cells
     ensure_region_closed(cons_region, PAGE_TYPE_CONS);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    /* cull_weak_hash_table_bucket may have logged some more pointers,
+     * so commit them now. */
+    commit_thread_local_remset();
+#endif
 }
 
 

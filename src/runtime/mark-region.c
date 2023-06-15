@@ -1127,12 +1127,9 @@ static void raise_survivors() {
   unsigned char line = ENCODE_GEN((unsigned char)gen);
   unsigned char target = ENCODE_GEN((unsigned char)gen + 1);
   for (page_index_t p = 0; p < next_free_page; p++)
-    /* Allocating in scan_finalizers can create fresh lines,
-     * which we need to check for. But we don't need to copy
-     * freshness, as we still set allocation bits. */
     if (!page_free_p(p))
       for_lines_in_page(l, p)
-        bytemap[l] = (UNFRESHEN_GEN(bytemap[l]) == line) ? target : bytemap[l];
+        bytemap[l] = (bytemap[l] == line) ? target : bytemap[l];
   for (page_index_t p = 0; p < next_free_page; p++)
     if (page_table[p].gen == gen && page_single_obj_p(p))
       page_table[p].gen++;
