@@ -1176,6 +1176,7 @@ void mr_collect_garbage(boolean raise) {
 #ifdef COMPACT
   if (compacting) {
     meters.compacts++;
+    set_all_allow_free_pages(1);
     METER(compact, run_compaction(&meters.copy, &meters.fix));
   }
 #endif
