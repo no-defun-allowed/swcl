@@ -8,7 +8,7 @@
 extern boolean compacting;
 extern void compactor_init();
 extern void consider_compaction(generation_index_t gen);
-extern void run_compaction();
+extern void run_compaction(uword_t *copy_meter, uword_t *fix_meter);
 
 extern unsigned char *target_pages;
 extern void log_relevant_slot(lispobj *where, lispobj *source_object, enum source source_type);

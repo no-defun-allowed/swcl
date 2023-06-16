@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <sys/time.h>
 
 #include "os.h"
 #include "gc.h"
@@ -19,10 +20,26 @@
 #include "genesis/gc-tables.h"
 #include "genesis/symbol.h"
 
+/* The fix_slots loop does less work per pointer, so we
+ * prefetch further than we do in the tracing loop. */
+#define FIX_PREFETCH_DISTANCE 128
+
+/* Duplicated from mark-region.c */
+#define METER(name, action) \
+  { uword_t before = get_time(); \
+  action; \
+  atomic_fetch_add(name, get_time() - before); }
+
+static uword_t get_time() {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return t.tv_sec * 1000000 + t.tv_nsec/1000;
+}
+
 /* Maximum ratio between pages used and pages "needed" to compact. */
 float page_overhead_threshold = 1.3;
 /* Minimum fraction of bytes used on a page to compact it. */
-float page_utilisation_threshold = 1.0;
+float page_utilisation_threshold = 0.5;
 /* Maximum number of bytes to copy in one collection. */
 uword_t bytes_to_copy = 10000000;
 /* Minimum generation to consider compacting when collecting. */
@@ -44,7 +61,7 @@ void compactor_init() {
 
 /* Deciding how to compact */
 
-static boolean should_compact(char *why) {
+static boolean should_compact(char __attribute__((unused)) *why) {
   /* If there are many more small-object pages than there could
    * be, start compacting. */
   uword_t pages = 0, bytes = 0;
@@ -55,10 +72,12 @@ static boolean should_compact(char *why) {
     }
   }
   float ratio = (float)(pages * GENCGC_PAGE_BYTES) / bytes;
+#if 0
   if (ratio > page_overhead_threshold)
     fprintf(stderr, "%s, ratio = %.2f\n", why, ratio);
   else
     fprintf(stderr, "ratio = %.2f\n", ratio);
+#endif
   return ratio > page_overhead_threshold;
 }
 
@@ -99,7 +118,7 @@ void consider_compaction(generation_index_t gen) {
  * remset. */
 static inline lispobj tag_source(lispobj *where, enum source s) { return (lispobj)where | (lispobj)s; }
 static inline enum source source_from_tagged(lispobj t) { return t & 7; }
-static inline lispobj *lispobj_from_tagged(lispobj t) { return (lispobj*)(t &~ 7); }
+static inline lispobj *slot_from_tagged(lispobj t) { return (lispobj*)(t &~ 7); }
 /* Each tracing thread records sources into thread-local blocks, like they
  * do with grey objects. */
 static _Thread_local struct Qblock *remset_block = NULL;
@@ -237,24 +256,26 @@ static void fix_slots() {
   int c = 0;
   for (; remset; remset = remset->next) {
     for (int n = 0; n < remset->count; n += 2) {
-      lispobj *slot = lispobj_from_tagged(remset->elements[n]),
+      lispobj *slot = slot_from_tagged(remset->elements[n]),
               *source = (lispobj*)remset->elements[n + 1];
       enum source source_type = source_from_tagged(remset->elements[n]);
       fix_slot(slot, source, source_type);
+      if (n + FIX_PREFETCH_DISTANCE < remset->count)
+        __builtin_prefetch(slot_from_tagged(remset->elements[n]));
       c++;
     }
   }
 }
 
-void run_compaction() {
+void run_compaction(uword_t *copy_meter, uword_t *fix_meter) {
   if (compacting) {
     /* Check again, in case fragmentation somehow improves.
      * Not likely, but it's a cheap test which avoids effort. */
     if (should_compact("Performing compaction")) {
       apply_pins();
-      move_objects();
+      METER(copy_meter, move_objects());
       gc_close_collector_regions(0);
-      fix_slots();
+      METER(fix_meter, fix_slots());
       should_compact("I just moved, but still");
     }
     memset(target_pages, 0, page_table_pages);

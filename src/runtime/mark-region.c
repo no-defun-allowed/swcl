@@ -56,7 +56,7 @@ static struct {
   uword_t consider; uword_t scavenge; uword_t prefix;
   uword_t trace; uword_t trace_alive; uword_t trace_running;
   uword_t sweep; uword_t weak; uword_t sweep_lines; uword_t sweep_pages;
-  uword_t compact; uword_t raise;
+  uword_t compact; uword_t copy; uword_t fix; uword_t raise;
   uword_t fresh_pointers; uword_t pinned_pages;
   uword_t compacts;
 } meters = { 0 };
@@ -68,13 +68,19 @@ static unsigned int collection = 0;
 
 void mr_print_meters() {
 #define NORM(x) (collection ? meters.x / collection : 0)
-  fprintf(stderr, "collection %d (%.0f%% compacting): %ldus consider %ld scavenge (%ld prefixes) %ld trace (%ld alive %ld running) %ld sweep (%ld lines %ld pages) %ld compact %ld raise; %ldB fresh %ldpg pinned\n",
+  fprintf(stderr,
+          "collection %d (%.0f%% compacting):\n"
+          "  %ldus consider\n"
+          "  %ld scavenge (%ld prefixes) %ld trace (%ld alive %ld running)\n"
+          "  %ld sweep (%ld lines %ld pages) %ld compact (%ld copy %ld fix)\n"
+          "  %ld raise; %ldB fresh %ldpg pinned\n",
           collection,
           collection ? 100.0 *  (float)meters.compacts / collection : 0.0,
           NORM(consider), NORM(scavenge), NORM(prefix),
           NORM(trace), NORM(trace_alive), NORM(trace_running),
           NORM(sweep), NORM(sweep_lines), NORM(sweep_pages),
-          NORM(compact), NORM(raise), NORM(fresh_pointers), NORM(pinned_pages));
+          NORM(compact), NORM(copy), NORM(fix),
+          NORM(raise), NORM(fresh_pointers), NORM(pinned_pages));
 #undef NORM
 }
 void mr_reset_meters() { meters = (typeof(meters)){ 0 }; collection = 0; }
@@ -1170,7 +1176,7 @@ void mr_collect_garbage(boolean raise) {
 #ifdef COMPACT
   if (compacting) {
     meters.compacts++;
-    METER(compact, run_compaction());
+    METER(compact, run_compaction(&meters.copy, &meters.fix));
   }
 #endif
   /* scan_finalizers checks forwarding pointers, so we need to
