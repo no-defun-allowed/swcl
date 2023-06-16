@@ -171,7 +171,8 @@ static void TRACE_NAME(lispobj* where)
         weakptr = (struct weak_pointer*)where;
         if (!DO_WEAKNESS_P) ACTION(weakptr->value, &weakptr->value, SOURCE_NORMAL);
         else if (is_lisp_pointer(weakptr->value) && interesting_pointer_p(weakptr->value)) {
-            WATCH_DEFERRED(&weakptr->value, 0, 1);
+            /* XXX: This hard-codes the layout of a weak pointer. Make a scalar WATCH_DEFERRED? */
+            WATCH_DEFERRED(where, 1, 2);
             LOCK;
             add_to_weak_pointer_chain(weakptr);
             UNLOCK;

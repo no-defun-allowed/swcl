@@ -22,7 +22,7 @@
 /* Maximum ratio between pages used and pages "needed" to compact. */
 float page_overhead_threshold = 1.3;
 /* Minimum fraction of bytes used on a page to compact it. */
-float page_utilisation_threshold = 0.5;
+float page_utilisation_threshold = 1.0;
 /* Maximum number of bytes to copy in one collection. */
 uword_t bytes_to_copy = 10000000;
 /* Minimum generation to consider compacting when collecting. */
@@ -73,7 +73,7 @@ static void pick_targets() {
     if (!page_single_obj_p(p) &&
         !page_free_p(p) &&
         page_table[p].gen < PSEUDO_STATIC_GENERATION &&
-        (float)(page_bytes_used(p)) / GENCGC_PAGE_BYTES < page_utilisation_threshold) {
+        (float)(page_bytes_used(p)) / GENCGC_PAGE_BYTES <= page_utilisation_threshold) {
       bytes_moving += page_bytes_used(p);
       pages_moving++;
       target_pages[p] = 1;
