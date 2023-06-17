@@ -39,7 +39,7 @@ static uword_t get_time() {
 /* Maximum ratio between pages used and pages "needed" to compact. */
 float page_overhead_threshold = 1.3;
 /* Minimum fraction of bytes used on a page to compact it. */
-float page_utilisation_threshold = 0.7;
+float page_utilisation_threshold = 0.5;
 /* Maximum number of bytes to copy in one collection. */
 uword_t bytes_to_copy = 30000000;
 /* Minimum generation to consider compacting when collecting. */

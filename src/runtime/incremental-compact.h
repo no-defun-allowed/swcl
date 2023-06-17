@@ -3,7 +3,6 @@
 #define INCREMENTAL_COMPACT_H
 #include "os.h"
 #include "lispobj.h"
-#include <stdatomic.h>
 
 extern boolean compacting;
 extern void compactor_init();
