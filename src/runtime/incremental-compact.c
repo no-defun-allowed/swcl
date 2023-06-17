@@ -39,9 +39,9 @@ static uword_t get_time() {
 /* Maximum ratio between pages used and pages "needed" to compact. */
 float page_overhead_threshold = 1.3;
 /* Minimum fraction of bytes used on a page to compact it. */
-float page_utilisation_threshold = 0.5;
+float page_utilisation_threshold = 0.7;
 /* Maximum number of bytes to copy in one collection. */
-uword_t bytes_to_copy = 10000000;
+uword_t bytes_to_copy = 30000000;
 /* Minimum generation to consider compacting when collecting. */
 generation_index_t minimum_compact_gen = 1;
 
@@ -208,12 +208,18 @@ static inline lispobj *forward_slot(lispobj *slot, lispobj *source) {
 }
 
 static void fix_slot(lispobj *slot, lispobj *source, enum source source_type) {
-  slot = forward_slot(slot, source);
-  source = native_pointer(follow_fp((lispobj)source));
+  /* TLS may not be moved, and isn't really an object.
+   * mr_preserve_range eventually calls fix_slot with
+   * source == NULL to indicate that the source cannot move. */
+  if (source) {
+    slot = forward_slot(slot, source);
+    source = native_pointer(follow_fp((lispobj)source));
+  }
   switch (source_type) {
   case SOURCE_NORMAL:
     *slot = follow_maybe_fp(*slot);
-    if (widetag_of(source) == SIMPLE_VECTOR_WIDETAG &&
+    if (source &&
+        widetag_of(source) == SIMPLE_VECTOR_WIDETAG &&
         vector_flagp(*source, VectorHashing)) {
       /* Tell any hash tables to rehash. This causes unnecessary rehashing,
        * but we compact infrequently and incrementally, so it shouldn't

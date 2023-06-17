@@ -434,7 +434,8 @@ static void mark(lispobj object, lispobj *where, enum source source_type) {
       object = make_lispobj(base, OTHER_POINTER_LOWTAG);
     }
 #ifdef COMPACT
-    log_slot(object, where, source_object, source_type);
+    if (where)
+      log_slot(object, where, source_object, source_type);
 #endif
     /* Enqueue onto mark queue */
     if (set_mark_bit(object)) {
@@ -937,12 +938,9 @@ void mr_preserve_ambiguous(uword_t address) {
 /* Preserve exact pointers in an array.
  * Used for scanning thread-local storage for roots. */
 void mr_preserve_range(lispobj *from, sword_t nwords) {
+  source_object = NULL;
   for (sword_t n = 0; n < nwords; n++) {
-    /* XXX: Somehow some TLS goes away and causes the
-     * compactor to segfault upon trying to fix the TLS slot.
-     * What gives? */
-    mr_preserve_ambiguous(from[n]);
-    //mark(from[n], from + n, SOURCE_NORMAL);
+    mark(from[n], from + n, SOURCE_NORMAL);
   }
 }
 

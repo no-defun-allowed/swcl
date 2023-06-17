@@ -16,9 +16,7 @@ extern unsigned char *target_pages;
 /* Avoid a full call unless the slot is relevant. */
 static inline void log_slot(lispobj target, lispobj *where,
                             lispobj *source_object, enum source source_type) {
-  /* mark() can provide NULL when there is no easy way to pass
-   * around the source. */
-  if (!where) return;
+  if (!compacting) return;
   page_index_t p = find_page_index(native_pointer(target));
   if (p != -1 && target_pages[p])
     log_relevant_slot(where, source_object, source_type);
