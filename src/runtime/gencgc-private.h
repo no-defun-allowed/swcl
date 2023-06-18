@@ -15,7 +15,8 @@
 /* The minimum heap occupancy to force more aggressive collections above. */
 #define PANIC_THRESHOLD 0.9
 #ifdef LISP_FEATURE_MARK_REGION_GC
-#define FRAGMENTATION_COMPENSATION 0.8
+// The inverse of page_overhead_threshold.
+#define FRAGMENTATION_COMPENSATION (1.0 / 1.3)
 #else
 #define FRAGMENTATION_COMPENSATION 1.0
 #endif
