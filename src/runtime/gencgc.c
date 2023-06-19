@@ -41,6 +41,7 @@
 #include "gc-private.h"
 #include "gencgc-private.h"
 #include "mark-region.h"
+#include "incremental-compact.h"
 #include "thread.h"
 #include "pseudo-atomic.h"
 #include "alloc.h"
@@ -5683,6 +5684,15 @@ static void prepare_dynamic_space_for_final_gc()
       generations[g].bytes_allocated = 0;
     }
     prepare_lines_for_final_gc();
+    /* Do one last aggressive compaction. */
+    force_compaction = 1;
+    page_overhead_threshold = 0.0;
+    page_utilisation_threshold = 1.0;
+    minimum_compact_gen = 0;
+    /* This number has to be guesstimated manually at the moment.
+     * Or we could compact everything, but somehow the GC chokes on
+     * the name of NIL somehow? */
+    bytes_to_copy = 45000000;
 #endif
 
 #ifdef LISP_FEATURE_SB_THREAD

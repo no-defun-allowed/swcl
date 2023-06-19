@@ -4,11 +4,19 @@
 #include "os.h"
 #include "lispobj.h"
 
+/* Compactor tuning */
+extern boolean force_compaction;
+extern float page_overhead_threshold, page_utilisation_threshold;
+extern generation_index_t minimum_compact_gen;
+extern uword_t bytes_to_copy;
+
+/* Entry-points for compactor */
 extern boolean compacting;
 extern void compactor_init();
 extern void consider_compaction(generation_index_t gen);
 extern void run_compaction(uword_t *copy_meter, uword_t *fix_meter);
 
+/* Tracing/logging interface */
 extern unsigned char *target_pages;
 extern void log_relevant_slot(lispobj *where, lispobj *source_object, enum source source_type);
 extern unsigned char *target_pages;

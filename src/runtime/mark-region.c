@@ -897,6 +897,7 @@ static void __attribute__((noinline)) sweep() {
 void mr_trace_bump_range(lispobj* start, lispobj *end) {
   lispobj *where = start;
   while (where < end) {
+    source_object = where;
     lispobj obj = compute_lispobj(where);
     trace_object(obj);
     where += listp(obj) ? 2 : headerobj_size(where);
@@ -905,6 +906,7 @@ void mr_trace_bump_range(lispobj* start, lispobj *end) {
 
 extern lispobj lisp_init_function, gc_object_watcher;
 static void trace_static_roots() {
+  source_object = native_pointer(NIL);
   trace_other_object((lispobj*)NIL_SYMBOL_SLOTS_START);
   mr_trace_bump_range((lispobj*)STATIC_SPACE_OBJECTS_START,
                       static_space_free_pointer);

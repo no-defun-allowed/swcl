@@ -44,6 +44,8 @@ float page_utilisation_threshold = 0.5;
 uword_t bytes_to_copy = 30000000;
 /* Minimum generation to consider compacting when collecting. */
 generation_index_t minimum_compact_gen = 1;
+/* To force compacting GC or not. Set by prepare_dynamic_space_for_final_gc. */
+boolean force_compaction = 0;
 
 static generation_index_t target_generation;
 /* A queue of interesting slots. */
@@ -78,7 +80,7 @@ static boolean should_compact(char __attribute__((unused)) *why) {
   else
     fprintf(stderr, "ratio = %.2f\n", ratio);
 #endif
-  return ratio > page_overhead_threshold;
+  return force_compaction || ratio > page_overhead_threshold;
 }
 
 static void pick_targets() {
@@ -167,8 +169,10 @@ static void move_objects() {
    * each thread would be confined to the pages it claimed.
    * But early experiements in parallel copying suggested we're bottlenecked
    * by refilling TLABs too. */
+  uword_t pages_moved = 0;
   for (page_index_t p = 0; p < page_table_pages; p++)
     if (target_pages[p]) {
+      pages_moved++;
       lispobj *end = (lispobj*)page_address(p + 1);
       /* Move every object in this page in the right generation. */
       for (lispobj *where = next_object((lispobj*)page_address(p), 0, end);
@@ -198,6 +202,7 @@ static void move_objects() {
         page_table[p].scan_start_offset_ = 0;
       }
     }
+  if (force_compaction) fprintf(stderr, "Forced compaction moved %ld pages\n", pages_moved);
 }
 
 /* Fix up the address of a slot, when the object containing the slot
