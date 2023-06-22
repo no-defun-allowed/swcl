@@ -215,8 +215,10 @@ static inline lispobj *forward_slot(lispobj *slot, lispobj *source) {
 static void fix_slot(lispobj *slot, lispobj *source, enum source source_type) {
   /* TLS may not be moved, and isn't really an object.
    * mr_preserve_range eventually calls fix_slot with
-   * source == NULL to indicate that the source cannot move. */
-  if (source) {
+   * source == NULL to indicate that the source cannot move.
+   * And remember that NIL has a funny alignment, which
+   * we shouldn't "fix". Nor does NIL move. */
+  if (source && source != native_pointer(NIL) - 1) {
     slot = forward_slot(slot, source);
     source = native_pointer(follow_fp((lispobj)source));
   }

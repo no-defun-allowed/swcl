@@ -5689,9 +5689,7 @@ static void prepare_dynamic_space_for_final_gc()
     page_overhead_threshold = 0.0;
     page_utilisation_threshold = 1.0;
     minimum_compact_gen = 0;
-    /* This number has to be guesstimated manually at the moment.
-     * Or we could compact everything, but somehow the GC chokes on
-     * the name of NIL somehow? */
+    /* This number has to be guesstimated manually at the moment. */
     bytes_to_copy = 45000000;
 #endif
 
