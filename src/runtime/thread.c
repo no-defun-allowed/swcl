@@ -214,29 +214,8 @@ int sb_GetTID()
     return getthrid();
 }
 #elif defined __APPLE__
-// follows is what the apple pthreads implementation does...
-#define __TSD_MACH_THREAD_SELF 3
-#if defined(__x86_64__)
-__attribute__((always_inline)) static inline uintptr_t _os_tsd_get_direct(unsigned long slot) {
-        uintptr_t ret;
-        __asm__ volatile ("mov %%gs:%1, %0" : "=r" (ret) : "m" (*(void **)(slot * sizeof(void *))));
-        return ret;
-}
-#else // __x86_64__
-__attribute__((always_inline)) static inline uintptr_t _os_tsd_get_direct(unsigned long slot) {
-        uintptr_t *base;
-#if defined(__arm__)
-        __asm__("mrc p15, 0, %0, c13, c0, 3\n"
-                "bic %0, %0, #0x3\n" : "=r" (base));
-#elif defined(__arm64__)
-        __asm__ ("mrs %0, TPIDRRO_EL0" : "=r" (base));
-#endif
-        return base[slot];
-}
-#endif
-uint32_t sb_GetTID(void) {
-        // actually a 32-bit id; truncation is harmless
-        return (uint32_t)_os_tsd_get_direct(__TSD_MACH_THREAD_SELF);
+int sb_GetTID() {
+    return mach_thread_self();
 }
 #else
 #define sb_GetTID() 0
@@ -301,7 +280,7 @@ void* read_current_thread() {
 #endif
 
 #if defined LISP_FEATURE_DARWIN && defined LISP_FEATURE_SB_THREAD
-extern pthread_key_t foreign_thread_ever_lispified;
+extern pthread_key_t ignore_stop_for_gc;
 #endif
 
 #if !defined COLLECT_GC_STATS && !defined STANDALONE_LDB && \
@@ -362,7 +341,7 @@ void create_main_lisp_thread(lispobj function) {
     pthread_key_create(&current_thread, 0);
 #endif
 #if defined LISP_FEATURE_DARWIN && defined LISP_FEATURE_SB_THREAD
-    pthread_key_create(&foreign_thread_ever_lispified, 0);
+    pthread_key_create(&ignore_stop_for_gc, 0);
 #endif
 #if defined(LISP_FEATURE_X86) || defined(LISP_FEATURE_X86_64)
     __attribute__((unused)) lispobj *args = NULL;
@@ -759,9 +738,6 @@ static void detach_os_thread(init_thread_data *scribble)
     CloseHandle((HANDLE)th->os_thread);
 #endif
 
-#ifdef LISP_FEATURE_DARWIN
-    pthread_setspecific(foreign_thread_ever_lispified, (void*)1);
-#endif
     unregister_thread(th, scribble);
 
     /* We have to clear a STOP_FOR_GC signal if pending. Consider:
@@ -778,13 +754,35 @@ static void detach_os_thread(init_thread_data *scribble)
      *  - but STOP_FOR_GC is pending because it was in the blocked set.
      * Bad things happen unless we clear the pending GC signal.
      */
-#if !defined LISP_FEATURE_SB_SAFEPOINT && !defined LISP_FEATURE_DARWIN
+#if !defined LISP_FEATURE_SB_SAFEPOINT
     sigset_t pending;
     sigpending(&pending);
     if (sigismember(&pending, SIG_STOP_FOR_GC)) {
+#ifdef LISP_FEATURE_DARWIN
+        /* sigwait is not reliable on macOS, but sigsuspend is. It unfortunately
+         * requires that the signal be delivered, so set a flag to ignore it.
+         * If you don't believe the preceding statement, try enabling the other
+         * branch of this #ifdef and running fcb-threads.impure.lisp which will
+         * sporadically fail with "Can't handle sig31 in non-lisp thread".
+         * So either sigpending was sometimes lying (hence we didn't try to clear
+         * the signal), or else sigwait did not dequeue the signal. Clearly the
+         * latter must be true, because if only the former were true, then we
+         * would also see the test fail with sigsuspend */
+        sigset_t blockmask;
+        sigfillset(&blockmask);
+        sigdelset(&blockmask, SIG_STOP_FOR_GC);
+        pthread_setspecific(ignore_stop_for_gc, (void*)1);
+        /* sigsuspend takes the mask of signals to block */
+        sigsuspend(&blockmask);
+        pthread_setspecific(ignore_stop_for_gc, 0);
+        sigpending(&pending);
+        if (sigismember(&pending, SIG_STOP_FOR_GC)) lose("clear stop-for-GC did not work");
+#else
         int sig, rc;
+        /* sigwait takes the mask of signals to allow through */
         rc = sigwait(&gc_sigset, &sig);
         gc_assert(rc == 0 && sig == SIG_STOP_FOR_GC);
+#endif
     }
 #endif
     put_recyclebin_item(th);
@@ -1037,9 +1035,9 @@ alloc_thread_struct(void* spaces) {
      * single-threaded foreign_function_call_active, KLUDGE and
      * all. */
 #if defined(LISP_FEATURE_X86) || defined(LISP_FEATURE_X86_64)
-    th->foreign_function_call_active = 0;
+    th->ffcall_active_p = 0;
 #elif !defined(LISP_FEATURE_ARM64) // uses control_stack_start
-    th->foreign_function_call_active = 1;
+    th->ffcall_active_p = 1;
 #endif
 #endif
 

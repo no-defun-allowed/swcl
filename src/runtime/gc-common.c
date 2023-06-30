@@ -1179,18 +1179,22 @@ DEF_SPECIALIZED_VECTOR(vector_long_float, length * LONG_FLOAT_SIZE)
 DEF_SPECIALIZED_VECTOR(vector_complex_long_float, length * (2 * LONG_FLOAT_SIZE))
 #endif
 
-#ifdef LISP_FEATURE_LITTLE_ENDIAN
-// read 4 bits from byte index 1 of the header
-# define WEAKPTR_SIZE(wp) ALIGN_UP(1+(((char*)(wp))[1] & 0xf), 2)
-#else
-# define WEAKPTR_SIZE(wp) ALIGN_UP(1+(((char*)(wp))[N_WORD_BYTES-2] & 0xf), 2)
-#endif
-/* We might wish to support two sizes of weak-pointer. The hypothetical variation
- * on weak-pointer would implement an ephemeron (https://en.wikipedia.org/wiki/Ephemeron)
+/* Weak-pointer has two variants. If the header data indicate 0 payload words,
+ * then it's a vector of lispobj with a widetag outside the the range of vector widetags.
+ * Otherwise, it contains exactly 1 referent.
+ * We might also wish to support a third variant which would implement an ephemeron
+ * (https://en.wikipedia.org/wiki/Ephemeron)
  * that otherwise can only be simulated very inefficiently in SBCL as a weak hash-table
  * containing a single key */
+#define WEAKPTR_FIXED_NWORDS (sizeof (struct weak_pointer)/sizeof (lispobj))
 static sword_t scav_weakptr(lispobj *where, lispobj __attribute__((unused)) object)
 {
+    int size = WEAKPTR_PAYLOAD_WORDS(where);
+    if (!size) { // treat it like a vector
+        add_to_weak_vector_list(where, *where);
+        int nelements = fixnum_value(where[1]);
+        return ALIGN_UP(nelements, 2) + 2;
+    }
     struct weak_pointer * wp = (struct weak_pointer*)where;
     /* If wp->next is non-NULL then it's already in the weak pointer chain.
      * If it is, then even if wp->value is now known to be live,
@@ -1214,14 +1218,28 @@ static sword_t scav_weakptr(lispobj *where, lispobj __attribute__((unused)) obje
                 add_to_weak_pointer_chain(wp);
         }
     }
-    return WEAKPTR_SIZE(wp);
+    return ALIGN_UP(WEAKPTR_FIXED_NWORDS, 2);
 }
 static lispobj trans_weakptr(lispobj object) {
-    return gc_copy_object(object,
-                          WEAKPTR_SIZE((object-OTHER_POINTER_LOWTAG)),
-                          small_mixed_region, PAGE_TYPE_SMALL_MIXED);
+    lispobj* where = (lispobj*)(object - OTHER_POINTER_LOWTAG);
+    int size = WEAKPTR_PAYLOAD_WORDS(where);
+    if (size)
+        return gc_copy_object(object,
+                              ALIGN_UP(WEAKPTR_FIXED_NWORDS, 2),
+                              small_mixed_region, PAGE_TYPE_SMALL_MIXED);
+    // treat it like a vector. See trans_vector_t
+    int nelements = fixnum_value(where[1]);
+    return copy_potential_large_object(object,
+                                       ALIGN_UP(nelements + 2, 2),
+                                       small_mixed_region, PAGE_TYPE_SMALL_MIXED);
 }
-static sword_t size_weakptr(lispobj *where) { return WEAKPTR_SIZE(where); }
+static sword_t size_weakptr(lispobj *where) {
+    int size = WEAKPTR_PAYLOAD_WORDS(where);
+    if (size) return ALIGN_UP(WEAKPTR_FIXED_NWORDS, 2);
+    // treat it like a vector
+    int nelements = fixnum_value(where[1]);
+    return ALIGN_UP(nelements, 2) + 2;
+}
 
 void smash_weak_pointers(void)
 {
@@ -1565,7 +1583,7 @@ static void scan_nonweak_kv_vector(struct vector *kv_vector, void (*scav_entry)(
     boolean eql_hashing = 0; // whether this table is an EQL table
     if (instancep(kv_supplement)) {
         struct hash_table* ht = (struct hash_table*)native_pointer(kv_supplement);
-        eql_hashing = hashtable_kind(ht) == 1;
+        eql_hashing = hashtable_kind(ht) == HASHTABLE_KIND_EQL;
         kv_supplement = ht->hash_vector;
     } else if (kv_supplement == LISP_T) { // EQL hashing on a non-weak table
         eql_hashing = 1;
@@ -1603,7 +1621,7 @@ boolean scan_weak_hashtable(struct hash_table *hash_table,
     gc_assert(2 * vector_len(VECTOR(hash_table->next_vector)) + 1 == kv_length);
 
     int weakness = hashtable_weakness(hash_table);
-    boolean eql_hashing = hashtable_kind(hash_table) == 1;
+    boolean eql_hashing = hashtable_kind(hash_table) == HASHTABLE_KIND_EQL;
     /* Work through the KV vector. */
     SCAV_ENTRIES(predicate(key, value), add_kv_triggers(&data[2*i], weakness));
     if (!any_deferred && debug_weak_ht)
@@ -1641,7 +1659,8 @@ scav_vector_t(lispobj *where, lispobj header)
     // Verify that the rehash stamp is a fixnum
     gc_assert(fixnump(data[1]));
 
-    /* Scavenge element (length-1), which may be a hash-table structure. */
+    /* Scavenge element (length-1), which may be a hash-table structure
+     * or a vector of hashes, depending on the table kind/weakness */
     scavenge(&data[length-1], 1);
     if (!vector_flagp(header, VectorWeak)) {
         scan_nonweak_kv_vector((struct vector*)where, gc_scav_pair);
@@ -1681,7 +1700,7 @@ scav_vector_t(lispobj *where, lispobj header)
     if (where != native_pointer(hash_table->pairs))
         lose("hash_table table!=this table %"OBJ_FMTX, hash_table->pairs);
 
-    if (hash_table->next_weak_hash_table == NIL) {
+    if ((lispobj)hash_table->next_weak_hash_table == NIL) {
         int weakness = hashtable_weakness(hash_table);
         boolean defer = 1;
         /* Key-AND-Value means that no scavenging can/will be performed as
@@ -1701,8 +1720,7 @@ scav_vector_t(lispobj *where, lispobj header)
          * then we don't know that we already did it, and we'll do it again.
          * This is the same as occurs on all other objects */
         if (defer) {
-            NON_FAULTING_STORE(hash_table->next_weak_hash_table
-                               = (lispobj)weak_hash_tables,
+            NON_FAULTING_STORE(hash_table->next_weak_hash_table = weak_hash_tables,
                                &hash_table->next_weak_hash_table);
             weak_hash_tables = hash_table;
         }
@@ -1741,7 +1759,7 @@ cull_weak_hash_table_bucket(struct hash_table *hash_table,
                             boolean rehash)
 {
     const lispobj empty_symbol = UNBOUND_MARKER_WIDETAG;
-    int eql_hashing = hashtable_kind(hash_table) == 1;
+    int eql_hashing = hashtable_kind(hash_table) == HASHTABLE_KIND_EQL;
     for ( ; index ; index = next_vector[index] ) {
         lispobj key = kv_vector[2 * index];
         lispobj value = kv_vector[2 * index + 1];
@@ -1885,8 +1903,8 @@ void cull_weak_hash_tables(int (*alivep[4])(lispobj,lispobj))
     struct hash_table *table, *next;
 
     for (table = weak_hash_tables; table != NULL; table = next) {
-        next = (struct hash_table *)table->next_weak_hash_table;
-        NON_FAULTING_STORE(table->next_weak_hash_table = NIL,
+        next = table->next_weak_hash_table;
+        NON_FAULTING_STORE(table->next_weak_hash_table = (void*)NIL,
                            &table->next_weak_hash_table);
         int weakness = hashtable_weakness(table);
         gc_assert((weakness & ~3) == 0);

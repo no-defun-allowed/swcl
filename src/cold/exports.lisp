@@ -205,7 +205,8 @@ SBCL itself")
            "BIGNUM-LOGCOUNT" "BIGNUM-LOGICAL-AND"
            "BIGNUM-LOGICAL-IOR" "BIGNUM-LOGICAL-NOT"
            "BIGNUM-LOGICAL-XOR" "BIGNUM-PLUS-P"
-           "BIGNUM-TO-FLOAT" "BIGNUM-TRUNCATE" "BIGNUM-TRUNCATE-SINGLE-DIGIT"
+           "BIGNUM-TO-SINGLE-FLOAT" "BIGNUM-TO-DOUBLE-FLOAT"
+           "BIGNUM-TRUNCATE" "BIGNUM-TRUNCATE-SINGLE-DIGIT"
            "MAKE-SMALL-BIGNUM"
            "MULTIPLY-BIGNUM-AND-FIXNUM" "MULTIPLY-BIGNUMS"
            "MULTIPLY-FIXNUMS" "NEGATE-BIGNUM"
@@ -1002,6 +1003,8 @@ like *STACK-TOP-HINT* and unsupported stuff like *TRACED-FUN-LIST*.")
    "WEAK-POINTER-VALUE"
    "MAKE-WEAK-VECTOR"
    "WEAK-VECTOR-P"
+   ;; todo: add WEAK-VECTOR-REF here once it's actually not the same as SVREF
+   ;; (currently WEAK-VECTOR-REF is in SB-INT:)
 
    ;; Hash table extensions
 
@@ -2080,7 +2083,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "FIND-DEFSTRUCT-DESCRIPTION"
            "FIND-OR-CREATE-FDEFN"
            "FLOAT-EXPONENT"
-           "FLOAT-FORMAT-DIGITS" "FLOAT-FORMAT-NAME"
+           "FLOAT-FORMAT-NAME"
            "FLOAT-FORMAT-MAX" "FLOAT-INT-EXPONENT"
            "FLOAT-INFINITY-OR-NAN-P"
            "FLOAT-SIGN-BIT"
@@ -3374,6 +3377,9 @@ possibly temporarily, because it might be used internally.")
            "PACK-CLOSURE-EXTRA-VALUES"
            "SET-CLOSURE-EXTRA-VALUES"
            "+CLOSURE-NAME-INDEX+"
+           "WEAK-VECTOR"
+           "WEAK-VECTOR-LEN"
+           "WEAK-VECTOR-REF"
 
             ;; These could be moved back into SB-EXT if someone has
             ;; compelling reasons, but hopefully we can get by

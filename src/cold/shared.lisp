@@ -290,7 +290,8 @@
                           sb-xc:*features*))
              (arch (target-platform-keyword)))
         ;; Win32 conditionally adds :sb-futex in grovel-features.sh
-        ;; Futexes aren't available in all macos versions, but they are available in all versions that support arm, so always enable them there
+        ;; Futexes aren't available in all macos versions, but they are available in
+        ;; all versions that support arm, so always enable them there
         (when (target-featurep '(:and :sb-thread (:or :linux :freebsd :openbsd (:and :darwin :arm64))))
           (pushnew :sb-futex sb-xc:*features*))
         (when (target-featurep :immobile-space)
@@ -386,6 +387,8 @@
           ":SYSTEM-TLABS requires SB-THREAD")
          ("(and sb-futex (not sb-thread))"
           "Can't enable SB-FUTEX on platforms lacking thread support")
+         ("(and weak-vector-readbarrier (not x86-64))"
+          "Weak vector read-barrier requires x86-64")
          ;; There is still hope to make multithreading on DragonFly x86-64
          ("(and sb-thread x86 dragonfly)"
           ":SB-THREAD not supported on selected architecture")))

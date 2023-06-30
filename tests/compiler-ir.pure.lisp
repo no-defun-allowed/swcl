@@ -431,3 +431,17 @@
                                       (eql (search "OVERFLOW" (string x)) 0))
                                     (ir2-vops lambda))
                      (cerror "" "~s" lambda))))))))
+
+(with-test (:name :type-diff-testing)
+  (assert
+   (= (count 'sb-int:double-float-p
+             (ir2-vops '(lambda (x)
+                         (declare ((or fixnum double-float) x))
+                         (typep x 'double-float))))
+      1))
+  (assert
+   (= (count 'numberp
+             (ir2-vops '(lambda (x)
+                         (declare ((or double-float array) x))
+                         (typep x 'number))))
+      0)))

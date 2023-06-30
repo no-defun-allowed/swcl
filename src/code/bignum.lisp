@@ -1251,6 +1251,7 @@
 ;;; Make a single or double float with the specified significand,
 ;;; exponent and sign.
 ;;; FIXME: how are these not the same as {SINGLE,DOUBLE}-FROM-BITS ???
+(declaim (inline single-float-from-bits double-float-from-bits))
 (defun single-float-from-bits (bits exp plusp)
   (declare (fixnum exp))
   ;; "float to pointer coercion -> return value"
@@ -1291,72 +1292,75 @@
 
 ;;; Convert Bignum to a float in the specified Format, rounding to the best
 ;;; approximation.
-(defun bignum-to-float (bignum format)
-  (let* ((plusp (bignum-plus-p bignum))
-         (x (if plusp bignum (negate-bignum bignum)))
-         (len (bignum-integer-length x))
-         (digits (float-format-digits format))
-         (keep (+ digits digit-size))
-         (shift (- keep len))
-         (shifted (if (minusp shift)
-                      (bignum-ashift-right x (- shift))
-                      (bignum-ashift-left x shift)))
-         (low (%bignum-ref shifted 0))
-         (round-bit (ash 1 (1- digit-size))))
-    (declare (type bignum-length len digits keep) (fixnum shift))
-    (labels ((round-up ()
-               (let ((rounded (add-bignums shifted round-bit)))
-                 (if (> (integer-length rounded) keep)
-                     (float-from-bits (bignum-ashift-right rounded 1)
-                                      (1+ len))
-                     (float-from-bits rounded len))))
-             (float-from-bits (bits len)
-               (declare (type bignum-length len))
-               (ecase format
-                 (single-float
-                  (single-float-from-bits
-                   bits
-                   (check-exponent len sb-vm:single-float-bias
-                                   sb-vm:single-float-normal-exponent-max)
-                   plusp))
-                 (double-float
-                  (double-float-from-bits
-                   bits
-                   (check-exponent len sb-vm:double-float-bias
-                                   sb-vm:double-float-normal-exponent-max)
-                   plusp))
-                 #+long-float
-                 (long-float
-                  (long-float-from-bits
-                   bits
-                   (check-exponent len sb-vm:long-float-bias
-                                   sb-vm:long-float-normal-exponent-max)
-                   plusp))))
-             (check-exponent (exp bias max)
-               (declare (type bignum-length len))
-               (let ((exp (+ exp bias)))
-                 (when (> exp max)
-                   (error 'floating-point-overflow
-                          :operation 'float
-                          :operands (list x format)))
-                 exp)))
+(macrolet ((def (type)
+             `(defun ,(symbolicate 'bignum-to- type) (bignum)
+               (let* ((plusp (bignum-plus-p bignum))
+                      (x (if plusp bignum (negate-bignum bignum)))
+                      (len (bignum-integer-length x))
+                      (digits ,(package-symbolicate :sb-vm type '-digits))
+                      (keep (+ digits digit-size))
+                      (shift (- keep len))
+                      (shifted (if (minusp shift)
+                                   (bignum-ashift-right x (- shift))
+                                   (bignum-ashift-left x shift)))
+                      (low (%bignum-ref shifted 0))
+                      (round-bit (ash 1 (1- digit-size))))
+                 (declare (type bignum-length len digits keep) (fixnum shift))
+                 (labels ((round-up ()
+                            (let ((rounded (add-bignums shifted round-bit)))
+                              (if (> (integer-length rounded) keep)
+                                  (float-from-bits (bignum-ashift-right rounded 1)
+                                                   (1+ len))
+                                  (float-from-bits rounded len))))
+                          (float-from-bits (bits len)
+                            (declare (type bignum-length len))
+                            ,(case type
+                               (single-float
+                                `(single-float-from-bits
+                                  bits
+                                  (check-exponent len sb-vm:single-float-bias
+                                                  sb-vm:single-float-normal-exponent-max)
+                                  plusp))
+                               (double-float
+                                `(double-float-from-bits
+                                  bits
+                                  (check-exponent len sb-vm:double-float-bias
+                                                  sb-vm:double-float-normal-exponent-max)
+                                  plusp))
+                               #+long-float
+                               (long-float
+                                `(long-float-from-bits
+                                 bits
+                                 (check-exponent len sb-vm:long-float-bias
+                                                 sb-vm:long-float-normal-exponent-max)
+                                 plusp))))
+                          (check-exponent (exp bias max)
+                            (declare (type bignum-length len))
+                            (let ((exp (+ exp bias)))
+                              (when (> exp max)
+                                (error 'floating-point-overflow
+                                       :operation 'float
+                                       :operands (list x ',type)))
+                              exp)))
 
-    (cond
-     ;; Round down if round bit is 0.
-     ((not (logtest round-bit low))
-      (float-from-bits shifted len))
-     ;; If only round bit is set, then round to even.
-     ((and (= low round-bit)
-           (dotimes (i (- (%bignum-length x) (ceiling keep digit-size))
-                       t)
-             (unless (zerop (%bignum-ref x i)) (return nil))))
-      (let ((next (%bignum-ref shifted 1)))
-        (if (oddp next)
-            (round-up)
-            (float-from-bits shifted len))))
-     ;; Otherwise, round up.
-     (t
-      (round-up))))))
+                   (cond
+                     ;; Round down if round bit is 0.
+                     ((not (logtest round-bit low))
+                      (float-from-bits shifted len))
+                     ;; If only round bit is set, then round to even.
+                     ((and (= low round-bit)
+                           (dotimes (i (- (%bignum-length x) (ceiling keep digit-size))
+                                       t)
+                             (unless (zerop (%bignum-ref x i)) (return nil))))
+                      (let ((next (%bignum-ref shifted 1)))
+                        (if (oddp next)
+                            (round-up)
+                            (float-from-bits shifted len))))
+                     ;; Otherwise, round up.
+                     (t
+                      (round-up))))))))
+  (def single-float)
+  (def double-float))
 
 ;;;; integer length and logbitp/logcount
 
@@ -1381,17 +1385,15 @@
     (multiple-value-bind (word-index bit-index)
         (floor index digit-size)
       (if (>= word-index len)
-          (not (bignum-plus-p bignum))
+          (not (%bignum-0-or-plusp bignum len))
           (logbitp bit-index (%bignum-ref bignum word-index))))))
 
 (defun bignum-logcount (bignum)
-  (declare (type bignum bignum)
-           (optimize speed))
-  (declare (muffle-conditions compiler-note)) ; returns lispobj, so what.
+  (declare (type bignum bignum))
   (let ((length (%bignum-length bignum))
         (result 0))
     (declare (type bignum-length length)
-             (fixnum result))
+             (type (integer 0 #.(* maximum-bignum-length digit-size))  result))
     (do ((index 0 (1+ index)))
         ((= index length)
          (if (%bignum-0-or-plusp bignum length)
@@ -1563,21 +1565,22 @@
              ;; At least one bit is obtained from each of two words,
              ;; and not more than two words.
              (let* ((low-part-size
-                     (truly-the (integer 1 #.(1- sb-vm:n-positive-fixnum-bits))
-                                (- digit-size bit-index)))
+                      (truly-the (integer 1 #.(1- sb-vm:n-positive-fixnum-bits))
+                                 (- digit-size bit-index)))
                     (high-part-size
-                     (truly-the (integer 1 #.(1- sb-vm:n-positive-fixnum-bits))
-                                (- byte-size low-part-size))))
-               (logior (truly-the (and fixnum unsigned-byte) ; high part
-                         (let ((word-index (1+ word-index)))
-                           (if (< word-index n-digits) ; next word exists
-                               (ash (ldb (byte high-part-size 0)
-                                         (%bignum-ref bignum word-index))
-                                    low-part-size)
-                               (mask-field (byte high-part-size low-part-size)
-                                           (%sign-digit bignum n-digits)))))
-                       (ldb (byte low-part-size bit-index) ; low part
-                            (%bignum-ref bignum word-index)))))))))
+                      (truly-the (integer 1 #.(1- sb-vm:n-positive-fixnum-bits))
+                                 (- byte-size low-part-size))))
+               (logior
+                ;; high part
+                (truly-the fixnum
+                           (let ((word-index (1+ word-index)))
+                             (ash (ldb (byte high-part-size 0)
+                                       (if (< word-index n-digits) ; next word exists
+                                           (%bignum-ref bignum word-index)
+                                           (%sign-digit bignum n-digits)))
+                                  low-part-size)))
+                (truly-the fixnum
+                           (ash (%bignum-ref bignum word-index) (- bit-index))))))))))
 
 ;;; Basically shift the bignum right by byte-pos, but assumes it's
 ;;; right at the end of the bignum.
@@ -1587,7 +1590,7 @@
            (optimize speed))
   (let ((n-digits (%bignum-length bignum)))
     (multiple-value-bind (word-index bit-index) (floor byte-pos digit-size)
-      (cond ((<= (+ bit-index sb-vm:n-fixnum-bits) digit-size) ; contained in one word
+      (cond ((<= bit-index (- digit-size sb-vm:n-fixnum-bits)) ; contained in one word
              (sb-c::mask-signed-field sb-vm:n-fixnum-bits
                                       (ash (%bignum-ref bignum word-index) (- bit-index))))
             (t
@@ -1595,20 +1598,16 @@
              ;; and not more than two words.
              (let* ((low-part-size
                       (truly-the (integer 1 #.(1- sb-vm:n-positive-fixnum-bits))
-                                 (- digit-size bit-index)))
-                    (high-part-size
-                      (truly-the (integer 1 #.(1- sb-vm:n-positive-fixnum-bits))
-                                 (- sb-vm:n-fixnum-bits low-part-size))))
-               (logior
-                (let ((word-index (1+ word-index)))
-                  (sb-c::mask-signed-field sb-vm:n-fixnum-bits
-                                           (if (< word-index n-digits) ; next word exists
-                                               (ash (%bignum-ref bignum word-index) low-part-size)
-                                               (truly-the word
-                                                          (mask-field (byte high-part-size low-part-size)
-                                                                      (%sign-digit bignum n-digits))))))
-                (ldb (byte low-part-size bit-index)
-                     (%bignum-ref bignum word-index)))))))))
+                                 (- digit-size bit-index))))
+               (sb-c::mask-signed-field sb-vm:n-fixnum-bits
+                                        (logior
+                                         (let ((word-index (1+ word-index)))
+                                           (ash (if (< word-index n-digits) ; next word exists
+                                                    (%bignum-ref bignum word-index)
+                                                    (%sign-digit bignum n-digits))
+                                                low-part-size))
+                                         (ash (%bignum-ref bignum word-index)
+                                              (- bit-index))))))))))
 
 ;;;; TRUNCATE
 

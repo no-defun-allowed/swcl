@@ -105,6 +105,9 @@
 ;;; The result value is cached in the LVAR-%DERIVED-TYPE slot. If the
 ;;; slot is true, just return that value, otherwise recompute and
 ;;; stash the value there.
+
+;;; Above comment describes (defun lvar-derived-type ...)
+
 (defmacro lvar-type-using (lvar accessor)
   `(let ((uses (lvar-uses ,lvar)))
      (cond ((null uses) *empty-type*)
@@ -333,6 +336,9 @@
         ;; Don't use type/=, it will return NIL on unknown types.
         ;; Instead of checking the second value just negate TYPE=
         (unless (type= initial-type int)
+          ;; This assertion is easily legitimately violated by
+          ;; transforms.
+          #+(or)
           (when (and *check-consistency*
                      (eq int *empty-type*)
                      (not (eq rtype *empty-type*)))
@@ -390,7 +396,8 @@
 
 ;;;; IR1-OPTIMIZE
 
-(declaim (start-block ir1-optimize ir1-optimize-last-effort))
+(declaim (start-block ir1-optimize ir1-optimize-last-effort
+                      flush-dead-code))
 
 ;;; Do one forward pass over COMPONENT, deleting unreachable blocks
 ;;; and doing IR1 optimizations. We can ignore all blocks that don't
@@ -1741,7 +1748,10 @@
                            (resolve-key-args args type)
                            args)))
           (args (mapcar #'value lvar-args)))
-     (multiple-value-bind (values win) (careful-call fun-name args)
+     (multiple-value-bind (values win) (careful-call (or (and (combination-fun-info call)
+                                                              (fun-info-folder (combination-fun-info call)))
+                                                         fun-name)
+                                                     args)
        (cond ((not win)
               (setf (combination-kind call) :error
                     (combination-info call)

@@ -122,6 +122,7 @@ boolean internal_errors_enabled = 0;
 #ifndef LISP_FEATURE_WIN32
 static
 void (*interrupt_low_level_handlers[NSIG]) (int, siginfo_t*, os_context_t*);
+struct sigaction old_ll_sigactions[NSIG];
 #endif
 lispobj lisp_sig_handlers[NSIG];
 
@@ -190,8 +191,7 @@ static void sigmask_logandc(sigset_t *dest, const sigset_t *source)
  * maybe all deferrables. */
 
 #if defined LISP_FEATURE_DARWIN && defined LISP_FEATURE_SB_THREAD
-pthread_key_t foreign_thread_ever_lispified;
-int sigwait_bug_mitigation_count;
+pthread_key_t ignore_stop_for_gc;
 #endif
 
 #ifdef LISP_FEATURE_WIN32
@@ -200,18 +200,6 @@ int sigwait_bug_mitigation_count;
 static void
 resignal_to_lisp_thread(int signal, os_context_t *context)
 {
-#if defined LISP_FEATURE_DARWIN && defined LISP_FEATURE_SB_THREAD
-    if (signal == SIG_STOP_FOR_GC && pthread_getspecific(foreign_thread_ever_lispified)) {
-        // This may be error-prone, I'm not sure.  Suppose there is a lingering
-        // stop-for-gc signal after we've demoted a lisp thread back to being
-        // a foreign thread. Suppose that thread then calls into lisp again so it re-promoted
-        // to a lisp thread. Is the next stop-for-gc signal real, or to be ignored?
-        // It'll be treated as real even if it was the lingering signal which ought to have
-        // been ignored. That probably won't happen, but "probably" is not a guarantee.
-        __sync_fetch_and_add(&sigwait_bug_mitigation_count, 1);
-        return;
-    }
-#endif
     if (!sigismember(&deferrable_sigset,signal)) {
         corruption_warning_and_maybe_lose
 #ifdef LISP_FEATURE_SB_THREAD
@@ -684,16 +672,6 @@ they are not safe to interrupt at all, this is a pretty severe occurrence.\n");
     }
 }
 
-
-inline static void
-check_interrupts_enabled_or_lose(os_context_t *context)
-{
-    struct thread *thread = get_sb_vm_thread();
-    if (read_TLS(INTERRUPTS_ENABLED,thread) == NIL)
-        lose("interrupts not enabled");
-    if (arch_pseudo_atomic_atomic(thread))
-        lose ("in pseudo atomic section");
-}
 
 /* Note that the comment from rev aa0ed5a420 seems back-ass-wards.
  * "if there is no pending signal .. because that means deferrable are blocked"?
@@ -1252,10 +1230,13 @@ interrupt_handle_now(int signal, siginfo_t *info, os_context_t *context)
 
     assert_blockables_blocked();
 
-    if (sigismember(&deferrable_sigset,signal))
-        check_interrupts_enabled_or_lose(context);
+    struct thread* thread = get_sb_vm_thread();
+    if (sigismember(&deferrable_sigset,signal)) {
+        if (read_TLS(INTERRUPTS_ENABLED,thread) == NIL) lose("interrupts not enabled");
+        if (arch_pseudo_atomic_atomic(thread)) lose ("in pseudo atomic section");
+    }
 
-    were_in_lisp = !foreign_function_call_active_p(get_sb_vm_thread());
+    were_in_lisp = !foreign_function_call_active_p(thread);
     if (were_in_lisp)
     {
         // Use the variant of fake_ffc that doesn't do another pthread_sigmask syscall,
@@ -1931,9 +1912,40 @@ extern void restore_sbcl_signals () {
 static void
 low_level_handle_now_handler(int signal, siginfo_t *info, void *void_context)
 {
-    SAVE_ERRNO(signal,context,void_context);
-    (*interrupt_low_level_handlers[signal])(signal, info, context);
-    RESTORE_ERRNO;
+    /* We forgo SAVE_ERRNO / RESTORE_ERRNO here because those can resignal to a
+     * different thread. It never makes sense with synchronous signals such as SIGILL,
+     * SIGTRAP, SIGFPE, SIGSEGV which are necessarily thread-specific; nor SIGABRT
+     * when raised by assert(). Some cases might warrant trying both the "old"
+     * and "our" handler, but the handler does not return an indicator of whether
+     * it did anything, which makes handler chaining impractical */
+    int saved_errno = errno;
+    RECORD_SIGNAL(signal,void_context);
+    UNBLOCK_SIGSEGV();
+    RESTORE_FP_CONTROL_WORD(context,void_context);
+    if (lisp_thread_p(void_context)) {
+        interrupt_low_level_handlers[signal](signal, info, context);
+    }
+#if defined LISP_FEATURE_DARWIN && defined LISP_FEATURE_SB_THREAD
+    else if (signal == SIG_STOP_FOR_GC && pthread_getspecific(ignore_stop_for_gc)) {
+        /* Clearing stop-for-GC on macOS seems to require that the signal
+         * be delivered and then ignored in code. */
+        return;
+    }
+#endif
+      else if (old_ll_sigactions[signal].sa_handler == SIG_IGN) {
+        // drop it
+    } else if (old_ll_sigactions[signal].sa_handler != SIG_DFL) {
+        (old_ll_sigactions[signal].sa_sigaction)(signal, info, context);
+    } else {
+#ifdef LISP_FEATURE_SB_THREAD
+        lose("Can't handle sig%d in non-lisp thread %p at @ %p",
+             signal,
+             // Casting to void* is a kludge - "technically" you can't assume that
+             // pthread_t is integer-sized. It could be a struct.
+             (void*)pthread_self(), (void*)os_context_pc(context));
+#endif
+    }
+    errno = saved_errno;
 }
 
 /* Install a handler for a synchronous signal. These are predominantly
@@ -1971,7 +1983,7 @@ ll_install_handler (int signal, interrupt_handler_t handler)
     if (signal==SIG_MEMORY_FAULT) sa.sa_flags |= SA_ONSTACK;
 #endif
 
-    sigaction(signal, &sa, NULL);
+    sigaction(signal, &sa, &old_ll_sigactions[signal]);
     interrupt_low_level_handlers[signal] = handler;
 }
 #endif

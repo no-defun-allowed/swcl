@@ -307,6 +307,11 @@
      (%make-ratio (- (numerator n)) (denominator n)))
     ((complex)
      (complex (- (realpart n)) (- (imagpart n))))))
+
+(defun %multiply-high (x y)
+  (declare (type word x y))
+  (%multiply-high x y))
+
 
 ;;;; TRUNCATE and friends
 
@@ -381,22 +386,6 @@
       (((foreach fixnum bignum ratio)
         (foreach single-float double-float #+long-float long-float))
        (truncate-float (dispatch-type divisor))))))
-
-(defun %multiply-high (x y)
-  (declare (type word x y))
-  (%multiply-high x y))
-
-;; (defun floor (number &optional (divisor 1))
-;;   "Return the greatest integer not greater than number, or number/divisor.
-;;   The second returned value is (mod number divisor)."
-;;   (declare (explicit-check))
-;;   (floor number divisor))
-
-;; (defun ceiling (number &optional (divisor 1))
-;;   "Return the smallest integer not less than number, or number/divisor.
-;;   The second returned value is the remainder."
-;;   (declare (explicit-check))
-;;   (ceiling number divisor))
 
 (defun floor (number &optional (divisor 1))
   "Return the greatest integer not greater than number, or number/divisor.
@@ -1187,7 +1176,7 @@ and the number of 0 bits if INTEGER is negative."
   (declare (explicit-check))
   (etypecase integer
     (fixnum
-     (logcount #-x86-64
+     (logcount #-(or x86-64 arm64)
                (truly-the (integer 0
                                    #.(max most-positive-fixnum
                                           (lognot most-negative-fixnum)))
@@ -1195,7 +1184,7 @@ and the number of 0 bits if INTEGER is negative."
                               (lognot (truly-the fixnum integer))
                               integer))
                ;; The VOP handles that case better
-               #+x86-64 integer))
+               #+(or x86-64 arm64) integer))
     (bignum
      (bignum-logcount integer))))
 

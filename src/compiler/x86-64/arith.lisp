@@ -1568,7 +1568,7 @@
       (if (sc-is y signed-reg)
           (inst test y y)               ; smaller instruction
           (inst cmp y 0))
-      (inst jmp :eq (generate-error-code vop 'division-by-zero-error x y)))
+      (inst jmp :eq (generate-error-code vop 'division-by-zero-error x)))
     (move eax x)
     (inst cqo)
     (inst idiv y)
@@ -1629,7 +1629,7 @@
       (if (sc-is y signed-reg)
           (inst test y y)               ; smaller instruction
           (inst cmp y 0))
-      (inst jmp :eq (generate-error-code vop 'division-by-zero-error x y)))
+      (inst jmp :eq (generate-error-code vop 'division-by-zero-error x)))
     (move eax x)
     (zeroize edx)
     (inst div y)
@@ -1682,7 +1682,7 @@
       (if (sc-is y signed-reg)
           (inst test y y)               ; smaller instruction
           (inst cmp y 0))
-      (inst jmp :eq (generate-error-code vop 'division-by-zero-error x y)))
+      (inst jmp :eq (generate-error-code vop 'division-by-zero-error x)))
     (move eax x)
     (inst cqo)
     (inst idiv y)
@@ -3176,8 +3176,6 @@
   (if (oddp (length args))
       `(logxor ,@args)
       `(lognot (logxor ,@args))))
-(define-source-transform logandc1 (x y)
-  `(logand (lognot ,x) ,y))
 (define-source-transform logandc2 (x y)
   `(logand ,x (lognot ,y)))
 (define-source-transform logorc1 (x y)
@@ -3193,7 +3191,15 @@
 
 (define-vop (bignum-length get-header-data)
   (:translate sb-bignum:%bignum-length)
-  (:policy :fast-safe))
+  (:policy :fast-safe)
+  (:results (res :scs (unsigned-reg any-reg)))
+  (:generator 6
+    (loadw res x 0 other-pointer-lowtag)
+    #.(assert (zerop (ash bignum-widetag
+                        (- n-fixnum-tag-bits n-widetag-bits))))
+    (inst shr res (if (sc-is res any-reg)
+                      (- n-widetag-bits n-fixnum-tag-bits)
+                      n-widetag-bits))))
 
 (define-vop (bignum-set-length set-header-data)
   (:translate sb-bignum:%bignum-set-length)

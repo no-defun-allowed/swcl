@@ -137,7 +137,9 @@
           #-c-stack-is-control-stack *non-descriptor-args*))
 
 (defun fixed-call-arg-location (type state)
-  (let* ((primtype (primitive-type type))
+  (let* ((primtype (if (typep type 'primitive-type)
+                       type
+                       (primitive-type type)))
          (sc (find descriptor-reg-sc-number (sb-c::primitive-type-scs primtype) :test-not #'eql)))
     (case (primitive-type-name primtype)
       ((double-float single-float)
@@ -206,7 +208,9 @@
   "Cause a continuable error.  ERROR-CODE is the error to cause."
   (emit-error-break vop cerror-trap (error-number-or-lose error-code) values))
 
-#+sb-safepoint
+;; C header generation can't execute DEFINE-VOP
+;; Perhaps this belongs somewhere different
+#+(and sb-safepoint (not :c-headers-only))
 (define-vop (insert-safepoint)
   (:policy :fast-safe)
   (:translate sb-kernel::gc-safepoint)
@@ -233,23 +237,27 @@
 ;;; then NIL is ok as the input. Indicate this by specifying PERMIT-NIL.
 ;;; With rare exception it should always be permitted, though not on ppc64
 ;;; where it would never be. The safe default is NIL.
-(defun other-pointer-tn-ref-p (tn-ref &optional permit-nil)
+(defun other-pointer-tn-ref-p (tn-ref &optional permit-nil
+                                                immediates-tested)
   (and (sc-is (tn-ref-tn tn-ref) descriptor-reg)
        (not (types-equal-or-intersect
              (tn-ref-type tn-ref)
              (if permit-nil
-                 (specifier-type '(or fixnum
-                                   #+64-bit single-float
+                 (specifier-type '(or
                                    function
                                    cons
                                    instance
                                    character))
-                 (specifier-type '(or fixnum
-                                   #+64-bit single-float
+                 (specifier-type '(or
                                    function
                                    list
                                    instance
-                                   character)))))))
+                                   character)))))
+       (or (memq 'fixnum immediates-tested)
+           (not (types-equal-or-intersect (tn-ref-type tn-ref) (specifier-type 'fixnum))))
+       #+64-bit
+       (or (memq single-float-widetag immediates-tested)
+           (not (types-equal-or-intersect (tn-ref-type tn-ref) (specifier-type 'single-float))))))
 
 (defun fixnum-or-other-pointer-tn-ref-p (tn-ref &optional permit-nil)
   (and (sc-is (tn-ref-tn tn-ref) descriptor-reg)

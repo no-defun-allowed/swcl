@@ -107,8 +107,6 @@
   (:note "inline (signed-byte 32) arithmetic"))
 
 
-(eval-when (:compile-toplevel :load-toplevel :execute)
-
 (defmacro define-binop (translate untagged-penalty op
                         &optional arg-swap restore-fixnum-mask)
   `(progn
@@ -160,18 +158,20 @@
              (:generator ,untagged-penalty
                (inst ,op r x y)))))))
 
-); eval-when
-
 (define-binop + 4 add)
 (define-binop - 4 sub)
 (define-binop logand 2 and)
-(define-binop logandc1 2 andn t)
 (define-binop logandc2 2 andn)
 (define-binop logior 2 or)
 (define-binop logorc1 2 orn t t)
 (define-binop logorc2 2 orn nil t)
 (define-binop logxor 2 xor)
 (define-binop logeqv 2 xnor nil t)
+
+(define-vop (fast-logandc2/unsigned-signed=>unsigned fast-logandc2/unsigned=>unsigned)
+  (:args (x :scs (unsigned-reg))
+         (y :scs (signed-reg)))
+  (:arg-types unsigned-num signed-num))
 
 (define-vop (fast-logand/signed-unsigned=>unsigned fast-logand/unsigned=>unsigned)
   (:args (x :scs (signed-reg) :target r)
@@ -208,7 +208,7 @@
               (and (member :sparc-v9 *backend-subfeatures*)
                    (not (member :sparc-64 *backend-subfeatures*)))))
   (:generator 12
-    (let ((zero (generate-error-code vop 'division-by-zero-error x y)))
+    (let ((zero (generate-error-code vop 'division-by-zero-error x)))
       (inst cmp y zero-tn)
       (inst b :eq zero)
       ;; Extend the sign of X into the Y register
@@ -243,7 +243,7 @@
               (and (member :sparc-v9 *backend-subfeatures*)
                    (not (member :sparc-64 *backend-subfeatures*)))))
   (:generator 12
-    (let ((zero (generate-error-code vop 'division-by-zero-error x y)))
+    (let ((zero (generate-error-code vop 'division-by-zero-error x)))
       (inst cmp y zero-tn)
       (if (member :sparc-v9 *backend-subfeatures*)
           (inst b :eq zero :pn)
@@ -279,7 +279,7 @@
               (and (member :sparc-v9 *backend-subfeatures*)
                    (not (member :sparc-64 *backend-subfeatures*)))))
   (:generator 8
-    (let ((zero (generate-error-code vop 'division-by-zero-error x y)))
+    (let ((zero (generate-error-code vop 'division-by-zero-error x)))
       (inst cmp y zero-tn)
       (if (member :sparc-v9 *backend-subfeatures*)
           (inst b :eq zero :pn)
@@ -311,7 +311,7 @@
   (:save-p :compute-only)
   (:guard (member :sparc-64 *backend-subfeatures*))
   (:generator 8
-    (let ((zero (generate-error-code vop 'division-by-zero-error x y)))
+    (let ((zero (generate-error-code vop 'division-by-zero-error x)))
       (inst cmp y zero-tn)
       (inst b :eq zero :pn)
       ;; Sign extend the numbers, just in case.
@@ -339,7 +339,7 @@
   (:save-p :compute-only)
   (:guard (member :sparc-64 *backend-subfeatures*))
   (:generator 8
-    (let ((zero (generate-error-code vop 'division-by-zero-error x y)))
+    (let ((zero (generate-error-code vop 'division-by-zero-error x)))
       (inst cmp y zero-tn)
       (inst b :eq zero :pn)
       ;; Zap the higher 32 bits, just in case
@@ -639,7 +639,6 @@
   (define-modular-backend + t)
   (define-modular-backend - t)
   (define-modular-backend logeqv t)
-  (define-modular-backend logandc1)
   (define-modular-backend logandc2 t)
   (define-modular-backend logorc1)
   (define-modular-backend logorc2 t))

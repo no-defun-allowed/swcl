@@ -701,22 +701,7 @@ necessary, since type inference may take arbitrarily long to converge.")
 (defvar *compile-component-hook* nil)
 
 (defun compile-component (component)
-
-  ;; miscellaneous sanity checks
-  ;;
-  ;; FIXME: These are basically pretty wimpy compared to the checks done
-  ;; by the old CHECK-IR1-CONSISTENCY code. It would be really nice to
-  ;; make those internal consistency checks work again and use them.
   (aver-live-component component)
-  (do-blocks (block component)
-    (aver (eql (block-component block) component)))
-  (dolist (lambda (component-lambdas component))
-    ;; sanity check to prevent weirdness from propagating insidiously as
-    ;; far from its root cause as it did in bug 138: Make sure that
-    ;; thing-to-COMPONENT links are consistent.
-    (aver (eql (lambda-component lambda) component))
-    (aver (eql (node-component (lambda-bind lambda)) component)))
-
   (let* ((*component-being-compiled* component))
 
     (when *compile-progress*
@@ -827,11 +812,11 @@ necessary, since type inference may take arbitrarily long to converge.")
     (let ((ir1-namespace *ir1-namespace*))
       (clrhash (free-funs ir1-namespace))
       (clrhash (free-vars ir1-namespace))
-      ;; FIXME: It would make sense to clear these tables as well, but
-      ;; ARM64 relies on the constant for NIL to stay around in order to
-      ;; assign a wired TN to it, so we let people share it. Investigate a
-      ;; proper fix.
-      #+(or)
+      ;; FIXME: It would make sense to clear these tables on arm64 as
+      ;; well, but it relies on the constant for NIL to stay around in
+      ;; order to assign a wired TN to it. A possible fix is to give
+      ;; arm64 NULL-SC like on other platforms.
+      #-arm64
       (progn
         (clrhash (eql-constants ir1-namespace))
         (clrhash (similar-constants ir1-namespace))))))

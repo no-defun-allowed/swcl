@@ -510,7 +510,7 @@
   (:vop-var vop)
   (:save-p :compute-only)
   (:generator 31
-    (let ((zero (generate-error-code vop 'division-by-zero-error x y)))
+    (let ((zero (generate-error-code vop 'division-by-zero-error x)))
       (if (sc-is y any-reg)
           (inst test y y)  ; smaller instruction
           (inst cmp y 0))
@@ -566,7 +566,7 @@
   (:vop-var vop)
   (:save-p :compute-only)
   (:generator 33
-    (let ((zero (generate-error-code vop 'division-by-zero-error x y)))
+    (let ((zero (generate-error-code vop 'division-by-zero-error x)))
       (if (sc-is y unsigned-reg)
           (inst test y y)  ; smaller instruction
           (inst cmp y 0))
@@ -616,7 +616,7 @@
   (:vop-var vop)
   (:save-p :compute-only)
   (:generator 33
-    (let ((zero (generate-error-code vop 'division-by-zero-error x y)))
+    (let ((zero (generate-error-code vop 'division-by-zero-error x)))
       (if (sc-is y signed-reg)
           (inst test y y)  ; smaller instruction
           (inst cmp y 0))
@@ -1584,8 +1584,6 @@ constant shift greater than word length")))
   (if (oddp (length args))
       `(logxor ,@args)
       `(lognot (logxor ,@args))))
-(define-source-transform logandc1 (x y)
-  `(logand (lognot ,x) ,y))
 (define-source-transform logandc2 (x y)
   `(logand ,x (lognot ,y)))
 (define-source-transform logorc1 (x y)

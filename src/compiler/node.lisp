@@ -418,6 +418,7 @@
   (defattr block-type-check)
   (defattr block-delete-p))
 
+;;; The LOOP structure holds information about a loop.
 (defstruct (cloop (:conc-name loop-)
                   (:predicate loop-p)
                   (:constructor make-loop)
@@ -502,13 +503,14 @@
   ;; other sets used in constraint propagation and/or copy propagation
   (in nil)
   (out nil)
-  ;; Set of all blocks that dominate this block. NIL is interpreted
-  ;; as "all blocks in component".
-  (dominators nil :type (or null sset))
-  ;; the LOOP that this block belongs to
-  (loop nil :type (or null cloop))
-  ;; next block in the loop.
+  ;; The Loop structure for the innermost loop that contains this
+  ;; block. Null only temporarily.
+  (loop nil :type (or cloop null))
+  ;; A link that holds together the list of blocks within Loop. Null
+  ;; at the end or when we haven't determined it yet.
   (loop-next nil :type (or null cblock))
+  ;; The immediate dominator of this block.
+  (dominator nil :type (or null cblock))
   ;; the component this block is in, or NIL temporarily during IR1
   ;; conversion and in deleted blocks
   (component (progn
@@ -563,12 +565,7 @@
 ;;;   component.
 (defstruct (component (:copier nil)
                       (:constructor make-component
-                       (head
-                        tail &aux
-                        (last-block tail)
-                        (outer-loop (make-loop :kind :outer
-                                               :head head
-                                               :tail (list tail))))))
+                       (head tail &aux (last-block tail))))
   ;; space where this component will be allocated in
   ;; :auto won't make any codegen optimizations pertinent to immobile space,
   ;; but will place the code there given sufficient available space.
@@ -662,7 +659,7 @@
   ;; this is filled by environment analysis
   (dx-lvars nil :type list)
   ;; The default LOOP in the component.
-  (outer-loop (missing-arg) :type cloop)
+  (outer-loop (make-loop :kind :outer :head head :tail (list tail)) :type cloop)
   (max-block-number 0 :type fixnum)
   (dominators-computed nil))
 
@@ -1780,21 +1777,8 @@
                         (lexenv thing)
                         (node (node-lexenv thing))
                         (functional (functional-lexenv thing)))))))
-
-;;; The basic interval type. It can handle open and closed intervals.
-;;; A bound is open if it is a list containing a number, just like
-;;; Lisp says. NIL means unbounded.
-(defstruct (interval (:constructor %make-interval (low high))
-                     (:copier nil))
-  low high)
-
-(defstruct (conditional-flags
-            (:constructor make-conditional-flags (flags))
-            (:copier nil))
-  flags)
 
 ;;;; Freeze some structure types to speed type testing.
 
 (declaim (freeze-type node lexenv ctran lvar cblock component cleanup
-                      environment tail-set nlx-info leaf interval
-                      conditional-flags))
+                      environment tail-set nlx-info leaf))

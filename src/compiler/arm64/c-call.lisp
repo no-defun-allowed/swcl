@@ -220,6 +220,9 @@
   (:generator 2
     (load-foreign-symbol res foreign-symbol :dataref t)))
 
+#+sb-safepoint
+(defconstant thread-saved-csp-slot -1) ; sits right before thread struct.
+
 (defun emit-c-call (vop nfp-save temp temp2 cfunc function)
   (let ((cur-nfp (current-nfp-tn vop)))
     (when cur-nfp
@@ -233,6 +236,10 @@
         (inst adr temp2 return)
         (inst stp cfp-tn temp2 (@ csp-tn))
         (storew-pair csp-tn thread-control-frame-pointer-slot temp thread-control-stack-pointer-slot thread-tn)
+        ;; OK to run GC without stopping this thread from this point
+        ;; on.
+        #+sb-safepoint
+        (storew csp-tn thread-tn thread-saved-csp-slot)
         (cond ((stringp function)
                (invoke-foreign-routine function cfunc))
               (t
@@ -251,6 +258,9 @@
                      :sc (sc-or-lose 'descriptor-reg)
                      :offset reg)
                     0))
+        ;; No longer OK to run GC except at safepoints.
+        #+sb-safepoint
+        (storew zr-tn thread-tn thread-saved-csp-slot)
         (storew zr-tn thread-tn thread-control-stack-pointer-slot))
       return
       #-sb-thread

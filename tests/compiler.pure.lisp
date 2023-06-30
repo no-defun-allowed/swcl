@@ -6328,3 +6328,36 @@
               (when (string= (format nil "~a" note)
                              "The second argument never returns a value.")
                 (return t))))))
+
+(with-test (:name :check-consistency-mv-call-substitute-single-use-lvar)
+  (let ((sb-c::*check-consistency* t))
+    (checked-compile
+     `(lambda (spec)
+       (multiple-value-call #'list
+         (first spec)
+         (values
+          5
+          6))))))
+
+(with-test (:name :check-consistency-call-symbol)
+  (let ((sb-c::*check-consistency* t))
+    (checked-compile
+     `(lambda ()
+        (print (lambda (x) (apply (read) x)))))))
+
+(with-test (:name :check-consistency-info-arg-count)
+  (let ((sb-c::*check-consistency* t))
+    (checked-compile
+     `(lambda (symbol expr eqx)
+        (declare (type function eqx))
+        (if (boundp symbol)
+            (let ((oldval (symbol-value symbol)))
+              (if (funcall eqx oldval expr) oldval expr))
+            expr)))))
+
+(with-test (:name :check-consistency-deleted-let)
+  (let ((sb-c::*check-consistency* t))
+    (checked-compile
+     `(lambda ()
+        (let ((x (error "fail")))
+          x)))))

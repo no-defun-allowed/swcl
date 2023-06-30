@@ -326,6 +326,7 @@ static inline boolean pinned_p(lispobj obj, page_index_t page)
 // Need this up here, in order to implement from_space_p for
 // mark-region GC.
 generation_index_t gc_gen_of(lispobj obj, int defaultval);
+extern generation_index_t from_space, new_space;
 
 // Return true only if 'obj' must be *physically* transported to survive gc.
 // Return false if obj is in the immobile space regardless of its generation.

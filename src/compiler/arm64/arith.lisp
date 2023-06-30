@@ -149,7 +149,6 @@
                         &key
                           (constant-test 'encode-logical-immediate)
                           (constant-fixnum-test 'fixnum-encode-logical-immediate)
-                          swap
                           (constant-op op)
                           (constant-transform 'identity)
                           negative-op)
@@ -158,16 +157,11 @@
                   fast-fixnum-binop)
        (:translate ,translate)
        (:generator 2
-         ,(if swap
-              `(inst ,op r y x)
-              `(inst ,op r x y))))
+         (inst ,op r x y)))
      (define-vop (,(symbolicate 'fast- translate '-c/fixnum=>fixnum)
                   fast-fixnum-binop-c)
-       ,(if swap
-            `(:arg-types (:constant (satisfies ,constant-fixnum-test))
-                         tagged-num)
-            `(:arg-types tagged-num
-                         (:constant (satisfies ,constant-fixnum-test))))
+       (:arg-types tagged-num
+                   (:constant (satisfies ,constant-fixnum-test)))
        (:translate ,translate)
        (:generator 1
          (cond ,@(and negative-op
@@ -179,17 +173,12 @@
                   fast-signed-binop)
        (:translate ,translate)
        (:generator ,(1+ untagged-penalty)
-         ,(if swap
-              `(inst ,op r y x)
-              `(inst ,op r x y))))
+         (inst ,op r x y)))
      (define-vop (,(symbolicate 'fast- translate '-c/signed=>signed)
                   fast-signed-binop-c)
        (:translate ,translate)
-       ,(if swap
-            `(:arg-types (:constant (satisfies ,constant-test))
-                         signed-num)
-            `(:arg-types signed-num
-                         (:constant (satisfies ,constant-test))))
+       (:arg-types signed-num
+                     (:constant (satisfies ,constant-test)))
        (:generator ,untagged-penalty
          (cond ,@(and negative-op
                       `(((minusp y)
@@ -200,17 +189,12 @@
                   fast-unsigned-binop)
        (:translate ,translate)
        (:generator ,(1+ untagged-penalty)
-         ,(if swap
-              `(inst ,op r y x)
-              `(inst ,op r x y))))
+         (inst ,op r x y)))
      (define-vop (,(symbolicate 'fast- translate '-c/unsigned=>unsigned)
                   fast-unsigned-binop-c)
        (:translate ,translate)
-       ,(if swap
-            `(:arg-types (:constant (satisfies ,constant-test))
-                         unsigned-num)
-            `(:arg-types unsigned-num
-                         (:constant (satisfies ,constant-test))))
+       (:arg-types unsigned-num
+                   (:constant (satisfies ,constant-test)))
        (:generator ,untagged-penalty
          (cond ,@(and negative-op
                       `(((minusp y)
@@ -241,22 +225,17 @@
   (:generator 6
     (inst add r x y)))
 
-(define-binop logandc1 2 bic :swap t
-  :constant-test bic-encode-immediate
-  :constant-fixnum-test bic-fixnum-encode-immediate
-  :constant-op and
-  :constant-transform bic-mask)
 (define-binop logandc2 2 bic
   :constant-test bic-encode-immediate
   :constant-fixnum-test bic-fixnum-encode-immediate
   :constant-op and
   :constant-transform bic-mask)
 
-;; (define-binop logorc1 2 orn :swap t
-;;   :constant-test bic-encode-immediate
-;;   :constant-fixnum-test bic-fixnum-encode-immediate
-;;   :constant-op orr
-;;   :constant-transform bic-mask)
+(define-vop (fast-logandc2/unsigned-signed=>unsigned fast-logandc2/unsigned=>unsigned)
+  (:args (x :scs (unsigned-reg))
+         (y :scs (signed-reg)))
+  (:arg-types unsigned-num signed-num))
+
 ;; (define-binop logorc2 2 orn
 ;;   :constant-test bic-encode-immediate
 ;;   :constant-fixnum-test bic-fixnum-encode-immediate
@@ -346,7 +325,7 @@
   (:generator 33
     (when (types-equal-or-intersect (tn-ref-type y-ref)
                                     (specifier-type '(eql 0)))
-      (let ((zero (generate-error-code vop 'division-by-zero-error x y)))
+      (let ((zero (generate-error-code vop 'division-by-zero-error x)))
         (inst cbz y zero)))
     (inst sdiv quo x y)
     (unless (eq (tn-kind rem) :unused)
@@ -368,7 +347,7 @@
   (:generator 33
     (when (types-equal-or-intersect (tn-ref-type y-ref)
                                     (specifier-type '(eql 0)))
-      (let ((zero (generate-error-code vop 'division-by-zero-error x y)))
+      (let ((zero (generate-error-code vop 'division-by-zero-error x)))
         (inst cbz y zero)))
     (inst udiv quo x y)
     (unless (eq (tn-kind rem) :unused)
@@ -390,7 +369,7 @@
   (:generator 34
     (when (types-equal-or-intersect (tn-ref-type y-ref)
                                     (specifier-type '(eql 0)))
-      (let ((zero (generate-error-code vop 'division-by-zero-error x y)))
+      (let ((zero (generate-error-code vop 'division-by-zero-error x)))
         (inst cbz y zero)))
     (inst cmp x 0)
     (inst csneg tmp-tn x x :ge)
@@ -1340,7 +1319,15 @@
 
 (define-vop (bignum-length get-header-data)
   (:translate sb-bignum:%bignum-length)
-  (:policy :fast-safe))
+  (:results (res :scs (unsigned-reg any-reg)))
+  (:policy :fast-safe)
+  (:generator 6
+    (loadw res x 0 other-pointer-lowtag)
+    #.(assert (zerop (ash bignum-widetag
+                       (- n-fixnum-tag-bits n-widetag-bits))))
+    (inst lsr res res (if (sc-is res any-reg)
+                          (- n-widetag-bits n-fixnum-tag-bits)
+                          n-widetag-bits))))
 
 (define-vop (bignum-set-length set-header-data)
   (:translate sb-bignum:%bignum-set-length)

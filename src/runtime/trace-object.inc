@@ -105,7 +105,7 @@ static void TRACE_NAME(lispobj* where)
             gc_assert(hashtable_weakp(hash_table));
             // An object can only be removed from the queue once.
             // Therefore the 'next' pointer has got to be nil.
-            gc_assert(hash_table->next_weak_hash_table == NIL);
+            gc_assert((lispobj)hash_table->next_weak_hash_table == NIL);
             int weakness = hashtable_weakness(hash_table);
             boolean defer = 1;
             LOCK;
@@ -113,7 +113,7 @@ static void TRACE_NAME(lispobj* where)
                 defer = scan_weak_hashtable(hash_table, HT_ENTRY_LIVENESS_FUN_ARRAY_NAME[weakness],
                                             TRACE_PAIR);
             if (defer) {
-                hash_table->next_weak_hash_table = (lispobj)weak_hash_tables;
+                hash_table->next_weak_hash_table = weak_hash_tables;
                 weak_hash_tables = hash_table;
             }
             UNLOCK;
@@ -170,13 +170,19 @@ static void TRACE_NAME(lispobj* where)
     case WEAK_POINTER_WIDETAG:
         weakptr = (struct weak_pointer*)where;
         if (!DO_WEAKNESS_P) ACTION(weakptr->value, &weakptr->value, SOURCE_NORMAL);
-        else if (is_lisp_pointer(weakptr->value) && interesting_pointer_p(weakptr->value)) {
+        else if (!WEAKPTR_PAYLOAD_WORDS(where)) { // vectorlike
+            WATCH_DEFERRED(where, 1, scan_to);
+            LOCK;
+            add_to_weak_vector_list(where, header);
+            UNLOCK;
+        } else if (is_lisp_pointer(weakptr->value) && interesting_pointer_p(weakptr->value)) {
             /* XXX: This hard-codes the layout of a weak pointer. Make a scalar WATCH_DEFERRED? */
             WATCH_DEFERRED(where, 1, 2);
             LOCK;
             add_to_weak_pointer_chain(weakptr);
             UNLOCK;
         }
+        return;
         return;
     default:
         if (leaf_obj_widetag_p(widetag)) return;

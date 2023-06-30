@@ -167,10 +167,14 @@
 (define-binop + 4 add :neg-op sub)
 (define-binop - 4 sub :neg-op add)
 (define-binop logand 2 and :cop bic :invert-y t :try-single-op t)
-(define-binop logandc1 2 bic :cop orr :arg-swap t :invert-y t :invert-r t)
 (define-binop logandc2 2 bic)
 (define-binop logior 2 orr)
 (define-binop logxor 2 eor)
+
+(define-vop (fast-logandc2/unsigned-signed=>unsigned fast-logandc2/unsigned=>unsigned)
+  (:args (x :scs (unsigned-reg))
+         (y :scs (signed-reg)))
+  (:arg-types unsigned-num signed-num))
 
 (define-vop (fast-logior-unsigned-signed=>signed fast-safe-arith-op)
   (:args (x :scs (unsigned-reg))
@@ -537,7 +541,6 @@
   ;; (define-modular-backend logeqv)
   ;; (define-modular-backend lognand)
   ;; (define-modular-backend lognor)
-  (define-modular-backend logandc1)
   (define-modular-backend logandc2)
   ;; (define-modular-backend logorc1)
   ;; (define-modular-backend logorc2)
