@@ -1022,7 +1022,7 @@ static void scavenge_root_gens_worker() {
           /* Check the widetag, to make sure we aren't going to
            * scavenge complete junk. */
           lispobj widetag = widetag_of((lispobj*)(page_address(i) - page_scan_start_offset(i)));
-          if (widetag != SIMPLE_VECTOR_WIDETAG) {
+          if (widetag != SIMPLE_VECTOR_WIDETAG && widetag != WEAK_POINTER_WIDETAG) {
             /* How odd. Just remove the card marks. */
             for (int j = 0, card = page_to_card_index(i); j < CARDS_PER_PAGE; j++, card++)
               gc_card_mark[card] = CARD_UNMARKED;
