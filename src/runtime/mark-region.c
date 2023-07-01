@@ -196,9 +196,9 @@ boolean try_allocate_small_after_region(sword_t nbytes, struct alloc_region *reg
 
 /* We try not to allocate small objects from free pages, to reduce
  * fragmentation. Something like "wilderness preservation". */
-boolean allow_free_pages[16] = {0};
+boolean allow_free_pages[8] = {0};
 void set_all_allow_free_pages(boolean value) {
-  for (int i = 0; i < 16; i++) allow_free_pages[i] = value;
+  for (int i = 0; i < 8; i++) allow_free_pages[i] = value;
 }
 
 /* try_allocate_small_from_pages updates the start pointer to after the
@@ -624,10 +624,13 @@ void set_allocation_bit_mark(void *address) {
   allocation_bitmap[first_word_index] |= ((uword_t)(1) << (first_bit_index % N_WORD_BITS));
 }
 
-void compute_allocations(void *address) {
+static void compute_allocations(void *address) {
   line_index_t l = address_line(address), start, end;
   page_index_t this_page = find_page_index(address);
-  line_index_t first_line = address_line(page_address(this_page)), last_line = address_line(page_address(this_page + 1));
+  /* Spans of fresh lines exist inside pages, so don't search outside the
+   * bounds of this page. */
+  line_index_t first_line = address_line(page_address(this_page)),
+               last_line = address_line(page_address(this_page + 1));
   /* Don't unfreshen lines when the mutator could still be
    * allocating into them. Forgetting this causes
    * brothertree.impure.lisp to fail. */
@@ -641,12 +644,15 @@ void compute_allocations(void *address) {
   /* Find the first subsequent unfresh line. */
   for (end = l + 1; end != last_line && IS_FRESH(line_bytemap[end]); end++)
     if (unfreshen) line_bytemap[end] = UNFRESHEN_GEN(line_bytemap[end]);
-  /* The run of contiguous allocation exists between those. */
-  meters.fresh_pointers += (end - start) * LINE_SIZE;
+  if (gc_active_p)
+    meters.fresh_pointers += (end - start) * LINE_SIZE;
+  /* Now we have found the span of fresh objects which encloses the address,
+   * and we mark each contiguous object in the allocation bitmap. */
   unsigned char *allocations = (unsigned char*)allocation_bitmap;
   if (page_table[this_page].type == PAGE_TYPE_CONS) {
-    /* Just fill with 1s. Worst we can do is create a (0 . 0) cell out
-     * of nowhere, as the allocator pre-zeroes memory. */
+    /* Assume that every possible cons cell is live. The worst we can do
+     * is to create a (0 . 0) cell out of nowhere, as the allocator pre-zeroes
+     * memory. */
     for (line_index_t l = start; l < end; l++) allocations[l] = 0xFF;
   } else {
     /* Walk the span to find object starts. */
