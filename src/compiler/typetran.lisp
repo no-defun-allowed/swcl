@@ -116,12 +116,37 @@
                  `(sb-alien::alien-value-typep object ',alien-type)))
               ;; (typep (the (or list fixnum) x) 'integer) =>
               ;; (typep x 'fixnum)
-              ((let ((new-predicate (backend-type-predicate intersect))
-                     (current (combination-fun-source-name node)))
+              ((let ((current (combination-fun-source-name node))
+                     (new-predicate
+                       (or
+                        (backend-type-predicate intersect)
+                        ;; Remove bounds from numeric types
+                        (and (csubtypep intersect (specifier-type 'real))
+                             (macrolet ((up (&rest types)
+                                          `(cond ,@(loop for (type predicate) on types by #'cddr
+                                                         collect
+                                                         `((and (csubtypep intersect (specifier-type ',type))
+                                                                (csubtypep (specifier-type ',type) type))
+                                                           ',predicate)))))
+                               (up fixnum fixnump
+                                   integer integerp
+                                   rational rationalp
+                                   single-float single-float-p
+                                   double-float double-float-p
+                                   float floatp
+                                   real realp))))))
                  (when (and new-predicate
                             (neq new-predicate current)
+                            ;; Some subtypes are more expensive to check
                             (not (and (eq current 'listp)
-                                      (eq new-predicate 'consp))))
+                                      (eq new-predicate 'consp)))
+                            (not (and (eq current 'functionp)
+                                      (eq new-predicate 'compiled-function-p)))
+                            (not (eq current 'characterp))
+                            (not (eq new-predicate #+64-bit 'signed-byte-64-p
+                                                   #-64-bit 'signed-byte-32-p))
+                            (not (eq new-predicate #+64-bit 'unsigned-byte-64-p
+                                                   #-64-bit 'unsigned-byte-32-p)))
                    `(,new-predicate object))))
               ;; (typep (the float x) 'double-float) =>
               ;; (typep x 'single-float)
@@ -1559,3 +1584,23 @@
     (if pred
         `(not (,pred object))
         (give-up-ir1-transform))))
+
+(when-vop-existsp (:translate fixnum-mod-p)
+  (deftransform fixnum-mod-p ((x mod) (t (constant-arg fixnum)) * :important nil)
+    (let* ((type (lvar-type x))
+           (mod (lvar-value mod))
+           (intersect (type-intersection type (specifier-type 'fixnum)))
+           (mod-type (specifier-type `(mod ,(1+ mod)))))
+      (cond ((csubtypep intersect mod-type)
+             `(fixnump x))
+            ((and (csubtypep type (specifier-type 'fixnum))
+                  (csubtypep (type-intersection type (specifier-type 'unsigned-byte))
+                             mod-type))
+             `(>= x 0))
+            ((let ((int (type-approximate-interval intersect)))
+               (when int
+                 (let ((power-of-two (1- (ash 1 (integer-length (interval-high int))))))
+                   (when (< 0 power-of-two mod)
+                     `(fixnum-mod-p x ,power-of-two))))))
+            (t
+             (give-up-ir1-transform))))))

@@ -174,17 +174,13 @@ print_entry_name (lispobj name, FILE *f)
             case PACKAGE_ID_KEYWORD: prefix = ":"; break;
             }
             if (prefix) fputs(prefix, f); else {
-                /* Check for the package being NIL first. */
-                lispobj package = symbol_package(symbol);
-                if (package != NIL) {
-                    struct package *pkg
-                        = (struct package *)native_pointer(package);
-                    struct vector *pkg_name = VECTOR(follow_maybe_fp(pkg->_name));
-                    print_string(pkg_name, f);
-                    fputs("::", f);
-                } else {
-                    fprintf(f, "<unknown package #%d>::", symbol_package_id(symbol));
+                struct package *pkg
+                    = (struct package *)native_pointer(symbol_package(symbol));
+                lispobj name_ptr = follow_maybe_fp(pkg->_name);
+                if (name_ptr) {
+                    print_string(VECTOR(name_ptr), f);
                 }
+                fputs("::", f);
             }
             print_string(symbol_name(symbol), f);
             break;
