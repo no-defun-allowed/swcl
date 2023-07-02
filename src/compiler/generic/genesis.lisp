@@ -471,6 +471,7 @@
                (unless (> (length (gspace-page-table gspace)) end-page)
                  (adjust-array (gspace-page-table gspace) (1+ end-page)
                                :initial-element nil))
+               #+mark-region-gc
                (when (> end-page start-page)
                  (assert (alignedp start-word-index)))
                (loop for page-index from start-page to end-page
