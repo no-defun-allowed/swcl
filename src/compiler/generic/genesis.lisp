@@ -279,6 +279,7 @@
                   sb-vm:n-word-bits)
                :element-type 'sb-vm:word
                :initial-element 0))
+  single-object-p
   scan-start) ; byte offset from base of the space
 
 ;;; a GENESIS-time representation of a memory space (e.g. read-only
@@ -465,7 +466,7 @@
              ;; CMUCL incorrectly warns that the result of ADJUST-ARRAY
              ;; must not be discarded.
              #+host-quirks-cmu (declare (notinline adjust-array))
-             (let* ((start-page (page-index start-word-index))
+             (let ((start-page (page-index start-word-index))
                     (end-page (page-index (+ start-word-index (1- count)))))
                (unless (> (length (gspace-page-table gspace)) end-page)
                  (adjust-array (gspace-page-table gspace) (1+ end-page)
@@ -502,11 +503,12 @@
                (loop for index from start-page to end-page
                      do (let ((pte (pte index)))
                           (unless (page-scan-start pte)
-                            (setf (page-scan-start pte) start-word-index)))))
+                            (setf (page-scan-start pte) start-word-index
+                                  (page-single-object-p pte) (>= n-words words-per-page))))))
              start-word-index)
            (get-frontier-page-type ()
              (page-type (pte (page-index (1- (gspace-free-word-index gspace))))))
-           (realign-frontier ()
+           (realign-frontier (&key (keep-hole t))
              ;; Align the frontier to a page, putting the empty space onto a free list
              (let* ((free-ptr (gspace-free-word-index gspace))
                     (avail (- (align-up free-ptr words-per-page) free-ptr))
@@ -516,7 +518,7 @@
                (aver (= word-index free-ptr))
                (aver (alignedp (gspace-free-word-index gspace)))
                (aver (= (gspace-free-word-index gspace) (+ free-ptr avail)))
-               (when (>= avail min-usable-hole-size)
+               (when (and (>= avail min-usable-hole-size) keep-hole)
                  ;; allocator is first-fit; space goes to the tail of the other freelist.
                  (nconc (ecase other-type
                           (:code  (gspace-code-free-ranges gspace))
@@ -558,17 +560,24 @@
       (unless (or (alignedp (gspace-free-word-index gspace))
                   (eq (get-frontier-page-type) page-type))
         (realign-frontier))
-      ;; Objects don't span pages
+      ;; The mark-region GC is stricter on what kind of heap it can work
+      ;; with. Notably: objects don't span pages,
+      #+mark-region-gc
       (let* ((free-ptr (gspace-free-word-index gspace))
              (avail (- (align-up free-ptr words-per-page) free-ptr)))
         (when (< avail n-words)
           (realign-frontier)))
-      ;; Large objects live on their own pages
+      ;; and large objects have their own pages,
+      #+mark-region-gc
       (when (>= n-words words-per-page)
         (realign-frontier))
       (let ((word-index (gspace-claim-n-words gspace n-words)))
         (assign-page-type page-type word-index n-words)
         (mark-allocation word-index)
+        ;; so small objects can't be put at the end of large objects.
+        #+mark-region-gc
+        (when (>= n-words words-per-page)
+          (realign-frontier :keep-hole nil))
         (note-words-used word-index)))))
 
 (defun gspace-claim-n-bytes (gspace specified-n-bytes &optional (page-type :mixed))
@@ -3849,9 +3858,10 @@ III. initially undefined function references (alphabetically):
                               (:code  (incf n-code)  #b111)
                               (:list  (incf n-cons)  #b101)
                               (:mixed (incf n-mixed) #b011))
-                            0)))
+                            0))
+             (single-object-bit (if (page-single-object-p pte) 1 0)))
         (setf (bvref-word-unaligned ptes pte-offset) (logior sso type-bits))
-        (setf (bvref-16 ptes (+ pte-offset sb-vm:n-word-bytes)) usage)))
+        (setf (bvref-16 ptes (+ pte-offset sb-vm:n-word-bytes)) (logior usage single-object-bit))))
     (when verbose
       (format t "movable dynamic space: ~d + ~d + ~d cons/code/mixed pages~%"
               n-cons n-code n-mixed))

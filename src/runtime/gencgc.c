@@ -3129,9 +3129,6 @@ static page_index_t scan_boxed_root_cards_non_spanning(page_index_t page, genera
  * By construction, objects will never span cards */
 static page_index_t scan_mixed_root_cards(page_index_t page, generation_index_t gen)
 {
-#ifdef LISP_FEATURE_MARK_REGION_GC
-    lose("No small mixed in mark-region yet.");
-#endif
     do {
         lispobj* start = (void*)page_address(page);
         long card = addr_to_card_index(start);
@@ -3511,7 +3508,7 @@ walk_generation(uword_t (*proc)(lispobj*,lispobj*,uword_t),
             /* This should be the start of a contiguous block */
             /* Why oh why does genesis seem to make a page table
             * that trips this assertion? */
-            // gc_assert(page_starts_contiguous_block_p(i));
+            gc_assert(page_starts_contiguous_block_p(i));
 
             /* Need to find the full extent of this contiguous block in case
                objects span pages. */
@@ -4611,7 +4608,7 @@ collect_garbage(generation_index_t last_gen)
         } else {
             raise =
                 (gen < last_gen)
-              || (generations[gen].num_gc >= generations[gen].number_of_gcs_before_promotion);
+                || (generations[gen].num_gc >= generations[gen].number_of_gcs_before_promotion);
             /* If we would not normally raise this one, but we're
              * running low on space in comparison to the object-sizes
              * we've been seeing, raise it and collect the next one

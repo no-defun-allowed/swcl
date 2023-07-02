@@ -37,7 +37,6 @@
 #define PAGES_CLAIMED_PER_THREAD 128
 #define PREFETCH_DISTANCE 32
 
-//#define DEBUG
 //#define LOG_COLLECTIONS
 #define COMPACT
 
@@ -416,10 +415,6 @@ static _Thread_local lispobj *source_object;
 
 static void mark(lispobj object, lispobj *where, enum source source_type) {
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
-#ifdef DEBUG
-    if (page_free_p(find_page_index(native_pointer(object))))
-      lose("%lx is on a free page (#%ld)", object, find_page_index(native_pointer(object)));
-#endif
 
     lispobj *np = native_pointer(object);
     if (gc_gen_of(object, 0) < dirty_generation_source)
@@ -1023,38 +1018,51 @@ static void scavenge_root_gens_worker() {
     for (page_index_t i = claim; i < limit; i++) {
       unsigned char page_type = page_table[i].type & PAGE_TYPE_MASK;
       if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(i)) continue;
-      if (page_single_obj_p(i) && page_type == PAGE_TYPE_MIXED) {
+      if (page_single_obj_p(i)) {
         if (page_table[i].gen > generation_to_collect) {
-          /* Check the widetag, to make sure we aren't going to
-           * scavenge complete junk. */
-          lispobj widetag = widetag_of((lispobj*)(page_address(i) - page_scan_start_offset(i)));
-          if (widetag != SIMPLE_VECTOR_WIDETAG && widetag != WEAK_POINTER_WIDETAG) {
+          int widetag = widetag_of((lispobj*)(page_address(i) - page_scan_start_offset(i)));
+          switch (widetag) {
+          case SIMPLE_VECTOR_WIDETAG:
+          case WEAK_POINTER_WIDETAG: {
+            /* Scavenge a page of a vector. */
+            if (page_starts_contiguous_block_p(i))
+              /* This page has the start of a large vector, and later pages
+               * will be part of this vector. */
+              source_object = (lispobj*)page_address(i);
+            /* The only time that page_address + page_words_used actually
+             * demarcates the end of a (sole) object on the page, with this
+             * heap layout. */
+            generation_index_t gen = page_table[i].gen;
+            lispobj *limit = (lispobj*)page_address(i) + page_words_used(i);
+            lispobj *start = (lispobj*)page_address(i);
+            for (int j = 0, card = addr_to_card_index(start);
+                 j < CARDS_PER_PAGE;
+                 j++, card++, start += WORDS_PER_CARD) {
+              if (card_dirtyp(card)) {
+                lispobj *card_end = start + WORDS_PER_CARD;
+                lispobj *end = (limit < card_end) ? limit : card_end;
+                dirty_generation_source = gen, dirty = 0;
+                for (lispobj *p = start; p < end; p++)
+                  mark(*p, p, SOURCE_NORMAL);
+                update_card_mark(card, dirty);
+              }
+            }
+            break;
+          }
+          case CODE_HEADER_WIDETAG: {
+            int card = addr_to_card_index(page_address(i));
+            if (page_starts_contiguous_block_p(i) && card_dirtyp(card)) {
+              source_object = (lispobj*)page_address(i);
+              dirty_generation_source = page_table[i].gen, dirty = 0;
+              trace_other_object((lispobj*)page_address(i));
+              update_card_mark(card, dirty);
+            }
+            break;
+          }
+          default:
             /* How odd. Just remove the card marks. */
             for (int j = 0, card = page_to_card_index(i); j < CARDS_PER_PAGE; j++, card++)
               gc_card_mark[card] = CARD_UNMARKED;
-            continue;
-          }
-          /* This page has the start of a large vector, and later pages
-           * will be part of this vector. */
-          if (page_starts_contiguous_block_p(i))
-            source_object = (lispobj*)page_address(i);
-          /* The only time that page_address + page_words_used actually
-           * demarcates the end of a (sole) object on the page, with this
-           * heap layout. */
-          generation_index_t gen = page_table[i].gen;
-          lispobj *limit = (lispobj*)page_address(i) + page_words_used(i);
-          lispobj *start = (lispobj*)page_address(i);
-          for (int j = 0, card = addr_to_card_index(start);
-               j < CARDS_PER_PAGE;
-               j++, card++, start += WORDS_PER_CARD) {
-            if (card_dirtyp(card)) {
-              lispobj *card_end = start + WORDS_PER_CARD;
-              lispobj *end = (limit < card_end) ? limit : card_end;
-              dirty_generation_source = gen, dirty = 0;
-              for (lispobj *p = start; p < end; p++)
-                mark(*p, p, SOURCE_NORMAL);
-              update_card_mark(card, dirty);
-            }
           }
         }
       } else {
@@ -1270,7 +1278,7 @@ void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
 void find_references_to(lispobj something) {
   for (uword_t i = 0; i < (dynamic_space_size / N_WORD_BYTES); i++) {
     lispobj *p = (lispobj*)(DYNAMIC_SPACE_START + i * N_WORD_BYTES);
-    if (labs(*p - something) < 64)
+    if (labs(*p - something) < 16)
       printf("%p: %lx\n", p, *p);
   }
 }

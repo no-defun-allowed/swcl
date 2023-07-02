@@ -74,12 +74,7 @@ static boolean should_compact(char __attribute__((unused)) *why) {
     }
   }
   float ratio = (float)(pages * GENCGC_PAGE_BYTES) / bytes;
-#if 0
-  if (ratio > page_overhead_threshold)
-    fprintf(stderr, "%s, ratio = %.2f\n", why, ratio);
-  else
-    fprintf(stderr, "ratio = %.2f\n", ratio);
-#endif
+  // fprintf(stderr, "%s, ratio = %.2f\n", why, ratio);
   return force_compaction || ratio > page_overhead_threshold;
 }
 
@@ -171,7 +166,8 @@ static void move_objects() {
    * by refilling TLABs too. */
   uword_t pages_moved = 0;
   for (page_index_t p = 0; p < page_table_pages; p++)
-    if (target_pages[p]) {
+    // What's wrong with testing page_single_obj_p in pick_targets?
+    if (target_pages[p] && !page_single_obj_p(p)) {
       pages_moved++;
       lispobj *end = (lispobj*)page_address(p + 1);
       /* Move every object in this page in the right generation. */
