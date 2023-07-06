@@ -125,9 +125,9 @@ void commit_thread_local_remset() {
     acquire_lock(&remset_lock);
     remset_block->next = remset;
     remset = remset_block;
-    remset_block = NULL;
     release_lock(&remset_lock);
   }
+  remset_block = NULL;
 }
 
 /* We need to know which object a slot resides in for two reasons:
