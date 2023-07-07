@@ -7,15 +7,14 @@
 
 static unsigned int gc_threads;
 static pthread_t *threads;
-static sem_t start_semaphore;
+static sem_t *start_semaphores;
 static sem_t join_semaphore;
-static int semaphores_initializedp;
 static void (*action)(void);
 
-static void *worker(void *nothing) {
-  (void)nothing;
+static void *worker(void *index) {
+  uword_t i = (uword_t)index;
   while (1) {
-    sem_wait(&start_semaphore);
+    sem_wait(start_semaphores + i);
     action();
     sem_post(&join_semaphore);
   }
@@ -23,11 +22,6 @@ static void *worker(void *nothing) {
 }
 
 void thread_pool_init() {
-  if (!semaphores_initializedp) {
-      sem_init(&start_semaphore, 0, 0);
-      sem_init(&join_semaphore, 0, 0);
-      semaphores_initializedp = 1;
-  }
 
   char *str = getenv("GC_THREADS"), *tail;
   if (str == NULL) {
@@ -37,17 +31,24 @@ void thread_pool_init() {
     if (tail == str || parse >= 256) lose("%s isn't a number of GC threads", str);
     gc_threads = parse;
   }
-  threads = successful_malloc(sizeof(pthread_t) * gc_threads);
 
-  for (unsigned int i = 0; i < gc_threads; i++)
-    if (pthread_create(threads + i, NULL, worker, NULL))
-      lose("Failed to create GC thread #%d", i);
+  threads = successful_malloc(sizeof(pthread_t) * gc_threads);
+  if (!start_semaphores) {
+    start_semaphores = successful_malloc(sizeof(sem_t) * gc_threads);
+    for (unsigned int i = 0; i < gc_threads; i++)
+      sem_init(start_semaphores + i, 0, 0);
+    sem_init(&join_semaphore, 0, 0);
+  }
+
+  for (uword_t i = 0; i < gc_threads; i++)
+    if (pthread_create(threads + i, NULL, worker, (void*)i))
+      lose("Failed to create GC thread #%ld", i);
     else
       pthread_setname_np(threads[i], "Parallel GC");
 }
 
 static void wake_gc_threads() {
-  for (unsigned int i = 0; i < gc_threads; i++) sem_post(&start_semaphore);
+  for (unsigned int i = 0; i < gc_threads; i++) sem_post(start_semaphores + i);
 }
 
 static void join_gc_threads() {
