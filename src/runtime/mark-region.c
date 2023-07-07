@@ -571,7 +571,6 @@ static void trace_step() {
   atomic_fetch_add(&traced, local_traced);
   atomic_fetch_add(&meters.trace_alive, get_time() - start_time);
   atomic_fetch_add(&meters.trace_running, running_time);
-  commit_thread_local_remset();
   recycle_list = NULL;
 }
 
@@ -1191,6 +1190,7 @@ void mr_collect_garbage(bool raise) {
 #ifdef COMPACT
   if (compacting) {
     meters.compacts++;
+    run_on_thread_pool(commit_thread_local_remset);
     set_all_allow_free_pages(1);
     METER(compact, run_compaction(&meters.copy, &meters.fix));
   }

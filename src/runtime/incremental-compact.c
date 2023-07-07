@@ -1,3 +1,4 @@
+#include <stdatomic.h>
 #include <stdio.h>
 #include <sys/time.h>
 
@@ -118,16 +119,16 @@ static inline enum source source_from_tagged(lispobj t) { return t & 7; }
 static inline lispobj *slot_from_tagged(lispobj t) { return (lispobj*)(t &~ 7); }
 /* Each tracing thread records sources into thread-local blocks, like they
  * do with grey objects. */
-static _Thread_local struct Qblock *remset_block = NULL;
+static _Thread_local struct Qblock *output_block = NULL;
 
 void commit_thread_local_remset() {
-  if (remset_block && remset_block->count) {
+  if (output_block && output_block->count) {
     acquire_lock(&remset_lock);
-    remset_block->next = remset;
-    remset = remset_block;
-    remset_block = NULL;
+    output_block->next = remset;
+    remset = output_block;
     release_lock(&remset_lock);
   }
+  output_block = NULL;
 }
 
 /* We need to know which object a slot resides in for two reasons:
@@ -140,13 +141,12 @@ void commit_thread_local_remset() {
  * prefer not to.
  */
 void log_relevant_slot(lispobj *slot, lispobj *source, enum source source_type) {
-  if (!remset_block || remset_block->count == QBLOCK_CAPACITY) {
+  if (!output_block || output_block->count == QBLOCK_CAPACITY) {
     commit_thread_local_remset();
-    remset_block = suballoc_allocate(&remset_suballocator);
+    output_block = suballoc_allocate(&remset_suballocator);
   }
-  remset_block->elements[remset_block->count] = tag_source(slot, source_type);
-  remset_block->elements[remset_block->count+1] = (lispobj)source;
-  remset_block->count += 2;
+  output_block->elements[output_block->count++] = tag_source(slot, source_type);
+  output_block->elements[output_block->count++] = (lispobj)source;
 }
 
 /* Compacting */
