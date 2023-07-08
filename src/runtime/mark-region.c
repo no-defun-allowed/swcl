@@ -668,6 +668,7 @@ static lispobj *find_object(uword_t address, uword_t start) {
   if (p == -1) return 0;
   boolean fresh = IS_FRESH(line_bytemap[address_line(np)]);
   if (page_free_p(p)) return 0;
+  if (page_single_obj_p(p)) return (lispobj*)(page_address(p) - page_scan_start_offset(p));
   if (page_table[p].type == PAGE_TYPE_CONS) {
     if (fresh) return np;
     /* CONS cells are always aligned, and the mutator is allowed to be lazy

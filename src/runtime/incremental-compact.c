@@ -181,7 +181,6 @@ static void move_objects() {
             }
       /* Free all lines we just copied from. */
       uword_t decrement = 0;
-      char *allocation = (char*)allocation_bitmap;
       for_lines_in_page (l, p)
         if (DECODE_GEN(line_bytemap[l]) == target_generation) {
           line_bytemap[l] = 0;
