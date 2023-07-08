@@ -697,10 +697,13 @@ static lispobj *find_object(uword_t address, uword_t start) {
                                          first_word_index),
                          address);
     /* Now we look at all bits of all preceding words. */
-    for (uword_t i = first_word_index; i-- >= last_word_index;) {
+    uword_t i = first_word_index - 1;
+    while (i >= last_word_index) {
       if (allocation_bitmap[i])
         /* Return the last location. */
         return fix_pointer(last_address_in(allocation_bitmap[i], i), address);
+      if (i == 0) break;        /* Avoid underflow if last_word_index == 0 */
+      i--;
     }
     return 0;
   }
