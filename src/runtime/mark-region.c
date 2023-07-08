@@ -589,22 +589,6 @@ static void __attribute__((noinline)) trace_everything() {
 
 /* Conservative pointer scanning */
 
-static lispobj *last_address_in(uword_t bitword, uword_t word_index) {
-  /* TODO: Make this portable? MSVC uses _BitScanReverse64 and
-   * we should probably have a portable fallback too. */
-  int last_bit = N_WORD_BITS - 1 - __builtin_clzl(bitword);
-  lispobj x = DYNAMIC_SPACE_START + ((word_index * N_WORD_BITS + last_bit) << N_LOWTAG_BITS);
-  return (lispobj*)x;
-}
-
-static lispobj *fix_pointer(lispobj *p, uword_t original) {
-  if (embedded_obj_p(widetag_of(p)))
-    p = fun_code_header(p);
-  if (native_pointer(original) >= p + object_size(p))
-    return 0;
-  return p;
-}
-
 boolean allocation_bit_marked(void *address) {
   uword_t first_bit_index = ((uword_t)(address) - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
   uword_t first_word_index = first_bit_index / N_WORD_BITS;
@@ -662,6 +646,21 @@ static void compute_allocations(void *address) {
   }
 }
 
+static lispobj *last_address_in(uword_t bitword, uword_t word_index) {
+  int last_bit = N_WORD_BITS - 1 - __builtin_clzl(bitword);
+  lispobj x = DYNAMIC_SPACE_START + ((word_index * N_WORD_BITS + last_bit) << N_LOWTAG_BITS);
+  return (lispobj*)x;
+}
+
+static lispobj *fix_pointer(lispobj *p, uword_t original) {
+  /* Check that p really is inside original. */
+  if (embedded_obj_p(widetag_of(p)))
+    p = fun_code_header(p);
+  if (native_pointer(original) >= p + object_size(p))
+    return 0;
+  return p;
+}
+
 static lispobj *find_object(uword_t address, uword_t start) {
   lispobj *np = native_pointer(address);
   page_index_t p = find_page_index(np);
@@ -676,33 +675,32 @@ static lispobj *find_object(uword_t address, uword_t start) {
     return allocation_bit_marked(np) ? np : 0;
   } else {
     if (fresh) compute_allocations(np);
-    /* Go scanning for the object. */
+    /* Go scanning for the object. We first decide, out of the first
+     * word to scan, which bits correspond to locations that aren't
+     * after the pointer. */
     uword_t first_bit_index = (address - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
     uword_t first_word_index = first_bit_index / N_WORD_BITS;
-    uword_t start_word_index = mark_bitmap_word_index((void*)start);
+    uword_t last_word_index = mark_bitmap_word_index((void*)start);
     /* Return the last location not after the address provided. */
-    /* Supposing first_bit_index = 5, we compute
-     * all_not_after = (1 << 6) - 1 = ...000111111
-     * i.e. all bits not above bit #5 set. */
     uword_t all_not_after;
     /* Need to ensure we don't overflow while trying to generate
      * all bits set. */
     if (first_bit_index % N_WORD_BITS == N_WORD_BITS - 1)
       all_not_after = ~0;
     else
+      /* Supposing e.g. first_bit_index = 5, we compute
+       * all_not_after = (1 << 6) - 1 = 0b...000111111
+       * i.e. all bits not above bit #5 set. */
       all_not_after = ((uword_t)(1) << ((first_bit_index % N_WORD_BITS) + 1)) - 1;
     if (allocation_bitmap[first_word_index] & all_not_after)
       return fix_pointer(last_address_in(allocation_bitmap[first_word_index] & all_not_after,
                                          first_word_index),
                          address);
-    uword_t i = first_word_index - 1;
-    while (i >= start_word_index) {
+    /* Now we look at all bits of all preceding words. */
+    for (uword_t i = first_word_index; i-- >= last_word_index;) {
       if (allocation_bitmap[i])
         /* Return the last location. */
         return fix_pointer(last_address_in(allocation_bitmap[i], i), address);
-      /* Don't underflow */
-      if (i == 0) break;
-      i--;
     }
     return 0;
   }
