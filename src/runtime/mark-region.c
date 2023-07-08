@@ -677,33 +677,28 @@ static lispobj *find_object(uword_t address, uword_t start) {
     return allocation_bit_marked(np) ? np : 0;
   } else {
     if (fresh) compute_allocations(np);
-    /* Go scanning for the object. */
     uword_t first_bit_index = (address - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
-    uword_t first_word_index = first_bit_index / N_WORD_BITS;
-    uword_t start_word_index = mark_bitmap_word_index((void*)start);
-    /* Return the last location not after the address provided. */
-    /* Supposing first_bit_index = 5, we compute
-     * all_not_after = (1 << 6) - 1 = ...000111111
-     * i.e. all bits not above bit #5 set. */
-    uword_t all_not_after;
-    /* Need to ensure we don't overflow while trying to generate
-     * all bits set. */
-    if (first_bit_index % N_WORD_BITS == N_WORD_BITS - 1)
-      all_not_after = ~0;
-    else
-      all_not_after = ((uword_t)(1) << ((first_bit_index % N_WORD_BITS) + 1)) - 1;
-    if (allocation_bitmap[first_word_index] & all_not_after)
-      return fix_pointer(last_address_in(allocation_bitmap[first_word_index] & all_not_after,
-                                         first_word_index),
-                         address);
-    uword_t i = first_word_index - 1;
-    while (i >= start_word_index) {
-      if (allocation_bitmap[i])
-        /* Return the last location. */
-        return fix_pointer(last_address_in(allocation_bitmap[i], i), address);
-      /* Don't underflow */
-      if (i == 0) break;
-      i--;
+    sword_t first_word_index = first_bit_index / N_WORD_BITS;
+    sword_t last_word_index = mark_bitmap_word_index((void*)start);
+    for (sword_t i = first_word_index; i >= last_word_index; i--) {
+      uword_t word = allocation_bitmap[i];
+      /* Find the last object which is not after this pointer. */
+      while (word) {
+        int last_bit_set = N_WORD_BITS - 1 - __builtin_clzl(word);
+        lispobj *location = (lispobj*)(DYNAMIC_SPACE_START) + 2 * (N_WORD_BITS * i + last_bit_set);
+        if (location <= np) {
+          /* Found a candidate - now check that the pointer is inside
+           * this object, and make sure not to produce an embedded
+           * object. */
+          if (embedded_obj_p(widetag_of(location)))
+            location = fun_code_header(location);
+          if (np >= location + object_size(location))
+            return 0;
+          return location;
+        }
+        /* Remove the bit, try again */
+        word &= ~((uword_t)(1) << last_bit_set);
+      }
     }
     return 0;
   }
