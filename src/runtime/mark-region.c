@@ -239,7 +239,7 @@ boolean try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *regio
   return 0;
 }
 
-/* Allocation annoying-path */
+/* Large allocation path */
 
 DEF_FINDER(find_free_page, page_index_t, page_free_p(where), -1);
 DEF_FINDER(find_used_page, page_index_t, !page_free_p(where), end);

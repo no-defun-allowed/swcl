@@ -3958,7 +3958,6 @@ garbage_collect_generation(generation_index_t generation, int raise,
 
     if (
 #ifdef LISP_FEATURE_MARK_REGION_GC
-        /* Look ma, no fullcgc! */
         1
 #else
         generation < PSEUDO_STATIC_GENERATION
