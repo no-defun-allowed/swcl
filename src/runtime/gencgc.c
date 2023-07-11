@@ -3965,8 +3965,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
         ) {
 
 #ifdef LISP_FEATURE_MARK_REGION_GC
-        from_space = -1;
-        new_space = generation;
+        from_space = new_space = generation;
 #else
         from_space = generation;
         if (raise)

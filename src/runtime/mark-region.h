@@ -1,5 +1,6 @@
 #ifndef MARK_REGION_H
 #define MARK_REGION_H
+
 #ifdef LISP_FEATURE_MARK_REGION_GC
 #include "lispobj.h"
 #include "core.h"
@@ -79,5 +80,10 @@ extern void mr_pre_gc(generation_index_t generation);
 extern void mr_collect_garbage(boolean raise);
 extern void zero_all_free_ranges();
 extern void prepare_lines_for_final_gc();
+
+#else
+#define set_allocation_bit_mark(pointer) 0
+#define mr_preserve_leaf(obj) 0
 #endif
+
 #endif
