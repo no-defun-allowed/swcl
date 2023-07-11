@@ -1,6 +1,7 @@
-#ifdef LISP_FEATURE_MARK_REGION_GC
 #ifndef INCREMENTAL_COMPACT_H
 #define INCREMENTAL_COMPACT_H
+
+#ifdef LISP_FEATURE_MARK_REGION_GC
 #include "os.h"
 #include "lispobj.h"
 
@@ -30,5 +31,8 @@ static inline void log_slot(lispobj target, lispobj *where,
 }
 extern void commit_thread_local_remset();
 
+#else
+#define log_slot(target, where, so, st) 0
 #endif
+
 #endif
