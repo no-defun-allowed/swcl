@@ -512,6 +512,7 @@ count_generation_pages(generation_index_t generation, page_index_t* n_dirty)
 }
 
 // You can call this with 0 and NULL to perform its assertions silently
+#ifndef LISP_FEATURE_MARK_REGION_GC
 void gc_gen_report_to_file(int filedes, FILE *file)
 {
 #ifdef LISP_FEATURE_X86
@@ -679,6 +680,7 @@ void gc_gen_report_to_file(int filedes, FILE *file)
     fpu_restore(fpu_state);
 #endif
 }
+#endif
 
 void write_generation_stats(FILE *file) { gc_gen_report_to_file(-1, file); }
 

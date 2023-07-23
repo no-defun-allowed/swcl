@@ -2,6 +2,7 @@
 #define MARK_REGION_H
 
 #ifdef LISP_FEATURE_MARK_REGION_GC
+#include <stdio.h>
 #include "lispobj.h"
 #include "core.h"
 
@@ -47,6 +48,7 @@ static inline line_index_t address_line(void *address) {
 extern void mrgc_init();
 extern void load_corefile_bitmap(int fd, core_entry_elt_t n_ptes);
 extern sword_t bitmap_sizes(core_entry_elt_t n_ptes);
+extern void gc_gen_report_to_file(int filedes, FILE *file);
 
 /* Allocation */
 extern bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
