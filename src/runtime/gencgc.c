@@ -378,6 +378,7 @@ int count_immobile_objects(__attribute__((unused)) int gen, int res[4])
     return (res[0] | res[1] | res[2] | res[3]) != 0;
 }
 
+#ifndef LISP_FEATURE_MARK_REGION_GC
 // You can call this with 0 and NULL to perform its assertions silently
 void gc_gen_report_to_file(int filedes, FILE *file)
 {
@@ -486,18 +487,12 @@ void gc_gen_report_to_file(int filedes, FILE *file)
                 words_allocated += page_words_used(page);
             }
         struct generation* gen = &generations[gen_num];
-        /* This wouldn't appear to hold for how mark-region GC treats pages.
-         * TODO: Write what should hold. */
-#ifdef LISP_FEATURE_MARK_REGION_GC
-        words_allocated = generations[gen_num].bytes_allocated >> WORD_SHIFT;
-#else
         if (gen_num == 0)
             gc_assert(gen->bytes_allocated ==
                       (words_allocated+eden_words_allocated) << WORD_SHIFT);
         else {
             gc_assert(gen->bytes_allocated == words_allocated << WORD_SHIFT);
         }
-#endif
         page_index_t n_dirty;
         count_generation_pages(gen_num, &n_dirty);
         uword_t waste = npage_bytes(tot_pages) - (words_allocated<<WORD_SHIFT);
@@ -545,6 +540,8 @@ void gc_gen_report_to_file(int filedes, FILE *file)
     fpu_restore(fpu_state);
 #endif
 }
+#endif
+
 void write_generation_stats(FILE *file) { gc_gen_report_to_file(-1, file); }
 
 extern void
