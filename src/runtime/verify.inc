@@ -1,5 +1,19 @@
 /* -*- Mode: C -*- */
 
+#ifdef LISP_FEATURE_MARK_REGION_GC
+#include <stdatomic.h>
+#include "tiny-lock.h"
+#include "gc-thread-pool.h"
+lock_t failure_lock = LOCK_INITIALIZER;
+#define lock() acquire_lock(&failure_lock)
+#define unlock() release_lock(&failure_lock)
+#else
+#define lock() (void)(0)
+#define unlock() (void)(0)
+#endif
+
+#define ERROR_LIMIT 25
+
 static int
 is_in_stack_space(lispobj ptr)
 {
@@ -67,6 +81,7 @@ char *page_card_mark_string(page_index_t page, char *result)
 static void note_failure(lispobj thing, lispobj *where, struct verify_state *state,
                          char *str)
 {
+    lock();
     if (state->flags & PRINT_HEADER_ON_FAILURE) {
         if (state->flags & VERIFY_PRE_GC) fprintf(stderr, "pre-GC failure\n");
         if (state->flags & VERIFY_POST_GC) fprintf(stderr, "post-GC failure\n");
@@ -87,6 +102,7 @@ static void note_failure(lispobj thing, lispobj *where, struct verify_state *sta
     } else {
         fprintf(stderr, "Ptr %p @ %"OBJ_FMTX" sees %s\n", (void*)thing, (uword_t)where, str);
     }
+    unlock();
 }
 
 static int
@@ -99,7 +115,7 @@ verify_pointer(lispobj thing, lispobj *where, struct verify_state *state)
     // bool strict_containment = state->flags & VERIFY_FINAL;
 
 #define FAIL_IF(cond, why) \
-    if (cond) { if (++state->nerrors > 25) return 1; note_failure(thing,where,state,why); }
+    if (cond) { if (++state->nerrors >= ERROR_LIMIT) return 1; note_failure(thing,where,state,why); }
 
     if (!is_lisp_pointer(thing)) {
         FAIL_IF(!is_lisp_immediate(thing), "strange non-pointer");
@@ -129,9 +145,36 @@ verify_pointer(lispobj thing, lispobj *where, struct verify_state *state)
     if (target_page_index >= 0) {
         // If it's within the dynamic space it should point to a used page.
         FAIL_IF(page_free_p(target_page_index), "free page");
+#ifdef LISP_FEATURE_MARK_REGION_GC
+        lispobj *native = native_pointer(thing);
+        bool embedded = embedded_obj_p(widetag_of(native));
+        /* Embedded objects don't get marked, the enclosing object does. */
+        lispobj *target = embedded ? fun_code_header((struct simple_fun*)native) : native;
+        if ((state->flags & VERIFY_POST_GC))
+          FAIL_IF(!allocation_bit_marked(target), "no allocation mark");
+#if 0
+        /* Line marks are often out of date before GC */
+        if ((state->flags & VERIFY_POST_GC) &&
+            to_gen != PSEUDO_STATIC_GENERATION &&
+            !page_single_obj_p(target_page_index)) {
+            /* Don't try to call object_size on embedded objects */
+            if (!embedded) {
+                uword_t size = object_size(native);
+                for (uword_t word = 0; word < size; word++) {
+                  if (!line_marked(native + word)) {
+                    char why[50];
+                    snprintf(why, sizeof(why), "no line mark on word %lx", word);
+                    FAIL_IF(!line_marked(native + word), why);
+                  }
+                }
+            }
+        }
+#endif
+#else
         FAIL_IF(!(page_table[target_page_index].type & OPEN_REGION_PAGE_FLAG)
                 && (thing & (GENCGC_PAGE_BYTES-1)) >= page_bytes_used(target_page_index),
                 "unallocated space");
+#endif
     } else {
         // The object pointed to must not have been discarded as garbage.
         FAIL_IF(!other_immediate_lowtag_p(*native_pointer(thing)), "trashed object");
@@ -294,9 +337,11 @@ static int verify_range(lispobj* start, lispobj* end, struct verify_state* state
 {
     lispobj* where = start;
     if (state->flags & VERIFYING_GENERATIONAL && find_page_index(start)>=0) {
-        page_index_t page = find_page_index(start);
+#ifndef LISP_FEATURE_MARK_REGION_GC /* We use a global bitmap */
+      page_index_t page = find_page_index(start);
         if (page_table[page].type == PAGE_TYPE_CONS)
             gc_assert(page_words_used(page) <=  MAX_CONSES_PER_PAGE*CONS_SIZE);
+#endif
     }
     if ((state->flags & VERIFYING_UNFORMATTED)) {
         while (where < end) {
@@ -308,7 +353,8 @@ static int verify_range(lispobj* start, lispobj* end, struct verify_state* state
         }
         return 0;
     }
-    while (where < end) {
+    where = next_object(start, 0, end); /* find first marked object */
+    while (where) {
         int widetag = is_header(*where) ? header_widetag(*where) : LIST_POINTER_LOWTAG;
         /* Technically we should wait until after performing the widetag validity
          * tests before calling the sizer.  Otherwise the lossage message would
@@ -318,14 +364,15 @@ static int verify_range(lispobj* start, lispobj* end, struct verify_state* state
         state->object_header = is_cons_half(*where) ? 0 : *where;
         if (state->flags & VERIFYING_GENERATIONAL) {
             page_index_t pg = find_page_index(where);
-            state->object_gen = pg >= 0 ? page_table[pg].gen :
-              gc_gen_of((lispobj)where, ARTIFICIALLY_HIGH_GEN);
+            state->object_gen = gc_gen_of((lispobj)where, ARTIFICIALLY_HIGH_GEN);
+            if (state->object_gen == ARTIFICIALLY_HIGH_GEN)
+              lose("object @ %p has no generation", where);
 #ifdef LISP_FEATURE_PPC64
             // Cons fillers (two words of all 1s) cause failure of
             // the default verification logic, so brute-force skip them
             // regardless of whether the page type is PAGE_TYPE_CONS.
             if (*where == (uword_t)-1 && where[1] == (uword_t)-1) {
-                where +=2;
+                where = next_object(where, 2, end);
                 continue;
             }
 #endif
@@ -374,7 +421,7 @@ static int verify_range(lispobj* start, lispobj* end, struct verify_state* state
         } else {
             if (verify_headered_object(where, nwords, state)) break;
         }
-        where += nwords;
+        where = next_object(where, nwords, end);
     }
     return 0;
 }
@@ -387,6 +434,52 @@ static int verify(lispobj start, lispobj* end, struct verify_state* state, int f
     state->flags = savedflags;
     return result;
 }
+
+#ifdef LISP_FEATURE_MARK_REGION_GC
+static uword_t walk_halted;
+static uword_t walk_cursor;
+static uword_t parallel_walk_extra;
+struct span { lispobj *start; lispobj *end; };
+static uword_t table_spans;
+static struct span *span_table;
+static uword_t (*parallel_proc)(lispobj*,lispobj*,uword_t);
+
+static uword_t fill_table(lispobj *start, lispobj *end, __attribute__((unused)) uword_t unused) {
+    span_table[table_spans++] = (struct span){start, end};
+    return 0;
+}
+
+static void parallel_walk_worker() {
+    /* Copy the verifier state. */
+    struct verify_state *original = (struct verify_state*)parallel_walk_extra, copy = *original;
+    uword_t index;
+    while ((index = atomic_fetch_add(&walk_cursor, 1)) < table_spans && !atomic_load(&walk_halted)) {
+        uword_t ret = parallel_proc(span_table[index].start, span_table[index].end, (uword_t)&copy);
+        if (ret) atomic_store(&walk_halted, ret);
+    }
+    atomic_fetch_add(&original->nerrors, copy.nerrors);
+}
+
+static void parallel_walk_generation(uword_t (*proc)(lispobj*,lispobj*,uword_t),
+                                     generation_index_t generation, uword_t extra)
+{
+    walk_halted = 0;
+    walk_cursor = 0;
+    parallel_walk_extra = extra;
+    parallel_proc = proc;
+    /* Compute a table of spans for the thread pool to walk.
+     * There can't be more spans than pages, but there can be
+     * fewer due to large objects. */
+    table_spans = 0;
+    uword_t table_size = sizeof(struct span) * next_free_page;
+    span_table = (struct span*)os_allocate(table_size);
+    walk_generation(fill_table, generation, 0);
+    run_on_thread_pool(parallel_walk_worker);
+    os_deallocate((char*)span_table, table_size);
+}
+#else
+#define parallel_walk_generation walk_generation
+#endif
 
 extern void save_gc_crashdump(char *, lispobj*);
 /* Return the number of verification errors found.
@@ -433,9 +526,13 @@ int verify_heap(__attribute__((unused)) lispobj* cur_thread_approx_stackptr,
     state.object_addr = 0;
     state.object_gen = 0;
     for_each_thread(th) {
+        if (verbose)
+            fprintf(stderr, " [thread bindings]");
         if (verify((lispobj)th->binding_stack_start,
                    (lispobj*)get_binding_stack_pointer(th), &state,
                    VERIFYING_UNFORMATTED)) goto out;
+        if (verbose)
+            fprintf(stderr, " [thread TLS]");
         if (verify((lispobj)&th->lisp_thread,
                    (lispobj*)(SymbolValue(FREE_TLS_INDEX,0) + (char*)th), &state,
                    VERIFYING_UNFORMATTED))
@@ -452,8 +549,8 @@ int verify_heap(__attribute__((unused)) lispobj* cur_thread_approx_stackptr,
     if (verbose)
         fprintf(stderr, " [dynamic]");
     state.flags |= VERIFYING_GENERATIONAL;
-    walk_generation((uword_t(*)(lispobj*,lispobj*,uword_t))verify_range,
-                    -1, (uword_t)&state);
+    parallel_walk_generation((uword_t(*)(lispobj*,lispobj*,uword_t))verify_range,
+                             -1, (uword_t)&state);
     if (verbose && state.nerrors==0) fprintf(stderr, " passed\n");
  out:
     if (state.nerrors && !(flags & VERIFY_DONT_LOSE)) {

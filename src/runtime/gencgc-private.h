@@ -13,6 +13,16 @@
 #define _GENCGC_PRIVATE_H_
 
 #include <stdbool.h>
+
+/* The minimum heap occupancy to force more aggressive collections above. */
+#define PANIC_THRESHOLD 0.9
+#ifdef LISP_FEATURE_MARK_REGION_GC
+// The inverse of page_overhead_threshold.
+#define FRAGMENTATION_COMPENSATION (1.0 / 1.3)
+#else
+#define FRAGMENTATION_COMPENSATION 1.0
+#endif
+
 void zeroize_pages_if_needed(page_index_t start, page_index_t end, int page_type);
 
 typedef unsigned int page_bytes_t;
@@ -213,5 +223,4 @@ static inline page_index_t contiguous_block_final_page(page_index_t first) {
     while (!page_ends_contiguous_block_p(last, page_table[first].gen)) ++last;
     return last;
 }
-
 #endif /* _GENCGC_PRIVATE_H_ */

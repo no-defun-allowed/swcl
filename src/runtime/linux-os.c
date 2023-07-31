@@ -311,8 +311,10 @@ int os_preinit(char *argv[], char *envp[])
     /* See if we can allocate read-only, static, and linkage table spaces
      * at their required addresses. If we can, then there's no need to try
      * the re-exec trick since dynamic space is relocatable. */
-    if (allocate_hardwired_spaces(0)) // soft failure mode
-        return 1; // indicate that we already allocated hardwired spaces
+
+    // KLUDGE: do the personality change first so the 32-bit heap address is less random
+    //    if (allocate_hardwired_spaces(0)) // soft failure mode
+    //        return 1; // indicate that we already allocated hardwired spaces
 
 #if ALLOW_PERSONALITY_CHANGE
     /* KLUDGE: Disable memory randomization by setting a personality

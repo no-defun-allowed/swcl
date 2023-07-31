@@ -10,6 +10,7 @@
 #include "gc-internal.h"
 #include "gc-private.h"
 #include "gencgc-private.h"
+#include "mark-region.h"
 #include "lispregs.h"
 #include "genesis/arena.h"
 #include "genesis/gc-tables.h"
@@ -423,7 +424,11 @@ void gc_scavenge_arenas()
                     if (gencgc_verbose)
                         fprintf(stderr, "Arena @ %p: scavenging %p..%p\n",
                                 a, block, block->freeptr);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+                    mr_trace_bump_range((lispobj*)block, (lispobj*)block->freeptr);
+#else
                     heap_scavenge((lispobj*)block, (lispobj*)block->freeptr);
+#endif
                 } while ((block = block->next) != NULL);
             }
             chain = a->link;

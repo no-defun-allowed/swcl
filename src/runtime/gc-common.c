@@ -53,6 +53,9 @@
 #include "var-io.h"
 #include "search.h"
 #include "murmur_hash.h"
+#include "mark-region.h"
+#include "incremental-compact.h"
+#include "walk-heap.h"
 
 #ifdef LISP_FEATURE_SPARC
 #define LONG_FLOAT_SIZE 4
@@ -138,7 +141,13 @@ static inline void scav1(lispobj* addr, lispobj object)
      * Therefore, when the object is in from_space, we incur one fewer branch */
 
     page_index_t page = find_page_index((void*)object);
+#ifndef LISP_FEATURE_MARK_REGION_GC
     if (page_table[page].gen == from_space) {
+#else
+      /* The incremental compactor only calls scavenge (then scav1) with
+       * pointers of the right generation. */
+      {
+#endif
             if (forwarding_pointer_p(native_pointer(object)))
                 *addr = forwarding_pointer_value(native_pointer(object));
             else if (!pinned_p(object, page))
@@ -1292,6 +1301,7 @@ struct hash_table *weak_hash_tables = NULL;
 struct hopscotch_table weak_objects; // other than weak pointers
 
 /* Return true if OBJ has already survived the current GC. */
+#ifndef LISP_FEATURE_MARK_REGION_GC
 static inline bool pointer_survived_gc_yet(lispobj obj)
 {
 #ifdef LISP_FEATURE_CHENEYGC
@@ -1317,6 +1327,7 @@ static inline bool pointer_survived_gc_yet(lispobj obj)
     return 1;
 #endif
 }
+#endif
 
 #define HT_ENTRY_LIVENESS_FUN_ARRAY_NAME weak_ht_alivep_funs
 #include "weak-hash-pred.inc"
@@ -1752,6 +1763,8 @@ cull_weak_hash_table_bucket(struct hash_table *hash_table,
         gc_assert(key != empty_symbol);
         gc_assert(value != empty_symbol);
         if (!alivep_test(key, value)) {
+            if (debug_weak_ht)
+                fprintf(stderr, "<%"OBJ_FMTX",%"OBJ_FMTX"> is dead\n", key, value);
             gc_assert(hash_table->_count > 0);
             kv_vector[2 * index] = empty_symbol;
             kv_vector[2 * index + 1] = empty_symbol;
@@ -1770,21 +1783,36 @@ cull_weak_hash_table_bucket(struct hash_table *hash_table,
                 cons->car = make_lispobj(cons + 1, LIST_POINTER_LOWTAG);
                 cons[1].car = make_fixnum(index);  // which cell became free
                 cons[1].cdr = make_fixnum(bucket); // which chain was it in
+#ifdef LISP_FEATURE_MARK_REGION_GC
+                mr_preserve_leaf(cons->car);
+#else
                 if (!compacting_p()) gc_mark_obj(cons->car);
+#endif
             } else { // small values
                 cons = (struct cons*)
                   gc_general_alloc(cons_region, sizeof(struct cons), PAGE_TYPE_CONS);
                 cons->car = ((index << 14) | bucket) << N_FIXNUM_TAG_BITS;
             }
             cons->cdr = hash_table->smashed_cells;
+#ifdef LISP_FEATURE_MARK_REGION_GC
+            /* We just created a pointer that the incremental compactor
+             * doesn't know about yet, so maybe log it. */
+            log_slot(cons->cdr, &cons->cdr, (lispobj*)cons, SOURCE_NORMAL);
+#endif
             // Lisp code must atomically pop the list whereas this C code
             // always wins and does not need compare-and-swap.
             notice_pointer_store(hash_table, &hash_table->smashed_cells);
             hash_table->smashed_cells = make_lispobj(cons, LIST_POINTER_LOWTAG);
             // ensure this cons doesn't get smashed into (0 . 0) by full gc
+#ifdef LISP_FEATURE_MARK_REGION_GC
+            mr_preserve_leaf(hash_table->smashed_cells);
+#else
             if (!compacting_p()) gc_mark_obj(hash_table->smashed_cells);
+#endif
 
         } else {
+            if (debug_weak_ht)
+                fprintf(stderr, "<%"OBJ_FMTX",%"OBJ_FMTX"> is alive\n", key, value);
             if (fix_pointers) { // Follow FPs as necessary
                 lispobj key = kv_vector[2 * index];
                 fix_pointers(&kv_vector[2 * index]);
@@ -1870,6 +1898,8 @@ void cull_weak_hash_tables(int (*alivep[4])(lispobj,lispobj))
                            &table->next_weak_hash_table);
         int weakness = hashtable_weakness(table);
         gc_assert((weakness & ~3) == 0);
+        if (debug_weak_ht)
+            fprintf(stderr, "Culling %p with weakness %d\n", table, weakness);
         cull_weak_hash_table(table, alivep[weakness], compacting_p() ? pair_follow_fps : 0);
     }
     weak_hash_tables = NULL;
@@ -1882,6 +1912,11 @@ void cull_weak_hash_tables(int (*alivep[4])(lispobj,lispobj))
         hopscotch_reset(&weak_objects);
     // Close the region used when pushing into hash_table->smashed_cells
     ensure_region_closed(cons_region, PAGE_TYPE_CONS);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    /* cull_weak_hash_table_bucket may have logged some more pointers,
+     * so commit them now. */
+    commit_thread_local_remset();
+#endif
 }
 
 
@@ -1988,10 +2023,12 @@ gc_search_space3(void *pointer, lispobj * const start, void *limit)
         if (pointer < (void*)(where+count)) return where;
     }
 #else
-    for ( ; (void*)where < limit ; where += count) {
+    where = next_object(where, 0, limit);
+    while (where) {
         count = object_size(where);
         /* Check whether the pointer is within this object. */
         if (pointer < (void*)(where+count)) return where;
+        where = next_object(where, count, limit);
     }
 #endif
     return NULL;
@@ -2645,7 +2682,15 @@ static inline int dummy_node_p(so_node* node) {
 static inline bool lispobj_livep(lispobj obj_base) {
     extern bool fullcgc_lispobj_livep(lispobj);
     lispobj obj = compute_lispobj((lispobj*)obj_base);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    /* We manipulate allocation bits, as we handle finalizers after
+     * sweeping, so that compaction can run before finalizers are
+     * scanned. Compaction needs to run before as scan_finalizers
+     * needs to rehash when forwarding pointers are encountered. */
+    return allocation_bit_marked(native_pointer(obj));
+#else
     return compacting_p() ? pointer_survived_gc_yet(obj) : fullcgc_lispobj_livep(obj);
+#endif
 }
 
 static void push_in_lockfree_list(struct symbol* list_holder,
@@ -2680,7 +2725,11 @@ static void push_in_lockfree_list(struct symbol* list_holder,
     lispobj __attribute__((unused)) actual =
         __sync_val_compare_and_swap(&list_holder->value, old, new);
     gc_assert(actual == old);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    set_allocation_bit_mark(node);
+#else
     if (!compacting_p()) gc_mark_obj(new);
+#endif
 }
 static void push_in_ordinary_list(struct symbol* list_holder, lispobj element)
 {
@@ -2692,7 +2741,11 @@ static void push_in_ordinary_list(struct symbol* list_holder, lispobj element)
     lispobj __attribute__((unused)) actual =
         __sync_val_compare_and_swap(&list_holder->value, old, new);
     gc_assert(actual == old);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    set_allocation_bit_mark(cons);
+#else
     if (!compacting_p()) gc_mark_obj(new);
+#endif
 }
 
 /* Scan the finalizer table and take action on each node as follows:
@@ -2744,7 +2797,11 @@ void scan_finalizers()
             // is a GC-use field. In 64-bit, that field fits in the header.
             memset(&weakptr->next, 0, 2*N_WORD_BYTES); // Will crash without this
 #endif
+#ifdef LISP_FEATURE_MARK_REGION_GC
+            set_allocation_bit_mark(weakptr);
+#else
             if (!compacting_p()) gc_mark_obj(make_lispobj(weakptr, OTHER_POINTER_LOWTAG));
+#endif
             push_in_lockfree_list(SYMBOL(FINALIZER_REHASHLIST),
                                   this, make_lispobj(weakptr, OTHER_POINTER_LOWTAG),
                                   this->data);

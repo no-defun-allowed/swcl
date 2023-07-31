@@ -19,6 +19,7 @@
 #include "genesis/instance.h"
 #include "genesis/funcallable-instance.h"
 #include "genesis/weak-pointer.h"
+#include "genesis/config.h"
 #include "immobile-space.h"
 #include "gencgc-internal.h"
 
@@ -27,14 +28,28 @@ void *collector_alloc_fallback(struct alloc_region*,sword_t,int);
 static inline void* __attribute__((unused))
 gc_general_alloc(struct alloc_region* region, sword_t nbytes, int page_type)
 {
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    /* We don't need small mixed pages. */
+    if (small_mixed_region == region &&
+        PAGE_TYPE_SMALL_MIXED == page_type) {
+        region = mixed_region; page_type = PAGE_TYPE_MIXED;
+    }
+#endif
     void *new_obj = region->free_pointer;
     void *new_free_pointer = (char*)new_obj + nbytes;
+    lispobj *address;
     // Large objects will never fit in a region, so we automatically dtrt
-    if (new_free_pointer <= region->end_addr) {
+    if (new_free_pointer < region->end_addr) {
         region->free_pointer = new_free_pointer;
-        return new_obj;
+        address = new_obj;
+    } else {
+        address = collector_alloc_fallback(region, nbytes, page_type);
     }
-    return collector_alloc_fallback(region, nbytes, page_type);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    extern void set_allocation_bit_mark(void *address);
+    set_allocation_bit_mark(address);
+#endif
+    return address;
 }
 lispobj copy_potential_large_object(lispobj object, sword_t nwords,
                                    struct alloc_region*, int page_type);
@@ -57,14 +72,14 @@ lispobj copy_potential_large_object(lispobj object, sword_t nwords,
 
 /* For debugging purposes, you can make this macro as complicated as you like,
  * such as checking various other aspects of the object in 'old' */
-#if GC_LOGGING
-#define NOTE_TRANSPORTING(old, new, nwords) really_note_transporting(old,new,nwords)
-void really_note_transporting(lispobj old,void*new,sword_t nwords);
-#elif defined COLLECT_GC_STATS && COLLECT_GC_STATS
+//#if GC_LOGGING
+//#define NOTE_TRANSPORTING(old, new, nwords) really_note_transporting(old,new,nwords)
+//void really_note_transporting(lispobj old,void*new,sword_t nwords);
+//#elifdef COLLECT_GC_STATS
 #define NOTE_TRANSPORTING(old, new, nwords) gc_copied_nwords += nwords
-#else
-#define NOTE_TRANSPORTING(old, new, nwords) /* do nothing */
-#endif
+//#else
+//#define NOTE_TRANSPORTING(old, new, nwords) /* do nothing */
+//#endif
 
 // In-situ live objects are those which get logically "moved" from oldspace to newspace
 // by frobbing the generation byte in the page table, not copying.

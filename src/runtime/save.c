@@ -155,7 +155,7 @@ write_bytes_to_file(FILE * file, char *addr, size_t bytes, int compression)
 };
 
 static long write_bytes(FILE *file, char *addr, size_t bytes,
-                        os_vm_offset_t file_offset, int compression)
+                        os_vm_offset_t file_offset, int compression, int align)
 {
     ftell_type here, data;
 
@@ -169,7 +169,7 @@ static long write_bytes(FILE *file, char *addr, size_t bytes,
     here = FTELL(file);
     FSEEK(file, 0, SEEK_END);
     data = ALIGN_UP(FTELL(file), os_vm_page_size);
-    FSEEK(file, data, SEEK_SET);
+    if (align) FSEEK(file, data, SEEK_SET);
     write_bytes_to_file(file, addr, bytes, compression);
     FSEEK(file, here, SEEK_SET);
     return ((data - file_offset) / os_vm_page_size) - 1;
@@ -212,7 +212,7 @@ output_space(FILE *file, int id, lispobj *addr, lispobj *end,
      * That seems quite bogus to operate on bytes that the caller didn't promise were OK
      * to be saved out (and didn't contain, say, a password and social security number) */
     data = write_bytes(file, (char *)addr, ALIGN_UP(bytes, os_vm_page_size),
-                       file_offset, core_compression_level);
+                       file_offset, core_compression_level, 1);
 
     write_lispobj(data, file);
     write_lispobj((uword_t)addr, file);
@@ -372,7 +372,13 @@ bool save_to_filehandle(FILE *file, char *filename, lispobj init_function,
         write_lispobj(next_free_page, file);
         write_lispobj(aligned_size, file);
         sword_t offset = write_bytes(file, data, aligned_size, core_start_pos,
-                                     COMPRESSION_LEVEL_NONE);
+                                     COMPRESSION_LEVEL_NONE, 1);
+#ifdef LISP_FEATURE_MARK_REGION_GC
+        extern sword_t bitmap_size(core_entry_elt_t);
+        sword_t size = bitmap_size(next_free_page);
+        extern uword_t *allocation_bitmap;
+        write_bytes(file, (char*)allocation_bitmap, size, core_start_pos, COMPRESSION_LEVEL_NONE, 0);
+#endif
         write_lispobj(offset, file);
     }
 #endif

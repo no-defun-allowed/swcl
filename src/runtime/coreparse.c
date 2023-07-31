@@ -41,6 +41,7 @@
 #include "gc-internal.h"
 #include "gc-private.h"
 #include "code.h"
+#include "walk-heap.h"
 #include "graphvisit.h"
 
 #include <errno.h>
@@ -407,7 +408,8 @@ static void relocate_space(uword_t start, lispobj* end, struct heap_adjust* adj)
     int i;
 
     adj->n_relocs_abs = adj->n_relocs_rel = 0;
-    for ( ; where < end ; where += nwords ) {
+    where = next_object(where, 0, end);
+    for ( ; where ; where = next_object(where, nwords, end) ) {
         lispobj word = *where;
         if (!is_header(word)) {
             adjust_pointers(where, 2, adj);
@@ -597,6 +599,10 @@ static void relocate_heap(struct heap_adjust* adj)
                         (char*)adj->range[i].start + adj->range[i].delta,
                         (char*)adj->range[i].end + adj->range[i].delta);
     }
+#ifdef LISP_FEATURE_MARK_REGION_GC
+    /* We need a correct page_table_pages in order to walk the heap. */
+    page_table_pages = dynamic_space_size / GENCGC_PAGE_BYTES;
+#endif
 #ifdef LISP_FEATURE_RELOCATABLE_STATIC_SPACE
     relocate_space(READ_ONLY_SPACE_START, read_only_space_free_pointer, adj);
     // Relocate the CAR slot of nil-as-a-list, which needs to point to
@@ -966,6 +972,14 @@ process_directory(int count, struct ndir_entry *entry,
                        spaces[IMMOBILE_TEXT_CORE_SPACE_ID].base, // expected
                        spaces[IMMOBILE_TEXT_CORE_SPACE_ID].len);
 #endif
+}
+
+/* This needs to be another step after loading everything, as
+ * the mark-region GC needs to have an allocation bitmap in order to
+ * walk the heap. The allocation bitmap is loaded with the page table,
+ * after loading the heap, so we can only walk the heap after loading
+ * everything. */
+static void post_process_directory(struct heap_adjust *adj) {
     if (adj->n_ranges) relocate_heap(adj);
 
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
@@ -1057,6 +1071,7 @@ load_core_file(char *file, os_vm_offset_t file_offset, int merge_core_pages)
             initial_function = adjust_word(&adj, (lispobj)*ptr);
             break;
         case END_CORE_ENTRY_TYPE_CODE:
+            post_process_directory(&adj);
             free(header);
             close(fd);
 #ifdef LISP_FEATURE_SB_THREAD
