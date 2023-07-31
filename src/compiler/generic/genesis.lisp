@@ -3894,9 +3894,13 @@ III. initially undefined function references (alphabetically):
                               (:list  (incf n-cons)  #b101)
                               (:mixed (incf n-mixed) #b011))
                             0))
+             #+mark-region-gc
              (single-object-bit (if (page-single-object-p pte) 1 0)))
         (setf (bvref-word-unaligned ptes pte-offset) (logior sso type-bits))
-        (setf (bvref-16 ptes (+ pte-offset sb-vm:n-word-bytes)) (logior usage single-object-bit))))
+        #+mark-region-gc
+        (setf (bvref-16 ptes (+ pte-offset sb-vm:n-word-bytes)) (logior usage single-object-bit))
+        #-mark-region-gc
+        (setf (bvref-16 ptes (+ pte-offset sb-vm:n-word-bytes)) usage)))
     (when verbose
       (format t "movable dynamic space: ~d + ~d + ~d cons/code/mixed pages~%"
               n-cons n-code n-mixed))
