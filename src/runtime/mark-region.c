@@ -31,6 +31,7 @@
 #include "genesis/gc-tables.h"
 #include "genesis/closure.h"
 #include "genesis/hash-table.h"
+#include "genesis/instance.h"
 #include "genesis/list-node.h"
 #include "gc-private.h"
 
@@ -1255,7 +1256,7 @@ sword_t bitmap_size(core_entry_elt_t n_ptes) {
   return bytes_of_heap / (8 << N_LOWTAG_BITS);
 }
 
-void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes) {
+void load_corefile_bitmap(int fd, core_entry_elt_t n_ptes) {
   sword_t size = bitmap_size(n_ptes);
   lseek(fd, ALIGN_UP(lseek(fd, 0, SEEK_CUR), N_WORD_BYTES), SEEK_SET);
   if (read(fd, allocation_bitmap, size) != size)

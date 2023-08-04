@@ -726,7 +726,8 @@ case "$sbcl_arch" in
 
     case "$sbcl_os" in
     linux | darwin | *bsd | win32)
-        printf ' :immobile-space' >> $ltf
+#        printf ' :immobile-space' >> $ltf
+        printf ' :mark-region-gc' >> $ltf
     esac
     ;;
   ppc)

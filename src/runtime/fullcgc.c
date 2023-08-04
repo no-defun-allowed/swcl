@@ -17,7 +17,6 @@
 #include "genesis/closure.h"
 #include "genesis/instance.h"
 #include "genesis/vector.h"
-#include "genesis/layout.h"
 #include "genesis/hash-table.h"
 #include "genesis/list-node.h"
 #include "code.h"
@@ -30,8 +29,6 @@
 #define HAVE_GETRUSAGE 1
 #include <sys/resource.h> // for getrusage()
 #endif
-
-extern lispobj lisp_init_function;
 
 struct unbounded_queue {
   struct Qblock* head_block;

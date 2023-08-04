@@ -3339,7 +3339,8 @@ Legal values for OFFSET are -4, -8, -12, ..."
     (fdefn
      (format stream "#define StaticSymbolFunction(x) FdefnFun(x##_FDEFN)
 /* Return 'fun' given a tagged pointer to an fdefn. */
-static inline lispobj FdefnFun(lispobj fdefn) { return FDEFN(fdefn)->fun; }~%"))
+static inline lispobj FdefnFun(lispobj fdefn) { return FDEFN(fdefn)->fun; }
+extern lispobj decode_fdefn_rawfun(struct fdefn *fdefn);~%"))
     (symbol
      (format stream "
 lispobj symbol_function(struct symbol* symbol);
@@ -4244,6 +4245,16 @@ static inline uword_t word_has_stickymark(uword_t word) {
     uword_t* mark = (uword_t*)&gc_card_mark[card];
     return ~{word_has_stickymark(mark[~d])~^ || ~};~%}~%" indices)))
 
+(defun write-wired-layout-ids (stream)
+  (terpri stream)
+  (dolist (x '((sb-kernel:layout "LAYOUT")
+               (sb-lockless::list-node "LFLIST_NODE")
+               (sb-brothertree::unary-node "BROTHERTREE_UNARY_NODE")))
+    (destructuring-bind (type c-const) x
+        (format stream "#define ~A_LAYOUT_ID ~D~%"
+                c-const (sb-kernel::choose-layout-id type nil))))
+  (terpri stream))
+
 (defun write-c-headers (c-header-dir-name)
   (macrolet ((out-to (name &body body) ; write boilerplate and inclusion guard
                `(actually-out-to ,name (lambda (stream) ,@body))))
@@ -4284,25 +4295,34 @@ static inline uword_t word_has_stickymark(uword_t word) {
         (out-to "cardmarks" (write-mark-array-operators stream))
         (out-to "tagnames" (write-tagnames-h stream))
         (out-to "print.inc" (write-c-print-dispatch stream))
-        (let ((structs (sort (copy-list sb-vm:*primitive-objects*) #'string<
-                             :key #'sb-vm:primitive-object-name))
-              (code (find 'sb-vm::code sb-vm:*primitive-objects*
-                          :key #'sb-vm:primitive-object-name)))
+        (let* ((structs (sort (copy-list sb-vm:*primitive-objects*) #'string<
+                              :key #'sb-vm:primitive-object-name))
+               (funinstance (find 'funcallable-instance sb-vm:*primitive-objects*
+                                  :key #'sb-vm:primitive-object-name))
+               (code (find 'sb-vm::code sb-vm:*primitive-objects*
+                           :key #'sb-vm:primitive-object-name))
+               (ignore-objs `(,funinstance ,code)))
           (dolist (obj structs)
-            (unless (eq obj code)
+            (unless (member obj ignore-objs)
               (out-to (string-downcase (sb-vm:primitive-object-name obj))
                 (write-primitive-object obj stream)
-                (when (eq (sb-vm:primitive-object-name obj) 'sb-kernel:simple-fun)
-                  (write-primitive-object code stream)))))
+                (case (sb-vm:primitive-object-name obj)
+                  (instance
+                   (write-primitive-object funinstance stream)
+                   (write-wired-layout-ids stream)
+                   (write-structure-object (layout-info (find-layout 'layout)) stream
+                                  "layout")
+                   (write-cast-operator 'layout "layout"
+                                        sb-vm:instance-pointer-lowtag stream)
+                   (format stream "#include ~S~%"
+                           (namestring (merge-pathnames "instance.inc" (lispobj-dot-h)))))
+                  (simple-fun
+                   (write-primitive-object code stream))))))
           (out-to "primitive-objects"
             (dolist (obj structs)
-              (unless (eq obj code)
+              (unless (member obj ignore-objs)
                 (format stream "~&#include \"~A.h\"~%"
                         (string-downcase (sb-vm:primitive-object-name obj)))))))
-        (out-to "layout"
-          (write-structure-object (layout-info (find-layout 'layout)) stream
-                                  "layout")
-          (write-cast-operator 'layout "layout" sb-vm:instance-pointer-lowtag stream))
         ;; For purposes of the C code, cast all hash tables as general_hash_table
         ;; even if they lack the slots for weak tables.
         (out-to "hash-table"

@@ -1046,25 +1046,44 @@
          ,'index
          nil)))
 
+(defun string-compare-transform (string1 string2 start1 end1 start2 end2)
+  (let* ((start1 (if start1
+                     (lvar-value start1)
+                     0))
+         (start2 (if start2
+                     (lvar-value start2)
+                     0))
+         (lengths1 (vector-type-lengths (lvar-type string1)))
+         (lengths2 (vector-type-lengths (lvar-type string2)))
+         (end1 (and end1 (lvar-value end1)))
+         (end2 (and end2 (lvar-value end2))))
+    (if (and lengths1
+             lengths2
+             (loop for length1 in lengths1
+                   never
+                   (loop for length2 in lengths2
+                         thereis
+                         (let ((end1 (or end1 length1))
+                               (end2 (or end2 length2)))
+                           (or (not (and (<= start1 end1 length1)
+                                         (<= start2 end2 length2)))
+                               (= (- end1 start1)
+                                  (- end2 start2)))))))
+        nil
+        (give-up-ir1-transform))))
+
 (deftransforms (string=* simple-base-string=
                          simple-character-string=)
     ((string1 string2 start1 end1 start2 end2)
      (t t (constant-arg t) (constant-arg t) (constant-arg t) (constant-arg t)))
-  (let* ((start1 (lvar-value start1))
-         (length1 (vector-type-length (lvar-type string1)))
-         (end1 (or (lvar-value end1)
-                   length1))
-         (start2 (lvar-value start2))
-         (length2 (vector-type-length (lvar-type string2)))
-         (end2 (or (lvar-value end2)
-                   length2)))
-    (if (and length1 length2
-             (<= start1 end1 length1)
-             (<= start2 end2 length2)
-             (/= (- end1 start1)
-                 (- end2 start2)))
-        nil
-        (give-up-ir1-transform))))
+  (string-compare-transform string1 string2 start1 end1 start2 end2))
+
+(deftransform string-equal ((string1 string2 &key start1 end1 start2 end2)
+                            (t t &key (:start1 (constant-arg t))
+                               (:start2 (constant-arg t))
+                               (:end1 (constant-arg t))
+                               (:end2 (constant-arg t))))
+  (string-compare-transform string1 string2 start1 end1 start2 end2))
 
 (deftransform string/=* ((str1 str2 start1 end1 start2 end2) * * :node node
                          :important nil)
@@ -1108,7 +1127,7 @@
 
 (defun check-sequence-ranges (string start end node &optional (suffix "") sequence-name)
   (let* ((type (lvar-type string))
-         (length (vector-type-length type))
+         (lengths (vector-type-lengths type))
          (annotation (find-if #'lvar-sequence-bounds-annotation-p (lvar-annotations string))))
     (when annotation
       (when (shiftf (lvar-annotation-fired annotation) t)
@@ -1118,22 +1137,26 @@
                (constant (ctype-of (constant-value x)))
                (lvar (lvar-type x))
                (t (leaf-type x)))))
-      (when length
-        (flet ((check (index name length-type)
-                 (when index
-                   (let ((index-type (arg-type index)))
-                     (unless (types-equal-or-intersect index-type
-                                                       (specifier-type length-type))
-                       (let ((*compiler-error-context* node))
-                         (compiler-warn "Bad :~a~a ~a for~a ~a"
-                                        name suffix
-                                        (type-specifier index-type)
-                                        (if sequence-name
-                                            (format nil " for ~a of type" sequence-name)
-                                            suffix)
-                                        (type-specifier type))))))))
-          (check start "start" `(integer 0 ,length))
-          (check end "end" `(or null (integer 0 ,length)))))
+      (flet ((check (index name length-type)
+               (when index
+                 (let ((index-type (arg-type index)))
+                   (unless (types-equal-or-intersect index-type
+                                                     (specifier-type length-type))
+                     (let ((*compiler-error-context* node))
+                       (compiler-warn "Bad :~a~a ~a for~a ~a"
+                                      name suffix
+                                      (type-specifier index-type)
+                                      (if sequence-name
+                                          (format nil " for ~a of type" sequence-name)
+                                          suffix)
+                                      (type-specifier type))
+                       t))))))
+        (loop for length in lengths
+              thereis
+              (check start "start" `(integer 0 ,length)))
+        (loop for length in lengths
+              thereis
+              (check end "end" `(or null (integer 0 ,length)))))
       (when (and start end)
         (let* ((start-type (arg-type start))
                (start-interval (type-approximate-interval start-type))
@@ -1209,6 +1232,9 @@
 (defoptimizer (mismatch ir2-hook) ((sequence1 sequence2 &key start1 end1 start2 end2 &allow-other-keys) node)
   (check-sequence-ranges sequence1 start1 end1 node 1 'sequence1)
   (check-sequence-ranges sequence2 start2 end2 node 2 'sequence2))
+
+(defoptimizer (vector-subseq* ir2-hook) ((vector start end) node)
+  (check-sequence-ranges vector start end node))
 
 (defun string-cmp-deriver (string1 string2 start1 end1 start2 end2 &optional equality)
   (flet ((dims (string start end)
@@ -3100,6 +3126,18 @@
                    (not (conservative-array-type-complexp type)))
           (first dim)))))
   nil)
+
+(defun vector-type-lengths (type)
+  (if (union-type-p type)
+      (loop with lengths
+            for type in (union-type-types type)
+            do (pushnew (or (vector-type-length type)
+                            (return))
+                        lengths)
+            finally (return lengths))
+      (let ((length (vector-type-length type)))
+        (when length
+          (list length)))))
 
 (defoptimizer (reduce derive-type) ((fun sequence
                                          &key

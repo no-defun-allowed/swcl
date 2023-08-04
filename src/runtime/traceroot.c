@@ -11,7 +11,6 @@
 #include "genesis/gc-tables.h"
 #include "genesis/hash-table.h"
 #include "genesis/instance.h"
-#include "genesis/layout.h"
 #include "genesis/package.h"
 #include "genesis/vector.h"
 #include "search.h"
@@ -53,8 +52,6 @@ typedef struct hopscotch_table* inverted_heap_t;
 int heap_trace_verbose = 0;
 
 typedef uintptr_t traceroot_pointer;
-
-extern generation_index_t gencgc_oldest_gen_to_gc;
 
 /// Each "layer" is a set of objects reachable by tracing one reverse pointer
 /// from any object in the previously built layer.

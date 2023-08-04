@@ -44,7 +44,7 @@ static inline line_index_t address_line(void *address) {
 
 /* I/O */
 extern void mrgc_init();
-extern void load_corefile_bitmaps(int fd, core_entry_elt_t n_ptes);
+extern void load_corefile_bitmap(int fd, core_entry_elt_t n_ptes);
 extern sword_t bitmap_sizes(core_entry_elt_t n_ptes);
 
 /* Allocation */
