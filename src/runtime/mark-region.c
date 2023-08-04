@@ -674,7 +674,7 @@ static lispobj *find_object(uword_t address, uword_t start) {
            * this object, and make sure not to produce an embedded
            * object. */
           if (embedded_obj_p(widetag_of(location)))
-            location = fun_code_header(location);
+            location = (lispobj*)fun_code_header((struct simple_fun*)location);
           if (np >= location + object_size(location))
             return 0;
           return location;
