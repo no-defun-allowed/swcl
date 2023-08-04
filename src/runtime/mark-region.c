@@ -590,23 +590,6 @@ static void __attribute__((noinline)) trace_everything() {
 }
 
 /* Conservative pointer scanning */
-
-static lispobj *last_address_in(uword_t bitword, uword_t word_index) {
-  /* TODO: Make this portable? MSVC uses _BitScanReverse64 and
-   * we should probably have a portable fallback too. */
-  int last_bit = N_WORD_BITS - 1 - __builtin_clzl(bitword);
-  lispobj x = DYNAMIC_SPACE_START + ((word_index * N_WORD_BITS + last_bit) << N_LOWTAG_BITS);
-  return (lispobj*)x;
-}
-
-static lispobj *fix_pointer(lispobj *p, uword_t original) {
-  if (embedded_obj_p(widetag_of(p)))
-    p = (void*)fun_code_header((struct simple_fun*)p);
-  if (native_pointer(original) >= p + object_size(p))
-    return 0;
-  return p;
-}
-
 bool allocation_bit_marked(void *address) {
   uword_t first_bit_index = ((uword_t)(address) - DYNAMIC_SPACE_START) >> N_LOWTAG_BITS;
   uword_t first_word_index = first_bit_index / N_WORD_BITS;
