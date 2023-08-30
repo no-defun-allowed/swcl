@@ -1,3 +1,8 @@
+The mark-region GC is upstream in SBCL now; I don't do anything
+interesting on this branch now.
+
+-----
+
 GENERAL INFORMATION
 
 Welcome to SBCL.
