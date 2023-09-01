@@ -480,7 +480,7 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
     if (widetag_of(ptr) == CODE_HEADER_WIDETAG)
         bits |= OBJ_WRITTEN_FLAG;
     assign_generation(ptr, bits);
-    
+
     low_page_index_t page_index = find_fixedobj_page_index(ptr);
     bool is_text = 0;
     // If called from preserve_pointer(), then we haven't scanned immobile
@@ -495,8 +495,6 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
         }
     }
 
-    if (ptr == native_pointer(0x502c5383))
-        fprintf(stderr, "enqueue %p\n", ptr);
     // TODO: check that objects on protected root pages are not enqueued
     // Enqueue only when we need to look for pointers in this object.
     if (pointerish) push_grey((lispobj)ptr);
@@ -603,8 +601,6 @@ void scavenge_immobile_newspace()
     lispobj next;
     while ((next = pop_grey())) {
         lispobj* obj = (lispobj*)(uword_t)next;
-        if (obj == native_pointer(0x502c5383))
-            fprintf(stderr, "pop %p\n", obj);
         lispobj header = *obj;
         scavtab[header_widetag(header)](obj, header);
     }
@@ -630,7 +626,6 @@ scavenge_immobile_roots(generation_index_t min_gen, generation_index_t max_gen)
         // object.
         do {
             if (!fixnump(*obj) && (genmask >> (gen=immobile_obj_gen_bits(obj)) & 1)) {
-                if (gen == new_space) { set_visited(obj); }
                 lispobj header = *obj;
                 scavtab[header_widetag(header)](obj, header);
             }
@@ -657,7 +652,6 @@ scavenge_immobile_roots(generation_index_t min_gen, generation_index_t max_gen)
                 // scav_code_blob will do nothing if the object isn't
                 // marked as written.
                 if (genmask >> (gen=immobile_obj_gen_bits(obj)) & 1) {
-                    if (gen == new_space) { set_visited(obj); }
                     n_words = scavtab[header_widetag(header)](obj, header);
                 } else {
                     n_words = headerobj_size2(obj, header);
@@ -857,14 +851,14 @@ static inline bool can_wp_text_page(page_index_t page)
 //     Nothing resides in 'from_space', and 'from_space+1' gains new objects
 //     if and only if any objects on the page were retained.
 // If 'raise' = 0 then:
-//     Nothing resides in the scratch generation, and 'from_space'
-//     has objects if and only if any objects were retained.
+//     'from_space' continues to have objects if and only if any objects
+//     were retained.
 #define COMPUTE_NEW_MASK(var, old) \
   int var = old & ~(1<<from_space); \
   if ( raise ) \
     var |= 1<<(from_space+1) & any_kept; \
   else \
-    var = (var & ~(1<<new_space)) | (1<<from_space & any_kept)
+    var |= 1<<from_space & any_kept
 
 static void
 sweep_fixedobj_pages(int raise)
