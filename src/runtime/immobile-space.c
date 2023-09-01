@@ -61,6 +61,8 @@
 #include "immobile-space.h"
 #include "lispstring.h"
 #include "pseudo-atomic.h"
+#include "queue.h"
+#include "queue-suballocator.h"
 #include "search.h"
 #include "unaligned.h"
 #include "validate.h"
@@ -94,12 +96,39 @@ unsigned int text_space_size = TEXT_SPACE_SIZE;
 // This table is for objects fixed in size, as opposed to variable-sized.
 // (Immobile objects are naturally fixed in placement)
 struct fixedobj_page *fixedobj_pages;
-lispobj* immobile_scav_queue;
-int immobile_scav_queue_head;
-// Number of items enqueued; can exceed QCAPACITY on overflow.
-// If overflowed, the queue is unusable until reset.
-unsigned int immobile_scav_queue_count;
-#define QCAPACITY 1024
+
+struct Qblock *immobile_grey_list = NULL;
+static struct Qblock *recycle_list = NULL;
+static struct suballocator grey_suballocator = SUBALLOCATOR_INITIALIZER("immobile-space grey stack");
+static void push_grey(lispobj object) {
+    if (!immobile_grey_list || immobile_grey_list->count == QBLOCK_CAPACITY) {
+        struct Qblock *next;
+        if (recycle_list) {
+            next = recycle_list;
+            recycle_list = recycle_list->next;
+        } else {
+            next = suballoc_allocate(&grey_suballocator);
+        }
+        next->count = 0;
+        next->next = immobile_grey_list;
+        immobile_grey_list = next;
+    }
+    immobile_grey_list->elements[immobile_grey_list->count++] = object;
+}
+static lispobj pop_grey() {
+    if (!immobile_grey_list) return 0;
+    lispobj element = immobile_grey_list->elements[--immobile_grey_list->count];
+    /* We move to the next queue block eagerly so that !grey_list
+     * indicates that the queue is empty. */
+    if (immobile_grey_list->count == 0) {
+        struct Qblock *next = immobile_grey_list->next;
+        /* Recycle the block */
+        immobile_grey_list->next = recycle_list;
+        recycle_list = immobile_grey_list;
+        immobile_grey_list = next;
+    }
+    return element;
+}
 
 #define gens attr.parts.gens_
 
@@ -440,26 +469,20 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
 {
     gc_assert(widetag_of(ptr) != SIMPLE_FUN_WIDETAG); // can't enliven interior pointer
     gc_assert(widetag_of(ptr) != FILLER_WIDETAG);
+#ifdef LISP_FEATURE_GENCGC
     gc_assert(immobile_obj_gen_bits(ptr) == from_space);
+#endif
     int pointerish = !leaf_obj_widetag_p(widetag_of(ptr));
-    int bits = (pointerish ? 0 : IMMOBILE_OBJ_VISITED_FLAG);
+    int bits = IMMOBILE_OBJ_VISITED_FLAG | immobile_obj_gen_bits(ptr);
     // enlivening makes the object appear as if written, so that
     // scav_code_blob won't skip it, thus ensuring we transitively
     // scavenge + enliven newspace objects.
     if (widetag_of(ptr) == CODE_HEADER_WIDETAG)
         bits |= OBJ_WRITTEN_FLAG;
-    assign_generation(ptr, bits | new_space);
+    assign_generation(ptr, bits);
+    
     low_page_index_t page_index = find_fixedobj_page_index(ptr);
     bool is_text = 0;
-
-    if (page_index < 0) {
-        page_index = find_text_page_index(ptr);
-        gc_assert(page_index >= 0);
-        text_page_genmask[page_index] |= 1<<new_space;
-        is_text = 1;
-    } else {
-        fixedobj_pages[page_index].gens |= 1<<new_space;
-    }
     // If called from preserve_pointer(), then we haven't scanned immobile
     // roots yet, so we only need ensure that this object's page's WP bit
     // is cleared so that the page is not skipped during root scan.
@@ -470,22 +493,13 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
             else
                 SET_WP_FLAG(page_index, WRITE_PROTECT_CLEARED);
         }
-        return; // No need to enqueue.
     }
 
+    if (ptr == native_pointer(0x502c5383))
+        fprintf(stderr, "enqueue %p\n", ptr);
     // TODO: check that objects on protected root pages are not enqueued
-
-    // Do nothing if either we don't need to look for pointers in this object,
-    // or the work queue has already overflowed, causing a full scan.
-    if (!pointerish || immobile_scav_queue_count > QCAPACITY) return;
-
-    // count is either less than or equal to QCAPACITY.
-    // If equal, just bump the count to signify overflow.
-    if (immobile_scav_queue_count < QCAPACITY) {
-        immobile_scav_queue[immobile_scav_queue_head] = (lispobj)ptr;
-        immobile_scav_queue_head = (immobile_scav_queue_head + 1) & (QCAPACITY - 1);
-    }
-    ++immobile_scav_queue_count;
+    // Enqueue only when we need to look for pointers in this object.
+    if (pointerish) push_grey((lispobj)ptr);
 }
 
 static uint32_t* loaded_codeblob_offsets;
@@ -571,65 +585,6 @@ bool immobile_space_preserve_pointer(void* addr)
     return 0;
 }
 
-// Loop over the newly-live objects, scavenging them for pointers.
-// As with the ordinary gencgc algorithm, this uses almost no stack.
-static void full_scavenge_immobile_newspace()
-{
-    page_index_t page;
-    unsigned char bit = 1<<new_space;
-
-    // Fixed-size object pages.
-
-    low_page_index_t max_used_fixedobj_page = calc_max_used_fixedobj_page();
-    for (page = FIXEDOBJ_RESERVED_PAGES; page <= max_used_fixedobj_page; ++page) {
-        if (!(fixedobj_pages[page].gens & bit)) continue;
-        // Skip amount within the loop is in bytes.
-        int obj_spacing = fixedobj_page_obj_align(page);
-        lispobj* obj    = fixedobj_page_address(page);
-        lispobj* limit  = compute_fixedobj_limit(obj, obj_spacing);
-        do {
-            if (!fixnump(*obj) && immobile_obj_gen_bits(obj) == new_space) {
-                set_visited(obj);
-                lispobj header = *obj;
-                scavtab[header_widetag(header)](obj, header);
-            }
-        } while (NEXT_FIXEDOBJ(obj, obj_spacing) <= limit);
-    }
-
-    // Variable-size object pages
-
-    low_page_index_t max_used_text_page = calc_max_used_text_page();
-    page = -1; // -1 because of pre-increment
-    while (1) {
-        // Find the next page with anything in newspace.
-        do {
-            if (++page > max_used_text_page) return;
-        } while ((text_page_genmask[page] & bit) == 0);
-        lispobj* obj = text_page_scan_start(page);
-        if (!obj) continue; // page contains nothing - can this happen?
-        do {
-            lispobj* limit = (lispobj*)text_page_address(page) + WORDS_PER_PAGE;
-            if (limit > text_space_highwatermark) limit = text_space_highwatermark;
-            sword_t n_words;
-            for ( ; obj < limit ; obj += n_words ) {
-                lispobj header = *obj;
-                if (immobile_obj_gen_bits(obj) == new_space) {
-                    set_visited(obj);
-                    n_words = scavtab[header_widetag(header)](obj, header);
-                } else {
-                    n_words = headerobj_size2(obj, header);
-                }
-            }
-            gc_assert(obj <= text_space_highwatermark);
-            // Bail out if exact absolute end of immobile space was reached.
-            if (obj == text_space_highwatermark) break;
-            // If 'page' should be scanned, then pick up where we left off,
-            // without recomputing 'obj' but setting a higher 'limit'.
-            page = find_text_page_index(obj);
-        } while (text_page_genmask[page] & bit);
-    }
-}
-
 /// Repeatedly scavenge immobile newspace work queue until we find no more
 /// reachable objects within. (They might be in dynamic space though).
 /// If queue overflow already happened, then a worst-case full scan is needed.
@@ -645,37 +600,14 @@ static void full_scavenge_immobile_newspace()
 /// because the queue state is inconsistent when 'count' exceeds 'capacity'.
 void scavenge_immobile_newspace()
 {
-  while (immobile_scav_queue_count) {
-      if (immobile_scav_queue_count > QCAPACITY) {
-          immobile_scav_queue_count = 0;
-          full_scavenge_immobile_newspace();
-      } else {
-          int queue_index_from = (immobile_scav_queue_head - immobile_scav_queue_count)
-                               & (QCAPACITY - 1);
-          int queue_index_to   = immobile_scav_queue_head;
-          int i = queue_index_from;
-          // The termination condition can't be expressed as an inequality,
-          // since the indices might be reversed due to wraparound.
-          // To express as equality entails forcing at least one iteration
-          // since the ending index might be the starting index.
-          do {
-              lispobj* obj = (lispobj*)(uword_t)immobile_scav_queue[i];
-              i = (1 + i) & (QCAPACITY-1);
-              // Only decrement the count if overflow did not happen.
-              // The first iteration of this loop will decrement for sure,
-              // but subsequent iterations might not.
-              if (immobile_scav_queue_count <= QCAPACITY)
-                  --immobile_scav_queue_count;
-              // FIXME: should not enqueue already-visited objects,
-              // but a gc_assert() that it wasn't visited fails.
-              if (!(immobile_obj_gen_bits(obj) & IMMOBILE_OBJ_VISITED_FLAG)) {
-                set_visited(obj);
-                lispobj header = *obj;
-                scavtab[header_widetag(header)](obj, header);
-              }
-          } while (i != queue_index_to);
-      }
-  }
+    lispobj next;
+    while ((next = pop_grey())) {
+        lispobj* obj = (lispobj*)(uword_t)next;
+        if (obj == native_pointer(0x502c5383))
+            fprintf(stderr, "pop %p\n", obj);
+        lispobj header = *obj;
+        scavtab[header_widetag(header)](obj, header);
+    }
 }
 
 void
@@ -755,8 +687,6 @@ scavenge_immobile_roots(generation_index_t min_gen, generation_index_t max_gen)
 
 void write_protect_immobile_space()
 {
-    immobile_scav_queue_head = 0;
-
     if (!ENABLE_PAGE_PROTECTION)
         return;
 
@@ -913,12 +843,12 @@ static inline bool can_wp_text_page(page_index_t page)
 */
 
 #define SETUP_GENS()                                                   \
-  /* Only care about pages with something in old or new space. */      \
-  int relevant_genmask = (1 << from_space) | (1 << new_space);         \
-  /* Objects whose gen byte is 'keep_gen' are alive. */                \
-  int keep_gen = IMMOBILE_OBJ_VISITED_FLAG | new_space;                \
-  /* Objects whose gen byte is 'from_space' are trash. */              \
-  int discard_gen = from_space;                                        \
+  /* Only care about pages with something in from space */             \
+  int relevant_genmask = (1 << from_space);                            \
+  /* Objects whose gen byte is 'keep_gen' are alive. */                 \
+  int keep_gen = IMMOBILE_OBJ_VISITED_FLAG | from_space;                \
+  /* Objects whose gen byte is 'from_space' are trash. */               \
+  int discard_gen = from_space;                                         \
   /* Moving non-garbage into either 'from_space' or 'from_space+1' */  \
   generation_index_t new_gen = from_space + (raise!=0)
 
@@ -1110,9 +1040,11 @@ sweep_text_pages(int raise)
 void
 sweep_immobile_space(int raise)
 {
-  gc_assert(immobile_scav_queue_count == 0);
+  gc_assert(immobile_grey_list == NULL);
   sweep_fixedobj_pages(raise);
   sweep_text_pages(raise);
+  recycle_list = NULL;
+  suballoc_release(&grey_suballocator);
 }
 
 void gc_init_immobile()
@@ -1131,8 +1063,6 @@ void gc_init_immobile()
     // The conservative value for 'touched' is 1.
     memset(text_page_touched_bits, 0xff, n_bitmap_elts * sizeof (int));
     text_page_genmask = calloc(n_text_pages, 1);
-    // Scav queue is arbitrarily located.
-    immobile_scav_queue = malloc(QCAPACITY * sizeof(lispobj));
     tlsf_control = malloc(tlsf_size());
     tlsf_create(tlsf_control);
 }

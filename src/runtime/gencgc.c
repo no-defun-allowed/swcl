@@ -76,7 +76,7 @@ int gencgc_verbose = 0;
 /* We hunt for pointers to old-space, when GCing generations >= verify_gen.
  * Set verify_gens to HIGHEST_NORMAL_GENERATION + 2 to disable this kind of
  * check. */
-generation_index_t verify_gens = HIGHEST_NORMAL_GENERATION + 2;
+generation_index_t verify_gens = 0; // HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
 int pre_verify_gen_0 = 0; // FIXME: should be named 'pre_verify_gc'
@@ -2889,7 +2889,7 @@ scavenge_newspace(generation_index_t generation)
 
     while (1) {
         if (GC_LOGGING) fprintf(gc_activitylog(), "newspace loop\n");
-        if (!new_areas_index && !immobile_scav_queue_count) { // possible stopping point
+        if (!new_areas_index && !immobile_grey_list) { // possible stopping point
             if (!test_weak_triggers(0, 0))
                 break; // no work to do
             // testing of triggers can't detect whether any triggering object
@@ -2897,7 +2897,7 @@ scavenge_newspace(generation_index_t generation)
             // from the pending list. So check again if allocations occurred,
             // which is only if not all triggers referenced already-live objects.
             gc_close_collector_regions(0); // update new_areas from regions
-            if (!new_areas_index && !immobile_scav_queue_count)
+            if (!new_areas_index && !immobile_grey_list)
                 break; // still no work to do
         }
         /* Move the current to the previous new areas */

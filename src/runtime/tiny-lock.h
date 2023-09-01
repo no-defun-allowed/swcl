@@ -1,3 +1,6 @@
+#ifndef TINY_LOCK_H
+#define TINY_LOCK_H
+
 #ifdef USE_PTHREAD_LOCK
 /* Probably not something you actually want to do in a signal handler,
  * but it lets you use things like mutrace. */
@@ -30,4 +33,5 @@ static void release_lock(lock_t *l) {
   atomic_store(&l->grabbed, 0);
 }
 #define LOCK_INITIALIZER { 0 }
+#endif
 #endif

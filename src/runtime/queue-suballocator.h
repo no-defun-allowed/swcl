@@ -1,3 +1,6 @@
+#include "tiny-lock.h"
+#include "queue.h"
+
 /* To allocate queue blocks without mmaping every time, we allocate larger and
  * larger "chunks" of memory. As the size of each subsequent chunk grows
  * exponentially, the metadata needed to represent a mark stack of any size

@@ -9,6 +9,9 @@
  * files for more information.
  */
 
+#ifndef QUEUE_H
+#define QUEUE_H
+
 /// Opposite head/tail convention for immobile space queue.
 /// (Enqueue at the tail, dequeue at the head).  Sorry. :-(
 struct Qblock {
@@ -28,4 +31,5 @@ struct Qblock {
 #define QBLOCK_CAPACITY (1+(QBLOCK_BYTES-sizeof(struct Qblock))/sizeof(lispobj))
 #else
 #define QBLOCK_CAPACITY 12 /* artificially low, for testing */
+#endif
 #endif
