@@ -483,6 +483,13 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
 
     low_page_index_t page_index = find_fixedobj_page_index(ptr);
     bool is_text = 0;
+    
+    if (page_index < 0) {
+        page_index = find_text_page_index(ptr);
+        gc_assert(page_index >= 0);
+        is_text = 1;
+    }
+    
     // If called from preserve_pointer(), then we haven't scanned immobile
     // roots yet, so we only need ensure that this object's page's WP bit
     // is cleared so that the page is not skipped during root scan.
