@@ -342,7 +342,14 @@ static bool in_dynamic_space(lispobj object) {
 }
 
 bool taggedptr_alivep_impl(lispobj object) {
-  return !in_dynamic_space(object) || object_marked_p(object) || gc_gen_of(object, 0) > generation_to_collect;
+  lispobj *np = native_pointer(object);
+  if (in_dynamic_space(object))
+    return object_marked_p(object)
+      || gc_gen_of(object, 0) > generation_to_collect;
+  else if (immobile_space_p(object))
+    return (immobile_obj_gen_bits(np) & IMMOBILE_OBJ_VISITED_FLAG) > 0
+      || immobile_obj_generation(np) > generation_to_collect;
+  else return true;
 }
 
 /* The number of blocks on the grey list and being processed.
@@ -417,6 +424,18 @@ static _Thread_local lispobj *source_object;
 
 static lock_t immobile_enliven_lock = LOCK_INITIALIZER;
 
+static void mark_immobile(lispobj object) {
+  lispobj *np = native_pointer(object);
+  if (!taggedptr_alivep_impl(object)) {
+    acquire_lock(&immobile_enliven_lock);
+    if (!taggedptr_alivep_impl(object)) {
+      enliven_immobile_obj(np, 0);
+    }
+    release_lock(&immobile_enliven_lock);
+  }
+  return;
+}
+
 static void mark(lispobj object, lispobj *where, enum source source_type) {
   if (!is_lisp_pointer(object)) return;
   if (in_dynamic_space(object) || immobile_space_p(object)) {
@@ -438,13 +457,8 @@ static void mark(lispobj object, lispobj *where, enum source source_type) {
 #endif
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
     if (immobile_space_p(object)) {
-      if (!(immobile_obj_gen_bits(np) & IMMOBILE_OBJ_VISITED_FLAG)) {
-        acquire_lock(&immobile_enliven_lock);
-        if (!(immobile_obj_gen_bits(np) & IMMOBILE_OBJ_VISITED_FLAG)) {
-          enliven_immobile_obj(np, 0);
-        }
-        release_lock(&immobile_enliven_lock);
-      }
+      mark_immobile(object);
+      return;
     }
 #endif
     /* Enqueue onto mark queue */
@@ -506,6 +520,12 @@ static void trace_object(lispobj object) {
 #ifdef COMPACT
         /* Inlined logic from mark() */
         log_slot(c->cdr, &c->cdr, native_pointer(object), SOURCE_NORMAL);
+#endif
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+        if (immobile_space_p(next)) {
+          mark_immobile(next);
+          return;
+        }
 #endif
         if (!pointer_survived_gc_yet(next)) {
           if (set_mark_bit(next)) {

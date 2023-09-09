@@ -2675,7 +2675,7 @@ static inline bool obj_alivep(lispobj* obj_base) {
      * sweeping, so that compaction can run before finalizers are
      * scanned. Compaction needs to run before as scan_finalizers
      * needs to rehash when forwarding pointers are encountered. */
-    return allocation_bit_marked(native_pointer(obj));
+    return taggedptr_alivep_impl(obj);
 #else
     return compacting_p() ? pointer_survived_gc_yet(obj) : fullcgc_lispobj_livep(obj);
 #endif

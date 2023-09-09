@@ -385,7 +385,7 @@ sigsegv_handler(int signal, siginfo_t *info, os_context_t *context)
     if (handle_safepoint_violation(context, addr)) return;
 #endif
 
-#ifdef LISP_FEATURE_GENCGC
+#ifdef LISP_FEATURE_GENERATIONAL
     if (gencgc_handle_wp_violation(context, addr)) return;
 #endif
     extern int diagnose_arena_fault(os_context_t*,char*);

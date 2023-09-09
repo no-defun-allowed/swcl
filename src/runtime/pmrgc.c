@@ -1444,6 +1444,60 @@ lisp_alloc(__attribute__((unused)) int flags,
     return new_obj;
 }
 
+/*
+ * shared support for the OS-dependent signal handlers which
+ * catch GENCGC-related write-protect violations
+ */
+void unhandled_sigmemoryfault(void* addr);
+
+/* Depending on which OS we're running under, different signals might
+ * be raised for a violation of write protection in the heap. This
+ * function factors out the common generational GC magic which needs
+ * to invoked in this case, and should be called from whatever signal
+ * handler is appropriate for the OS we're running under.
+ *
+ * Return true if this signal is a normal generational GC thing that
+ * we were able to handle, or false if it was abnormal and control
+ * should fall through to the general SIGSEGV/SIGBUS/whatever logic.
+ *
+ * We have two control flags for this: one causes us to ignore faults
+ * on unprotected pages completely, and the second complains to stderr
+ * but allows us to continue without losing.
+ */
+extern bool ignore_memoryfaults_on_unprotected_pages;
+bool ignore_memoryfaults_on_unprotected_pages = 0;
+
+extern bool continue_after_memoryfault_on_unprotected_pages;
+bool continue_after_memoryfault_on_unprotected_pages = 0;
+
+int gencgc_handle_wp_violation(__attribute__((unused)) void* context, void* fault_addr)
+{
+    page_index_t page_index = find_page_index(fault_addr);
+
+    /* Check whether the fault is within the dynamic space. */
+    if (page_index == (-1)) {
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+        extern int immobile_space_handle_wp_violation(void*);
+        if (immobile_space_handle_wp_violation(fault_addr))
+            return 1;
+#endif
+        /* It can be helpful to be able to put a breakpoint on this
+         * case to help diagnose low-level problems. */
+        unhandled_sigmemoryfault(fault_addr);
+        /* not within the dynamic space -- not our responsibility */
+        return 0;
+    }
+    lose("misuse of mprotect() on dynamic space @ %p", fault_addr);
+    return 1; // Handled
+}
+/* This is to be called when we catch a SIGSEGV/SIGBUS, determine that
+ * it's not just a case of the program hitting the write barrier, and
+ * are about to let Lisp deal with it. It's basically just a
+ * convenient place to set a gdb breakpoint. */
+void
+unhandled_sigmemoryfault(void __attribute__((unused)) *addr)
+{}
+
 /** code blob scavenging **/
 
 /* Return 1 if 'a' is strictly younger than 'b'.

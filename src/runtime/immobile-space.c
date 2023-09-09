@@ -850,7 +850,7 @@ static inline bool can_wp_text_page(page_index_t page)
 */
 
 #ifdef LISP_FEATURE_MARK_REGION_GC
-#define IN_FULL_GC (from_space == -1)
+#define IN_FULL_GC (new_space == PSEUDO_STATIC_GENERATION)
 #else
 #define IN_FULL_GC 0
 #endif
