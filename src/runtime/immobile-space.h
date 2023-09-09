@@ -149,10 +149,12 @@ static inline void assign_generation(lispobj* obj, generation_index_t gen)
 static inline generation_index_t immobile_obj_generation(lispobj *x) {
   extern generation_index_t new_space;
   int bits = immobile_obj_gen_bits(x);
+#ifdef LISP_FEATURE_GENCGC
   /* Convert immobile-space grey to look like gencgc grey */
   if (bits & IMMOBILE_OBJ_VISITED_FLAG)
     return new_space;
   else
+#endif
     return bits & 0x0F;
 }
 #else
@@ -170,7 +172,7 @@ static inline int immobile_space_preserve_pointer(__attribute__((unused)) void* 
 #define scavenge_immobile_newspace(dummy)
 #define sweep_immobile_space(dummy)
 #define write_protect_immobile_space()
-#define immobile_scav_queue_count 0
+#define immobile_grey_list 0
 #define immobile_card_protected_p(dummy) (0)
 
 #endif
