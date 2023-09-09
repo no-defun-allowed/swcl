@@ -843,9 +843,15 @@ static inline bool can_wp_text_page(page_index_t page)
     in that case each hole's pointer to the next hole is zero as well.
 */
 
+#ifdef LISP_FEATURE_MARK_REGION_GC
+#define IN_FULL_GC (from_space == -1)
+#else
+#define IN_FULL_GC 0
+#endif
+
 #define SETUP_GENS()                                                   \
   /* Only care about pages with something in from space */             \
-  int relevant_genmask = (1 << from_space);                            \
+  int relevant_genmask = IN_FULL_GC ? -1 : (1 << from_space);          \
   /* Objects whose gen byte is 'keep_gen' are alive. */                 \
   int keep_gen = IMMOBILE_OBJ_VISITED_FLAG | from_space;                \
   /* Objects whose gen byte is 'from_space' are trash. */               \
@@ -910,6 +916,8 @@ sweep_fixedobj_pages(int raise)
         int wp_it = ENABLE_PAGE_PROTECTION && !fixedobj_page_wp(page);
         int gen;
         do {
+            /* Don't touch generations while doing a full GC */
+            if (IN_FULL_GC) new_gen = immobile_obj_gen_bits(obj) & ~IMMOBILE_OBJ_VISITED_FLAG;
             if (fixnump(*obj)) { // was already a hole
             trash_it:
                 // re-link it into the new freelist
@@ -922,10 +930,7 @@ sweep_fixedobj_pages(int raise)
                   fixedobj_pages[page].free_index = (char*)obj - page_base;
                 hole = obj;
                 n_holes ++;
-            } else if ((gen = immobile_obj_gen_bits(obj)) == discard_gen) { // trash
-                memset(obj, 0, obj_spacing);
-                goto trash_it;
-            } else if (gen == keep_gen) {
+            } else if ((gen = immobile_obj_gen_bits(obj)) & IMMOBILE_OBJ_VISITED_FLAG) {
                 assign_generation(obj, gen = new_gen);
 #ifdef DEBUG
                 gc_assert(!fixedobj_points_to_younger_p(obj,
@@ -933,6 +938,9 @@ sweep_fixedobj_pages(int raise)
                                                         gen, keep_gen, new_gen));
 #endif
                 any_kept = -1;
+            } else if (gen == discard_gen || IN_FULL_GC) { // trash
+                memset(obj, 0, obj_spacing);
+                goto trash_it;
             } else if (wp_it && fixedobj_points_to_younger_p(obj,
                                                              headerobj_size(obj),
                                                              gen, keep_gen, new_gen))
@@ -941,16 +949,18 @@ sweep_fixedobj_pages(int raise)
         if ( hole ) // terminate the chain of holes
             *hole = (lispobj)((char*)obj - ((char*)hole + obj_spacing));
 
-        COMPUTE_NEW_MASK(mask, fixedobj_pages[page].gens);
-        if ( mask ) {
-            fixedobj_pages[page].gens = mask;
-            if (wp_it) {
-                SET_WP_FLAG(page, WRITE_PROTECT);
-                dprintf((logfile, "set WP(2) on fixedobj page %d\n", page));
+        if (!IN_FULL_GC) {
+            COMPUTE_NEW_MASK(mask, fixedobj_pages[page].gens);
+            if ( mask ) {
+                fixedobj_pages[page].gens = mask;
+                if (wp_it) {
+                    SET_WP_FLAG(page, WRITE_PROTECT);
+                    dprintf((logfile, "set WP(2) on fixedobj page %d\n", page));
+                }
+            } else {
+                dprintf((logfile,"page %d is all garbage\n", page));
+                fixedobj_pages[page].attr.packed = 0;
             }
-        } else {
-            dprintf((logfile,"page %d is all garbage\n", page));
-            fixedobj_pages[page].attr.packed = 0;
         }
 #ifdef DEBUG
         check_fixedobj_page(page, keep_gen, new_gen);
@@ -998,8 +1008,17 @@ sweep_text_pages(int raise)
         for ( ; obj < limit ; obj += size ) {
             lispobj word = *obj;
             size = object_size2(obj, word);
+            if (IN_FULL_GC) new_gen = immobile_obj_gen_bits(obj) & ~IMMOBILE_OBJ_VISITED_FLAG;
             if (header_widetag(word) == FILLER_WIDETAG) { // ignore
-            } else if ((gen = immobile_obj_gen_bits(obj)) == discard_gen) {
+            } else if ((gen = immobile_obj_gen_bits(obj)) & IMMOBILE_OBJ_VISITED_FLAG) {
+                assign_generation(obj, gen = new_gen);
+#ifdef DEBUG
+                gc_assert(!text_points_to_younger_p(obj, gen, keep_gen, new_gen,
+                                                    (os_vm_address_t)page_base,
+                                                    (os_vm_address_t)limit));
+#endif
+                any_kept = -1;
+            } else if (gen == discard_gen) {
                 gc_assert(header_widetag(word) == CODE_HEADER_WIDETAG);
                 assign_widetag(obj, FILLER_WIDETAG);
                 // ASSUMPTION: little-endian
@@ -1010,21 +1029,15 @@ sweep_text_pages(int raise)
                 // Descending order would decrease the HWM for each deallocation.
                 if (freelist) freelist_tail[1] = (lispobj)obj; else freelist = obj;
                 freelist_tail = obj;
-            } else if (gen == keep_gen) {
-                assign_generation(obj, gen = new_gen);
-#ifdef DEBUG
-                gc_assert(!text_points_to_younger_p(obj, gen, keep_gen, new_gen,
-                                                       (os_vm_address_t)page_base,
-                                                       (os_vm_address_t)limit));
-#endif
-                any_kept = -1;
             } else if (wp_it && header_rememberedp(*obj))
                 wp_it = 0;
         }
-        COMPUTE_NEW_MASK(mask, text_page_genmask[page]);
-        text_page_genmask[page] = mask;
-        if ( mask && wp_it )
-            text_page_touched_bits[page/32] &= ~(1U << (page & 31));
+        if (!IN_FULL_GC) {
+            COMPUTE_NEW_MASK(mask, text_page_genmask[page]);
+            text_page_genmask[page] = mask;
+            if ( mask && wp_it )
+                text_page_touched_bits[page/32] &= ~(1U << (page & 31));
+        }
     }
     // Stuff the new freelist onto the front of codeblob_freelist
     if (freelist_tail) {
