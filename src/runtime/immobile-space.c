@@ -483,13 +483,13 @@ enliven_immobile_obj(lispobj *ptr, int rescan) // a native pointer
 
     low_page_index_t page_index = find_fixedobj_page_index(ptr);
     bool is_text = 0;
-    
+
     if (page_index < 0) {
         page_index = find_text_page_index(ptr);
         gc_assert(page_index >= 0);
         is_text = 1;
     }
-    
+
     // If called from preserve_pointer(), then we haven't scanned immobile
     // roots yet, so we only need ensure that this object's page's WP bit
     // is cleared so that the page is not skipped during root scan.
@@ -581,10 +581,14 @@ bool immobile_space_preserve_pointer(void* addr)
                   immobile_obj_gen_bits(object_start) == from_space)) {
         dprintf((logfile,"immobile obj @ %p (<- %p) is conservatively live\n",
                  object_start, addr));
+#ifdef LISP_FEATURE_MARK_REGION_GC
+        enliven_immobile_obj(object_start, 0);
+#else
         if (compacting_p())
             enliven_immobile_obj(object_start, 0);
         else
             gc_mark_obj(compute_lispobj(object_start));
+#endif
         return 1;
     }
     return 0;
@@ -592,24 +596,17 @@ bool immobile_space_preserve_pointer(void* addr)
 
 /// Repeatedly scavenge immobile newspace work queue until we find no more
 /// reachable objects within. (They might be in dynamic space though).
-/// If queue overflow already happened, then a worst-case full scan is needed.
-/// If it didn't, we try to drain the queue, hoping that overflow does
-/// not happen while doing so.
-/// The approach taken is more subtle than just dequeuing each item,
-/// scavenging, and letting the outer 'while' loop take over.
-/// That would be ok, but could cause more full scans than necessary.
-/// Instead, since each entry in the queue is useful information
-/// in the non-overflow condition, perform all the work indicated thereby,
-/// rather than considering the queue discardable as soon as overflow happens.
-/// Essentially we just have to capture the valid span of enqueued items,
-/// because the queue state is inconsistent when 'count' exceeds 'capacity'.
 void scavenge_immobile_newspace()
 {
     lispobj next;
     while ((next = pop_grey())) {
         lispobj* obj = (lispobj*)(uword_t)next;
+#ifdef LISP_FEATURE_MARK_REGION_GC
+        mr_trace_object(obj);
+#else
         lispobj header = *obj;
         scavtab[header_widetag(header)](obj, header);
+#endif
     }
 }
 
@@ -633,8 +630,12 @@ scavenge_immobile_roots(generation_index_t min_gen, generation_index_t max_gen)
         // object.
         do {
             if (!fixnump(*obj) && (genmask >> (gen=immobile_obj_gen_bits(obj)) & 1)) {
+#ifdef LISP_FEATURE_MARK_REGION_GC
+                mr_trace_object(obj);
+#else
                 lispobj header = *obj;
                 scavtab[header_widetag(header)](obj, header);
+#endif
             }
         } while (NEXT_FIXEDOBJ(obj, obj_spacing) <= limit);
     }
@@ -659,7 +660,12 @@ scavenge_immobile_roots(generation_index_t min_gen, generation_index_t max_gen)
                 // scav_code_blob will do nothing if the object isn't
                 // marked as written.
                 if (genmask >> (gen=immobile_obj_gen_bits(obj)) & 1) {
+#ifdef LISP_FEATURE_MARK_REGION_GC
+                    mr_trace_object(obj);
+                    n_words = headerobj_size2(obj, header);
+#else
                     n_words = scavtab[header_widetag(header)](obj, header);
+#endif
                 } else {
                     n_words = headerobj_size2(obj, header);
                 }
@@ -853,7 +859,7 @@ static inline bool can_wp_text_page(page_index_t page)
   /* Only care about pages with something in from space */             \
   int relevant_genmask = IN_FULL_GC ? -1 : (1 << from_space);          \
   /* Objects whose gen byte is 'keep_gen' are alive. */                 \
-  int keep_gen = IMMOBILE_OBJ_VISITED_FLAG | from_space;                \
+  int __attribute__((unused)) keep_gen = IMMOBILE_OBJ_VISITED_FLAG | from_space; \
   /* Objects whose gen byte is 'from_space' are trash. */               \
   int discard_gen = from_space;                                         \
   /* Moving non-garbage into either 'from_space' or 'from_space+1' */  \

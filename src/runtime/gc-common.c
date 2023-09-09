@@ -133,7 +133,7 @@ static inline void scav1(lispobj* addr, lispobj object)
 #else
       /* The incremental compactor only calls scavenge (then scav1) with
        * pointers of the right generation. */
-      {
+      if (1) {
 #endif
             if (forwarding_pointer_p(native_pointer(object)))
                 *addr = forwarding_pointer_value(native_pointer(object));

@@ -131,7 +131,14 @@ bool line_marked(void *pointer) {
 
 generation_index_t gc_gen_of(lispobj obj, int defaultval) {
   page_index_t p = find_page_index((void*)obj);
-  if (p < 0) return defaultval;
+  if (p < 0) {
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+    if (immobile_space_p(obj))
+      return immobile_obj_generation(native_pointer(obj));
+    else
+#endif
+      return defaultval;
+  }
   if (page_single_obj_p(p))
     return page_table[p].gen;
   char c = UNMARK_GEN(line_bytemap[address_line((void*)obj)]);
@@ -408,9 +415,11 @@ static _Thread_local generation_index_t dirty_generation_source = 0;
 static _Thread_local bool dirty = 0;
 static _Thread_local lispobj *source_object;
 
-static void mark(lispobj object, lispobj *where, enum source source_type) {
-  if (is_lisp_pointer(object) && in_dynamic_space(object)) {
+static lock_t immobile_enliven_lock = LOCK_INITIALIZER;
 
+static void mark(lispobj object, lispobj *where, enum source source_type) {
+  if (!is_lisp_pointer(object)) return;
+  if (in_dynamic_space(object) || immobile_space_p(object)) {
     lispobj *np = native_pointer(object);
     if (gc_gen_of(object, 0) < dirty_generation_source)
       /* Used to find dirty pages in mr_scavenge_root_gens. */
@@ -426,6 +435,17 @@ static void mark(lispobj object, lispobj *where, enum source source_type) {
 #ifdef COMPACT
     if (where)
       log_slot(object, where, source_object, source_type);
+#endif
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+    if (immobile_space_p(object)) {
+      if (!(immobile_obj_gen_bits(np) & IMMOBILE_OBJ_VISITED_FLAG)) {
+        acquire_lock(&immobile_enliven_lock);
+        if (!(immobile_obj_gen_bits(np) & IMMOBILE_OBJ_VISITED_FLAG)) {
+          enliven_immobile_obj(np, 0);
+        }
+        release_lock(&immobile_enliven_lock);
+      }
+    }
 #endif
     /* Enqueue onto mark queue */
     if (set_mark_bit(object)) {
@@ -579,12 +599,22 @@ static bool parallel_trace_step() {
   return threads_did_any_work;
 }
 
+static bool immobile_trace_step() {
+  if (immobile_grey_list) {
+    scavenge_immobile_newspace();
+    return true;
+  }
+  return false;
+}
+
 /* We logged interesting pointers already, when tracing weak objects.
  * So not having a source is okay here. */
 static void mark_weak(lispobj obj) { mark(obj, NULL, SOURCE_NORMAL); }
 
 static void __attribute__((noinline)) trace_everything() {
-  while (parallel_trace_step()) test_weak_triggers(pointer_survived_gc_yet, mark_weak);
+  while (parallel_trace_step()
+         || test_weak_triggers(pointer_survived_gc_yet, mark_weak)
+         || immobile_trace_step());
 }
 
 /* Conservative pointer scanning */
@@ -851,7 +881,7 @@ static void __attribute__((noinline)) sweep_pages() {
   }
 }
 
-static void __attribute__((noinline)) sweep() {
+static void __attribute__((noinline)) sweep(bool __attribute__((unused)) raise) {
   /* Handle weak pointers. */
   local_smash_weak_pointers();
   gc_dispose_private_pages();
@@ -870,6 +900,7 @@ static void __attribute__((noinline)) sweep() {
   else
     METER(sweep_lines, run_on_thread_pool(sweep_lines));
   METER(sweep_pages, sweep_pages());
+  sweep_immobile_space(raise);
 }
 
 /* Trace a bump-allocated range, e.g. static space or an arena. */
@@ -912,6 +943,8 @@ void mr_preserve_ambiguous(uword_t address) {
       mark(compute_lispobj(obj), NULL, SOURCE_NORMAL);
       gc_page_pins[p] = 0xFF;
     }
+  } else if (immobile_space_p(address)) {
+    immobile_space_preserve_pointer(native_pointer(address));
   }
 }
 
@@ -1114,6 +1147,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
   root_objects_checked = 0; dirty_root_objects = 0;
   last_page_processed = 0;
   run_on_thread_pool(scavenge_root_gens_worker);
+  scavenge_immobile_roots(generation_to_collect + 1, PSEUDO_STATIC_GENERATION);
 }
 
 static void CPU_SPLIT raise_survivors(void) {
@@ -1169,7 +1203,7 @@ void mr_collect_garbage(bool raise) {
   }
   trace_static_roots();
   METER(trace, trace_everything());
-  METER(sweep, sweep());
+  METER(sweep, sweep(raise));
 #ifdef COMPACT
   if (compacting) {
     meters.compacts++;

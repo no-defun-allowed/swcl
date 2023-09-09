@@ -42,7 +42,11 @@ static void USING_LAYOUT(lispobj layout, lispobj* where, int nslots)
     // Apart from the allowance for untagged pointers in lockfree list nodes,
     // this contains almost none of the special cases that gencgc does.
     if (!layout) return;
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
+    ACTION(layout, NULL, SOURCE_NORMAL);
+#else
     ACTION(layout, &layout_of(where), SOURCE_NORMAL);
+#endif
     if (lockfree_list_node_layout_p(LAYOUT(layout))) { // allow untagged 'next'
         struct list_node* node = (void*)where;
         lispobj next = node->_node_next;
