@@ -42,7 +42,7 @@ int n_gcs;
 
 /* the verbosity level. All non-error messages are disabled at level 0;
  * and only a few rare messages are printed at level 1. */
-int gencgc_verbose = 0;
+int gencgc_verbose = 1;
 
 /* FIXME: At some point enable the various error-checking things below
  * and see what they say. */
@@ -777,7 +777,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
     /* Set the global src and dest. generations */
     generation_index_t original_alloc_generation = gc_alloc_generation;
 
-    from_space = -1;
+    from_space = generation;
     new_space = generation;
 
     /* Change to a new space for allocation, resetting the alloc_start_page */
