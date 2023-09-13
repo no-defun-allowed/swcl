@@ -134,7 +134,7 @@ generation_index_t gc_gen_of(lispobj obj, int defaultval) {
   if (p < 0) {
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
     if (immobile_space_p(obj))
-      return immobile_obj_generation(native_pointer(obj));
+      return immobile_obj_generation(base_pointer(obj));
     else
 #endif
       return defaultval;
