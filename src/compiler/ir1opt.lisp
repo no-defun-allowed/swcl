@@ -37,6 +37,18 @@
         ;; check for EQL types and singleton numeric types
         (values (type-singleton-p type)))))
 
+(defun lvar-constant (lvar)
+  (declare (type lvar lvar))
+  (let* ((type (lvar-type lvar))
+         (principal-lvar (principal-lvar lvar))
+         (principal-use (lvar-uses principal-lvar))
+         leaf)
+    (and (ref-p principal-use)
+         (constant-p (setf leaf (ref-leaf principal-use)))
+         (or (not (lvar-reoptimize principal-lvar))
+             (ctypep (constant-value leaf) type))
+         leaf)))
+
 (defun constant-lvar-ignore-types-p (lvar &optional (singleton-types t))
   (declare (type lvar lvar))
   (let ((use (principal-lvar-use lvar)))
@@ -1180,19 +1192,18 @@
                     (transform-call node transform (combination-fun-source-name node)))
                    ((:default :maybe)
                     ;; Let transforms have a crack at it.
-                    (or (try-equality-constraint node)
-                        (dolist (x (fun-info-transforms info))
-                          (when (eq show :all)
-                            (let* ((lvar (basic-combination-fun node))
-                                   (fname (lvar-fun-name lvar t)))
-                              (format *trace-output*
-                                      "~&trying transform ~s for ~s"
-                                      (transform-type x) fname)))
-                          (unless (ir1-transform node x show)
-                            (when (eq show :all)
-                              (format *trace-output*
-                                      "~&quitting because IR1-TRANSFORM result was NIL"))
-                            (return))))))))))))))
+                    (dolist (x (fun-info-transforms info))
+                      (when (eq show :all)
+                        (let* ((lvar (basic-combination-fun node))
+                               (fname (lvar-fun-name lvar t)))
+                          (format *trace-output*
+                                  "~&trying transform ~s for ~s"
+                                  (transform-type x) fname)))
+                      (unless (ir1-transform node x show)
+                        (when (eq show :all)
+                          (format *trace-output*
+                                  "~&quitting because IR1-TRANSFORM result was NIL"))
+                        (return)))))))))))))
   (values))
 
 (defun xep-tail-combination-p (node)

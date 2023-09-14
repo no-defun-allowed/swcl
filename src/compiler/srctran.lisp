@@ -1180,6 +1180,28 @@
          (if (consp high)
              (<= (car high) n)
              (< high n)))))
+
+;;; Does it contain integers?
+(defun interval-ratio-p (interval)
+  (let ((low (interval-low interval))
+        (high (interval-high interval)))
+    (and (or (ratiop low)
+             (if (consp low)
+                 (setf low (car low))))
+         (or (ratiop high)
+             (and (consp high)
+                  (setf high
+                        (if (integerp (car high))
+                            (1- (car high))
+                            (car high)))))
+         (= (floor low) (floor high)))))
+
+(defun interval-constant-p (interval)
+  (let ((low (interval-low interval))
+        (high (interval-high interval)))
+    (and (numberp low)
+         (eql low high)
+         low)))
 
 ;;;; numeric DERIVE-TYPE methods
 
@@ -1321,26 +1343,30 @@
 ;;; For the case of member types, if a MEMBER-FUN is given it is
 ;;; called to compute the result otherwise the member type is first
 ;;; converted to a numeric type and the DERIVE-FUN is called.
-(defun one-arg-derive-type (arg derive-fun member-fun)
+(defun one-arg-derive-type (arg derive-fun member-fun &optional (ratio-to-rational t))
   (declare (type function derive-fun)
            (type (or null function) member-fun))
   (let ((arg-list (prepare-arg-for-derive-type (lvar-type arg))))
     (when arg-list
-      (flet ((deriver (x)
-               (typecase x
-                 (member-type
-                  (if member-fun
-                      (with-float-traps-masked
-                          (:underflow :overflow :divide-by-zero)
-                        (specifier-type
-                         `(eql ,(funcall member-fun
-                                         (first (member-type-members x))))))
-                      ;; Otherwise convert to a numeric type.
-                      (funcall derive-fun (convert-member-type x))))
-                 (numeric-type
-                  (funcall derive-fun x))
-                 (t
-                  *universal-type*))))
+      (labels ((deriver (x)
+                 (cond
+                   ((member-type-p x)
+                    (if member-fun
+                        (with-float-traps-masked
+                            (:underflow :overflow :divide-by-zero)
+                          (specifier-type
+                           `(eql ,(funcall member-fun
+                                           (first (member-type-members x))))))
+                        ;; Otherwise convert to a numeric type.
+                        (funcall derive-fun (convert-member-type x))))
+                   ((or (numeric-type-p x)
+                        (and (not ratio-to-rational)
+                             (eq x (specifier-type 'ratio))))
+                    (funcall derive-fun x))
+                   (t
+                    (if (eq x (specifier-type 'ratio))
+                        (deriver (specifier-type 'rational))
+                        *universal-type*)))))
         ;; Run down the list of args and derive the type of each one,
         ;; saving all of the results in a list.
         (let ((results nil))
@@ -1359,14 +1385,23 @@
 ;;; really represent the same lvar. This is useful for deriving the
 ;;; type of things like (* x x), which should always be positive. If
 ;;; we didn't do this, we wouldn't be able to tell.
-(defun two-arg-derive-type (arg1 arg2 derive-fun member-fun)
+(defun two-arg-derive-type (arg1 arg2 derive-fun member-fun &optional (ratio-to-rational t))
   (%two-arg-derive-type (lvar-type arg1) (lvar-type arg2)
                         derive-fun member-fun
-                        (same-leaf-ref-p arg1 arg2)))
+                        (same-leaf-ref-p arg1 arg2)
+                        ratio-to-rational))
 
-(defun %two-arg-derive-type (arg1-type arg2-type derive-fun member-fun &optional same-leaf)
+(defun %two-arg-derive-type (arg1-type arg2-type derive-fun member-fun &optional same-leaf (ratio-to-rational t))
   (declare (type function derive-fun member-fun))
-  (labels ((deriver (x y same-arg)
+  (labels ((numeric-or-ratio-p (x)
+             (or (numeric-type-p x)
+                 (eq x (specifier-type 'ratio))))
+           (deriver (x y same-arg)
+             (when ratio-to-rational
+               (when (eq x (specifier-type 'ratio))
+                 (setf x (specifier-type 'rational)))
+               (when (eq y (specifier-type 'ratio))
+                 (setf y (specifier-type 'rational))))
              (cond ((and (member-type-p x) (member-type-p y))
                     (let* ((x (first (member-type-members x)))
                            (y (first (member-type-members y)))
@@ -1382,11 +1417,11 @@
                                                 :complexp :real))
                             (t
                              (specifier-type `(eql ,result))))))
-                   ((and (member-type-p x) (numeric-type-p y))
+                   ((and (member-type-p x) (numeric-or-ratio-p y))
                     (funcall derive-fun (convert-member-type x) y same-arg))
-                   ((and (numeric-type-p x) (member-type-p y))
+                   ((and (numeric-or-ratio-p x) (member-type-p y))
                     (funcall derive-fun x (convert-member-type y) same-arg))
-                   ((and (numeric-type-p x) (numeric-type-p y))
+                   ((and (numeric-or-ratio-p x) (numeric-or-ratio-p y))
                     (funcall derive-fun x y same-arg))
                    (t
                     *universal-type*)))
@@ -1417,102 +1452,163 @@
     (derive arg1-type arg2-type same-leaf)))
 
 (defun +-derive-type-aux (x y same-arg)
-  (if (and (numeric-type-real-p x)
-           (numeric-type-real-p y))
-      (let ((result
-              (if same-arg
-                  (let ((x-int (numeric-type->interval x)))
-                    (interval-add x-int x-int))
-                  (interval-add (numeric-type->interval x)
-                                (numeric-type->interval y))))
-            (result-type (numeric-contagion x y)))
-        ;; If the result type is a float, we need to be sure to coerce
-        ;; the bounds into the correct type.
-        (when (eq (numeric-type-class result-type) 'float)
-          (setf result (interval-func
-                        #'(lambda (x)
-                            (coerce-for-bound x (or (numeric-type-format result-type)
-                                                    'float)))
-                        result)))
-        (make-numeric-type
-         :class (if (and (eq (numeric-type-class x) 'integer)
-                         (eq (numeric-type-class y) 'integer))
-                    ;; The sum of integers is always an integer.
-                    'integer
-                    (numeric-type-class result-type))
-         :format (numeric-type-format result-type)
-         :low (interval-low result)
-         :high (interval-high result)))
-      ;; general contagion
-      (numeric-contagion x y)))
+  (cond ((and (numeric-type-real-p x)
+              (numeric-type-real-p y))
+         (let* ((x-interval (numeric-type->interval x))
+                (y-interval (if same-arg
+                                x-interval
+                                (numeric-type->interval y)))
+                (result (interval-add x-interval y-interval))
+                (result-type (numeric-contagion x y)))
+           ;; If the result type is a float, we need to be sure to coerce
+           ;; the bounds into the correct type.
+           (when (eq (numeric-type-class result-type) 'float)
+             (setf result (interval-func
+                           #'(lambda (x)
+                               (coerce-for-bound x (or (numeric-type-format result-type)
+                                                       'float)))
+                           result)))
+           (let ((numeric (make-numeric-type
+                           :class (if (and (eq (numeric-type-class x) 'integer)
+                                           (eq (numeric-type-class y) 'integer))
+                                      ;; The sum of integers is always an integer.
+                                      'integer
+                                      (numeric-type-class result-type))
+                           :format (numeric-type-format result-type)
+                           :low (interval-low result)
+                           :high (interval-high result))))
+             (if (or (and (eq (numeric-type-class x) 'integer)
+                          (interval-ratio-p y-interval))
+                     (and (eq (numeric-type-class y) 'integer)
+                          (interval-ratio-p x-interval)))
+                 (type-intersection numeric (specifier-type 'ratio))
+                 numeric))))
+        ((and (eq x (specifier-type 'ratio))
+              (numeric-type-p y)
+              (eq (numeric-type-class y) 'integer))
+         (specifier-type 'ratio))
+        ((and (eq y (specifier-type 'ratio))
+              (numeric-type-p x)
+              (eq (numeric-type-class x) 'integer))
+         (specifier-type 'ratio))
+        (t
+         (numeric-contagion x y))))
 
 (defoptimizer (+ derive-type) ((x y))
-  (two-arg-derive-type x y #'+-derive-type-aux #'sb-xc:+))
+  (two-arg-derive-type x y #'+-derive-type-aux #'sb-xc:+ nil))
 
 (defun --derive-type-aux (x y same-arg)
-  (if (and (numeric-type-real-p x)
-           (numeric-type-real-p y))
-      (let ((result
-              ;; (- X X) is always 0.
-              (if same-arg
-                  (make-interval :low 0 :high 0)
-                  (interval-sub (numeric-type->interval x)
-                                (numeric-type->interval y))))
-            (result-type (numeric-contagion x y)))
-        ;; If the result type is a float, we need to be sure to coerce
-        ;; the bounds into the correct type.
-        (when (eq (numeric-type-class result-type) 'float)
-          (setf result (interval-func
-                        #'(lambda (x)
-                            (coerce-for-bound x (or (numeric-type-format result-type)
-                                                    'float)))
-                        result)))
-        (make-numeric-type
-         :class (if (and (eq (numeric-type-class x) 'integer)
-                         (eq (numeric-type-class y) 'integer))
-                    ;; The difference of integers is always an integer.
-                    'integer
-                    (numeric-type-class result-type))
-         :format (numeric-type-format result-type)
-         :low (interval-low result)
-         :high (interval-high result)))
-      ;; general contagion
-      (numeric-contagion x y)))
+  (cond ((and (numeric-type-real-p x)
+              (numeric-type-real-p y))
+         (let* ((x-interval (numeric-type->interval x))
+                (y-interval (if same-arg
+                                x-interval
+                                (numeric-type->interval y)))
+                (result
+                  ;; (- X X) is always 0.
+                  (if same-arg
+                      (make-interval :low 0 :high 0)
+                      (interval-sub x-interval y-interval)))
+                (result-type (numeric-contagion x y)))
+           ;; If the result type is a float, we need to be sure to coerce
+           ;; the bounds into the correct type.
+           (when (eq (numeric-type-class result-type) 'float)
+             (setf result (interval-func
+                           #'(lambda (x)
+                               (coerce-for-bound x (or (numeric-type-format result-type)
+                                                       'float)))
+                           result)))
+           (let ((numeric
+                   (make-numeric-type
+                    :class (if (and (eq (numeric-type-class x) 'integer)
+                                    (eq (numeric-type-class y) 'integer))
+                               ;; The difference of integers is always an integer.
+                               'integer
+                               (numeric-type-class result-type))
+                    :format (numeric-type-format result-type)
+                    :low (interval-low result)
+                    :high (interval-high result))))
+             (if (or (and (eq (numeric-type-class x) 'integer)
+                          (interval-ratio-p y-interval))
+                     (and (eq (numeric-type-class y) 'integer)
+                          (interval-ratio-p x-interval)))
+                 (type-intersection numeric (specifier-type 'ratio))
+                 numeric))))
+        ((and (eq x (specifier-type 'ratio))
+              (numeric-type-p y)
+              (eq (numeric-type-class y) 'integer))
+         (specifier-type 'ratio))
+        ((and (eq y (specifier-type 'ratio))
+              (numeric-type-p x)
+              (eq (numeric-type-class x) 'integer))
+         (specifier-type 'ratio))
+        ((and same-arg
+              (eq x (specifier-type 'ratio)))
+         (specifier-type '(integer 0 0)))
+        (t
+         (numeric-contagion x y))))
 
 (defoptimizer (- derive-type) ((x y))
-  (two-arg-derive-type x y #'--derive-type-aux #'sb-xc:-))
+  (two-arg-derive-type x y #'--derive-type-aux #'sb-xc:- nil))
 
 (defun *-derive-type-aux (x y same-arg)
-  (if (and (numeric-type-real-p x)
-           (numeric-type-real-p y))
-      (let ((result
-              ;; (* X X) is always positive, so take care to do it right.
-              (if same-arg
-                  (interval-sqr (numeric-type->interval x))
-                  (interval-mul (numeric-type->interval x)
-                                (numeric-type->interval y))))
-            (result-type (numeric-contagion x y)))
-        ;; If the result type is a float, we need to be sure to coerce
-        ;; the bounds into the correct type.
-        (when (eq (numeric-type-class result-type) 'float)
-          (setf result (interval-func
-                        #'(lambda (x)
-                            (coerce-for-bound x (or (numeric-type-format result-type)
-                                                    'float)))
-                        result)))
-        (make-numeric-type
-         :class (if (and (eq (numeric-type-class x) 'integer)
-                         (eq (numeric-type-class y) 'integer))
-                    ;; The product of integers is always an integer.
-                    'integer
-                    (numeric-type-class result-type))
-         :format (numeric-type-format result-type)
-         :low (interval-low result)
-         :high (interval-high result)))
-      (numeric-contagion x y)))
+  (cond ((and (numeric-type-real-p x)
+              (numeric-type-real-p y))
+         (let* ((x-interval (numeric-type->interval x))
+                (y-interval (if same-arg
+                                x-interval
+                                (numeric-type->interval y)))
+                (result
+                  ;; (* X X) is always positive, so take care to do it right.
+                  (if same-arg
+                      (interval-sqr x-interval)
+                      (interval-mul x-interval y-interval)))
+                (result-type (numeric-contagion x y)))
+           ;; If the result type is a float, we need to be sure to coerce
+           ;; the bounds into the correct type.
+           (when (eq (numeric-type-class result-type) 'float)
+             (setf result (interval-func
+                           #'(lambda (x)
+                               (coerce-for-bound x (or (numeric-type-format result-type)
+                                                       'float)))
+                           result)))
+           (let ((numeric
+                   (make-numeric-type
+                    :class (if (and (eq (numeric-type-class x) 'integer)
+                                    (eq (numeric-type-class y) 'integer))
+                               ;; The product of integers is always an integer.
+                               'integer
+                               (numeric-type-class result-type))
+                    :format (numeric-type-format result-type)
+                    :low (interval-low result)
+                    :high (interval-high result))))
+             (flet ((ratio-result-p (a a-interval b-interval)
+                      (let (ratio)
+                        (and (eq (numeric-type-class a) 'integer)
+                             (ratiop (setf ratio (interval-constant-p b-interval)))
+                             (interval-bounded-p a-interval 'both)
+                             ;; Is the integer between two adjecents
+                             ;; powers of denominator?
+                             (let* ((low (interval-low a-interval))
+                                    (high (interval-high a-interval))
+                                    (den (denominator ratio))
+                                    (rem (nth-value 1 (ceiling low den))))
+                               (and (not (zerop rem))
+                                    (< high (- low rem))))))))
+               (if (or (ratio-result-p x x-interval y-interval)
+                       (ratio-result-p y y-interval x-interval))
+                   (type-intersection numeric (specifier-type 'ratio))
+                   numeric)))))
+        ((and same-arg
+              (eq x (specifier-type 'ratio)))
+         ;; TODO: should be positive, but this results in an
+         ;; intersection type which other optimizers do not see.
+         (specifier-type 'ratio))
+        (t
+         (numeric-contagion x y))))
 
 (defoptimizer (* derive-type) ((x y))
-  (two-arg-derive-type x y #'*-derive-type-aux #'sb-xc:*))
+  (two-arg-derive-type x y #'*-derive-type-aux #'sb-xc:* nil))
 
 (defoptimizer (%signed-multiply-high derive-type) ((x y))
   (two-arg-derive-type x y
@@ -1531,35 +1627,49 @@
   (%signed-multiply-high-derive-type-optimizer node))
 
 (defun /-derive-type-aux (x y same-arg)
-  (if (and (numeric-type-real-p x)
-           (numeric-type-real-p y))
-      (let ((result
-              ;; (/ X X) is always 1, except if X can contain 0. In
-              ;; that case, we shouldn't optimize the division away
-              ;; because we want 0/0 to signal an error.
-              (if (and same-arg
-                       (not (interval-contains-p
-                             0 (interval-closure (numeric-type->interval y)))))
-                  (make-interval :low 1 :high 1)
-                  (interval-div (numeric-type->interval x)
-                                (numeric-type->interval y))))
-            (result-type (numeric-contagion x y)))
-        ;; If the result type is a float, we need to be sure to coerce
-        ;; the bounds into the correct type.
-        (when (eq (numeric-type-class result-type) 'float)
-          (setf result (interval-func
-                        #'(lambda (x)
-                            (coerce-for-bound x (or (numeric-type-format result-type)
-                                                    'float)))
-                        result)))
-        (make-numeric-type :class (numeric-type-class result-type)
-                           :format (numeric-type-format result-type)
-                           :low (interval-low result)
-                           :high (interval-high result)))
-      (numeric-contagion x y)))
+  (cond ((and (numeric-type-real-p x)
+              (numeric-type-real-p y))
+         (let* ((x-interval (numeric-type->interval x))
+                (y-interval (if same-arg
+                                x-interval
+                                (numeric-type->interval y)))
+                (result
+                  ;; (/ X X) is always 1, except if X can contain 0. In
+                  ;; that case, we shouldn't optimize the division away
+                  ;; because we want 0/0 to signal an error.
+                  (if (and same-arg
+                           (not (interval-contains-p
+                                 0 (interval-closure x-interval))))
+                      (make-interval :low 1 :high 1)
+                      (interval-div x-interval y-interval)))
+                (result-type (numeric-contagion x y)))
+           ;; If the result type is a float, we need to be sure to coerce
+           ;; the bounds into the correct type.
+           (when (eq (numeric-type-class result-type) 'float)
+             (setf result (interval-func
+                           #'(lambda (x)
+                               (coerce-for-bound x (or (numeric-type-format result-type)
+                                                       'float)))
+                           result)))
+           (let ((numeric (make-numeric-type :class (numeric-type-class result-type)
+                                             :format (numeric-type-format result-type)
+                                             :low (interval-low result)
+                                             :high (interval-high result))))
+             (if (and (eq (numeric-type-class y) 'integer)
+                      (interval-ratio-p x-interval))
+                 (type-intersection numeric (specifier-type 'ratio))
+                 numeric))))
+        ((and (eq x (specifier-type 'ratio))
+              (cond (same-arg
+                     (specifier-type '(integer 1 1)))
+                    ((and (numeric-type-p y)
+                          (eq (numeric-type-class y) 'integer))
+                     (specifier-type 'ratio)))))
+        (t
+         (numeric-contagion x y))))
 
 (defoptimizer (/ derive-type) ((x y))
-  (two-arg-derive-type x y #'/-derive-type-aux #'sb-xc:/))
+  (two-arg-derive-type x y #'/-derive-type-aux #'sb-xc:/ nil))
 
 (defun ash-derive-type-aux (n-type shift same-arg)
   (declare (ignore same-arg))
@@ -1612,20 +1722,24 @@
 
 
 (defun %negate-derive-type-aux (type)
-  (flet ((negate-bound (b)
-           (and b
-                (set-bound (sb-xc:- (type-bound-number b))
-                           (consp b)))))
-    (modified-numeric-type
-     type
-     :low (negate-bound (numeric-type-high type))
-     :high (negate-bound (numeric-type-low type)))))
+  (if (eq type (specifier-type 'ratio))
+      type
+      (flet ((negate-bound (b)
+               (and b
+                    (set-bound (sb-xc:- (type-bound-number b))
+                               (consp b)))))
+        (modified-numeric-type
+         type
+         :low (negate-bound (numeric-type-high type))
+         :high (negate-bound (numeric-type-low type))))))
 
 (defoptimizer (%negate derive-type) ((num))
-  (one-arg-derive-type num #'%negate-derive-type-aux #'sb-xc:-))
+  (one-arg-derive-type num #'%negate-derive-type-aux #'sb-xc:- nil))
 
 (defun abs-derive-type-aux (type)
-  (cond ((eq (numeric-type-complexp type) :complex)
+  (cond ((eq type (specifier-type 'ratio))
+         type)
+        ((eq (numeric-type-complexp type) :complex)
          ;; The absolute value of a complex number is always a
          ;; non-negative float.
          (let* ((format (case (numeric-type-class type)
@@ -1653,7 +1767,7 @@
                    (interval-high abs-bnd) bound-type))))))
 
 (defoptimizer (abs derive-type) ((num))
-  (one-arg-derive-type num #'abs-derive-type-aux #'abs))
+  (one-arg-derive-type num #'abs-derive-type-aux #'abs nil))
 
 (defun rem-result-type (number-type divisor-type)
   ;; Figure out what the remainder type is. The remainder is an
@@ -2444,8 +2558,10 @@
   (make-values-type (mapcar #'lvar-type values)))
 
 (defun signum-derive-type-aux (type)
-  (if (eq (numeric-type-complexp type) :complex)
-      (let* ((format (case (numeric-type-class type)
+  (cond ((eq type (specifier-type 'ratio))
+         (specifier-type '(or (eql 1) (eql -1))))
+        ((eq (numeric-type-complexp type) :complex)
+         (let* ((format (case (numeric-type-class type)
                           ((integer rational) 'single-float)
                           (t (numeric-type-format type))))
                 (bound-format (or format 'float)))
@@ -2453,38 +2569,39 @@
                               :format format
                               :complexp :complex
                               :low (coerce -1 bound-format)
-                              :high (coerce 1 bound-format)))
-      (let* ((interval (numeric-type->interval type))
-             (range-info (interval-range-info interval))
-             (contains-0-p (interval-contains-p 0 interval))
-             (class (numeric-type-class type))
-             (format (numeric-type-format type))
-             (one (coerce 1 (or format class 'real)))
-             (zero (coerce 0 (or format class 'real)))
-             (minus-one (coerce -1 (or format class 'real)))
-             (plus (make-numeric-type :class class :format format
-                                      :low one :high one))
-             (minus (make-numeric-type :class class :format format
-                                       :low minus-one :high minus-one))
-             ;; KLUDGE: here we have a fairly horrible hack to deal
-             ;; with the schizophrenia in the type derivation engine.
-             ;; The problem is that the type derivers reinterpret
-             ;; numeric types as being exact; so (DOUBLE-FLOAT 0d0
-             ;; 0d0) within the derivation mechanism doesn't include
-             ;; -0d0.  Ugh.  So force it in here, instead.
-             (zero (make-numeric-type :class class :format format
-                                      :low (sb-xc:- zero) :high zero)))
-        (let ((result
-                (case range-info
-                  (+ (if contains-0-p (type-union plus zero) plus))
-                  (- (if contains-0-p (type-union minus zero) minus))
-                  (t (type-union minus zero plus)))))
-          (if (eq (numeric-type-complexp type) :real)
-              result
-              (type-union result (make-numeric-type :class 'float
-                                                    :complexp :complex
-                                                    :low -1
-                                                    :high 1)))))))
+                              :high (coerce 1 bound-format))))
+        (t
+         (let* ((interval (numeric-type->interval type))
+                (range-info (interval-range-info interval))
+                (contains-0-p (interval-contains-p 0 interval))
+                (class (numeric-type-class type))
+                (format (numeric-type-format type))
+                (one (coerce 1 (or format class 'real)))
+                (zero (coerce 0 (or format class 'real)))
+                (minus-one (coerce -1 (or format class 'real)))
+                (plus (make-numeric-type :class class :format format
+                                         :low one :high one))
+                (minus (make-numeric-type :class class :format format
+                                          :low minus-one :high minus-one))
+                ;; KLUDGE: here we have a fairly horrible hack to deal
+                ;; with the schizophrenia in the type derivation engine.
+                ;; The problem is that the type derivers reinterpret
+                ;; numeric types as being exact; so (DOUBLE-FLOAT 0d0
+                ;; 0d0) within the derivation mechanism doesn't include
+                ;; -0d0.  Ugh.  So force it in here, instead.
+                (zero (make-numeric-type :class class :format format
+                                         :low (sb-xc:- zero) :high zero)))
+           (let ((result
+                   (case range-info
+                     (+ (if contains-0-p (type-union plus zero) plus))
+                     (- (if contains-0-p (type-union minus zero) minus))
+                     (t (type-union minus zero plus)))))
+             (if (eq (numeric-type-complexp type) :real)
+                 result
+                 (type-union result (make-numeric-type :class 'float
+                                                       :complexp :complex
+                                                       :low -1
+                                                       :high 1))))))))
 
 (defoptimizer (signum derive-type) ((num))
   (one-arg-derive-type num #'signum-derive-type-aux nil))
@@ -3107,11 +3224,11 @@
                  * :node node :important nil)
   (overflow-transform-unknown-x 'overflow+ x y node))
 
-(deftransform * ((x y) (t (or word sb-vm:signed-word))
+(deftransform * ((x y) ((not ratio) (or word sb-vm:signed-word))
                  * :node node :important nil)
   (overflow-transform-unknown-x 'overflow* x y node))
 
-(deftransform * ((y x) ((or word sb-vm:signed-word) t)
+(deftransform * ((y x) ((or word sb-vm:signed-word) (not ratio))
                  * :node node :important nil)
   (overflow-transform-unknown-x 'overflow* x y node))
 
@@ -3200,6 +3317,21 @@
 
 (deftransform mod ((number divisor))
   `(nth-value 1 (floor number divisor)))
+
+(deftransform ceiling ((number divisor) ((real (0) (1)) (integer * (0))) * :important nil)
+  `(values 0 number))
+(deftransform ceiling ((number divisor) ((real (-1) (0)) (integer (0) *)) * :important nil)
+  `(values 0 number))
+
+(deftransform floor ((number divisor) ((real (-1) (0)) (integer * (0))) * :important nil)
+  `(values 0 number))
+(deftransform floor ((number divisor) ((real (0) (1)) (integer (0) *)) * :important nil)
+  `(values 0 number))
+
+(deftransform truncate ((number divisor) ((and (real (-1) (1)) (not (eql $-0d0)) (not (eql $-0f0)))
+                                          (and integer (not (eql 0))))
+                        * :important nil)
+  `(values 0 number))
 
 ;;; If arg is a constant power of two, turn FLOOR into a shift and
 ;;; mask. If CEILING, add in (1- (ABS Y)), do FLOOR and correct a
@@ -3877,7 +4009,6 @@
   "convert to simpler equality predicate"
   (let* ((x-type (lvar-type x))
          (y-type (lvar-type y))
-         #+integer-eql-vop (int-type (specifier-type 'integer))
          (char-type (specifier-type 'character)))
     (cond
       ((same-leaf-ref-p x y) t)
@@ -3886,22 +4017,6 @@
       ((and (csubtypep x-type char-type)
             (csubtypep y-type char-type))
        '(char= x y))
-      ((or (eq-comparable-type-p x-type) (eq-comparable-type-p y-type))
-       '(eq y x))
-      #+integer-eql-vop
-      ((or (csubtypep x-type int-type) (csubtypep y-type int-type))
-       '(%eql/integer x y))
-      (t
-       (give-up-ir1-transform)))))
-
-#+integer-eql-vop
-(deftransform %eql/integer ((x y) * * :node node)
-  (let* ((x-type (lvar-type x))
-         (y-type (lvar-type y)))
-    (cond
-      ((same-leaf-ref-p x y) t)
-      ((not (types-equal-or-intersect x-type y-type))
-       nil)
       ((or (eq-comparable-type-p x-type) (eq-comparable-type-p y-type))
        '(eq y x))
       (t
@@ -4025,13 +4140,8 @@
 (deftransform equal ((x y) * *)
   "convert to simpler equality predicate"
   (let ((x-type (lvar-type x))
-        (y-type (lvar-type y))
-        (constraint (or (find-ref-equality-constraint 'eql x y)
-                        (find-ref-equality-constraint 'eq x y))))
-    (cond ((and constraint
-                (not (constraint-not-p constraint)))
-           t)
-          ((same-leaf-ref-p x y) t)
+        (y-type (lvar-type y)))
+    (cond ((same-leaf-ref-p x y) t)
           ((array-type-dimensions-mismatch x-type y-type)
            nil)
           (t
@@ -4113,13 +4223,8 @@
 (deftransform equalp ((x y) * *)
   "convert to simpler equality predicate"
   (let ((x-type (lvar-type x))
-        (y-type (lvar-type y))
-        (constraint (or (find-ref-equality-constraint 'eql x y)
-                        (find-ref-equality-constraint 'eq x y))))
-    (cond ((and constraint
-                (not (constraint-not-p constraint)))
-           t)
-          ((same-leaf-ref-p x y) t)
+        (y-type (lvar-type y)))
+    (cond ((same-leaf-ref-p x y) t)
           ((array-type-dimensions-mismatch x-type y-type)
            nil)
           (t

@@ -3161,7 +3161,6 @@ Legal values for OFFSET are -4, -8, -12, ..."
           (format t "#define ~A ~A~A /* 0x~X */~%" name value suffix value))))
     (terpri))
 
-  (format t "#define CLASSOID_NAME_WORDINDEX ~d~%" sb-kernel::classoid-name-wordindex)
   ;; backend-page-bytes doesn't really mean much any more.
   ;; It's the granularity at which we can map the core file pages.
   (format t "#define BACKEND_PAGE_BYTES ~D~%" sb-c:+backend-page-bytes+)
@@ -3366,6 +3365,8 @@ lispobj symbol_package(struct symbol*);~%" (genesis-header-prefix))
 (defun write-genesis-thread-h-requisites ()
   (write-structure-object (layout-info (find-layout 'sb-thread::thread))
                           *standard-output* "thread_instance" nil)
+  (write-structure-object (layout-info (find-layout 'sb-thread::mutex))
+                          *standard-output* "mutex" nil)
   ;; The os_thread field is either pthread_t or lispobj.
   ;; If no threads, then it's lispobj. #+win32 uses lispobj too
   ;; but it gets cast to HANDLE upon use.
@@ -3486,6 +3487,7 @@ static inline struct code* fun_code_header(struct simple_fun* fun) {
                (write-cast-operator 'function "simple_fun" sb-vm:fun-pointer-lowtag
                                     *standard-output*))
              (when (eq name 'vector)
+               (output-c-primitive-obj (get-primitive-obj 'array))
                ;; This is 'sword_t' because we formerly would call fixnum_value() which
                ;; is a signed int, but it isn't really; except that I made all C vars
                ;; signed to avoid comparison mismatch, and don't want to change back.
@@ -4315,7 +4317,10 @@ static inline uword_t word_has_stickymark(uword_t word) {
         (let* ((funinstance (get-primitive-obj 'funcallable-instance))
                (catch-block (get-primitive-obj 'sb-vm::catch-block))
                (code (get-primitive-obj 'sb-vm::code))
-               (skip `(,funinstance ,catch-block ,code ,@numeric-primitive-objects))
+               (simple-fun (get-primitive-obj 'sb-kernel:simple-fun))
+               (array (get-primitive-obj 'array))
+               (skip `(,funinstance ,catch-block ,code ,simple-fun ,array
+                       ,@numeric-primitive-objects))
                (structs (sort (set-difference sb-vm:*primitive-objects* skip) #'string<
                               :key #'sb-vm:primitive-object-name)))
           (out-to "number-types"
@@ -4337,7 +4342,8 @@ static inline uword_t word_has_stickymark(uword_t word) {
                            (namestring (merge-pathnames "instance.inc" (lispobj-dot-h)))))
                   (sb-vm::unwind-block
                    (write-primitive-object catch-block stream))
-                  (simple-fun
+                  (sb-kernel:closure
+                   (write-primitive-object simple-fun stream)
                    (write-primitive-object code stream)))))
           (out-to "primitive-objects"
             (format stream "~&#include \"number-types.h\"~%")
@@ -4361,7 +4367,7 @@ static inline uword_t word_has_stickymark(uword_t word) {
         (dolist (class '(defstruct-description package
                          ;; FIXME: probably these should be external?
                          sb-lockless::list-node sb-lockless::split-ordered-list
-                         sb-vm::arena sb-thread::avlnode sb-thread::mutex
+                         sb-vm::arena sb-thread::avlnode
                          sb-c::compiled-debug-info))
           (out-to (string-downcase class)
             ;; parent/child structs like to be output as one header, child first

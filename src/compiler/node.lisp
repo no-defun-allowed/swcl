@@ -693,13 +693,8 @@
 (defstruct (environment (:copier nil))
   ;; the function that allocates this environment
   (lambda (missing-arg) :type clambda :read-only t)
-  ;; This ultimately converges to a list of all the LAMBDA-VARs and
-  ;; NLX-INFOs needed from enclosing environments by code in this
-  ;; environment. In the meantime, it may be
-  ;;   * NIL at object creation time
-  ;;   * a superset of the correct result, generated somewhat later
-  ;;   * smaller and smaller sets converging to the correct result as
-  ;;     we notice and delete unused elements in the superset
+  ;; a list of all the LAMBDA-VARs and NLX-INFOs needed from enclosing
+  ;; environments by code in this environment.
   (closure nil :type list)
   ;; a list of NLX-INFO structures describing all the non-local exits
   ;; into this environment
@@ -1438,9 +1433,7 @@
   ;; The leaf referenced.
   (leaf nil :type leaf)
   ;; KLUDGE: This is supposed to help with keyword debug messages somehow.
-  (%source-name (missing-arg) :type symbol :read-only t)
-  ;; Constraints that cannot be expressed as NODE-DERIVED-TYPE
-  (constraints nil))
+  (%source-name (missing-arg) :type symbol :read-only t))
 (defprinter (ref :identity t)
   (%source-name :test (neq %source-name '.anonymous.))
   leaf)
@@ -1703,7 +1696,8 @@
   (kind (missing-arg) :type (member dynamic-extent truly-dynamic-extent))
   ;; the values explicitly declared with this dynamic extent.
   (values nil :type list)
-  ;; the cleanup for this extent. NULL only temporarily.
+  ;; the cleanup for this extent. NULL indicates that this dynamic
+  ;; extent is over the environment and hence needs no cleanup code.
   (cleanup nil :type (or cleanup null))
   ;; some kind of info used by the back end
   (info nil))

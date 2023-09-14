@@ -119,6 +119,33 @@
                    ref))))
     (recurse lvar nil)))
 
+(defun mv-principal-lvar-ref-use (lvar)
+  (labels ((recurse (lvar)
+             (let ((use (lvar-uses lvar)))
+               (if (ref-p use)
+                   (let ((var (ref-leaf use)))
+                     (if (and (lambda-var-p var)
+                              (null (lambda-var-sets var)))
+                         (case (functional-kind (lambda-var-home var))
+                           (:mv-let
+                            (let* ((fun (lambda-var-home var))
+                                   (n-value (position-or-lose var (lambda-vars fun))))
+                              (loop for arg in (basic-combination-args (let-combination fun))
+                                    for nvals = (nth-value 1 (values-types (lvar-derived-type arg)))
+                                    when (eq nvals :unknown) return nil
+                                    when (<= n-value nvals) do (return-from mv-principal-lvar-ref-use
+                                                                 (values (lvar-uses arg) n-value))
+                                    do (decf n-value nvals))
+                              use))
+                           (:let
+                               (recurse (let-var-initial-value var)))
+                           (t
+                            use))
+                         use))
+                   use))))
+    (recurse lvar)))
+
+
 (defun map-lvar-dest-casts (fun lvar)
   (labels ((pld (lvar)
              (and lvar
@@ -1244,10 +1271,7 @@
                     (unless (eq type1 type2)
                       (derive-node-type ref1
                                         (values-type-union type1 type2)
-                                        :from-scratch t))
-                    (setf (ref-constraints ref1)
-                          (intersection (ref-constraints ref1)
-                                        (ref-constraints ref2))))
+                                        :from-scratch t)))
                   (loop for pred in (block-pred block2)
                         do
                         (change-block-successor pred block2 block1))
@@ -1315,7 +1339,6 @@
   (let* ((block (node-block node))
          (start (node-next node))
          (last (block-last block)))
-    (check-type last node)
     (unless (eq last node)
       (aver (and (eq (ctran-kind start) :inside-block)
                  (not (block-delete-p block))))
@@ -2171,7 +2194,7 @@ is :ANY, the function name is not checked."
 ;;; whether to substitute
 (defun substitute-leaf-if (test new-leaf old-leaf)
   (declare (type leaf new-leaf old-leaf) (type function test))
-  #-sb-xc-host (declare (dynamic-extent test)) ; "unable"
+  (declare (dynamic-extent test))
   (dolist (ref (leaf-refs old-leaf))
     (when (funcall test ref)
       (change-ref-leaf ref new-leaf)))
@@ -2669,16 +2692,6 @@ is :ANY, the function name is not checked."
         return nil
         do (setf lvar (combination-lvar dest))
         finally (return t)))
-
-;;; True if the optional has a rest-argument.
-(defun optional-rest-p (opt)
-  (dolist (var (optional-dispatch-arglist opt) nil)
-    (let* ((info (when (lambda-var-p var)
-                   (lambda-var-arg-info var)))
-           (kind (when info
-                   (arg-info-kind info))))
-      (when (eq :rest kind)
-        (return t)))))
 
 ;;; Don't substitute single-ref variables on high-debug / low speed,
 ;;; to improve the debugging experience, unless it is a special

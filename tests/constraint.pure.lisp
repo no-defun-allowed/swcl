@@ -506,3 +506,233 @@
               (error "")
               s)))))
     '(values array &optional))))
+
+(with-test (:name :+integer-argument-constarint)
+  (assert
+   (type-specifiers-equal
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda (a x y)
+          (declare (fixnum x))
+          (aref a (+ x y))
+          y))))
+    '(values integer &optional))))
+
+(with-test (:name :+integer-argument-constarint.var)
+  (assert
+   (type-specifiers-equal
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda (a x y)
+          (declare (fixnum x))
+          (let ((m (+ x y)))
+            (aref a (+ m (aref a m)))
+            y)))))
+    '(values integer &optional))))
+
+(with-test (:name :+integer-argument-constarint.typep)
+  (assert
+   (type-specifiers-equal
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda (x)
+          (let ((m (+ 1 x)))
+            (if (integerp m)
+                (+ m x)
+                2))))))
+    '(values integer &optional))))
+
+(with-test (:name :truncate-zero-remainder)
+  (assert
+   (type-specifiers-equal
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda (x y)
+          (declare (integer x y))
+          (multiple-value-bind (q r) (truncate x y)
+            (if (zerop r)
+                (error "~a" q)
+                x))))))
+    '(values (or (integer * -1) (integer 1)) &optional))))
+
+(with-test (:name :vector-length-var)
+  (assert
+   (type-specifiers-equal
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda (x)
+          (declare (simple-vector x))
+          (if (< 3 (length x) 5)
+              (length x)
+              (error ""))))))
+    '(values (integer 4 4) &optional))))
+
+(with-test (:name :ash)
+  (assert
+   (type-specifiers-equal
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda (x)
+          (declare ((integer 1) x))
+          (let ((d (ash x -1)))
+            (< d x))))))
+    '(values (member t) &optional)))
+  (assert
+   (type-specifiers-equal
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda (x)
+          (declare ((integer 1) x))
+          (let ((d (ash x -1)))
+            (print d)
+            (< d x))))))
+    '(values (member t) &optional)))
+  (assert
+   (type-specifiers-equal
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda (x y)
+          (declare (unsigned-byte x)
+                   ((integer * 0) y))
+          (let ((d (ash x y)))
+            (> d x))))))
+    '(values null &optional))))
+
+(with-test (:name :/)
+  (assert
+   (type-specifiers-equal
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda (x)
+          (declare ((integer 1) x))
+          (let ((d (truncate x 4)))
+            (< d x))))))
+    '(values (member t) &optional)))
+  (assert
+   (type-specifiers-equal
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda (x y)
+          (declare ((integer 0) x y))
+          (let ((d (/ x y)))
+            (> d x))))))
+    '(values null &optional))))
+
+(with-test (:name :negate-<)
+  (assert
+   (type-specifiers-equal
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda (a b)
+          (declare (type integer a)
+                   ((integer 2 3) b))
+          (if (< (- a) b)
+              a
+              (loop))))))
+    '(values (integer -2) &optional))))
+
+(with-test (:name :eq-vector-lengths)
+  (assert
+   (type-specifiers-equal
+    (caddr
+     (sb-kernel:%simple-fun-type
+      (checked-compile
+       `(lambda (a b j)
+          (declare (simple-vector a b)
+                   ((integer 10 20) j)
+                   (optimize (debug 1)))
+          (when (and (= (length a) (length b))
+                     (= j (length a)))
+            (length b))))))
+    '(values (or null (integer 10 20)) &optional))))
+
+(defmacro assert-type (lambda type)
+  `(assert
+    (type-specifiers-equal
+     (caddr
+      (sb-kernel:%simple-fun-type
+       (checked-compile
+        ',lambda)))
+     '(values ,type &optional))))
+
+(with-test (:name :+>)
+  (assert-type
+   (lambda (a j)
+     (declare (integer a)
+              ((integer 1) j))
+     (> (+ a j) a))
+   (member t))
+  (assert-type
+   (lambda (a j)
+     (declare (integer a)
+              ((integer 0) j))
+     (> (+ j a) a))
+   boolean)
+  (assert-type
+   (lambda (a b j)
+     (declare (integer a b)
+              ((integer 1) j))
+     (if (= b a)
+         (let ((d (+ b j)))
+           (> a d))
+         (loop)))
+   null)
+  (assert-type
+   (lambda (a b j)
+     (declare (integer a b)
+              ((integer 0) j))
+     (if (<= a b)
+         (let ((d (+ b j)))
+           (>= a d))
+         (loop)))
+   boolean)
+  (assert-type
+   (lambda (a b j)
+     (declare (integer a b)
+              ((integer 1) j))
+     (if (<= a b)
+         (let ((d (+ b j)))
+           (>= a d))
+         (loop)))
+   null))
+
+(with-test (:name :->)
+  (assert-type
+   (lambda (v)
+     (declare (integer v)
+              (optimize (debug 2)))
+     (let ((l (1- v)))
+       (< l v)))
+   (member t))
+  (assert-type
+   (lambda (v)
+     (declare (simple-vector v)
+              (optimize (debug 2)))
+     (let ((l (1- (length v))))
+       (< l (length v))))
+   (member t))
+  (assert-type
+   (lambda (v)
+     (declare (integer v)
+              (optimize (debug 1)))
+     (let ((l (1- v)))
+       (< l v)))
+   (member t))
+  (assert-type
+   (lambda (v)
+     (declare (simple-vector v)
+              (optimize (debug 1)))
+     (let ((l (1- (length v))))
+       (< l (length v))))
+   (member t)))

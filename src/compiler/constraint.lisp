@@ -457,8 +457,6 @@
       `(flet ((body (,symbol)
                 (declare (type constraint ,symbol))
                 ,@body))
-         (declare (optimize speed)
-                  (inline body))
          (when ,constraints
            (let ((,min (conset-min ,conset))
                  (,max (conset-max ,conset)))
@@ -508,9 +506,6 @@
            (body-fun con))
          (do-conset-constraints-intersection
              (con (,conset (lambda-var-inheritable-constraints ,variable)) ,result)
-           (body-fun con))
-         (do-conset-constraints-intersection
-             (con (,conset (lambda-var-equality-constraints ,variable)) ,result)
            (body-fun con))))))
 
 (declaim (inline conset-lvar-lambda-var-eql-p conset-add-lvar-lambda-var-eql))
@@ -646,17 +641,21 @@
                                          consequent-constraints
                                          alternative-constraints
                                          quick-p)
-  (flet ((add (fun x y &optional no-complement)
-           (if no-complement
-               (when x
-                 (add-test-constraint quick-p
-                                      fun x y nil
-                                      constraints
-                                      consequent-constraints))
-               (add-complement-constraints quick-p
-                                           fun x y nil
-                                           constraints
-                                           consequent-constraints
+  (flet ((add (fun lvar y &optional no-complement)
+           (let ((x (ok-lvar-lambda-var lvar constraints)))
+             (if no-complement
+                 (when x
+                   (add-test-constraint quick-p
+                                        fun x y nil
+                                        constraints
+                                        consequent-constraints))
+                 (add-complement-constraints quick-p
+                                             fun x y nil
+                                             constraints
+                                             consequent-constraints
+                                             alternative-constraints)))
+           (constraint-propagate-back lvar fun y constraints consequent-constraints
+                                      (and (not no-complement)
                                            alternative-constraints)))
          (prop (triples target)
            (map nil (lambda (constraint)
@@ -670,25 +669,20 @@
                 triples)))
     (when (eq (combination-kind use) :known)
       (binding* ((info (combination-fun-info use) :exit-if-null)
-                 (propagate (fun-info-constraint-propagate-if
-                             info)
-                            :exit-if-null))
+                 (propagate (fun-info-constraint-propagate-if info) :exit-if-null))
         (multiple-value-bind (lvar type if else no-complement)
             (funcall propagate use constraints)
           (prop if consequent-constraints)
           (prop else alternative-constraints)
           (when (and lvar type)
-            (add 'typep (ok-lvar-lambda-var lvar constraints)
-                 type no-complement)
+            (add 'typep lvar type no-complement)
             (return-from add-combination-test-constraints)))))
     (let* ((name (lvar-fun-name
                   (basic-combination-fun use)))
            (args (basic-combination-args use))
            (ptype (gethash name *backend-predicate-types*)))
       (when ptype
-        (add 'typep (ok-lvar-lambda-var (first args)
-                                        constraints)
-             ptype)))))
+        (add 'typep (first args) ptype)))))
 
 ;;; Add test constraints to the consequent and alternative blocks of
 ;;; the test represented by USE.
@@ -702,12 +696,14 @@
     (let ((consequent-constraints (make-conset))
           (alternative-constraints (make-conset))
           (quick-p (policy if (> compilation-speed speed))))
-      (labels ((add (fun x y not-p)
+      (labels ((add (fun x y not-p &optional lvar)
                  (add-complement-constraints quick-p
                                              fun x y not-p
                                              constraints
                                              consequent-constraints
-                                             alternative-constraints))
+                                             alternative-constraints)
+                 (when lvar
+                   (constraint-propagate-back lvar fun y constraints consequent-constraints alternative-constraints)))
                (process-node (node)
                  (typecase node
                    (ref
@@ -760,7 +756,8 @@
                                    ((constant-lvar-p arg2)
                                     (add 'eql var1
                                          (nth-value 1 (lvar-value arg2))
-                                         nil))
+                                         nil
+                                         arg1))
                                    (t
                                     (add-test-constraint quick-p
                                                          'typep var1 (lvar-type arg2)
@@ -1119,29 +1116,6 @@
                (other (if (eq x leaf) y x))
                (kind (constraint-kind con)))
           (case kind
-            (equality
-             (unless (eq (ref-constraints ref)
-                         (pushnew con (ref-constraints ref)))
-               (labels ((reoptimize (node)
-                          (when (valued-node-p node)
-                            (let ((lvar (node-lvar node))
-                                  (principal-lvar (nth-value 1 (principal-lvar-end (node-lvar ref)))))
-                              (reoptimize-lvar lvar)
-                              (unless (eq lvar principal-lvar)
-                                (reoptimize-lvar principal-lvar)))))
-                        (try (x y)
-                          (when (and (vector-length-constraint-p x)
-                                     (eq (vector-length-constraint-var x) leaf))
-                            (when (and (constant-p y)
-                                       (not not-p)
-                                       (eq (equality-constraint-operator con) 'eq)
-                                       (not (types-equal-or-intersect res (specifier-type '(not simple-array)))))
-                              (setf res (type-intersection res (specifier-type `(simple-array * (,(constant-value y)))))))
-                            (reoptimize (node-dest ref))
-                            t)))
-                 (or (try x y)
-                     (try y x)
-                     (reoptimize ref)))))
             (typep
              (if not-p
                  (if (member-type-p other)
@@ -1248,7 +1222,8 @@
                  do (let ((type (lvar-type val)))
                       (unless (eq type *universal-type*)
                         (conset-add-constraint gen 'typep var type nil)))
-                    (maybe-add-eql-var-var-constraint var val gen)))))
+                    (maybe-add-eql-var-var-constraint var val gen)
+                    (add-var-result-constraints var val gen)))))
       (ref
        (when (ok-ref-lambda-var node)
          (maybe-add-eql-var-lvar-constraint node gen)
@@ -1256,11 +1231,12 @@
            (constrain-ref-type node gen))))
       (cast
        (let* ((lvar (cast-value node))
-              (var (ok-lvar-lambda-var lvar gen)))
-         (when var
-           (let ((atype (single-value-type (cast-derived-type node)))) ;FIXME
-             (unless (eq atype *universal-type*)
-               (conset-add-constraint-to-eql gen 'typep var atype nil))))
+              (var (ok-lvar-lambda-var lvar gen))
+              (atype (single-value-type (cast-derived-type node))))
+         (cond ((eq atype *universal-type*))
+               (var
+                (conset-add-constraint-to-eql gen 'typep var atype nil)))
+         (constraint-propagate-back lvar 'typep atype gen gen nil)
          (when (and (bound-cast-p node)
                     (bound-cast-check node)
                     (not (node-deleted (bound-cast-check node))))
@@ -1268,7 +1244,7 @@
              (destructuring-bind (array dim index)
                  (combination-args check-bound)
                (declare (ignore array))
-               (add-equality-constraints '< (list index dim) gen gen nil))))))
+               (add-equality-constraint '< index dim gen gen nil))))))
       (cset
        (binding* ((var (set-var node))
                   (nil (lambda-var-p var) :exit-if-null)
@@ -1289,22 +1265,26 @@
          (add-eq-constraint var (set-value node) gen)))
       (combination
        (when (eq (combination-kind node) :known)
-         (binding* ((info (combination-fun-info node) :exit-if-null)
-                    (propagate (fun-info-constraint-propagate info)
-                               :exit-if-null)
-                    (constraints (funcall propagate node gen))
-                    (register (if (policy node
-                                          (> compilation-speed speed))
-                                  #'conset-add-constraint
-                                  #'conset-add-constraint-to-eql)))
-           (map nil (lambda (constraint)
-                      (destructuring-bind (kind x y &optional not-p)
-                          constraint
-                        (when (and kind x y)
-                          (funcall register gen
-                                   kind x y
-                                   not-p))))
-                constraints))))))
+         (unless (and preprocess-refs-p
+                      (try-equality-constraint node gen))
+           (let ((lvar (node-lvar node)))
+             (when lvar
+               (add-var-result-constraints lvar lvar gen)))
+           (binding* ((info (combination-fun-info node) :exit-if-null)
+                      (propagate (fun-info-constraint-propagate info)
+                                 :exit-if-null)
+                      (constraints (funcall propagate node gen))
+                      (register (if (policy node
+                                        (> compilation-speed speed))
+                                    #'conset-add-constraint
+                                    #'conset-add-constraint-to-eql)))
+             (map nil (lambda (constraint)
+                        (destructuring-bind (kind x y &optional not-p) constraint
+                          (when (and kind x y)
+                            (funcall register gen
+                                     kind x y
+                                     not-p))))
+                  constraints)))))))
   gen)
 
 (defun constraint-propagate-if (block gen)
