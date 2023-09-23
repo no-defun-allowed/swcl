@@ -16,6 +16,15 @@
 ;;;; in addition to which it is near impossible to wade through the
 ;;;; ton of nameless, slow, and noisy tests.
 
+(defmacro assert-type (lambda type)
+  `(assert
+    (type-specifiers-equal
+     (caddr
+      (sb-kernel:%simple-fun-type
+       (checked-compile
+        ',lambda)))
+     '(values ,type &optional))))
+
 #+sb-unicode
 (with-test (:name :base-char-p)
   (assert
@@ -607,26 +616,30 @@
     '(values null &optional))))
 
 (with-test (:name :/)
-  (assert
-   (type-specifiers-equal
-    (caddr
-     (sb-kernel:%simple-fun-type
-      (checked-compile
-       `(lambda (x)
-          (declare ((integer 1) x))
-          (let ((d (truncate x 4)))
-            (< d x))))))
-    '(values (member t) &optional)))
-  (assert
-   (type-specifiers-equal
-    (caddr
-     (sb-kernel:%simple-fun-type
-      (checked-compile
-       `(lambda (x y)
-          (declare ((integer 0) x y))
-          (let ((d (/ x y)))
-            (> d x))))))
-    '(values null &optional))))
+  (assert-type
+   (lambda (x)
+     (declare ((integer 1) x))
+     (let ((d (truncate x 4)))
+       (< d x)))
+   (member t))
+  (assert-type
+   (lambda (x y)
+     (declare ((integer 0) x y))
+     (let ((d (/ x y)))
+       (> d x)))
+   null)
+  (assert-type
+   (lambda (a b)
+     (declare ((integer 1) a b))
+     (< (/ a b) a))
+   boolean)
+  (assert-type
+   (lambda (x y)
+     (declare (integer x y))
+     (if (plusp (rem x y))
+         x
+         1))
+   (integer 1)))
 
 (with-test (:name :negate-<)
   (assert
@@ -656,15 +669,6 @@
                      (= j (length a)))
             (length b))))))
     '(values (or null (integer 10 20)) &optional))))
-
-(defmacro assert-type (lambda type)
-  `(assert
-    (type-specifiers-equal
-     (caddr
-      (sb-kernel:%simple-fun-type
-       (checked-compile
-        ',lambda)))
-     '(values ,type &optional))))
 
 (with-test (:name :+>)
   (assert-type
@@ -736,3 +740,115 @@
      (let ((l (1- (length v))))
        (< l (length v))))
    (member t)))
+
+(with-test (:name :sub-sign)
+  (assert-type
+   (lambda (x)
+     (declare (unsigned-byte x))
+     (- x (truncate x 2)))
+   unsigned-byte))
+
+(with-test (:name :equal)
+  (assert-type
+   (lambda (x y)
+     (if (eql x y)
+         (equalp x y)
+         t))
+   (member t))
+  (assert-type
+   (lambda (x y)
+     (if (eq x y)
+         (equal x y)
+         t))
+   (member t))
+  (assert-type
+   (lambda (x y)
+     (if (eql x y)
+         nil
+         (equal x y)))
+   boolean)
+  (assert-type
+   (lambda (x y)
+     (if (equalp x y)
+         (eql x y)
+         t))
+   boolean))
+
+(with-test (:name :bounds-check-constants)
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     `(lambda (v)
+                        (declare (simple-vector v))
+                        (setf (aref v 0) (aref v 1)))
+                     nil))
+             1)))
+
+(with-test (:name :bounds-check-constants-svref)
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     `(lambda (v)
+                        (values (svref v 1)
+                                (svref v 0)))
+                     nil))
+             1)))
+
+(with-test (:name :bounds-check-variable-svref)
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     `(lambda (x i)
+                        (values (svref x i)
+                                (svref x i)))
+                     nil))
+             1)))
+
+(with-test (:name :bounds-check-length)
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     `(lambda (x y)
+                        (when (< x (length y))
+                          (svref y x)))
+                     nil))
+             0)))
+
+(with-test (:name :bounds-check-length)
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     `(lambda (v)
+                        (declare (simple-vector v)
+                                 (optimize (debug 2)))
+                        (loop for i below (1- (length v))
+                              sum (aref v i)))
+                     nil))
+             0))
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     `(lambda (v)
+                        (declare (simple-vector v)
+                                 (optimize (debug 1)))
+                        (loop for i below (1- (length v))
+                              sum (aref v i)))
+                     nil))
+             0)))
+
+
+(with-test (:name :bounds-check-min-length)
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     `(lambda (x v)
+                        (declare (integer x)
+                                 (simple-vector v)
+                                 (optimize (debug 2)))
+                        (loop for i below (min x (1- (length v)))
+                              sum (aref v i)))
+                     nil))
+             0))
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     `(lambda (x v)
+                        (declare (integer x)
+                                 (simple-vector v)
+                                 (optimize (debug 1)))
+                        (loop for i below (min x (length v))
+                              sum (aref v i)))
+                     nil))
+             0)))

@@ -64,6 +64,12 @@ static inline int layout_depth2_id(struct layout* layout) {
     int32_t* vector = (int32_t*)&layout->uw_id_word0;
     return vector[0];
 }
+static inline int layout_depthN_id(int n, struct layout* layout) {
+    int32_t* vector = (int32_t*)&layout->uw_id_word0;
+    // depthoids 0 and 1 are not stored because they have to be T and STRUCTURE-OBJECT,
+    // so the array index is off by 2.
+    return vector[n-2];
+}
 
 /// Return true if 'thing' is a layout.
 /// This predicate is careful, as is it used to verify heap invariants.
@@ -77,6 +83,13 @@ static inline int layoutp(lispobj thing)
 /// Return true if 'thing' is the layout of any subtype of sb-lockless::list-node.
 static inline int lockfree_list_node_layout_p(struct layout* layout) {
     return layout_depth2_id(layout) == LFLIST_NODE_LAYOUT_ID;
+}
+/// Return true if 'thing' is a finalizer list node
+/// FINALIZER-NODE is-a SO-DATA-NODE is-a SO-KEY-NODE is-a SO-NODE is-a
+///    LIST-NODE is-a STRUCTURE-OBJECT
+/// so layout depthoid 6 is the one to check the ID of.
+static inline int finalizer_node_layout_p(struct layout* layout) {
+    return layout_depthN_id(6, layout) == FINALIZER_NODE_LAYOUT_ID;
 }
 
 struct bitmap { sword_t *bits; unsigned int nwords; };

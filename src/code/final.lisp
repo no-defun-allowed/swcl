@@ -64,11 +64,20 @@
 ;;; both try to rehash, and presumably one will have no work to do. (Unless GC moves
 ;;; even more things after the first thread to rehash leaves its mutex scope)
 (macrolet
-    ((base-pointer (k) ; Cast K to fixnum in the DESCRIPTOR-SAP representation.
-       `(%make-lisp-obj (logandc2 (get-lisp-obj-address ,k) sb-vm:lowtag-mask)))
+    ((base-pointer (object) ; Cast OBJECT to fixnum in the DESCRIPTOR-SAP representation.
+       `(let* ((o ,object)
+               (address
+                (get-lisp-obj-address
+                 (if (simple-fun-p o) (fun-code-header o) o))))
+          (%make-lisp-obj (logandc2 address sb-vm:lowtag-mask))))
      (insert (k v)
        `(with-pinned-objects (,k)
-          (prog1 (sb-lockless:so-insert table (base-pointer ,k) ,v)
+          (prog1 (let ((node (sb-lockless:so-insert table (base-pointer ,k) ,v)))
+                   ;; I didn't feel like changing INSERT to return a FINALIZER-NODE, though I should.
+                   ;; Having the right type enables an extra verification in GC but it's not critical
+                   ;; for correctness.
+                   (%set-instance-layout node ,(sb-kernel:find-layout 'sb-lockless::finalizer-node))
+                   node)
             (sb-thread:barrier (:write)))))
      (get-table ()
        ;; The global var itself is actually invariant, but I suspect that lookups
@@ -182,6 +191,7 @@ Examples:
       (if (eq space :static)
           (error "Cannot finalize ~S." object)
           ;; silently discard finalizers on file streams in arenas I guess
+          ;; and also silently do nothing on fixnum/character.
           (progn ; (warn "Will not finalize ~S." object)
             (return-from finalize object)))))
   ;; Wrapping a VALUE-CELL around FUNCTION indicates the :DONT-SAVE option without
@@ -233,7 +243,10 @@ Examples:
 ;;; So for now: MUST be wrapped in WITHOUT-GCING by calling code
 (export 'finalizer-object) ; for regression test
 (defun finalizer-object (node)
-  (sb-vm::reconstitute-object (sb-lockless:so-key node)))
+  ;; if no lowtag on NEXT, then NODE is deleted, or is on its way to being deleted
+  (if (fixnump (sb-lockless:%node-next node))
+      (bug "can't reconstitute key of deleted finalizer node")
+      (sb-vm::reconstitute-object (sb-lockless:so-key node))))
 
 ;;; Perform various cleanups around finalizers
 (defglobal *saved-finalizers* nil)
@@ -281,7 +294,10 @@ Examples:
            (keys (make-array count))
            (values (make-array count))
            (n 0))
+      ;; As much as we should eschew WITHOUT-GCING in system internals, this code is
+      ;; single-threaded and preparing to exit, so it's kind of excusable.
       (without-gcing
+       ;; SO-MAPLIST skips deleted nodes
        (sb-lockless:so-maplist (lambda (node)
                                  (setf (aref keys n) (finalizer-object node)
                                        (aref values n) (sb-lockless:so-data node))
@@ -414,6 +430,7 @@ Examples:
       (display (weak-pointer-value (sb-lockless:so-key node))))
     (format t "~&Hashed:~%")
     (sb-lockless:so-maplist (lambda (node)
+                              ;; For debugging only; caveat emptor.
                               (display (without-gcing (finalizer-object node))))
                             **finalizer-store**)))
 

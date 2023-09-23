@@ -81,10 +81,17 @@
                    (:include so-node)
                    (:copier nil)
                    (:constructor %make-so-set-node (node-hash so-key)))
-  (so-key (missing-arg))) ; should be readonly. DO NOT MUTATE without extreme care
+  (so-key (missing-arg) :read-only t))
 (sb-xc:defstruct (so-data-node
                    (:conc-name nil)
                    (:include so-key-node)
                    (:copier nil)
                    (:constructor %make-so-map-node (node-hash so-key so-data)))
   (so-data nil))
+
+;;; Nodes inserted into the list held in *FINALIZER-STORE* get their %INSTANCE-LAYOUT
+;;; changed to this mainly for a GC heap invariant check.
+(sb-xc:defstruct (finalizer-node
+                   (:conc-name nil)
+                   (:include so-data-node)
+                   (:copier nil)))

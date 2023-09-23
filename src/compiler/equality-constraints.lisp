@@ -169,8 +169,8 @@
                    (lvar (lvar-type second))
                    (lambda-var (lambda-var-type second))
                    (vector-length-constraint (specifier-type 'index)))))
-    (when (lvar-p x)
-      (constraint-propagate-back x operator second
+    (when (lvar-p first)
+      (constraint-propagate-back first operator second
                                  constraints
                                  consequent-constraints
                                  alternative-constraints))
@@ -496,9 +496,13 @@
          (lambda (op not-p)
            (if not-p
                (case op
-                 (< (derive (integer 0)))   ; >=
-                 (> (derive (integer * 0)))) ; <=
+                 (< (derive (integer 0)))       ; >=
+                 (> (derive (integer * 0)))     ; <=
+                 (<= (derive (integer (0))))    ; >
+                 (>= (derive (integer * (0))))) ; <
                (case op
+                 (>= (derive (integer 0)))
+                 (<= (derive (integer * 0)))
                  (> (derive (integer (0))))
                  (< (derive (integer * (0)))))))))))
   :give-up)
@@ -660,7 +664,7 @@
 (defun div-constraints (x y)
   (when (csubtypep (lvar-type y) (specifier-type 'rational))
     (cond ((and (csubtypep (lvar-type x) (specifier-type '(integer 1)))
-                (csubtypep (lvar-type y) (specifier-type '(integer 1))))
+                (csubtypep (lvar-type y) (specifier-type '(integer (1)))))
            (list (list '< x)))
           ((and (csubtypep (lvar-type x) (specifier-type '(integer 0)))
                 (csubtypep (lvar-type y) (specifier-type '(integer 0))))
