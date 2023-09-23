@@ -99,7 +99,7 @@ static void allocate_bitmap(uword_t **bitmap, uword_t size,
 /* Initialisation */
 uword_t *allocation_bitmap;
 _Atomic(uword_t) *mark_bitmap;
-unsigned char *line_bytemap;             /* 1 if line used, 0 if not used */
+unsigned char *line_bytemap;
 line_index_t line_count;
 uword_t mark_bitmap_size;
 
@@ -483,7 +483,7 @@ static void mark(lispobj object, lispobj *where, enum source source_type) {
 /* A lock protecting structures to do with weak references. */
 static lock_t weak_lists_lock = LOCK_INITIALIZER;
 static bool interesting_pointer_p(lispobj object) {
-  return in_dynamic_space(object);
+  return in_dynamic_space(object) || immobile_space_p(object);
 }
 static inline bool pointer_survived_gc_yet(lispobj obj) {
     return taggedptr_alivep_impl(obj);
@@ -982,10 +982,14 @@ void mr_preserve_range(lispobj *from, sword_t nwords) {
  * We never have to deal with fixing pointers here, as we don't
  * allocate into pages we intend to evacuate. */
 void mr_preserve_leaf(lispobj obj) {
-  if (is_lisp_pointer(obj) && in_dynamic_space(obj)) {
-    set_mark_bit(obj);
-    lispobj *n = native_pointer(obj);
-    mark_lines(n);
+  if (is_lisp_pointer(obj)) {
+    if (in_dynamic_space(obj)) {
+      set_mark_bit(obj);
+      lispobj *n = native_pointer(obj);
+      mark_lines(n);
+    } else if (immobile_space_p(obj)) {
+      enliven_immobile_obj(native_pointer(obj), 0);
+    }
   }
 }
 
@@ -1002,6 +1006,8 @@ void mr_preserve_object(lispobj obj) {
   if (p != -1) {
     mark(obj, NULL, SOURCE_NORMAL);
     gc_page_pins[p] = 0xFF;
+  } else if (immobile_space_p(obj)) {
+    immobile_space_preserve_pointer(native_pointer(obj));
   }
 }
 
