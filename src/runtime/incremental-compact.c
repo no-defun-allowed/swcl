@@ -1,3 +1,4 @@
+#include <stdatomic.h>
 #include <stdio.h>
 #include <sys/time.h>
 #include <stdlib.h>
@@ -49,7 +50,6 @@ bool force_compaction = 0;
 static generation_index_t target_generation;
 /* A queue of interesting slots. */
 static struct Qblock *remset;
-static lock_t remset_lock = LOCK_INITIALIZER;
 static struct suballocator remset_suballocator = SUBALLOCATOR_INITIALIZER("compaction remset");
 bool compacting;
 unsigned char *target_pages;
@@ -121,10 +121,13 @@ static _Thread_local struct Qblock *output_block = NULL;
 
 void commit_thread_local_remset() {
   if (output_block && output_block->count) {
-    acquire_lock(&remset_lock);
-    output_block->next = remset;
-    remset = output_block;
-    release_lock(&remset_lock);
+    /* There's no ABA here, as we only append to the remset while
+     * tracing, and thus no reuse to cause problems. */
+    struct Qblock *next;
+    do {
+      next = remset;
+      output_block->next = next;
+    } while (!atomic_compare_exchange_strong(&remset, &next, output_block));
   }
   output_block = NULL;
 }

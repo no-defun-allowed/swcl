@@ -341,13 +341,18 @@ bool taggedptr_alivep_impl(lispobj object) {
 /* The number of blocks on the grey list and being processed.
  * Tracing terminates when we end up with 0 blocks in flight again. */
 static _Atomic(sword_t) blocks_in_flight = 0;
-static lock_t grey_list_lock = LOCK_INITIALIZER;
-static struct Qblock *grey_list = NULL;
+
+/* A block list with a reuse counter, to avoid ABA bugs. */
+struct cas_list {
+  struct Qblock *list;
+  uword_t reuse;
+};
+static struct cas_list grey_list = { NULL, 0 };
 static struct suballocator grey_suballocator = SUBALLOCATOR_INITIALIZER("grey stack");
 
 /* Thanks to Larry Masinter for suggesting that I use per-thread
  * free lists, rather than hurting my head on lock-free free lists.
- * (Say that five times fast.)*/
+ * (Say that five times fast.) */
 static _Thread_local struct Qblock *recycle_list = NULL;
 /* The "output packet" from "A Parallel, Incremental and Concurrent GC
  * for Servers". The "input packet" is block in trace_everything. */
@@ -430,13 +435,15 @@ static void mark(lispobj object, lispobj *where, enum source source_type) {
     /* Enqueue onto mark queue */
     if (set_mark_bit(object)) {
       if (!output_block || output_block->count == QBLOCK_CAPACITY) {
-        struct Qblock *next = grab_qblock();
         if (output_block) {
-          acquire_lock(&grey_list_lock);
-          output_block->next = grey_list;
-          grey_list = output_block;
-          release_lock(&grey_list_lock);
+          struct cas_list expect, replace;
+          do {
+            expect = grey_list;
+            replace = (struct cas_list){ output_block, expect.reuse + 1 };
+            output_block->next = expect.list;
+          } while (!atomic_compare_exchange_strong(&grey_list, &expect, replace));
         }
+        struct Qblock *next = grab_qblock();
         output_block = next;
       }
       output_block->elements[output_block->count++] = object;
@@ -513,15 +520,16 @@ static bool work_to_do(struct Qblock **where) {
     output_block = NULL;
     return 1;
   } else {
-    acquire_lock(&grey_list_lock);
-    if (grey_list) {
-      *where = grey_list;
-      grey_list = grey_list->next;
-      release_lock(&grey_list_lock);
-      return 1;
+    while (1) {
+      struct cas_list expect, replace;
+      expect = grey_list;
+      if (expect.list == NULL) return 0;
+      replace = (struct cas_list){ expect.list->next, expect.reuse };
+      if (atomic_compare_exchange_strong(&grey_list, &expect, replace)) {
+        *where = expect.list;
+        return 1;
+      }
     }
-    release_lock(&grey_list_lock);
-    return 0;
   }
 }
 
