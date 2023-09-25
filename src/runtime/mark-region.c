@@ -89,12 +89,31 @@ static uword_t get_time() {
   return t.tv_sec * 1000000 + t.tv_nsec/1000;
 }
 
-static void allocate_bitmap(uword_t **bitmap, uword_t size,
-                            const char *description) {
-  *bitmap = calloc(size, 1);
-  if (!*bitmap)
-    lose("Failed to allocate %s (of %lu bytes)", description, size);
+/* Double-word CAS */
+/* GCC pulls in libatomic to do a double-word CAS, which we don't
+ * really want, so we define our own. */
+
+typedef struct {
+  struct Qblock *list;
+  uword_t reuse;
+} __attribute__((aligned(16))) cas_list_t;
+#ifdef LISP_FEATURE_X86_64
+static bool double_cas(cas_list_t *dst, cas_list_t *old, cas_list_t new) {
+  bool win;
+  __asm__("lock cmpxchg16b %3"
+          : "=@cce" (win),              /*set when equal*/
+            "=a" (old->list),
+            "=d" (old->reuse),
+            "+m" (*dst)              /* read and write dst as memory */
+          : "b" (new.list),
+            "c" (new.reuse),
+            "a" (old->list),
+            "d" (old->reuse));
+  return win;
 }
+#else
+#define double_cas atomic_compare_exchange_strong
+#endif
 
 /* Initialisation */
 uword_t *allocation_bitmap;
@@ -102,6 +121,13 @@ _Atomic(uword_t) *mark_bitmap;
 unsigned char *line_bytemap;             /* 1 if line used, 0 if not used */
 line_index_t line_count;
 uword_t mark_bitmap_size;
+
+static void allocate_bitmap(uword_t **bitmap, uword_t size,
+                            const char *description) {
+  *bitmap = calloc(size, 1);
+  if (!*bitmap)
+    lose("Failed to allocate %s (of %lu bytes)", description, size);
+}
 
 static void allocate_bitmaps() {
   int bytes_per_heap_byte = 8 /* bits/byte */ << N_LOWTAG_BITS;
@@ -343,11 +369,7 @@ bool taggedptr_alivep_impl(lispobj object) {
 static _Atomic(sword_t) blocks_in_flight = 0;
 
 /* A block list with a reuse counter, to avoid ABA bugs. */
-struct cas_list {
-  struct Qblock *list;
-  uword_t reuse;
-};
-static struct cas_list grey_list = { NULL, 0 };
+static cas_list_t grey_list = { NULL, 0 };
 static struct suballocator grey_suballocator = SUBALLOCATOR_INITIALIZER("grey stack");
 
 /* Thanks to Larry Masinter for suggesting that I use per-thread
@@ -436,12 +458,12 @@ static void mark(lispobj object, lispobj *where, enum source source_type) {
     if (set_mark_bit(object)) {
       if (!output_block || output_block->count == QBLOCK_CAPACITY) {
         if (output_block) {
-          struct cas_list expect, replace;
+          cas_list_t expect, replace;
           do {
             expect = grey_list;
-            replace = (struct cas_list){ output_block, expect.reuse + 1 };
+            replace = (cas_list_t){ output_block, expect.reuse + 1 };
             output_block->next = expect.list;
-          } while (!atomic_compare_exchange_strong(&grey_list, &expect, replace));
+          } while (!double_cas(&grey_list, &expect, replace));
         }
         struct Qblock *next = grab_qblock();
         output_block = next;
@@ -521,11 +543,11 @@ static bool work_to_do(struct Qblock **where) {
     return 1;
   } else {
     while (1) {
-      struct cas_list expect, replace;
+      cas_list_t expect, replace;
       expect = grey_list;
       if (expect.list == NULL) return 0;
-      replace = (struct cas_list){ expect.list->next, expect.reuse };
-      if (atomic_compare_exchange_strong(&grey_list, &expect, replace)) {
+      replace = (cas_list_t){ expect.list->next, expect.reuse };
+      if (double_cas(&grey_list, &expect, replace)) {
         *where = expect.list;
         return 1;
       }
