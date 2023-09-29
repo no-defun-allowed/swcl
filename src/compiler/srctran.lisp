@@ -3098,6 +3098,8 @@
            (cast (or (cast-or-check-bound-type (node-lvar node))
                      (give-up-ir1-transform)))
            (result-type (type-intersection type cast)))
+      (when (eq result-type *empty-type*)
+        (give-up-ir1-transform))
       (flet ((subp (lvar type)
                (cond
                  ((not (constant-type-p type))
@@ -3110,24 +3112,24 @@
                     (if (typep type '(cons (eql satisfies)))
                         (funcall (second type) value)
                         (sb-xc:typep value type)))))))
-       (loop with rotate
-             for vop in vops
-             for (x-type y-type cast-type) = (fun-type-required (vop-info-type vop))
-             when (and (csubtypep result-type (single-value-type (fun-type-returns (vop-info-type vop))))
-                       (neq x-type *universal-type*)
-                       (neq y-type *universal-type*)
-                       (or (and (subp x x-type)
-                                (subp y y-type))
-                           (and swap
-                                (subp y x-type)
-                                (subp x y-type)
-                                (setf rotate t))))
-             return `(%primitive ,(vop-info-name vop)
-                                 ,@(if rotate
-                                       '(y x)
-                                       '(x y))
-                                 ',(type-specifier cast))
-             finally (give-up-ir1-transform))))))
+        (loop with rotate
+              for vop in vops
+              for (x-type y-type cast-type) = (fun-type-required (vop-info-type vop))
+              when (and (csubtypep result-type (single-value-type (fun-type-returns (vop-info-type vop))))
+                        (neq x-type *universal-type*)
+                        (neq y-type *universal-type*)
+                        (or (and (subp x x-type)
+                                 (subp y y-type))
+                            (and swap
+                                 (subp y x-type)
+                                 (subp x y-type)
+                                 (setf rotate t))))
+              return `(%primitive ,(vop-info-name vop)
+                                  ,@(if rotate
+                                        '(y x)
+                                        '(x y))
+                                  ',(type-specifier cast))
+              finally (give-up-ir1-transform))))))
 
 (deftransform * ((x y) ((or word sb-vm:signed-word) (or word sb-vm:signed-word))
                  * :node node :important nil)
@@ -3165,6 +3167,8 @@
            (cast (or (cast-or-check-bound-type (node-lvar node) t)
                      (give-up-ir1-transform)))
            (result-type (type-intersection type cast)))
+      (when (eq result-type *empty-type*)
+        (give-up-ir1-transform))
       (multiple-value-bind (cast-low cast-high) (integer-type-numeric-bounds cast)
         (unless (and (fixnump cast-low)
                      (fixnump cast-high))
@@ -5006,11 +5010,15 @@
 
 (defoptimizer (rational derive-type) ((x))
   (one-arg-derive-type x (lambda (type)
-                           (flet ((%rational (bound)
-                                    (typecase bound
-                                      (cons (list (rational (car bound))))
-                                      (null nil)
-                                      (t (rational bound)))))
+                           (labels ((%%rational (x)
+                                      (unless (and (floatp x)
+                                                   (float-infinity-or-nan-p x))
+                                        (rational x)))
+                                    (%rational (bound)
+                                      (typecase bound
+                                        (cons (list (%%rational (car bound))))
+                                        (null nil)
+                                        (t (%%rational bound)))))
                              (make-numeric-type
                               :class 'rational
                               :low (%rational (numeric-type-low type))
@@ -5019,11 +5027,15 @@
 
 (defoptimizer (rationalize derive-type) ((x))
   (one-arg-derive-type x (lambda (type)
-                           (flet ((%rationalize (bound)
-                                    (typecase bound
-                                      (cons (list (rationalize (car bound))))
-                                      (null nil)
-                                      (t (rationalize bound)))))
+                           (labels ((%%rationalize (x)
+                                      (unless (and (floatp x)
+                                                   (float-infinity-or-nan-p x))
+                                        (rationalize x)))
+                                    (%rationalize (bound)
+                                      (typecase bound
+                                        (cons (list (%%rationalize (car bound))))
+                                        (null nil)
+                                        (t (%%rationalize bound)))))
                              (make-numeric-type
                               :class 'rational
                               :low (%rationalize (numeric-type-low type))

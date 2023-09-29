@@ -208,3 +208,21 @@
                (sb-bignum:%bignum-set-length res 2)))))
     ((-9.223372036854776d18) nil)
     ((9.223372036854776d18) t)))
+
+(with-test (:name :overflow-transform-nil)
+  (checked-compile-and-assert
+      (:allow-warnings t)
+      `(lambda (v)
+         (let ((i 0))
+           (flet ((f (i)
+                    (the fixnum i)
+                    (svref v (+ i 26387449082611642302))))
+             (f i)
+             (incf i)
+             (f i)
+             (incf i)))))
+  (checked-compile-and-assert
+      (:allow-style-warnings t)
+      `(lambda (s e)
+         (subseq s 0 (when e
+                       (- (length s) 12129535698721845515))))))

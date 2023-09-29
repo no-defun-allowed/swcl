@@ -297,10 +297,7 @@ run in any thread.")
 The default is to initiate a nursery collection, which may in turn
 trigger a collection of one or more older generations as well. If FULL
 is true, all generations are collected. If GEN is provided, it can be
-used to specify the oldest generation guaranteed to be collected.
-
-On CheneyGC platforms arguments FULL and GEN take no effect: a full
-collection is always performed."
+used to specify the oldest generation guaranteed to be collected."
   (let ((gen (if full sb-vm:+pseudo-static-generation+ gen)))
     (when (eq t (sub-gc gen))
       (post-gc))))
@@ -429,11 +426,12 @@ statistics are appended to it."
                        #xF)))))))
 
 #+mark-region-gc
-(define-alien-routine "gc_gen_of" char (address unsigned))
-#+mark-region-gc
 (defun generation-of (object)
-  (with-pinned-objects (object)
-    (gc-gen-of (get-lisp-obj-address object))))
+  (with-alien ((gc-gen-of (function char unsigned int) :extern))
+    (let ((result (with-pinned-objects (object)
+                    (alien-funcall gc-gen-of
+                                   (get-lisp-obj-address object) 127))))
+      (unless (= result 127) result))))
 
 (export 'page-protected-p)
 (macrolet ((addr->mark (addr)

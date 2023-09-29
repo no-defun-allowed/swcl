@@ -80,7 +80,7 @@
                              #-sb-xc-host
                            (declare (muffle-conditions compiler-note))
                            (list nil))))
-                   (declare (truly-dynamic-extent ,map-result))
+                   (declare (dynamic-extent ,map-result))
                    (do-anonymous ((,last ,map-result) . ,(do-clauses))
                      (,endtest (cdr ,map-result))
                      (let ((result ,call))
@@ -97,7 +97,7 @@
                             #-sb-xc-host
                             (declare (muffle-conditions compiler-note))
                           (list nil))))
-                   (declare (truly-dynamic-extent ,map-result))
+                   (declare (dynamic-extent ,map-result))
                    (do-anonymous ((,temp ,map-result) . ,(do-clauses))
                      (,endtest
                       (%rplacd ,temp nil) ;; replace the 0
@@ -1459,15 +1459,17 @@
                               (type-specifier initial-contents-type)
                               (sb-vm:saetp-specifier saetp))))
             ((constant-lvar-p initial-contents)
-             (map nil (lambda (x)
-                        (unless (ctypep x element-type)
-                          (let ((*compiler-error-context* node))
-                            (compiler-warn ":initial-contents has an element ~s incompatible with :element-type ~a."
-                                           x
-                                           (type-specifier element-type)))
-                          (return-from %make-array-ir2-hook-optimizer))
-                        x)
-                  (lvar-value initial-contents)))))))
+             (let ((initial-contents (lvar-value initial-contents)))
+               (when (sequencep initial-contents)
+                 (map nil (lambda (x)
+                            (unless (ctypep x element-type)
+                              (let ((*compiler-error-context* node))
+                                (compiler-warn ":initial-contents has an element ~s incompatible with :element-type ~a."
+                                               x
+                                               (type-specifier element-type)))
+                              (return-from %make-array-ir2-hook-optimizer))
+                            x)
+                      initial-contents))))))))
 
 (defun check-sequence-item (item seq node format-string)
   (let ((seq-type (lvar-type seq))
@@ -2782,18 +2784,12 @@
                                                                    (sb-xc:typep x 'eq-comparable-type))
                                                               'item)
                                                              ((and (eq effective-test 'char-equal)
-                                                                   (not (both-case-p x)))
+                                                                   (if (characterp x)
+                                                                       (not (both-case-p x))
+                                                                       (give-up-ir1-transform)))
                                                               'item)
                                                              (t
                                                               `',x))))))))
-                          ;; FIXME: dups cause more than one test on the same key because IR1
-                          ;; doesn't propagate information about which IFs can't possibly match.
-                          ;; FIXME: suffers from same type derivation issue as above.
-                          ;;        e.g. (- (position (the (member 10 20) x) #(1 2 5 10 15 20 30)))
-                          ;; -> "Constant NIL conflicts with its asserted type NUMBER."
-                          ;; But a fix for the general case (with any :TEST) has to figure out
-                          ;; whether the returned value must definitely be non-NIL before doing
-                          ;; the same thing as above which we claim is unreachable.
                           (return-from ,fun-name
                             `(lambda (item sequence &rest rest)
                                (declare (ignore sequence rest))

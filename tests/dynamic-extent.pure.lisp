@@ -172,10 +172,7 @@
 ;;; value-cells
 
 (defun-with-dx dx-value-cell (x)
-  ;; Not implemented everywhere, yet.
-  #+(or arm64 x86 x86-64 mips)
   (let ((cell x))
-    (declare (sb-int:truly-dynamic-extent cell))
     (flet ((f ()
              (incf cell)))
       (declare (dynamic-extent #'f))
@@ -194,7 +191,7 @@
 (defun force-make-array-on-stack (n)
   (declare (optimize safety))
   (let ((v (make-array (min n 1))))
-    (declare (sb-int:truly-dynamic-extent v))
+    (declare (dynamic-extent v))
     (true v)
     (true v)
     nil))
@@ -209,7 +206,7 @@
 (defun-with-dx make-array-on-stack-2 (n x)
   (declare (integer n))
   (let ((v (make-array n :initial-contents x)))
-    (declare (sb-int:truly-dynamic-extent v))
+    (declare (dynamic-extent v))
     (true v)
     (true v)
     nil))
@@ -218,76 +215,76 @@
   (let ((v (make-array 3
                        :element-type 'fixnum :initial-contents (list x y z)
                        :element-type t :initial-contents x)))
-    (declare (sb-int:truly-dynamic-extent v))
+    (declare (dynamic-extent v))
     (true v)
     (true v)
     nil))
 
 (defun-with-dx make-array-on-stack-4 ()
   (let ((v (make-array 3 :initial-contents '(1 2 3))))
-    (declare (sb-int:truly-dynamic-extent v))
+    (declare (dynamic-extent v))
     (true v)
     (true v)
     nil))
 
 (defun-with-dx make-array-on-stack-5 ()
   (let ((v (make-array 3 :initial-element 12 :element-type t)))
-    (declare (sb-int:truly-dynamic-extent v))
+    (declare (dynamic-extent v))
     (true v)
     (true v)
     nil))
 
 (defun-with-dx make-array-on-stack-6 ()
   (let ((v (make-array 3 :initial-element 12 :element-type '(unsigned-byte 8))))
-    (declare (sb-int:truly-dynamic-extent v))
+    (declare (dynamic-extent v))
     (true v)
     (true v)
     nil))
 
 (defun-with-dx make-array-on-stack-7 ()
   (let ((v (make-array 3 :initial-element 12 :element-type '(signed-byte 8))))
-    (declare (sb-int:truly-dynamic-extent v))
+    (declare (dynamic-extent v))
     (true v)
     (true v)
     nil))
 
 (defun-with-dx make-array-on-stack-8 ()
   (let ((v (make-array 3 :initial-element 12 :element-type 'word)))
-    (declare (sb-int:truly-dynamic-extent v))
+    (declare (dynamic-extent v))
     (true v)
     (true v)
     nil))
 
 (defun-with-dx make-array-on-stack-9 ()
   (let ((v (make-array 3 :initial-element 12.0 :element-type 'single-float)))
-    (declare (sb-int:truly-dynamic-extent v))
+    (declare (dynamic-extent v))
     (true v)
     (true v)
     nil))
 
 (defun-with-dx make-array-on-stack-10 ()
   (let ((v (make-array 3 :initial-element 12.0d0 :element-type 'double-float)))
-    (declare (sb-int:truly-dynamic-extent v))
+    (declare (dynamic-extent v))
     (true v)
     (true v)
     nil))
 
 (defun-with-dx make-array-on-stack-11 ()
   (let ((v (make-array (the integer (opaque-identity 3)) :initial-element 12.0d0 :element-type 'double-float)))
-    (declare (sb-int:truly-dynamic-extent v))
+    (declare (dynamic-extent v))
     (true v)
     (true v)
     nil))
 
 (defun-with-dx vector-on-stack (x y)
   (let ((v (vector 1 x 2 y 3)))
-    (declare (sb-int:truly-dynamic-extent v))
+    (declare (dynamic-extent v))
     (true v)
     nil))
 
 (defun-with-dx make-3d-fixed-array-on-stack-1 ()
   (let ((a (make-array '(4 8 3) :initial-element 12 :element-type t)))
-    (declare (sb-int:truly-dynamic-extent a))
+    (declare (dynamic-extent a))
     (true a)
     (true a)
     nil))
@@ -302,7 +299,7 @@
 (defun-with-dx make-2d-variable-array-on-stack ()
   (let* ((n (opaque-identity 5))
          (a (make-array `(,n 2) :initial-element 12 :element-type t)))
-    (declare (sb-int:truly-dynamic-extent a))
+    (declare (dynamic-extent a))
     (true a)
     (true a)
     nil))
@@ -317,7 +314,7 @@
   (let* ((x (opaque-identity n))
          (y (opaque-identity x))
          (a (make-array `(,x ,y) :initial-contents (2d-array-initializer x))))
-    (declare (sb-int:truly-dynamic-extent a))
+    (declare (dynamic-extent a))
     (true a)
     (true a)
     nil))
@@ -330,7 +327,7 @@
   (sb-int:dx-let ((s (make-list-container :listy-slot (make-list n))))
     (values (funcall (the function thunk) s))))
 ;; stack-allocatable lists are necessary but not sufficient
-(with-test (:name (:dx-list :make-list) :skipped-on (not :x86-64))
+(with-test (:name (:dx-list :make-list) :fails-on (not :x86-64))
   (let ((calls (ctu:asm-search "CALL" #'make-var-length-dx-list)))
     ;; Call nothing but the funarg
     (assert (eql (length calls) 1)))
@@ -340,7 +337,7 @@
 ;;; MAKE-STRUCTURE
 
 ;; stack-allocatable fixed-size objects are necessary but not sufficient
-(with-test (:name :copy-structure-dx :skipped-on (not (or :x86 :x86-64)))
+(with-test (:name :copy-structure-dx :fails-on (not (or :x86 :x86-64)))
   (let ((thing sb-c::*backend-parsed-vops*))
     ;; check some preconditions
     (assert (typep thing 'hash-table))
@@ -874,7 +871,6 @@
     (assert (every (lambda (x) (eql x 0)) a))))
 
 (with-test (:name (:dx-bug-misc :bdowning-2005-iv-16))
-  #+(or arm64 mips x86 x86-64)
   (assert-no-consing (bdowning-2005-iv-16))
   (bdowning-2005-iv-16))
 
@@ -929,7 +925,6 @@
       (multiple-value-bind (y pos2) (read-from-string res nil nil :start pos)
         (assert (equalp f2 y))
         (assert (equalp f3 (read-from-string res nil nil :start pos2))))))
-  #+(or arm64 mips x86 x86-64)
   (assert-no-consing (assert (eql n (funcall fun nil))))
   (assert (eql n (funcall fun nil))))
 
@@ -1042,11 +1037,6 @@
              (unless (= (length notes) j)
                (error "Wanted ~S notes, got ~S for~%   ~S"
                       j (length notes) lambda)))))
-    ;; This should complain.
-    (assert-notes 1 `(lambda ()
-                       (let ((v (make-array (1+ #.sb-vm::+backend-page-bytes+))))
-                         (declare (dynamic-extent v))
-                         (print (sb-ext:stack-allocated-p v)))))
     ;; These ones should not complain.
     (assert-notes 0 `(lambda (name)
                        (with-alien
@@ -2151,3 +2141,21 @@
              (setq y x)
              (values z)))))
      ((1) 0))))
+
+(with-test (:name :stack-allocated-vector-checks-overflow)
+  (checked-compile-and-assert
+   (:optimize :safe)
+   '(lambda ()
+     (let ((x (make-array
+               ;; guaranteed to overflow the stack.
+               (abs (- (sb-sys:sap-int
+                        (sb-vm::current-thread-offset-sap sb-vm::thread-control-stack-start-slot))
+                       (sb-sys:sap-int
+                        (sb-int:descriptor-sap sb-vm:*control-stack-end*)))))))
+       (declare (dynamic-extent x))
+       (dotimes (i (length x))
+         (setf (aref x i) i))
+       123))
+   ;; This condition will be different depending on whether the
+   ;; explicit stack check signals or the guard page gets hit.
+   (() (condition 'sb-kernel::storage-condition))))

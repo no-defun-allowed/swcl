@@ -25,7 +25,8 @@
                    (setf ffff-count ffff
                          zero-count zero
                          single-mov (or (= ffff 1)
-                                        (= zero 1))))))
+                                        (= zero 1))))
+             single-mov))
       (cond ((typep val '(unsigned-byte 16))
              (inst movz y val)
              y)
@@ -84,6 +85,18 @@
                                (try b a 0 c 32))
                               ((= c d)
                                (try c a 0 b 16)))))))
+             y)
+            ((and (not single-mov)
+                  (not single-instruction)
+                  (= (ldb (byte 32 0) val)
+                     (ldb (byte 32 32) val))
+                  (let ((a (ldb (byte 16 0) val))
+                        (b (ldb (byte 16 16) val)))
+                    (when (and (/= a #xFFFF 0)
+                               (/= b #xFFFF 0))
+                      (inst movz y a)
+                      (inst movk y b 16)
+                      (inst orr y y (lsl y 32)))))
              y)
             ((and (< ffff-count zero-count)
                   (or single-mov
