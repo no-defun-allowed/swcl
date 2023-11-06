@@ -52,9 +52,17 @@ static inline uword_t bitmap_size(uword_t n_ptes) {
 }
 
 /* Allocation */
+struct allocator_state {
+  page_index_t page;
+  /* We try not to allocate small objects from free pages in order to
+   * reduce fragmentation, and to keep more free pages for large
+   * objects. */
+  bool allow_free_pages;
+};
+
 extern bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
                                           int page_type, generation_index_t gen,
-                                          page_index_t *start, page_index_t end);
+                                          struct allocator_state *start, page_index_t end);
 extern bool try_allocate_small_after_region(sword_t nbytes,
                                             struct alloc_region *region);
 extern page_index_t try_allocate_large(uword_t nbytes,

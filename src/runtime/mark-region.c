@@ -161,7 +161,7 @@ bool try_allocate_small(sword_t nbytes, struct alloc_region *region,
   line_index_t where = start;
   while (1) {
     line_index_t chunk_start = find_free_line(where, end);
-    if (chunk_start == -1) return 0;
+    if (chunk_start == -1) return false;
     line_index_t chunk_end = find_used_line(chunk_start, end);
     if (chunk_end - chunk_start >= nlines) {
       region->start_addr = line_address(chunk_start);
@@ -175,9 +175,9 @@ bool try_allocate_small(sword_t nbytes, struct alloc_region *region,
        * to the page and its state in the page table.. */
       for (line_index_t c = chunk_start; c < chunk_end; c++)
         line_bytemap[c] = gc_active_p ? 0 : FRESHEN_GEN(0);
-      return 1;
+      return true;
     }
-    if (chunk_end == end) return 0;
+    if (chunk_end == end) return false;
     where = chunk_end;
   }
 }
@@ -192,24 +192,17 @@ bool try_allocate_small_after_region(sword_t nbytes, struct alloc_region *region
   return try_allocate_small(nbytes, region, address_line(region->end_addr), end);
 }
 
-/* We try not to allocate small objects from free pages, to reduce
- * fragmentation. Something like "wilderness preservation". */
-bool allow_free_pages[8] = {0};
-void set_all_allow_free_pages(bool value) {
-  for (int i = 0; i < 8; i++) allow_free_pages[i] = value;
-}
-
 /* try_allocate_small_from_pages updates the start pointer to after the
  * claimed page. */
 bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
                                    int page_type, generation_index_t gen,
-                                   page_index_t *start, page_index_t end) {
+                                   struct allocator_state *start, page_index_t end) {
   gc_assert(gen != SCRATCH_GENERATION);
  again:
-  for (page_index_t where = *start; where < end; where++) {
+  for (page_index_t where = start->page; where < end; where++) {
     if (page_bytes_used(where) <= GENCGC_PAGE_BYTES - nbytes &&
         !target_pages[where] &&
-        ((allow_free_pages[page_type & PAGE_TYPE_MASK] && page_free_p(where)) ||
+        ((start->allow_free_pages && page_free_p(where)) ||
          (page_table[where].type == page_type &&
           page_table[where].gen != PSEUDO_STATIC_GENERATION)) &&
         try_allocate_small(nbytes, region,
@@ -218,7 +211,7 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       page_table[where].type = page_type | OPEN_REGION_PAGE_FLAG;
       page_table[where].gen = 0;
       set_page_scan_start_offset(where, 0);
-      *start = where + 1;
+      start->page = where + 1;
       /* Update residency statistics. mr_update_closed_region will
        * enliven all lines on this page, so it's correct to set the
        * page bytes used like this. */
@@ -227,15 +220,14 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       generations[gen].bytes_allocated += claimed;
       set_page_bytes_used(where, GENCGC_PAGE_BYTES);
       if (where + 1 > next_free_page) next_free_page = where + 1;
-      return 1;
+      return true;
     }
   }
-  if (!allow_free_pages[page_type & PAGE_TYPE_MASK]) {
-    allow_free_pages[page_type & PAGE_TYPE_MASK] = 1;
-    *start = 0;
+  if (!start->allow_free_pages) {;
+    *start = (struct allocator_state){0, true};
     goto again;
   }
-  return 0;
+  return false;
 }
 
 /* Large object allocation */
@@ -1162,6 +1154,7 @@ void mr_pre_gc(generation_index_t generation) {
 }
 
 void mr_collect_garbage(bool raise) {
+  extern void reset_alloc_start_pages(bool allow_free_pages);
   if (generation_to_collect != PSEUDO_STATIC_GENERATION) {
     METER(scavenge, mr_scavenge_root_gens());
   }
@@ -1174,7 +1167,7 @@ void mr_collect_garbage(bool raise) {
     /* This isn't a lot of work to wake up every thread for. Perhaps
      * we could snoop TLS of each GC thread instead. */
     run_on_thread_pool(commit_thread_local_remset);
-    set_all_allow_free_pages(1);
+    reset_alloc_start_pages(true);
     METER(compact, run_compaction(&meters.copy, &meters.fix));
   }
 #endif
@@ -1193,7 +1186,7 @@ void mr_collect_garbage(bool raise) {
           next_free_page, raise ? ", raised" : "");
 #endif
   if (gencgc_verbose) mr_print_meters();
-  set_all_allow_free_pages(0);
+  reset_alloc_start_pages(false);
   reset_pinned_pages();
 }
 
