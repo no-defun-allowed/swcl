@@ -13,6 +13,7 @@
  * files for more information.
  */
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include "genesis/sbcl.h"
@@ -255,7 +256,7 @@ static generation_index_t gc_alloc_generation;
 /* We use five regions for the current newspace generation. */
 struct alloc_region gc_alloc_region[6];
 
-static struct allocator_state alloc_start_states[8]; // one for each value of PAGE_TYPE_x
+static _Atomic struct allocator_state alloc_start_states[8]; // one for each value of PAGE_TYPE_x
 static page_index_t max_alloc_start_page; // the largest of any array element
 page_index_t gencgc_alloc_start_page; // initializer for the preceding array
 
@@ -322,7 +323,7 @@ void *collector_alloc_fallback(struct alloc_region* region, sword_t nbytes, int 
     if ((uword_t)nbytes >= (GENCGC_PAGE_BYTES / 4 * 3)) {
         uword_t largest_hole;
         page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,
-                                                   &alloc_start.page, page_table_pages, &largest_hole);
+                                                   &alloc_start, page_table_pages, &largest_hole);
         if (new_page == -1) gc_heap_exhausted_error_or_lose(largest_hole, nbytes);
         new_obj = page_address(new_page);
         set_allocation_bit_mark(new_obj);
@@ -1393,14 +1394,14 @@ lisp_alloc(__attribute__((unused)) int flags,
 #endif
 
     ensure_region_closed(region, page_type);
-    int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
-    gc_assert(ret);
     struct allocator_state alloc_start = get_alloc_start_page(page_type);
     bool largep = nbytes >= LARGE_OBJECT_SIZE && page_type != PAGE_TYPE_CONS;
     if (largep) {
+        int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
+        gc_assert(ret);
         uword_t largest_hole;
         page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,
-                                                   &alloc_start.page, page_table_pages, &largest_hole);
+                                                   &alloc_start, page_table_pages, &largest_hole);
         if (new_page == -1) gc_heap_exhausted_error_or_lose(largest_hole, nbytes);
         set_alloc_start_page(page_type, alloc_start);
         ret = mutex_release(&free_pages_lock);
@@ -1409,7 +1410,13 @@ lisp_alloc(__attribute__((unused)) int flags,
         set_allocation_bit_mark(new_obj);
         memset(new_obj, 0, nbytes);
     } else {
+        /* Try to find a page before acquiring free_pages_lock. */
+        pre_search_for_small_space(nbytes, page_type, &alloc_start, page_table_pages);
+        int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
+        gc_assert(ret);
         if (!gc_active_p) small_allocation_count++;
+        /* This search will only re-visit the page found by pre_search_for_small_space
+         * if no one else claimed the page since acquiring free_pages_lock. */
         bool success =
             try_allocate_small_from_pages(nbytes, region, page_type,
                                           gc_alloc_generation,

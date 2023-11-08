@@ -99,7 +99,7 @@ static void allocate_bitmap(uword_t **bitmap, uword_t size,
 /* Initialisation */
 uword_t *allocation_bitmap;
 _Atomic(uword_t) *mark_bitmap;
-unsigned char *line_bytemap;             /* 1 if line used, 0 if not used */
+unsigned char *line_bytemap;
 line_index_t line_count;
 uword_t mark_bitmap_size;
 
@@ -150,6 +150,31 @@ generation_index_t gc_gen_of(lispobj obj, int defaultval) {
 
 DEF_FINDER(find_free_line, line_index_t, !line_bytemap[where], -1);
 DEF_FINDER(find_used_line, line_index_t, line_bytemap[where], end);
+
+/* Try to find a page which could fit a new object. This should be
+ * be called before the caller locks and calls
+ * try_allocate_small_from_pages, to minimise the time spent locking. */
+void pre_search_for_small_space(sword_t nbytes, int page_type,
+                                struct allocator_state *state, page_index_t end) {
+  sword_t nlines = ALIGN_UP(nbytes, LINE_SIZE) / LINE_SIZE;
+  for (page_index_t where = state->page; where < end; where++) {
+    if (page_bytes_used(where) <= GENCGC_PAGE_BYTES - nbytes &&
+        !target_pages[where] &&
+        ((state->allow_free_pages && page_free_p(where)) ||
+         (page_table[where].type == page_type &&
+          page_table[where].gen != PSEUDO_STATIC_GENERATION))) {
+      line_index_t first_line = address_line(page_address(where));
+      line_index_t last_line = address_line(page_address(where + 1));
+      line_index_t chunk_start = find_free_line(first_line, last_line);
+      if (chunk_start == -1) continue;
+      line_index_t chunk_end = find_used_line(chunk_start, last_line);
+      if (chunk_end - chunk_start >= nlines) {
+        state->page = where;
+        return;
+      }
+    }
+  }
+}
 
 /* Try to find space to fit a new object in the lines between `start`
  * and `end`. Updates `region` and returns true if we succeed, keeps
@@ -237,12 +262,12 @@ DEF_FINDER(find_used_page, page_index_t, !page_free_p(where), end);
 
 page_index_t try_allocate_large(uword_t nbytes,
                                 int page_type, generation_index_t gen,
-                                page_index_t *start, page_index_t end,
+                                struct allocator_state *start, page_index_t end,
                                 uword_t *largest_hole) {
   gc_assert(gen != SCRATCH_GENERATION);
   uword_t pages_needed = ALIGN_UP(nbytes, GENCGC_PAGE_BYTES) / GENCGC_PAGE_BYTES;
   uword_t remainder = nbytes % GENCGC_PAGE_BYTES;
-  page_index_t where = *start;
+  page_index_t where = start->page;
   uword_t largest_hole_seen = 0;
   while (1) {
     page_index_t chunk_start = find_free_page(where, end);
@@ -260,7 +285,7 @@ page_index_t try_allocate_large(uword_t nbytes,
         set_page_scan_start_offset(p,
                                    GENCGC_PAGE_BYTES * (p - chunk_start));
       }
-      *start = chunk_start + pages_needed;
+      start->page = chunk_start + pages_needed;
       bytes_allocated += nbytes;
       generations[gen].bytes_allocated += nbytes;
       if (last_page + 1 > next_free_page) next_free_page = last_page + 1;
