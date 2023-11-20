@@ -15,6 +15,7 @@ extern bool compacting;
 extern void compactor_init();
 extern void consider_compaction(generation_index_t gen);
 extern void run_compaction(_Atomic(uword_t) *copy_meter, _Atomic(uword_t) *fix_meter);
+extern void update_compacting_stats(generation_index_t gen);
 
 /* Tracing/logging interface */
 extern unsigned char *target_pages;

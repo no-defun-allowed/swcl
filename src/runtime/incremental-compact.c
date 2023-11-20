@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <sys/time.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "os.h"
 #include "gc.h"
@@ -41,6 +42,8 @@ float page_overhead_threshold = 1.3;
 float page_utilisation_threshold = 0.5;
 /* Maximum number of bytes to copy in one collection. */
 uword_t bytes_to_copy = 30000000;
+/* Maximum survival rate of gen0 to perform proactive compaction. */
+float gen0_proactive_survival_threshold = 0.30;
 /* Minimum generation to consider compacting when collecting. */
 generation_index_t minimum_compact_gen = 1;
 /* To force compacting GC or not. Set by prepare_dynamic_space_for_final_gc. */
@@ -98,11 +101,26 @@ static void pick_targets() {
   }
 }
 
+static void pick_proactive_targets() {
+  for (page_index_t p = 0; p < page_table_pages; p++)
+    if (!page_single_obj_p(p) && !page_free_p(p))
+      target_pages[p] = 1;
+}
+
+static uword_t gen0_bytes_allocated;
+static float gen0_survival_rate = 1.0;
+
 void consider_compaction(generation_index_t gen) {
+  if (gen == 0)
+    gen0_bytes_allocated = generations[0].bytes_allocated;
   if (gen >= minimum_compact_gen && should_compact("Enabling remset")) {
     compacting = 1;
     target_generation = gen;
     pick_targets();
+  } else if (gen == 0 && gen0_survival_rate < gen0_proactive_survival_threshold) {
+    compacting = 1;
+    target_generation = 0;
+    pick_proactive_targets();
   } else {
     compacting = 0;
   }
@@ -197,6 +215,39 @@ static void move_objects() {
   if (force_compaction) fprintf(stderr, "Forced compaction moved %ld pages\n", pages_moved);
 }
 
+static void move_proactive_objects() {
+  line_index_t cursor = 0, limit = address_line(page_address(next_free_page));
+  unsigned char *allocation = (unsigned char*)allocation_bitmap;
+  while (cursor < limit) {
+    /* Find another line to copy. */
+    unsigned char *next_line = memchr(line_bytemap + cursor, ENCODE_GEN(0), limit - cursor);
+    if (!next_line) return;
+    line_index_t l = next_line - line_bytemap;
+    page_index_t p = find_page_index(line_address(l));
+    if (!target_pages[p] || page_single_obj_p(p)) {
+      cursor = address_line(page_address(p + 1));
+      continue;
+    }
+    /* Now we have a line in gen0, so copy it. */
+    for (int i = 0; i < 8; i++)
+      if (allocation[l] & (1 << i)) {
+        lispobj *where = (lispobj*)line_address(l) + 2 * i;
+        lispobj bogus = compute_lispobj(where);
+        scavenge(&bogus, 1);
+      }
+    /* Free the line. */
+    allocation[l] = line_bytemap[l] = 0;
+    set_page_bytes_used(p, page_bytes_used(p) - LINE_SIZE);
+    generations[0].bytes_allocated -= LINE_SIZE;
+    bytes_allocated -= LINE_SIZE;
+    if (page_words_used(p) == 0) {
+      page_table[p].type = FREE_PAGE_FLAG;
+      page_table[p].scan_start_offset_ = 0;
+    }
+    cursor = l + 1;
+  }
+}
+
 /* Fix up the address of a slot, when the object containing the slot
  * may have been forwarded. */
 static inline lispobj *forward_slot(lispobj *slot, lispobj *source) {
@@ -280,7 +331,11 @@ void run_compaction(_Atomic(uword_t) *copy_meter, _Atomic(uword_t) *fix_meter) {
      * Not likely, but it's a cheap test which avoids effort. */
     if (should_compact("Performing compaction")) {
       apply_pins();
-      METER(copy_meter, move_objects());
+      if (target_generation == 0) {
+        METER(copy_meter, move_proactive_objects());
+      } else {
+        METER(copy_meter, move_objects());
+      }
       gc_close_collector_regions(0);
       METER(fix_meter, fix_slots());
       should_compact("I just moved, but still");
@@ -290,4 +345,10 @@ void run_compaction(_Atomic(uword_t) *copy_meter, _Atomic(uword_t) *fix_meter) {
     suballoc_release(&remset_suballocator);
   }
   compacting = 0;
+}
+
+void update_compacting_stats(generation_index_t gen) {
+  if (gen == 0) {
+    gen0_survival_rate = (float)generations[0].bytes_allocated / gen0_bytes_allocated;
+  }
 }

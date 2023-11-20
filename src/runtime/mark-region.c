@@ -1195,6 +1195,7 @@ void mr_collect_garbage(bool raise) {
     reset_alloc_start_pages(true);
     METER(compact, run_compaction(&meters.copy, &meters.fix));
   }
+  update_compacting_stats(generation_to_collect);
 #endif
   /* scan_finalizers checks forwarding pointers, so we need to
    * ensure it is called after compaction. */
