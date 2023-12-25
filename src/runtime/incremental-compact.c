@@ -14,6 +14,7 @@
 #include "genesis/static-symbols.h"
 #include "genesis/fdefn.h"
 #include "mark-region.h"
+#include "gc-thread-pool.h"
 
 #include "genesis/closure.h"
 #include "genesis/gc-tables.h"
@@ -48,8 +49,6 @@ bool force_compaction = 0;
 
 static generation_index_t target_generation;
 /* A queue of interesting slots. */
-static struct Qblock *remset;
-static lock_t remset_lock = LOCK_INITIALIZER;
 static struct suballocator remset_suballocator = SUBALLOCATOR_INITIALIZER("compaction remset");
 bool compacting;
 unsigned char *target_pages;
@@ -115,19 +114,6 @@ void consider_compaction(generation_index_t gen) {
 static inline lispobj tag_source(lispobj *where, enum source s) { return (lispobj)where | (lispobj)s; }
 static inline enum source source_from_tagged(lispobj t) { return t & 7; }
 static inline lispobj *slot_from_tagged(lispobj t) { return (lispobj*)(t &~ 7); }
-/* Each tracing thread records sources into thread-local blocks, like they
- * do with grey objects. */
-static _Thread_local struct Qblock *output_block = NULL;
-
-void commit_thread_local_remset() {
-  if (output_block && output_block->count) {
-    acquire_lock(&remset_lock);
-    output_block->next = remset;
-    remset = output_block;
-    release_lock(&remset_lock);
-  }
-  output_block = NULL;
-}
 
 /* We need to know which object a slot resides in for two reasons:
  * - If the object has been moved, we need to adjust the location of
@@ -139,12 +125,15 @@ void commit_thread_local_remset() {
  * prefer not to.
  */
 void log_relevant_slot(lispobj *slot, lispobj *source, enum source source_type) {
-  if (!output_block || output_block->count == QBLOCK_CAPACITY) {
-    commit_thread_local_remset();
-    output_block = suballoc_allocate(&remset_suballocator);
+#define remset collector_tls->remset
+  if (!remset || remset->count == QBLOCK_CAPACITY) {
+    struct Qblock *next = suballoc_allocate(&remset_suballocator);
+    next->next = remset;
+    remset = next;
   }
-  output_block->elements[output_block->count++] = tag_source(slot, source_type);
-  output_block->elements[output_block->count++] = (lispobj)source;
+  remset->elements[remset->count++] = tag_source(slot, source_type);
+  remset->elements[remset->count++] = (lispobj)source;
+#undef remset
 }
 
 /* Compacting */
@@ -156,12 +145,12 @@ static void apply_pins() {
 }
 
 static void move_objects() {
-  /* Note that this function is very un-thread-safe; list linearisation
-   * can cause a thread to copy any objects. But if it weren't for list
-   * linearisation, no synchronisation between threads mightn't be needed, as
-   * each thread would be confined to the pages it claimed.
-   * But early experiements in parallel copying suggested we're bottlenecked
-   * by refilling TLABs too. */
+  /* Note that this function is very un-thread-safe; for example list
+   * linearisation can cause a thread to copy any objects. But if it
+   * weren't for list linearisation, no synchronisation between
+   * threads mightn't be needed, as each thread would be confined to
+   * the pages it claimed. But early experiements in parallel copying
+   * suggested we're bottlenecked by refilling TLABs too. */
   uword_t pages_moved = 0;
   unsigned char *allocation = (unsigned char*)allocation_bitmap;
   for (page_index_t p = 0; p < page_table_pages; p++)
@@ -268,15 +257,18 @@ static void fix_slot(lispobj *slot, lispobj *source, enum source source_type) {
 
 static void fix_slots() {
   __attribute__((unused)) int c = 0;
-  for (; remset; remset = remset->next) {
-    for (int n = 0; n < remset->count; n += 2) {
-      lispobj *slot = slot_from_tagged(remset->elements[n]),
-              *source = (lispobj*)remset->elements[n + 1];
-      enum source source_type = source_from_tagged(remset->elements[n]);
-      fix_slot(slot, source, source_type);
-      if (n + FIX_PREFETCH_DISTANCE < remset->count)
-        __builtin_prefetch(slot_from_tagged(remset->elements[n]));
-      c++;
+  for (uword_t thread = 0; thread < gc_threads; thread++) {
+    struct Qblock *remset = collector_tlses[thread].remset;
+    for (; remset; remset = remset->next) {
+      for (int n = 0; n < remset->count; n += 2) {
+        lispobj *slot = slot_from_tagged(remset->elements[n]),
+                *source = (lispobj*)remset->elements[n + 1];
+        enum source source_type = source_from_tagged(remset->elements[n]);
+        fix_slot(slot, source, source_type);
+        if (n + FIX_PREFETCH_DISTANCE < remset->count)
+          __builtin_prefetch(slot_from_tagged(remset->elements[n]));
+        c++;
+      }
     }
   }
 }
@@ -293,7 +285,8 @@ void run_compaction(_Atomic(uword_t) *copy_meter, _Atomic(uword_t) *fix_meter) {
       should_compact("I just moved, but still");
     }
     memset(target_pages, 0, page_table_pages);
-    remset = NULL;
+    for (uword_t i = 0; i < gc_threads; i++)
+      collector_tlses[i].remset = NULL;
     suballoc_release(&remset_suballocator);
   }
   compacting = 0;

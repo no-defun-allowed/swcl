@@ -1206,9 +1206,6 @@ void mr_collect_garbage(bool raise) {
 #if ENABLE_COMPACTION
   if (compacting) {
     meters.compacts++;
-    /* This isn't a lot of work to wake up every thread for. Perhaps
-     * we could snoop TLS of each GC thread instead. */
-    run_on_thread_pool(commit_thread_local_remset);
     reset_alloc_start_pages(true);
     METER(compact, run_compaction(&meters.copy, &meters.fix));
   }
