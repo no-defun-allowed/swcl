@@ -425,6 +425,8 @@ static void add_words_used(void *where, uword_t count) {
     }
     if (byte_count)
       set_page_bytes_used(p, byte_count);
+  } else {
+    collector_tls->words[p] += count;
   }
 }
 
@@ -432,6 +434,8 @@ static void mark_cons_line(struct cons *c) {
   /* CONS cells never span lines, because they are aligned on
    * cons pages. */
   line_bytemap[address_line(c)] = MARK_GEN(line_bytemap[address_line(c)]);
+  page_index_t p = find_page_index(c);
+  collector_tls->words[p] += 2;
 }
 static void mark_lines(lispobj *p) {
   uword_t word_count = object_size(p);

@@ -50,10 +50,13 @@ void thread_pool_init() {
   }
 
   collector_tlses = aligned_alloc(CACHE_LINE_SIZE, sizeof(struct collector_tls) * gc_threads);
+  int pages = dynamic_space_size / GENCGC_PAGE_BYTES;
   if (!collector_tlses)
     lose("Failed to allocate GC thread TLSes");
-  for (uword_t i = 0; i < gc_threads; i++)
+  for (uword_t i = 0; i < gc_threads; i++) {
     collector_tlses[i].remset = NULL;
+    collector_tlses[i].words = successful_malloc(sizeof(page_words_t) * pages);
+  }
 
   for (uword_t i = 0; i < helper_threads; i++) {
     pthread_t thread;
