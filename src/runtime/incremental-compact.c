@@ -167,16 +167,16 @@ static void move_objects() {
               scavenge(&bogus, 1);
             }
       /* Free all lines we just copied from. */
-      uword_t decrement = 0;
       char *allocation = (char*)allocation_bitmap;
       for_lines_in_page (l, p)
         if (DECODE_GEN(line_bytemap[l]) == target_generation) {
           line_bytemap[l] = 0;
           allocation[l] = 0;
-          decrement++;
         }
-      set_page_bytes_used(p, page_bytes_used(p) - LINE_SIZE * decrement);
-      generations[target_generation].bytes_allocated -= LINE_SIZE * decrement;
+      uword_t decrement = N_WORD_BYTES * small_object_words[target_generation][p];
+      small_object_words[target_generation][p] = 0;
+      set_page_bytes_used(p, page_bytes_used(p) - decrement);
+      generations[target_generation].bytes_allocated -= decrement;
       bytes_allocated -= LINE_SIZE * decrement;
       if (page_words_used(p) == 0) {
         set_page_need_to_zero(p, 1);

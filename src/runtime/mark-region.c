@@ -42,14 +42,15 @@
 #endif
 
 /* The idea of the mark-region collector is to avoid copying where
- * possible, and instead reclaim as much memory in-place as possible.
+ * possible, and instead reclaim as much memory in place.
  * The result is that we save time on copying objects (especially leaf
  * objects), and parallelisation is easier.
  * The design is loosely inspired by the Immix collector designed by
  * Blackburn and McKinley, mostly in being able to reclaim both smaller
- * lines and larger pages. But we plan to have a separate compaction
- * phase, rather than copying and marking in one pass, to make parallel
- * compacting easier, and to enable concurrent marking. */
+ * lines and larger pages. But we have a separate compaction
+ * phase in incremental-compact.c, rather than copying and marking
+ * in one pass, which makes parallel tracing easier allows for concurrent
+ * marking without concurrent copying. */
 
 /* Metering */
 static struct {
@@ -91,11 +92,11 @@ static uword_t get_time() {
   return t.tv_sec * 1000000 + t.tv_nsec/1000;
 }
 
-static void allocate_bitmap(uword_t **bitmap, uword_t size,
-                            const char *description) {
-  *bitmap = calloc(size, 1);
-  if (!*bitmap)
+static void *allocate_bitmap(uword_t size, const char *description) {
+  void *bitmap = calloc(size, 1);
+  if (!bitmap)
     lose("Failed to allocate %s (of %lu bytes)", description, size);
+  return bitmap;
 }
 
 /* Initialisation */
@@ -104,13 +105,17 @@ _Atomic(uword_t) *mark_bitmap;
 unsigned char *line_bytemap;
 line_index_t line_count;
 uword_t mark_bitmap_size;
+page_words_t *small_object_words[HIGHEST_NORMAL_GENERATION + 1];
 
 static void allocate_bitmaps() {
-  mark_bitmap_size = bitmap_size(dynamic_space_size / GENCGC_PAGE_BYTES);
-  allocate_bitmap(&allocation_bitmap, mark_bitmap_size, "allocation bitmap");
-  allocate_bitmap((uword_t**)&mark_bitmap, mark_bitmap_size, "mark bitmap");
+  page_index_t pages = dynamic_space_size / GENCGC_PAGE_BYTES;
+  mark_bitmap_size = bitmap_size(pages);
+  allocation_bitmap = allocate_bitmap(mark_bitmap_size, "allocation bitmap");
+  mark_bitmap = allocate_bitmap(mark_bitmap_size, "mark bitmap");
   line_count = dynamic_space_size / LINE_SIZE;
-  allocate_bitmap((uword_t**)&line_bytemap, line_count, "line bytemap");
+  line_bytemap = allocate_bitmap(line_count, "line bytemap");
+  for (generation_index_t g = 0; g <= HIGHEST_NORMAL_GENERATION; g++)
+    small_object_words[g] = allocate_bitmap(sizeof(page_words_t) * pages, "page usage table");
 }
 
 uword_t lines_used() {
@@ -261,6 +266,7 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       page_bytes_t used = page_bytes_used(where), claimed = GENCGC_PAGE_BYTES - used;
       bytes_allocated += claimed;
       generations[gen].bytes_allocated += claimed;
+      small_object_words[gen][where] += claimed / N_WORD_BYTES;
       set_page_bytes_used(where, GENCGC_PAGE_BYTES);
       if (where + 1 > next_free_page) next_free_page = where + 1;
       return true;
@@ -417,15 +423,20 @@ static void recycle_qblock(struct Qblock *block) {
 static void add_words_used(void *where, uword_t count) {
   page_index_t p = find_page_index(where);
   if (page_single_obj_p(p)) {
+    /* Only one thread can possibly trace an object, and a large object
+     * has its own pages, so update these pages without synchronisation. */
     uword_t byte_count = count * N_WORD_BYTES;
     while (byte_count >= GENCGC_PAGE_BYTES) {
       set_page_bytes_used(p, GENCGC_PAGE_BYTES);
       byte_count -= GENCGC_PAGE_BYTES;
       p++;
     }
-    if (byte_count)
+    if (byte_count) {
       set_page_bytes_used(p, byte_count);
+    }
   } else {
+    /* Otherwise update the thread-local buffer, which will be added to
+     * the global statistics after tracing. */
     collector_tls->words[p] += count;
   }
 }
@@ -517,7 +528,7 @@ static void trace_object(lispobj object) {
     mark(c->car, &c->car, SOURCE_NORMAL);
     lispobj next = c->cdr;
     /* "Tail-recurse" on the cdr, unless we're recording dirty cards.
-     * This saves us from continuously writing into grey blocks,
+     * This saves us from continuously writing cdrs into grey blocks,
      * but loses memory parallelism. */
     if (is_lisp_pointer(next)) {
       if (!dirty_generation_source) {
@@ -630,6 +641,22 @@ static void mark_weak(lispobj obj) { mark(obj, NULL, SOURCE_NORMAL); }
 
 static void __attribute__((noinline)) trace_everything() {
   while (parallel_trace_step()) test_weak_triggers(pointer_survived_gc_yet, mark_weak);
+  /* Update small object statistics */
+  if (generation_to_collect != PSEUDO_STATIC_GENERATION) {
+    for (unsigned int i = 0; i < gc_threads; i++)
+      for (page_index_t p = 0; p < next_free_page; p++) {
+        uword_t bytes = collector_tlses[i].words[p] * N_WORD_BYTES;
+        set_page_bytes_used(p, page_bytes_used(p) + bytes);
+        generations[generation_to_collect].bytes_allocated += bytes;
+        small_object_words[generation_to_collect][p] += collector_tlses[i].words[p];
+        bytes_allocated += bytes;
+        collector_tlses[i].words[p] = 0;
+      }
+  } else {
+    for (unsigned int i = 0; i < gc_threads; i++)
+      for (page_index_t p = 0; p < next_free_page; p++)
+        collector_tlses[i].words[p] = 0;
+  }
 }
 
 /* Conservative pointer scanning */
@@ -699,8 +726,7 @@ static lispobj *find_object(uword_t address, uword_t start) {
   if (page_free_p(p)) return 0;
   if (page_table[p].type == PAGE_TYPE_CONS) {
     if (fresh) return np;
-    /* CONS cells are always aligned, and the mutator is allowed to be lazy
-     * w.r.t putting down allocation bits, so just use alignment. */
+    /* CONS cells are always aligned, so just use alignment. */
     return allocation_bit_marked(np) ? np : 0;
   } else {
     if (fresh) compute_allocations(np);
@@ -770,24 +796,20 @@ static void local_smash_weak_pointers()
 
 static void reset_statistics() {
   traced = 0;
+  generation_index_t gen = generation_to_collect;
+  if (gen == PSEUDO_STATIC_GENERATION) return;
   for (page_index_t p = 0; p <= page_table_pages; p++) {
-    if (page_single_obj_p(p) &&
-        (page_table[p].gen == generation_to_collect || generation_to_collect == PSEUDO_STATIC_GENERATION)) {
-      generations[page_table[p].gen].bytes_allocated -= page_bytes_used(p);
+    if (page_single_obj_p(p) && page_table[p].gen == gen) {
+      generations[gen].bytes_allocated -= page_bytes_used(p);
       set_page_bytes_used(p, 0);
+    } else {
+      uword_t bytes = (uword_t)(small_object_words[gen][p]) * N_WORD_BYTES;
+      generations[gen].bytes_allocated -= bytes;
+      set_page_bytes_used(p, page_bytes_used(p) - bytes);
+      bytes_allocated -= bytes;
+      small_object_words[gen][p] = 0;
     }
   }
-}
-
-/* Pulled out these functions to clue auto-vectorisation. */
-CPU_SPLIT
-static page_bytes_t count_dead_bytes(page_index_t p) {
-  unsigned char dead = ENCODE_GEN(generation_to_collect);
-  page_bytes_t n = 0;
-  unsigned char *lines = line_bytemap;
-  for_lines_in_page(l, p)
-    if (UNFRESHEN_GEN(lines[l]) == dead) n++;
-  return n * LINE_SIZE;
 }
 
 CPU_SPLIT
@@ -817,9 +839,7 @@ static _Atomic(page_index_t) last_page_processed;
          (limit = claim + PAGES_CLAIMED_PER_THREAD, limit = (limit >= page_table_pages) ? page_table_pages - 1 : limit, 1))
 
 static void sweep_lines() {
-  /* Free this gen, and work out how much space is used on each small
-   * page. */
-  os_vm_size_t total_decrement = 0;
+  /* Free unmarked lines in this generation. */
   page_index_t claim, limit;
   for_each_claim (claim, limit) {
     for (page_index_t p = claim; p < limit; p++) {
@@ -828,30 +848,17 @@ static void sweep_lines() {
           unsigned char *marks = (unsigned char*)mark_bitmap,
                         *allocs = (unsigned char*)allocation_bitmap,
                         *lines = line_bytemap;
-          page_bytes_t used = 0;
           for_lines_in_page(l, p) {
             allocs[l] = marks[l];
             lines[l] = IS_MARKED(lines[l]) ? UNMARK_GEN(lines[l]) : 0;
-            if (lines[l]) {
-              generations[DECODE_GEN(lines[l])].bytes_allocated += LINE_SIZE;
-              used += LINE_SIZE;
-            }
             marks[l] = 0;
           }
-          set_page_bytes_used(p, used);
         } else if (page_table[p].gen != PSEUDO_STATIC_GENERATION) {
-          page_bytes_t decrement = count_dead_bytes(p);
-          if (page_bytes_used(p) < decrement)
-            lose("Decrement of %d on page #%ld, with only %d bytes to spare.",
-                 decrement, p, page_bytes_used(p));
-          total_decrement += decrement;
-          set_page_bytes_used(p, page_bytes_used(p) - decrement);
           sweep_small_page(p);
         }
       }
     }
   }
-  atomic_fetch_add(&generations[generation_to_collect].bytes_allocated, -total_decrement);
 }
 
 static void reset_pinned_pages() {
@@ -904,10 +911,6 @@ static void __attribute__((noinline)) sweep() {
   cull_weak_hash_tables(mr_alivep_funs);
   /* Reset values we're about to recompute */
   bytes_allocated = 0;
-  /* We recompute bytes allocated from scratch when doing full GC */
-  if (generation_to_collect == PSEUDO_STATIC_GENERATION)
-    for (generation_index_t g = 0; g <= PSEUDO_STATIC_GENERATION; g++)
-      generations[g].bytes_allocated = 0;
   /* Currently I haven't made full GC sweeping parallel, but as you have
    * to trigger that manually, its performance isn't that important. */
   last_page_processed = 0;
@@ -1166,9 +1169,12 @@ static void CPU_SPLIT raise_survivors(void) {
   unsigned char line = ENCODE_GEN((unsigned char)gen);
   unsigned char target = ENCODE_GEN((unsigned char)gen + 1);
   for (page_index_t p = 0; p < next_free_page; p++)
-    if (!page_free_p(p))
+    if (!page_free_p(p)) {
       for_lines_in_page(l, p)
         bytemap[l] = (bytemap[l] == line) ? target : bytemap[l];
+      small_object_words[gen + 1][p] = small_object_words[gen][p];
+      small_object_words[gen][p] = 0;
+    }
   for (page_index_t p = 0; p < next_free_page; p++)
     if (page_table[p].gen == gen && page_single_obj_p(p))
       page_table[p].gen++;
@@ -1347,27 +1353,4 @@ void count_line_values(char *why) {
   for (int n = 0; n < 256; n++)
     if (counts[n])
       fprintf(stderr, "%x: %d\n", n, counts[n]);
-}
-
-/* Check that page occupancy makes sense. (Put this in verify?) */
-void check_weird_pages() {
-  for (page_index_t p = 0; p < page_table_pages; p++)
-    if (page_words_used(p) > GENCGC_PAGE_WORDS)
-      fprintf(stderr, "Page #%ld has %d words used\n", p, page_words_used(p));
-  bool fail = 0;
-  for (page_index_t p = 0; p < page_table_pages; p++)
-    if (!page_single_obj_p(p)) {
-      page_bytes_t size = 0;
-      for_lines_in_page(l, p) {
-        if (line_bytemap[l]) {
-          size += LINE_SIZE;
-        }
-      }
-      if (size != page_bytes_used(p)) {
-        fail = 1;
-        fprintf(stderr, "Page #%lu (%x %d) has %d bytes, not %d\n",
-                p, page_table[p].type, page_table[p].gen, size, page_bytes_used(p));
-      }
-      if (fail) lose("Errors checking line/page usage, as above.");
-    }
 }

@@ -1905,6 +1905,16 @@ static void check_free_pages()
                     lose("You call page #%ld free, despite the fact it's obviously got allocation bits.", p);
 }
 
+static void check_weird_pages() {
+  bool fail = 0;
+  for (page_index_t p = 0; p < page_table_pages; p++)
+    if (page_words_used(p) > GENCGC_PAGE_WORDS) {
+      fprintf(stderr, "Page #%ld has %d words used\n", p, page_words_used(p));
+      fail = 1;
+    }
+  if (fail) lose("Page usage doesn't make sense");
+}
+
 /* Return the number of verification errors found.
  * You might want to use that as a deciding factor for dump the heap
  * to a file (which takes time, and generally isn't needed).
@@ -1976,6 +1986,7 @@ int verify_heap(__attribute__((unused)) lispobj* cur_thread_approx_stackptr,
     parallel_walk_generation((uword_t(*)(lispobj*,lispobj*,uword_t))verify_range,
                              -1, (uword_t)&state);
     check_free_pages();
+    check_weird_pages();
     if (verbose && state.nerrors==0) fprintf(stderr, " passed\n");
  out:
     if (state.nerrors && !(flags & VERIFY_DONT_LOSE)) {
