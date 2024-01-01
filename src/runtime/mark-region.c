@@ -76,7 +76,7 @@ void mr_print_meters() {
           "  %ld sweep (%ld lines %ld pages) %ld compact (%ld copy %ld fix)\n"
           "  %ld raise; %ldB fresh %ldpg pinned\n",
           collection,
-          collection ? 100.0 *  (float)meters.compacts / collection : 0.0,
+          collection ? 100.0 * (float)meters.compacts / collection : 0.0,
           NORM(consider), NORM(scavenge), NORM(prefix),
           NORM(trace), NORM(trace_alive), NORM(trace_running),
           NORM(sweep), NORM(sweep_lines), NORM(sweep_pages),
@@ -441,21 +441,21 @@ static void add_words_used(void *where, uword_t count) {
   }
 }
 
-static void mark_cons_line(struct cons *c) {
+static void mark_cons_line(struct cons *c, bool add_words) {
   /* CONS cells never span lines, because they are aligned on
    * cons pages. */
   line_bytemap[address_line(c)] = MARK_GEN(line_bytemap[address_line(c)]);
   page_index_t p = find_page_index(c);
-  collector_tls->words[p] += 2;
+  if (add_words) collector_tls->words[p] += 2;
 }
-static void mark_lines(lispobj *p) {
+static void mark_lines(lispobj *p, bool add_words) {
   uword_t word_count = object_size(p);
   if (!page_single_obj_p(find_page_index(p))) {
     line_index_t first = address_line(p), last = address_line(p + word_count - 1);
     for (line_index_t line = first; line <= last; line++)
       line_bytemap[line] = MARK_GEN(line_bytemap[line]);
   }
-  add_words_used(p, word_count);
+  if (add_words) add_words_used(p, word_count);
 }
 
 /* Generation of the object being scavenged,
@@ -546,9 +546,9 @@ static void trace_object(lispobj object) {
         if (!pointer_survived_gc_yet(next)) {
           if (set_mark_bit(next)) {
             if (listp(next))
-              mark_cons_line(CONS(next));
+              mark_cons_line(CONS(next), true);
             else
-              mark_lines(np);
+              mark_lines(np, true);
             object = next;
             goto again;
           }
@@ -613,9 +613,9 @@ static void trace_step() {
        * an object (when we also have to read data) is better than doing it
        * while marking a pointer (when we don't have to read data). */
       if (listp(obj))
-        mark_cons_line(CONS(obj));
+        mark_cons_line(CONS(obj), true);
       else
-        mark_lines(native_pointer(obj));
+        mark_lines(native_pointer(obj), true);
       trace_object(obj);
     }
     recycle_qblock(block);
@@ -641,22 +641,6 @@ static void mark_weak(lispobj obj) { mark(obj, NULL, SOURCE_NORMAL); }
 
 static void __attribute__((noinline)) trace_everything() {
   while (parallel_trace_step()) test_weak_triggers(pointer_survived_gc_yet, mark_weak);
-  /* Update small object statistics */
-  if (generation_to_collect != PSEUDO_STATIC_GENERATION) {
-    for (unsigned int i = 0; i < gc_threads; i++)
-      for (page_index_t p = 0; p < next_free_page; p++) {
-        uword_t bytes = collector_tlses[i].words[p] * N_WORD_BYTES;
-        set_page_bytes_used(p, page_bytes_used(p) + bytes);
-        generations[generation_to_collect].bytes_allocated += bytes;
-        small_object_words[generation_to_collect][p] += collector_tlses[i].words[p];
-        bytes_allocated += bytes;
-        collector_tlses[i].words[p] = 0;
-      }
-  } else {
-    for (unsigned int i = 0; i < gc_threads; i++)
-      for (page_index_t p = 0; p < next_free_page; p++)
-        collector_tlses[i].words[p] = 0;
-  }
 }
 
 /* Conservative pointer scanning */
@@ -799,16 +783,40 @@ static void reset_statistics() {
   generation_index_t gen = generation_to_collect;
   if (gen == PSEUDO_STATIC_GENERATION) return;
   for (page_index_t p = 0; p <= page_table_pages; p++) {
-    if (page_single_obj_p(p) && page_table[p].gen == gen) {
-      generations[gen].bytes_allocated -= page_bytes_used(p);
-      set_page_bytes_used(p, 0);
+    if (page_single_obj_p(p)) {
+      if (page_table[p].gen == gen) {
+        generations[gen].bytes_allocated -= page_bytes_used(p);
+        set_page_bytes_used(p, 0);
+      }
     } else {
       uword_t bytes = (uword_t)(small_object_words[gen][p]) * N_WORD_BYTES;
+      if (p == 3072) fprintf(stderr, "sub %d\n", small_object_words[gen][p]);
       generations[gen].bytes_allocated -= bytes;
       set_page_bytes_used(p, page_bytes_used(p) - bytes);
       bytes_allocated -= bytes;
       small_object_words[gen][p] = 0;
     }
+  }
+}
+
+static void update_small_page_statistics() {
+  if (generation_to_collect != PSEUDO_STATIC_GENERATION) {
+    /* Update small object statistics */
+    for (unsigned int i = 0; i < gc_threads; i++)
+      for (page_index_t p = 0; p < next_free_page; p++) {
+        uword_t bytes = collector_tlses[i].words[p] * N_WORD_BYTES;
+        if (p == 3072) fprintf(stderr, "gen %d bytes %ld\n", generation_to_collect, bytes);
+        set_page_bytes_used(p, page_bytes_used(p) + bytes);
+        generations[generation_to_collect].bytes_allocated += bytes;
+        small_object_words[generation_to_collect][p] += collector_tlses[i].words[p];
+        bytes_allocated += bytes;
+        collector_tlses[i].words[p] = 0;
+      }
+  } else {
+    /* Clear out word counts for the next GC */
+    for (unsigned int i = 0; i < gc_threads; i++)
+      for (page_index_t p = 0; p < next_free_page; p++)
+        collector_tlses[i].words[p] = 0;
   }
 }
 
@@ -908,6 +916,7 @@ static void __attribute__((noinline)) sweep() {
   /* Handle weak pointers. */
   local_smash_weak_pointers();
   gc_dispose_private_pages();
+  update_small_page_statistics();
   cull_weak_hash_tables(mr_alivep_funs);
   /* Reset values we're about to recompute */
   bytes_allocated = 0;
@@ -985,7 +994,9 @@ void mr_preserve_leaf(lispobj obj) {
   if (is_lisp_pointer(obj) && in_dynamic_space(obj)) {
     set_mark_bit(obj);
     lispobj *n = native_pointer(obj);
-    mark_lines(n);
+    /* We just allocated the leaf object, so it was already counted
+     * in heap usage. But we still have to mark its lines as live. */
+    mark_lines(n, false);
   }
 }
 
@@ -1172,7 +1183,7 @@ static void CPU_SPLIT raise_survivors(void) {
     if (!page_free_p(p)) {
       for_lines_in_page(l, p)
         bytemap[l] = (bytemap[l] == line) ? target : bytemap[l];
-      small_object_words[gen + 1][p] = small_object_words[gen][p];
+      small_object_words[gen + 1][p] += small_object_words[gen][p];
       small_object_words[gen][p] = 0;
     }
   for (page_index_t p = 0; p < next_free_page; p++)

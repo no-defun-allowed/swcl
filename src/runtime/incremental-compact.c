@@ -177,7 +177,7 @@ static void move_objects() {
       small_object_words[target_generation][p] = 0;
       set_page_bytes_used(p, page_bytes_used(p) - decrement);
       generations[target_generation].bytes_allocated -= decrement;
-      bytes_allocated -= LINE_SIZE * decrement;
+      bytes_allocated -= decrement;
       if (page_words_used(p) == 0) {
         set_page_need_to_zero(p, 1);
 #ifdef LISP_FEATURE_DARWIN_JIT
