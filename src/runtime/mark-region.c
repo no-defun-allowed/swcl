@@ -789,7 +789,6 @@ static void reset_statistics() {
       }
     } else if (gen != PSEUDO_STATIC_GENERATION) {
       uword_t bytes = (uword_t)(small_object_words[gen][p]) * N_WORD_BYTES;
-      if (p == 3072) fprintf(stderr, "sub %d\n", small_object_words[gen][p]);
       generations[gen].bytes_allocated -= bytes;
       set_page_bytes_used(p, page_bytes_used(p) - bytes);
       bytes_allocated -= bytes;
@@ -804,7 +803,6 @@ static void update_small_page_statistics() {
     for (unsigned int i = 0; i < gc_threads; i++)
       for (page_index_t p = 0; p < next_free_page; p++) {
         uword_t bytes = collector_tlses[i].words[p] * N_WORD_BYTES;
-        if (p == 3072) fprintf(stderr, "gen %d bytes %ld\n", generation_to_collect, bytes);
         set_page_bytes_used(p, page_bytes_used(p) + bytes);
         generations[generation_to_collect].bytes_allocated += bytes;
         small_object_words[generation_to_collect][p] += collector_tlses[i].words[p];
@@ -856,8 +854,14 @@ static void sweep_lines() {
                         *allocs = (unsigned char*)allocation_bitmap,
                         *lines = line_bytemap;
           for_lines_in_page(l, p) {
+            /* We can't free any lines here. We don't update heap
+             * usage in full GC, which overestimates heap usage
+             * after GC. If we did free lines, the allocator could use the
+             * lines and end up with more used bytes on a page than
+             * should be possible, when the allocation is added to the
+             * overestimate. */
             allocs[l] = marks[l];
-            lines[l] = IS_MARKED(lines[l]) ? UNMARK_GEN(lines[l]) : 0;
+            lines[l] = UNMARK_GEN(lines[l]);
             marks[l] = 0;
           }
         } else if (page_table[p].gen != PSEUDO_STATIC_GENERATION) {
@@ -1295,6 +1299,7 @@ void prepare_lines_for_final_gc() {
           new_size += LINE_SIZE;
         }
       }
+      small_object_words[0][p] = new_size / N_WORD_BYTES;
       generations[0].bytes_allocated += new_size;
       set_page_bytes_used(p, new_size);
     }
