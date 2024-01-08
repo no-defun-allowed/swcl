@@ -781,14 +781,13 @@ static void local_smash_weak_pointers()
 static void reset_statistics() {
   traced = 0;
   generation_index_t gen = generation_to_collect;
-  if (gen == PSEUDO_STATIC_GENERATION) return;
   for (page_index_t p = 0; p <= page_table_pages; p++) {
     if (page_single_obj_p(p)) {
-      if (page_table[p].gen == gen) {
+      if (page_table[p].gen == gen || gen == PSEUDO_STATIC_GENERATION) {
         generations[gen].bytes_allocated -= page_bytes_used(p);
         set_page_bytes_used(p, 0);
       }
-    } else {
+    } else if (gen != PSEUDO_STATIC_GENERATION) {
       uword_t bytes = (uword_t)(small_object_words[gen][p]) * N_WORD_BYTES;
       if (p == 3072) fprintf(stderr, "sub %d\n", small_object_words[gen][p]);
       generations[gen].bytes_allocated -= bytes;
@@ -923,10 +922,7 @@ static void __attribute__((noinline)) sweep() {
   /* Currently I haven't made full GC sweeping parallel, but as you have
    * to trigger that manually, its performance isn't that important. */
   last_page_processed = 0;
-  if (generation_to_collect == PSEUDO_STATIC_GENERATION)
-    sweep_lines();
-  else
-    METER(sweep_lines, run_on_thread_pool(sweep_lines));
+  METER(sweep_lines, run_on_thread_pool(sweep_lines));
   METER(sweep_pages, sweep_pages());
 }
 
