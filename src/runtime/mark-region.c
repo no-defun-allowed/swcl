@@ -49,8 +49,8 @@
  * Blackburn and McKinley, mostly in being able to reclaim both smaller
  * lines and larger pages. But we have a separate compaction
  * phase in incremental-compact.c, rather than copying and marking
- * in one pass, which makes parallel tracing easier allows for concurrent
- * marking without concurrent copying. */
+ * in one pass, which makes parallel tracing easier and allows for
+ * concurrent marking without concurrent copying. */
 
 /* Metering */
 static struct {
@@ -783,8 +783,8 @@ static void reset_statistics() {
   generation_index_t gen = generation_to_collect;
   for (page_index_t p = 0; p <= page_table_pages; p++) {
     if (page_single_obj_p(p)) {
-      if (page_table[p].gen == gen || gen == PSEUDO_STATIC_GENERATION) {
-        generations[gen].bytes_allocated -= page_bytes_used(p);
+      if (page_table[p].gen <= gen) {
+        generations[page_table[p].gen].bytes_allocated -= page_bytes_used(p);
         set_page_bytes_used(p, 0);
       }
     } else if (gen != PSEUDO_STATIC_GENERATION) {
@@ -848,15 +848,16 @@ static void sweep_lines() {
   page_index_t claim, limit;
   for_each_claim (claim, limit) {
     for (page_index_t p = claim; p < limit; p++) {
-      if (!page_free_p(p) && !page_single_obj_p(p)) {
+      if (page_free_p(p)) continue;
+      if (!page_single_obj_p(p)) { /* small objects */
         if (generation_to_collect == PSEUDO_STATIC_GENERATION) {
           unsigned char *marks = (unsigned char*)mark_bitmap,
                         *allocs = (unsigned char*)allocation_bitmap,
                         *lines = line_bytemap;
           for_lines_in_page(l, p) {
-            /* We can't free any lines here. We don't update heap
+            /* We can't free any lines now. We don't update heap
              * usage in full GC, which overestimates heap usage
-             * after GC. If we did free lines, the allocator could use the
+             * after GC. If we did free lines now, the allocator could use the
              * lines and end up with more used bytes on a page than
              * should be possible, when the allocation is added to the
              * overestimate. */
@@ -867,6 +868,11 @@ static void sweep_lines() {
         } else if (page_table[p].gen != PSEUDO_STATIC_GENERATION) {
           sweep_small_page(p);
         }
+      } else if (page_table[p].gen <= generation_to_collect) { /* large object */
+        if (page_words_used(p) == 0)
+          allocation_bitmap[mark_bitmap_word_index(page_address(p))] = 0;
+        /* There can only be one mark on a large-object page. */
+        mark_bitmap[mark_bitmap_word_index(page_address(p))] = 0;
       }
     }
   }
@@ -880,35 +886,20 @@ static void reset_pinned_pages() {
   memset(gc_page_pins, 0, page_table_pages);
 }
 
-#define LINES_PER_PAGE (GENCGC_PAGE_BYTES / LINE_SIZE)
 static void __attribute__((noinline)) sweep_pages() {
   /* next_free_page is only maintained for page walking - we
    * reuse partially filled pages, so it's not useful for allocation */
   next_free_page = page_table_pages;
   for (page_index_t p = 0; p < page_table_pages; p++) {
-    /* Rather than clearing marks for every page, we only clear marks for
-     * pages which were live before, as a dead page cannot have any marks
-     * that we need to clear. */
-    if (!page_free_p(p) &&
-        (generation_to_collect == PSEUDO_STATIC_GENERATION ||
-         page_table[p].gen < PSEUDO_STATIC_GENERATION)) {
-      if (page_single_obj_p(p))
-        /* There can only be one mark on a large-object page. */
-        mark_bitmap[mark_bitmap_word_index(page_address(p))] = 0;
-    }
+    if (page_free_p(p)) continue;
     if (page_words_used(p) == 0) {
-      /* Remove allocation bit for the large object here. */
-      if (page_single_obj_p(p))
-        allocation_bitmap[mark_bitmap_word_index(page_address(p))] = 0;
       /* Why is reset_page_flags(p) much slower here? It does other stuff
        * for gencgc, sure, but not that much more stuff. */
       set_page_need_to_zero(p, 1);
       set_page_type(page_table[p], FREE_PAGE_FLAG);
       page_table[p].scan_start_offset_ = 0;
     } else {
-      bytes_allocated += page_bytes_used(p);
-      if (page_single_obj_p(p) &&
-          (page_table[p].gen == generation_to_collect || generation_to_collect == PSEUDO_STATIC_GENERATION))
+      if (page_single_obj_p(p) && page_table[p].gen <= generation_to_collect)
         generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
       next_free_page = p + 1;
     }
