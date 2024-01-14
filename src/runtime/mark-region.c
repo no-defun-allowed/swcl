@@ -1200,11 +1200,11 @@ void mr_pre_gc(generation_index_t generation) {
           bytes_allocated >> 20);
 #endif
   generation_to_collect = generation;
-  reset_statistics();
 #if ENABLE_COMPACTION
   if (generation != PSEUDO_STATIC_GENERATION)
     METER(consider, consider_compaction(generation_to_collect));
 #endif
+  reset_statistics();
 }
 
 void mr_collect_garbage(bool raise) {
