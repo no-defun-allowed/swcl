@@ -38,14 +38,16 @@ static uword_t get_time() {
 
 /* Maximum ratio between pages used and pages "needed" to compact. */
 float page_overhead_threshold = 1.3;
-/* Minimum fraction of bytes used on a page to compact it. */
+/* Maximum fraction of bytes used on a page to compact it. */
 float page_utilisation_threshold = 0.5;
 /* Maximum number of bytes to copy in one collection. */
 uword_t bytes_to_copy = 30000000;
 /* Minimum generation to consider compacting when collecting. */
 generation_index_t minimum_compact_gen = 1;
-/* To force compacting GC or not. Set by prepare_dynamic_space_for_final_gc. */
+/* Whether to force compacting GC or not. Set by prepare_dynamic_space_for_final_gc. */
 bool force_compaction = 0;
+/* Compact more aggressively for debugging. */
+bool compact_a_lot = 0;
 
 static generation_index_t target_generation;
 /* A queue of interesting slots. */
@@ -57,6 +59,12 @@ void compactor_init() {
   target_pages = calloc(dynamic_space_size / GENCGC_PAGE_BYTES, 1);
   if (!target_pages)
     lose("Failed to allocate target pages table");
+  if (compact_a_lot) {
+    page_overhead_threshold = 1.0;
+    page_utilisation_threshold = 1.0;
+    bytes_to_copy = 1000000000;
+    force_compaction = 1;
+  }
 }
 
 /* Deciding how to compact */
