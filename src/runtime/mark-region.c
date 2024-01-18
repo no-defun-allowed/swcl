@@ -806,7 +806,6 @@ static void update_small_page_statistics() {
         set_page_bytes_used(p, page_bytes_used(p) + bytes);
         generations[generation_to_collect].bytes_allocated += bytes;
         small_object_words[generation_to_collect][p] += collector_tlses[i].words[p];
-        bytes_allocated += bytes;
         collector_tlses[i].words[p] = 0;
       }
   } else {
@@ -901,6 +900,7 @@ static void __attribute__((noinline)) sweep_pages() {
     } else {
       if (page_single_obj_p(p) && page_table[p].gen <= generation_to_collect)
         generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
+      bytes_allocated += page_bytes_used(p);
       next_free_page = p + 1;
     }
   }
