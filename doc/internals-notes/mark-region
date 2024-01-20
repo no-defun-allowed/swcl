@@ -89,16 +89,11 @@ being collected, and free each line that is unmarked and in the
 generation being collected, preserving older lines.
 
 Computing occupancy of each page, each generation, and the entire heap
-is also tricky. The current approach, which could be improved upon, is
-to count the number of dead lines on each page, and then decrement the
-occupancy of the page, the heap, and the generation being collected by
-the number of dead bytes found. Another approach would be to count the
-number of live lines on each page, which requires the same amount of
-work, and to also count the number of live lines in the generation
-being collected. In either case, it is only necessary to recompute
-occupancy for the generation being collected, as the collector
-performs no actions that would cause the occupancy of any other
-generation to change.
+is also tricky, moreso when parallelism is involved. The current approach
+(which was redesigned after the initial upstreaming of the mark-region
+GC) is to have each thread count how many words it traced in each
+page in thread-local tables, which are summed after parallel tracing into
+shared tables of how many words of each page belong to each generation.
 
 All the sweeping operations can be (automatically) vectorised, which
 improves performance substantially. Parallelisation also improves
