@@ -802,15 +802,10 @@ static void update_small_page_statistics() {
     /* Update small object statistics */
     for (unsigned int i = 0; i < gc_threads; i++)
       for (page_index_t p = 0; p < next_free_page; p++) {
-        /* XXX: This test shouldn't be necessary, but somehow tracing
-         * manages to find gen0 objects on pseudo-static pages after
-         * SLAD? */
-        if (page_table[p].gen != PSEUDO_STATIC_GENERATION) {
-          uword_t bytes = collector_tlses[i].words[p] * N_WORD_BYTES;
-          set_page_bytes_used(p, page_bytes_used(p) + bytes);
-          generations[generation_to_collect].bytes_allocated += bytes;
-          small_object_words[generation_to_collect][p] += collector_tlses[i].words[p];
-        }
+        uword_t bytes = collector_tlses[i].words[p] * N_WORD_BYTES;
+        set_page_bytes_used(p, page_bytes_used(p) + bytes);
+        generations[generation_to_collect].bytes_allocated += bytes;
+        small_object_words[generation_to_collect][p] += collector_tlses[i].words[p];
         collector_tlses[i].words[p] = 0;
       }
   } else {

@@ -56,6 +56,8 @@ void thread_pool_init() {
   for (uword_t i = 0; i < gc_threads; i++) {
     collector_tlses[i].remset = NULL;
     collector_tlses[i].words = successful_malloc(sizeof(page_words_t) * pages);
+    for (page_index_t p = 0; p < pages; p++)
+      collector_tlses[i].words[p] = 0;
   }
 
   for (uword_t i = 0; i < helper_threads; i++) {
