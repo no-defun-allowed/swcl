@@ -174,29 +174,7 @@ static void move_objects() {
               lispobj bogus = compute_lispobj(where);
               scavenge(&bogus, 1);
             }
-      /* Free all lines we just copied from. */
-      char *allocation = (char*)allocation_bitmap;
-      for_lines_in_page (l, p)
-        if (DECODE_GEN(line_bytemap[l]) == target_generation) {
-          line_bytemap[l] = 0;
-          allocation[l] = 0;
-        }
-      uword_t decrement = N_WORD_BYTES * small_object_words[target_generation][p];
-      small_object_words[target_generation][p] = 0;
-      set_page_bytes_used(p, page_bytes_used(p) - decrement);
-      generations[target_generation].bytes_allocated -= decrement;
-      bytes_allocated -= decrement;
-      if (page_words_used(p) == 0) {
-        set_page_need_to_zero(p, 1);
-#ifdef LISP_FEATURE_DARWIN_JIT
-        reset_page_flags(p);
-#else
-        set_page_type(page_table[p], FREE_PAGE_FLAG);
-        page_table[p].scan_start_offset_ = 0;
-#endif
-      }
     }
-
   if (force_compaction && !lisp_startup_options.noinform)
       fprintf(stderr, "Forced compaction moved %ld pages\n", pages_moved);
 }
@@ -281,7 +259,38 @@ static void fix_slots() {
   }
 }
 
-void run_compaction(_Atomic(uword_t) *copy_meter, _Atomic(uword_t) *fix_meter) {
+static void resweep_moved_lines() {
+  unsigned char *allocation = (unsigned char*)allocation_bitmap;
+  for (page_index_t p = 0; p < page_table_pages; p++) {
+    if (target_pages[p] && !page_single_obj_p(p)) {
+      /* Free all lines we just copied from. */
+      char *allocation = (char*)allocation_bitmap;
+      for_lines_in_page (l, p)
+        if (DECODE_GEN(line_bytemap[l]) == target_generation) {
+          line_bytemap[l] = 0;
+          allocation[l] = 0;
+        }
+      uword_t decrement = N_WORD_BYTES * small_object_words[target_generation][p];
+      small_object_words[target_generation][p] = 0;
+      set_page_bytes_used(p, page_bytes_used(p) - decrement);
+      generations[target_generation].bytes_allocated -= decrement;
+      bytes_allocated -= decrement;
+      if (page_words_used(p) == 0) {
+        set_page_need_to_zero(p, 1);
+#ifdef LISP_FEATURE_DARWIN_JIT
+        reset_page_flags(p);
+#else
+        set_page_type(page_table[p], FREE_PAGE_FLAG);
+        page_table[p].scan_start_offset_ = 0;
+#endif
+      }
+    }
+  }
+}
+
+void run_compaction(_Atomic(uword_t) *copy_meter,
+                    _Atomic(uword_t) *fix_meter,
+                    _Atomic(uword_t) *resweep_meter) {
   if (compacting) {
     /* Check again, in case fragmentation somehow improves.
      * Not likely, but it's a cheap test which avoids effort. */
@@ -290,6 +299,7 @@ void run_compaction(_Atomic(uword_t) *copy_meter, _Atomic(uword_t) *fix_meter) {
       METER(copy_meter, move_objects());
       gc_close_collector_regions(0);
       METER(fix_meter, fix_slots());
+      METER(resweep_meter, resweep_moved_lines());
       should_compact("I just moved, but still");
     }
     memset(target_pages, 0, page_table_pages);
