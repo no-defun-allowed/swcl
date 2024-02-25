@@ -272,7 +272,7 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       return true;
     }
   }
-  if (!start->allow_free_pages) {;
+  if (!start->allow_free_pages) {
     *start = (struct allocator_state){0, true};
     goto again;
   }
