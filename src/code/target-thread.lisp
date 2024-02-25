@@ -206,8 +206,8 @@ a simple-string (not necessarily unique) or NIL."
                            (typecase thing
                              (null '(:running))
                              (cons
-                              (list "waiting on:" (cdr thing)
-                                    "timeout: " (car thing)))
+                              ;; It's a DX cons, can't look at it.
+                              (list "waiting on a mutex with a timeout"))
                              (t
                               (list "waiting on:" thing)))))
                         ((eq values :aborted) '(:aborted))
@@ -220,7 +220,8 @@ a simple-string (not necessarily unique) or NIL."
               ;; if not finished, show the STATE as a list.
               ;; if finished, show the VALUES.
               "~@[tid=~D ~]~@[~S ~]~:[~{~I~A~^~2I~_ ~}~_~;~A~:[ no values~; values: ~:*~{~S~^, ~}~]~]"
-              (or #+linux (thread-os-tid thread))
+              (or #+(or linux win32 freebsd darwin openbsd)
+                  (thread-os-tid thread))
               (thread-name thread)
               (eq :finished state)
               state
@@ -2256,16 +2257,17 @@ subject to change."
         ;; -- DFL
         (setf *thruption-pending* t)))))
 
-#+linux
-(defun thread-os-tid (thread)
-  (declare (ignorable thread))
-  (if (eq *current-thread* thread)
-      (my-kernel-thread-id)
-      (with-deathlok (thread c-thread)
-        (unless (= c-thread 0)
-          (sap-ref-32 (int-sap c-thread)
-                      (+ (ash sb-vm::thread-os-kernel-tid-slot sb-vm:word-shift)
-                         #+(and 64-bit big-endian) 4))))))
+#+(or linux win32 freebsd darwin openbsd)
+(progn
+  (declaim (ftype (sfunction (thread) (or null (unsigned-byte 32))) thread-os-tid))
+  (defun thread-os-tid (thread)
+    (if (eq *current-thread* thread)
+        (my-kernel-thread-id)
+        (with-deathlok (thread c-thread)
+          (unless (= c-thread 0)
+            (sap-ref-32 (int-sap c-thread)
+                        (+ (ash sb-vm::thread-os-kernel-tid-slot sb-vm:word-shift)
+                           #+(and 64-bit big-endian) 4)))))))
 
 (defun interrupt-thread (thread function)
   (declare (ignorable thread))

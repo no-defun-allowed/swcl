@@ -964,20 +964,31 @@ symbol-case giving up: case=((V U) (F))
 ;;; 2. an array of (unsigned-byte 16) for the clause index to select
 ;;; 3. an expression mapping each layout in LAYOUT-LISTS to an integer 0..N-1
 (defun build-sealed-struct-typecase-map (layout-lists hashes)
-  (let* ((lambda (sb-c:make-perfect-hash-lambda hashes))
-         (phashfun #+sb-xc-host (sb-cold::compile-perfect-hashfun-for-host lambda)
-                   #-sb-xc-host (compile nil lambda))
-         (n (length hashes))
-         (domain (make-array n :initial-element nil))
-         (range (sb-xc:make-array n :element-type '(unsigned-byte 16))))
-    (loop for clause-index from 1 for list across layout-lists
+  ;; The hash-generator emulator wants a cookie identifying the set of objects
+  ;; that were hashed.
+  (let ((lambda (sb-c:make-perfect-hash-lambda
+                 hashes
+                 #+sb-xc-host
+                 (map 'vector
+                      (lambda (list)
+                        (mapcar (lambda (layout)
+                                  (list :type (classoid-name (layout-classoid layout))))
+                                list))
+                      layout-lists))))
+    (unless lambda
+      (return-from build-sealed-struct-typecase-map (values nil nil nil)))
+    (let* ((phashfun (sb-c::compile-perfect-hash lambda hashes))
+           (n (length hashes))
+           (domain (make-array n :initial-element nil))
+           (range (sb-xc:make-array n :element-type '(unsigned-byte 16))))
+      (loop for clause-index from 1 for list across layout-lists
           do (dolist (layout list)
                (let* ((hash (ldb (byte 32 0) (layout-clos-hash layout)))
                       (index (funcall phashfun hash)))
                  (aver (null (aref domain index)))
                  (setf (aref domain index) layout
                        (aref range index) clause-index))))
-    (values domain range lambda)))
+      (values domain range lambda))))
 
 (declaim (ftype function sb-pcl::emit-cache-lookup))
 (defun optimize-%typecase-index (layout-lists object sealed)
@@ -1007,10 +1018,9 @@ symbol-case giving up: case=((V U) (F))
                          (lambda (x) #+64-bit (ldb (byte 32 0) (layout-clos-hash x))
                                      #-64-bit (layout-clos-hash x))
                          seen-layouts)))
-        (when (= (length hashes) (length (remove-duplicates hashes)))
-          (multiple-value-bind (layouts indices expr)
-              (build-sealed-struct-typecase-map expanded-lists hashes)
-            (aver expr)
+        (multiple-value-bind (layouts indices expr)
+            (build-sealed-struct-typecase-map expanded-lists hashes)
+          (when expr
             (return-from optimize-%typecase-index
               `(truly-the
                 (integer 0 ,(length layout-lists))
@@ -1056,7 +1066,7 @@ symbol-case giving up: case=((V U) (F))
 ;;; into a dispatch based on layout-clos-hash.
 ;;; The decision to use a hash-based lookup should depend on the number of types
 ;;; matched, but if there are a lot of types matched all rooted at a common
-;;; ancestor, it is not beneficial.
+;;; ancestor, it may not be as beneficial.
 ;;;
 ;;; The expansion currently works only with sealed classoids.
 ;;; Making it work with unsealed classoids isn't too tough.
@@ -1070,7 +1080,7 @@ symbol-case giving up: case=((V U) (F))
 (defun expand-struct-typecase (keyform temp normal-clauses type-specs default errorp)
   (let* ((n (length type-specs))
          (n-base-types 0)
-         (layout-lists (make-array  n))
+         (layout-lists (make-array n))
          (exhaustive-list) ; of classoids
          (all-sealed t))
     (labels
@@ -1124,12 +1134,12 @@ symbol-case giving up: case=((V U) (F))
            (case (sb-kernel::%typecase-index ,layout-lists ,temp ,all-sealed)
              ,@(loop for i from 1 for clause in normal-clauses
                      collect `(,i
-                                   ;; CLAUSE is ((TYPEP #:G 'a-type) NIL . forms)
+                                   ;; CLAUSE is ((TYPEP #:G 'a-type) . forms)
                                    (sb-c::%type-constraint ,temp ,(third (car clause)))
-                                   ,@(cddr clause)))
+                                   ,@(cdr clause)))
              (0 ,@(if errorp
                           `((etypecase-failure ,temp ',type-specs))
-                          (cddr default)))))))))
+                          (cdr default)))))))))
 
 
 ;;; Turn a case over symbols into a case over their hashes.
@@ -1163,16 +1173,15 @@ symbol-case giving up: case=((V U) (F))
       #+sb-devel (format t "~&symbol-case giving up: probes=~d byte=~d~%"
                          maxprobes byte)
       (return-from expand-symbol-case nil))
-    (let* ((default (when (eql (caar clauses) 't) (pop clauses)))
-           (unique-symbols)
+    (binding*
+          ((default (when (eql (caar clauses) 't) (pop clauses)))
+           (unique-symbols nil)
            (clauses
             ;; This is crummy, but we first have to undo our pre-expansion
             ;; and remove dups. Otherwise the (BUG "Messup") below could occur.
             (mapcar
              (lambda (clause)
                (destructuring-bind (antecedent . consequent) clause
-                 (aver (typep consequent '(cons (eql nil))))
-                 (pop consequent) ; strip the NIL that CASE-BODY inserts
                  (when (typep antecedent '(cons (eql eql)))
                    (setq antecedent `(or ,antecedent)))
                  (flet ((extract-key (form) ; (EQL #:gN (QUOTE foo)) -> FOO
@@ -1200,32 +1209,26 @@ symbol-case giving up: case=((V U) (F))
            (symbol (gensym "S"))
            (hash (gensym "H"))
            (vector (gensym "V"))
-           (is-hashable
+           ((is-hashable expr)
             ;; For x86-64, any non-immediate object is considered hashable,
             ;; so we only do a lowtag test on the object, though the correct hash
             ;; is obtained only if the object is a symbol.
-            #+x86-64 `(pointerp ,symbol)
+            #+x86-64 (values `(pointerp ,symbol)
+                             `(,(if (eq hash-fun 'sxhash) 'hash-as-if-symbol-name hash-fun) ,symbol))
             ;; For others backends, the set of keys in a particular CASE form
             ;; makes a difference. NIL as a possible key mandates choosing SYMBOLP
             ;; but NON-NULL-SYMBOL-P is the quicker test.
-            #-x86-64 `(,(if (member nil keys) 'symbolp 'non-null-symbol-p) ,symbol))
-           (sxhash
-             ;; Always access the pre-memoized value in the hash slot.
-             ;; SYMBOL-HASH* reads the word following the header word
-             ;; in any pointer object regardless of lowtag.
-             #+x86-64
-             (if (eq hash-fun 'sxhash) `(symbol-hash* ,symbol nil) `(,hash-fun ,symbol))
-             ;; For others, use SYMBOL-HASH.
-             #-x86-64 `(,(if (eq hash-fun 'sxhash) 'symbol-hash hash-fun) ,symbol))
+            #-x86-64 (values `(,(if (member nil keys) 'symbolp 'non-null-symbol-p) ,symbol)
+                             `(,(if (eq hash-fun 'sxhash) 'symbol-hash hash-fun) ,symbol)))
            (calc-hash
              (if (vectorp byte) ; mix 2 bytes
                  ;; FIXME: this could be performed as ((h >> c1) ^ (h >> c2)) & mask
                  ;; instead of having two AND operations as it does now.
                  (let ((b1 (elt byte 0)) (b2 (elt byte 1)))
-                   `(let ((,hash ,sxhash))
+                   `(let ((,hash ,expr))
                       (logxor (ldb (byte ,(byte-size b1) ,(byte-position b1)) ,hash)
                               (ldb (byte ,(byte-size b2) ,(byte-position b2)) ,hash))))
-                 `(ldb (byte ,(byte-size byte) ,(byte-position byte)) ,sxhash))))
+                 `(ldb (byte ,(byte-size byte) ,(byte-position byte)) ,expr))))
 
       (flet ((trivial-result-p (clause)
                ;; Return 2 values: T/NIL if the clause's consequent
@@ -1280,7 +1283,7 @@ symbol-case giving up: case=((V U) (F))
                             ;; ECASE that gets inlined many times over.
                             `(ecase-failure
                               ,symbol ,(coerce keys 'simple-vector))
-                            `(progn ,@(cddr default)))))))))
+                            `(progn ,@(cdr default)))))))))
 
         ;; Reset the bins, try it the long way
         (fill bins nil)
@@ -1397,7 +1400,7 @@ symbol-case giving up: case=((V U) (F))
                    (progn ,@(cdar clauses))
                    ,(if errorp
                         `(ecase-failure ,symbol ,(coerce keys 'simple-vector))
-                        `(progn ,@(cddr default)))))))
+                        `(progn ,@(cdr default)))))))
 
         ;; Produce a COND only if the backend supports the multiway branch vop.
         #+(or x86 x86-64)
@@ -1431,34 +1434,30 @@ symbol-case giving up: case=((V U) (F))
                              (t (unreachable)))))))
                ,@(if errorp
                      `((ecase-failure ,symbol ,(coerce keys 'simple-vector)))
-                     (cddr default)))))))))
+                     (cdr default)))))))))
 
 ;;; CASE-BODY returns code for all the standard "case" macros. NAME is
-;;; the macro name, and KEYFORM is the thing to case on. MULTI-P
-;;; indicates whether a branch may fire off a list of keys; otherwise,
-;;; a key that is a list is interpreted in some way as a single key.
-;;; When MULTI-P, TEST is applied to the value of KEYFORM and each key
-;;; for a given branch; otherwise, TEST is applied to the value of
-;;; KEYFORM and the entire first element, instead of each part, of the
-;;; case branch. When ERRORP, no OTHERWISE-CLAUSEs are recognized,
-;;; and an ERROR form is generated where control falls off the end
-;;; of the ordinary clauses. When PROCEEDP, it is an error to
-;;; omit ERRORP, and the ERROR form generated is executed within a
-;;; RESTART-CASE allowing KEYFORM to be set and retested.
+;;; the macro name, and KEYFORM is the thing to case on.
+;;; When ERRORP, no OTHERWISE-CLAUSEs are recognized,
+;;; and an ERROR or CERROR form is generated where control falls off the end
+;;; of the ordinary clauses.
 
 ;;; Note the absence of EVAL-WHEN here. The cross-compiler calls this function
 ;;; and gets the compiled code that the host produced in make-host-1.
 ;;; If recompiled, you do not want an interpreted definition that might come
 ;;; from EVALing a toplevel form - the stack blows due to infinite recursion.
-(defun case-body (name keyform cases multi-p test errorp proceedp needcasesp)
-  (unless (or cases (not needcasesp))
-    (warn "no clauses in ~S" name))
-  (let ((keyform-value (gensym))
-        (clauses ())
-        (keys ())
-        (keys-seen (make-hash-table :test #'eql)))
-    (do* ((cases cases (cdr cases))
-          (case (car cases) (car cases))
+(defun case-body (whole lexenv test errorp
+                  &aux (keyform-value (gensym))
+                       (clauses ())
+                       (case-clauses (if (eq test 'typep) '(0))) ; generalized boolean
+                       (keys))
+  (declare (ignore lexenv)) ; for future use, i.e. testing CONSTANTP on all result forms
+  (destructuring-bind (name keyform &rest specified-clauses) whole
+    (unless (or (cdr whole) (not errorp))
+      (warn "no clauses in ~S" name))
+    (do* ((cases specified-clauses (cdr cases))
+          (clause (car cases) (car cases))
+          (keys-seen (make-hash-table :test #'eql))
           (case-position 1 (1+ case-position)))
          ((null cases) nil)
       (flet ((check-clause (case-keys)
@@ -1468,90 +1467,119 @@ symbol-case giving up: case=((V U) (F))
                        (warn 'duplicate-case-key-warning
                              :key k
                              :case-kind name
-                             :occurrences `(,existing (,case-position (,case))))))
-               (let ((record (list case-position (list case))))
+                             :occurrences `(,existing (,case-position (,clause))))))
+               (let ((record (list case-position (list clause))))
                  (dolist (k case-keys)
                    (setf (gethash k keys-seen) record)))))
-        (unless (list-of-length-at-least-p case 1)
+        (unless (list-of-length-at-least-p clause 1)
           (with-current-source-form (cases)
-            (error "~S -- bad clause in ~S" case name)))
-        (with-current-source-form (case)
-          (destructuring-bind (keyoid &rest forms) case
+            (error "~S -- bad clause in ~S" clause name)))
+        (with-current-source-form (clause)
+          ;; https://sourceforge.net/p/sbcl/mailman/message/11863996/ contains discussion
+          ;; of whether to warn when seeing OTHERWISE in a normal-clause position, but
+          ;; it is in fact an error: "In the case of case, the symbols t and otherwise
+          ;; MAY NOT be used as the keys designator."
+          ;; T in CASE heads an otherwise-clause, but in TYPECASE it's either a plain
+          ;; type specifier OR it is the otherwise-clause. They're equivalent, but
+          ;; EXPAND-STRUCT-TYPECASE has a fixed expectation re. normal and otherwise clause
+          (destructuring-bind (keyoid &rest forms) clause
+            (when (null forms)
+              (setq forms '(nil)))
             (cond (;; an OTHERWISE-CLAUSE
-                   ;;
-                   ;; By the way... The old code here tried gave
-                   ;; STYLE-WARNINGs for normal-clauses which looked as
-                   ;; though they might've been intended to be
-                   ;; otherwise-clauses. As Tony Martinez reported on
-                   ;; sbcl-devel 2004-11-09 there are sometimes good
-                   ;; reasons to write clauses like that; and as I noticed
-                   ;; when trying to understand the old code so I could
-                   ;; understand his patch, trying to guess which clauses
-                   ;; don't have good reasons is fundamentally kind of a
-                   ;; mess. SBCL does issue style warnings rather
-                   ;; enthusiastically, and I have often justified that by
-                   ;; arguing that we're doing that to detect issues which
-                   ;; are tedious for programmers to detect for by
-                   ;; proofreading (like small typoes in long symbol
-                   ;; names, or duplicate function definitions in large
-                   ;; files). This doesn't seem to be an issue like that,
-                   ;; and I can't think of a comparably good justification
-                   ;; for giving STYLE-WARNINGs for legal code here, so
-                   ;; now we just hope the programmer knows what he's
-                   ;; doing. -- WHN 2004-11-20
                    (and (not errorp) ; possible only in CASE or TYPECASE,
                                         ; not in [EC]CASE or [EC]TYPECASE
-                        (memq keyoid '(t otherwise))
-                        (null (cdr cases)))
-                   ;; The NIL has a reason for being here: Without it, COND
-                   ;; will return the value of the test form if FORMS is NIL.
-                   (push `(t nil ,@forms) clauses))
-                  ((and multi-p (listp keyoid))
-                   (setf keys (nconc (reverse keyoid) keys))
-                   (check-clause keyoid)
-                   (push `((or ,@(mapcar (lambda (key)
-                                           `(,test ,keyform-value ',key))
-                                         keyoid))
-                           nil
-                           ,@forms)
-                         clauses))
-                  (t
-                   (when (and (eq name 'case)
-                              (cdr cases)
-                              (memq keyoid '(t otherwise)))
-                     (error 'simple-reference-error
-                            :format-control
+                        (or (eq keyoid 'otherwise)
+                            (and (eq keyoid 't) (or (eq test 'eql) (not (cdr cases))))))
+                   (cond ((null (cdr cases))
+                          (push `(t ,@forms) clauses))
+                         ((eq name 'case)
+                          (error 'simple-reference-error
+                                 :format-control
                             "~@<~IBad ~S clause:~:@_  ~S~:@_~S allowed as the key ~
                            designator only in the final otherwise-clause, not in a ~
                            normal-clause. Use (~S) instead, or move the clause to the ~
                            correct position.~:@>"
-                            :format-arguments (list 'case case keyoid keyoid)
+                            :format-arguments (list 'case clause keyoid keyoid)
                             :references `((:ansi-cl :macro case))))
+                         (t
+                          ;; OTHERWISE is a redundant bit of the behavior of TYPECASE
+                          ;; since T is the universal type. OTHERWISE could not legally
+                          ;; be DEFTYPEed so this _must_ be a misplaced clause.
+                          (error 'simple-reference-error
+                                     :format-control
+                            "~@<~IBad ~S clause:~:@_  ~S~:@_~S is allowed only in the final clause. ~
+                           Use T instead, or move the clause to the correct position.~:@>"
+                            :format-arguments (list 'typecase clause keyoid)
+                            :references `((:ansi-cl :macro typecase))))))
+                  ((and (listp keyoid) (eq test 'eql))
+                   (setf keys (nconc (reverse keyoid) keys))
+                   (check-clause keyoid)
+                   ;; This inserts an unreachable clause if KEYOID is NIL, but
+                   ;; FORMS could contain a side-effectful LOAD-TIME-VALUE.
+                   (push `(,(if keyoid
+                                `(or ,@(mapcar (lambda (key)
+                                                 `(,test ,keyform-value ',key))
+                                               keyoid)))
+                           ,@forms)
+                         clauses))
+                  (t
+                   (when (and (eq test 'typep) (eq keyoid t))
+                     ;; - if ERRORP is nil and there are more clauses, this shadows them,
+                     ;;   which seems suspicious and worth style-warning for.
+                     ;; - if ERRORP is non-nil, though this isn't technically an "otherwise"
+                     ;;   clause, in acts just like one.
+                     (if errorp
+                         (setq errorp :none)
+                         (style-warn "T clause in ~S makes subsequent clauses unreachable:~%~S"
+                                     name specified-clauses)))
+                   (when case-clauses ; try the TYPECASE into CASE reduction
+                     (let ((typespec (ignore-errors (typexpand keyoid))))
+                       (cond ((typep typespec '(cons (eql member) (satisfies proper-list-p)))
+                              (push (cons (cdr typespec) forms) case-clauses))
+                             ((and (eq typespec t) (not (cdr cases))) ; one more KLUDGE
+                              (push clause case-clauses))
+                             (t
+                              (setq case-clauses nil)))))
                    (push keyoid keys)
                    (check-clause (list keyoid))
-                   (push `((,test ,keyform-value ',keyoid)
-                           nil
-                           ,@forms)
+                   (push `((,test ,keyform-value ',keyoid) ,@forms)
                          clauses)))))))
+    (when (eq errorp :none)
+      (setq errorp nil))
+
+    ;; [EC]CASE has an advantage over [EC]TYPECASE in that we readily notice when
+    ;; the expansion can use symbol-hash to pick the clause.
+    (when case-clauses
+      (return-from case-body
+        `(,(cond ((not errorp) 'case) ((eq name 'ctypecase) 'ccase) (t 'ecase))
+           ,keyform
+          ,@(cdr (reverse case-clauses)) ; 1st elt was a boolean flag
+          ,@(when (eq (caar clauses) t) (list (car clauses))))))
+
     (setq keys
           (nreverse (mapcon (lambda (tail)
                               (unless (member (car tail) (cdr tail))
                                 (list (car tail))))
                             keys)))
-    (case-body-aux name keyform keyform-value clauses keys errorp proceedp
-                   `(,(if multi-p 'member 'or) ,@keys))))
 
-;;; CASE-BODY-AUX provides the expansion once CASE-BODY has groveled
-;;; all the cases. Note: it is not necessary that the resulting code
-;;; signal case-failure conditions, but that's what KMP's prototype
-;;; code did. We call CASE-BODY-ERROR, because of how closures are
-;;; compiled. RESTART-CASE has forms with closures that the compiler
-;;; causes to be generated at the top of any function using the case
-;;; macros, regardless of whether they are needed.
-(defun case-body-aux (name keyform keyform-value clauses keys
-                      errorp proceedp expected-type)
-  (when proceedp ; CCASE or CTYPECASE
-    (return-from case-body-aux
+    (unless (eq errorp 'cerror)
+      ;; try expanding [E]CASE using a jump table
+      (when (and (eq test 'eql) (every #'symbolp keys))
+        (awhen (expand-symbol-case keyform clauses keys errorp 'sxhash)
+          (return-from case-body it)))
+      ;; try expanding [E]TYPECASE using a jump table
+      (when (and (eq test 'typep) (sb-c::vop-existsp :named sb-c:multiway-branch-if-eq))
+        (let* ((default (if (eq (caar clauses) 't) (car clauses)))
+               (normal-clauses (reverse (if default (cdr clauses) clauses))))
+          (awhen (expand-struct-typecase keyform keyform-value normal-clauses keys
+                                         default errorp)
+            (return-from case-body it)))))
+
+    ;; This list should get reversed sooner, but EXPAND-SYMBOL-CASE wants a backwards order
+    (setq clauses (nreverse clauses))
+
+    (let ((expected-type `(,(if (eq test 'eql) 'member 'or) ,@keys)))
+     (if (eq errorp 'cerror) ; CCASE or CTYPECASE
       ;; It is not a requirement to evaluate subforms of KEYFORM once only, but it often
       ;; reduces code size to do so, as the update form will take advantage of typechecks
       ;; already performed. (Nor is it _required_ to re-evaluate subforms)
@@ -1562,69 +1590,19 @@ symbol-case giving up: case=((V U) (F))
                  ((vars vals stores writer reader) (get-setf-expansion keyform)))
         `(let* ,(mapcar #'list vars vals)
            (named-let ,switch ((,keyform-value ,reader))
-             (cond ,@(nreverse clauses)
-                   (t (multiple-value-bind ,stores ,retry (,switch ,writer)))))))))
-  (let ((implement-as name)
-        (original-keys keys))
-    (when (member name '(typecase etypecase))
-      ;; Bypass all TYPEP handling if every clause of [E]TYPECASE is a MEMBER type.
-      ;; More importantly, try to use the fancy expansion for symbols as keys.
-      (let* ((default (if (eq (caar clauses) 't) (car clauses)))
-             (normal-clauses (reverse (if default (cdr clauses) clauses)))
-             (new-clauses))
-        (collect ((new-keys))
-          (dolist (clause normal-clauses)
-            ;; clause is ((TYPEP #:x (QUOTE <sometype>)) NIL forms*)
-            (destructuring-bind ((typep thing type-expr) . consequent) clause
-              (declare (ignore thing))
-              (unless (and (typep type-expr '(cons (eql quote) (cons t null)))
-                           (eq typep 'typep))
-                (bug "TYPECASE expander glitch"))
-              (let* ((spec (second type-expr))
-                     (clause-keys
-                      (case (if (listp spec) (car spec))
-                        (eql (when (singleton-p (cdr spec)) (list (cadr spec))))
-                        (member (when (proper-list-p (cdr spec)) (cdr spec)))
-                        (t :fail))))
-                (cond ((eq clause-keys :fail)
-                       (setq new-clauses :fail))
-                      ((neq new-clauses :fail)
-                       (dolist (key clause-keys)
-                         (unless (member key (new-keys))
-                           (new-keys key)))
-                       (push (cons `(or ,@(mapcar (lambda (x) `(eql ,keyform-value ',x))
-                                                  clause-keys))
-                                   consequent)
-                             new-clauses))))))
-          (acond ((neq new-clauses :fail)
-                  ;; all TYPECASE clauses were convertible to CASE clauses
-                  (setq clauses (if default (cons default new-clauses) new-clauses)
-                        keys (new-keys)
-                        implement-as 'case))
-                 ((and (sb-c::vop-existsp :named sb-c:multiway-branch-if-eq)
-                       (expand-struct-typecase keyform keyform-value normal-clauses keys
-                                          default errorp))
-                  (return-from case-body-aux it))))))
-
-    ;; Efficiently expanding CASE over symbols depends on CASE over integers being
-    ;; translated as a jump table. If it's not - as on most backends - then we use
-    ;; the customary expansion as a series of IF tests.
-    ;; Production code rarely uses CCASE, and the expansion differs such that
-    ;; it doesn't seem worth the effort to handle it as a jump table.
-    (when (and (member implement-as '(case ecase)) (every #'symbolp keys))
-      (awhen (expand-symbol-case keyform clauses keys errorp 'sxhash)
-        (return-from case-body-aux it)))
+             (cond ,@clauses
+                   (t (multiple-value-bind ,stores ,retry (,switch ,writer)))))))
 
     `(let ((,keyform-value ,keyform))
        (declare (ignorable ,keyform-value)) ; e.g. (CASE KEY (T))
-       (cond ,@(nreverse clauses)
+       (cond ,@clauses
              ,@(when errorp
                  `((t ,(ecase name
                          (etypecase
                           `(etypecase-failure
-                            ,keyform-value ,(etypecase-error-spec original-keys)))
+                            ,keyform-value ,(etypecase-error-spec keys)))
                          (ecase
-                          `(ecase-failure ,keyform-value ',original-keys))))))))))
+                          `(ecase-failure ,keyform-value ',keys))))))))))))
 
 ;;; ETYPECASE over clauses that form a "simpler" type specifier should use that,
 ;;; e.g. partitions of INTEGER:
@@ -1647,42 +1625,48 @@ symbol-case giving up: case=((V U) (F))
             (return-from etypecase-error-spec `',unparsed))))))
   `',types)
 
-(sb-xc:defmacro case (keyform &body cases)
+(sb-xc:defmacro case (&whole form &environment env &rest r)
+  (declare (sb-c::lambda-list (keyform &body cases)) (ignore r))
   "CASE Keyform {({(Key*) | Key} Form*)}*
   Evaluates the Forms in the first clause with a Key EQL to the value of
   Keyform. If a singleton key is T then the clause is a default clause."
-  (case-body 'case keyform cases t 'eql nil nil nil))
+  (case-body form env 'eql nil))
 
-(sb-xc:defmacro ccase (keyform &body cases)
+(sb-xc:defmacro ccase (&whole form &environment env &rest r)
+  (declare (sb-c::lambda-list (keyform &body cases)) (ignore r))
   "CCASE Keyform {({(Key*) | Key} Form*)}*
   Evaluates the Forms in the first clause with a Key EQL to the value of
   Keyform. If none of the keys matches then a correctable error is
   signalled."
-  (case-body 'ccase keyform cases t 'eql t t t))
+  (case-body form env 'eql 'cerror))
 
-(sb-xc:defmacro ecase (keyform &body cases)
+(sb-xc:defmacro ecase (&whole form &environment env &rest r)
+  (declare (sb-c::lambda-list (keyform &body cases)) (ignore r))
   "ECASE Keyform {({(Key*) | Key} Form*)}*
   Evaluates the Forms in the first clause with a Key EQL to the value of
   Keyform. If none of the keys matches then an error is signalled."
-  (case-body 'ecase keyform cases t 'eql t nil t))
+  (case-body form env 'eql 'error))
 
-(sb-xc:defmacro typecase (keyform &body cases)
+(sb-xc:defmacro typecase (&whole form &environment env &rest r)
+  (declare (sb-c::lambda-list (keyform &body cases)) (ignore r))
   "TYPECASE Keyform {(Type Form*)}*
   Evaluates the Forms in the first clause for which TYPEP of Keyform and Type
   is true."
-  (case-body 'typecase keyform cases nil 'typep nil nil nil))
+  (case-body form env 'typep nil))
 
-(sb-xc:defmacro ctypecase (keyform &body cases)
+(sb-xc:defmacro ctypecase (&whole form &environment env &rest r)
+  (declare (sb-c::lambda-list (keyform &body cases)) (ignore r))
   "CTYPECASE Keyform {(Type Form*)}*
   Evaluates the Forms in the first clause for which TYPEP of Keyform and Type
   is true. If no form is satisfied then a correctable error is signalled."
-  (case-body 'ctypecase keyform cases nil 'typep t t t))
+  (case-body form env 'typep 'cerror))
 
-(sb-xc:defmacro etypecase (keyform &body cases)
+(sb-xc:defmacro etypecase (&whole form &environment env &rest r)
+  (declare (sb-c::lambda-list (keyform &body cases)) (ignore r))
   "ETYPECASE Keyform {(Type Form*)}*
   Evaluates the Forms in the first clause for which TYPEP of Keyform and Type
   is true. If no form is satisfied then an error is signalled."
-  (case-body 'etypecase keyform cases nil 'typep t nil t))
+  (case-body form env 'typep 'error))
 
 ;;; Compile a version of BODY for all TYPES, and dispatch to the
 ;;; correct one based on the value of VAR. This was originally used

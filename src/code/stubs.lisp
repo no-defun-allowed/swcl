@@ -78,8 +78,6 @@
     (def-accessor sap-ref-single)
     (def-accessor sap-ref-double))
   (def %byte-blt (src src-start dst dst-start count))
-  (def shift-towards-start (number count))
-  (def shift-towards-end (number count))
   (def get-header-data)
   (def set-header-data (x val))
   (def widetag-of)
@@ -167,6 +165,7 @@
   (def fun-code-header)
   (def symbol-package-id)
   (def symbol-hash)
+  #+x86-64 (def hash-as-if-symbol-name)
   (def symbol-%info) ; primitive reader always needs a stub
   #-(or x86 x86-64) (def lra-code-header)
   (def %make-lisp-obj)
@@ -202,12 +201,6 @@
   (and (%other-pointer-p x)
        (member (%other-pointer-widetag x) choices)
        t))
-
-#+x86-64
-(defun symbol-hash* (x satisfies)
-  (declare (explicit-check)) ; actually, not
-  (declare (ignore satisfies))
-  (symbol-hash* x nil))
 
 ;;; TYPECASE could expand to contain a call to this function.
 ;;; The interpreter can ignore it, it is just compiler magic.

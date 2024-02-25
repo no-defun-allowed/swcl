@@ -138,6 +138,10 @@
 (defconstant clock-realtime 3) ; #x3
 (defconstant clock-monotonic 4) ; #x4
 (defconstant clock-process-cputime-id 5) ; #x5
+;;; KLUDGE: this file contains constants for both SunOS and Linux
+;;; and the numbers can overlap.
+(defconstant clock-thread-cputime-id 3) ; #x3
+(defconstant clock-monotonic-coarse 6) ; #x6
 ;;; structures
 (define-alien-type nil
   (struct timeval

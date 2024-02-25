@@ -110,7 +110,7 @@
                      ((eq key-value
                           :allow-other-keys))
                      (t
-                      (setf unknown t))))
+                      (push key unknown))))
       unknown)))
 
 ;;; Turn constant LVARs in keyword arg positions to constants so that
@@ -252,8 +252,9 @@
                      ((symbolp fun-name)
                       (if (or (fun-lexically-notinline-p fun-name
                                                          (node-lexenv (lvar-dest lvar)))
-                              (and (neq (info :function :where-from fun-name) :declared)
-                                   asserted-type))
+                              (and (or asserted-type
+                                       defined-here)
+                                   (neq (info :function :where-from fun-name) :declared)))
                           lvar-type
                           (global-ftype fun-name)))
                      ((functional-p leaf)

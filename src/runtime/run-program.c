@@ -232,6 +232,81 @@ int wait_for_exec(int pid, int channel[2]) {
 }
 
 extern char **environ;
+
+
+#ifdef LISP_FEATURE_OS_PROVIDES_POSIX_SPAWN
+
+#include <spawn.h>
+int pspawn(char *program, char *argv[], int sin, int sout, int serr,
+          int search, char *envp[], __attribute__((unused)) char *pty_name,
+          __attribute__((unused)) char *pwd, __attribute__((unused)) int* dont_close)
+{
+    pid_t pid;
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attr;
+    short flags = POSIX_SPAWN_SETSIGMASK;
+
+    posix_spawn_file_actions_init(&actions);
+    posix_spawnattr_init(&attr);
+
+    sigset_t sset;
+    sigemptyset(&sset);
+
+    posix_spawnattr_setsigmask(&attr, &sset);
+
+    if (sin >= 0) {
+        posix_spawn_file_actions_adddup2(&actions, sin, 0);
+        flags |= POSIX_SPAWN_SETPGROUP;
+    } else
+    {
+#ifdef LISP_FEATURE_DARWIN
+        posix_spawn_file_actions_addinherit_np(&actions, 0);
+#endif
+    }
+    if (sout >= 0)
+        posix_spawn_file_actions_adddup2(&actions, sout, 1);
+    else
+    {
+#ifdef LISP_FEATURE_DARWIN
+        posix_spawn_file_actions_addinherit_np(&actions, 1);
+#endif
+    }
+    if (serr >= 0)
+        posix_spawn_file_actions_adddup2(&actions, serr, 2);
+    else
+    {
+#ifdef LISP_FEATURE_DARWIN
+        posix_spawn_file_actions_addinherit_np(&actions, 2);
+#endif
+    }
+
+#ifdef LISP_FEATURE_DARWIN
+    flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#elif defined LISP_FEATURE_LINUX
+    posix_spawn_file_actions_addclosefrom_np(&actions, 3);
+#endif
+
+    posix_spawnattr_setflags(&attr, flags);
+
+    int ret;
+
+    if (search)
+        ret = posix_spawnp(&pid, program, &actions, &attr, argv, envp);
+    else
+        ret = posix_spawn(&pid, program, &actions, &attr, argv, envp);
+
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attr);
+
+    if (ret) {
+        errno = ret;
+        return -2;
+    }
+
+    return pid;
+}
+#endif
+
 int spawn(char *program, char *argv[], int sin, int sout, int serr,
           int search, char *envp[], char *pty_name,
           int channel[2],
@@ -328,4 +403,3 @@ int spawn(char *program, char *argv[], int sin, int sout, int serr,
     }
     _exit(failure_code);
 }
-

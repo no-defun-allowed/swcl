@@ -1739,14 +1739,20 @@ nnnn 1_    any       linear scan (don't try to read when rehash already in progr
              (setf (aref it index)
                    (if address-based-p +magic-hash-vector-value+ hash)))
 
-           ;; Store the pair
-           (let ((i (* 2 index)))
-             (setf (aref kv-vector i) key (aref kv-vector (1+ i)) value))
            ;; Push this slot onto the front of the chain for its bucket.
+           ;; A chain linked to an empty cell makes no difference, as any concurrent
+           ;; operation on this same table would constitute user error.
            (let* ((index-vector (hash-table-index-vector hash-table))
                   (bucket (mask-hash hash (1- (length index-vector)))))
              (setf (aref next-vector index) (aref index-vector bucket)
-                   (aref index-vector bucket) index)))
+                   (aref index-vector bucket) index))
+           ;; Store the pair only *after* linking the cell in. This order of operations
+           ;; allows GC to assert that every pair in kvv is findable in a bucket.
+           ;; Setting the kvv elements first, before chaining, would temporarily result
+           ;; in a non-findable key which we'd have to heuristically allow based on
+           ;; implicit pinning.
+           (let ((i (* 2 index)))
+             (setf (aref kv-vector i) key (aref kv-vector (1+ i)) value)))
          (incf (hash-table-%count hash-table))
          value))
 
@@ -2136,7 +2142,7 @@ table itself."
                  (incf n-chains))))
     (format t "maxlen=~d avglen=~f~%" max-len (/ tot-len n-chains))
     (show-chain "Freelist:" (hash-table-next-free-kv tbl))
-    (awhen (hash-table-smashed-cells tbl)
+    (awhen (and (typep tbl 'general-hash-table) (hash-table-smashed-cells tbl))
       (format t "smashed=~d~%"
               (mapcar (lambda (x)
                         (if (fixnump x)

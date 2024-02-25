@@ -95,6 +95,7 @@
 (def-math-rtn "pow" 2)
 #-(or x86 x86-64 arm-vfp arm64 riscv) (def-math-rtn "sqrt" 1)
 #-x86 (def-math-rtn "log1p" 1)
+#-x86 (def-math-rtn "log2" 1)
 
 
 ;;;; power functions
@@ -115,6 +116,7 @@
 ;;; a positive integer. Values of power are calculated as positive
 ;;; integers, and inverted if negative.
 (defun intexp (base power)
+  (declare (explicit-check))
   (cond ((eql base 1)
          base)
         ((eql base -1)
@@ -146,10 +148,12 @@
         ((eql base 2)
          (ash 1 power))
         (t
-         (do ((nextn (ash power -1) (ash power -1))
-              (total (if (oddp power) base 1)
-                     (if (oddp power) (* base total) total)))
-             ((zerop nextn) total)
+         (do* ((base base)
+               (power power)
+               (nextn (ash power -1) (ash power -1))
+               (total (if (oddp power) base 1)
+                      (if (oddp power) (* base total) total)))
+              ((zerop nextn) total)
            (setq base (* base base))
            (setq power nextn)))))
 
@@ -340,31 +344,52 @@
           (foreach complex double-float single-float))
          (complex-expt base power))))))
 
-;;; FIXME: Maybe rename this so that it's clearer that it only works
-;;; on integers?
-(declaim (inline log2))
-(defun log2 (x)
-  (declare (type integer x))
+(declaim (start-block log))
+(defun log2/nonnegative-integer (x)
+  (declare (type (integer 0) x))
   ;; CMUCL comment:
   ;;
-  ;;   Write x = 2^n*f where 1/2 < f <= 1.  Then log2(x) = n +
+  ;;   Write x = 2^n*f where 1/2 <= f < 1.  Then log2(x) = n +
   ;;   log2(f).  So we grab the top few bits of x and scale that
   ;;   appropriately, take the log of it and add it to n.
   ;;
   ;; Motivated by an attempt to get LOG to work better on bignums.
   (cond ((typep x 'sb-vm:signed-word)
-         (log (coerce x 'double-float) $2.0d0))
+         (%log2 (coerce x 'double-float)))
         (t
          (let ((n (integer-length x)))
            (cond ((< n sb-vm:double-float-digits)
-                  (log (coerce x 'double-float) $2.0d0))
+                  (%log2 (coerce x 'double-float)))
                  (t
                   (let ((f (ldb (byte sb-vm:double-float-digits
                                       (- n sb-vm:double-float-digits))
                                 x)))
-                    (+ n (log (scale-float (coerce f 'double-float)
-                                           (- sb-vm:double-float-digits))
-                              $2.0d0)))))))))
+                    (+ n (%log2 (scale-float (coerce f 'double-float)
+                                             (- sb-vm:double-float-digits)))))))))))
+
+(defun log2/double-float (x)
+  (declare (type double-float x))
+  (if (float-sign-bit-set-p x)
+      (complex (%log2 (- x)) (sb-xc:/ pi (log $2d0)))
+      (%log2 x)))
+
+(defun log2/nonnegative-ratio (x)
+  (declare (type (and (rational 0) (not integer)) x))
+  (truly-the double-float
+             (- (truly-the double-float (log2/nonnegative-integer (numerator x)))
+                (truly-the double-float (log2/nonnegative-integer (denominator x))))))
+
+(defun log2/nonnegative-rational (x)
+  (declare (type (rational 0) x))
+  (if (typep x 'integer)
+      (log2/nonnegative-integer x)
+      (log2/nonnegative-ratio x)))
+
+(defun log2/rational (x)
+  (declare (type rational x))
+  (if (minusp x)
+      (complex (log2/nonnegative-rational (- x)) (sb-xc:/ pi (log $2d0)))
+      (log2/nonnegative-rational x)))
 
 (defun log (number &optional (base nil base-p))
   "Return the logarithm of NUMBER in the base BASE, which defaults to e."
@@ -375,46 +400,52 @@
          (if (or (typep number 'double-float) (typep base 'double-float))
              $0.0d0
              $0.0f0))
-        ((and (typep number '(integer (0) *))
-              (typep base '(integer (0) *)))
-         (coerce (/ (truly-the double-float (log2 number))
-                    (truly-the double-float (log2 base))) 'single-float))
-        ((and (typep number 'integer) (typep base 'double-float))
-         ;; No single float intermediate result
-         (/ (log2 number) (log base $2.0d0)))
-        ((and (typep number 'double-float) (typep base 'integer))
-         (/ (log number $2.0d0) (log2 base)))
+        ((and (typep number '(rational 0))
+              (typep base '(rational 0)))
+         (coerce (/ (truly-the double-float (log2/nonnegative-rational number))
+                    (truly-the double-float (log2/nonnegative-rational base)))
+                 'single-float))
+        ((and (typep number 'rational)
+              (typep base 'rational))
+         (coerce (/ (log2/rational number)
+                    (log2/rational base))
+                 '(complex single-float)))
+        ((and (typep number 'rational) (typep base 'double-float))
+         (/ (log2/rational number) (log2/double-float base)))
+        ((and (typep number 'double-float) (typep base 'rational))
+         (/ (log2/double-float number) (log2/rational base)))
         (t
          (/ (log number) (log base))))
       (number-dispatch ((number number))
         (((foreach fixnum bignum))
          (if (minusp number)
              (complex (log (- number)) (coerce pi 'single-float))
-             (coerce (/ (truly-the double-float (log2 number))
+             (coerce (/ (truly-the double-float (log2/nonnegative-integer number))
                         (log (exp $1.0d0) $2.0d0)) 'single-float)))
         ((ratio)
          (if (minusp number)
              (complex (log (- number)) (coerce pi 'single-float))
              (let ((numerator (numerator number))
                    (denominator (denominator number)))
-               (if (= (integer-length numerator)
-                      (integer-length denominator))
+               (if (and (<= -1 (- (integer-length numerator) (integer-length denominator)) 1)
+                        (<= 3/4 number 5/4))
                    (coerce (%log1p (coerce (- number 1) 'double-float))
                            'single-float)
-                   (coerce (/ (- (truly-the double-float (log2 numerator))
-                                 (truly-the double-float (log2 denominator)))
+                   (coerce (/ (- (truly-the double-float (log2/nonnegative-integer numerator))
+                                 (truly-the double-float (log2/nonnegative-integer denominator)))
                               (log (exp $1.0d0) $2.0d0))
                            'single-float)))))
         (((foreach single-float double-float))
          ;; Is (log -0) -infinity (libm.a) or -infinity + i*pi (Kahan)?
          ;; Since this doesn't seem to be an implementation issue
          ;; I (pw) take the Kahan result.
-         (if (= (float-sign-bit number) 1) ; MINUSP
+         (if (float-sign-bit-set-p number)
              (complex (log (- number)) (coerce pi '(dispatch-type number)))
              (coerce (%log (coerce number 'double-float))
                      '(dispatch-type number))))
         ((complex)
          (complex-log number)))))
+(declaim (end-block))
 
 (defun sqrt (number)
   "Return the square root of NUMBER."
@@ -562,7 +593,7 @@
                         (values double-float))
                (if (zerop x)
                    (if (zerop y)
-                       (if (= (float-sign-bit x) 0) ; PLUSP
+                       (if (not (float-sign-bit-set-p x))
                            y
                            (float-sign y pi))
                        (float-sign y (sb-xc:/ pi 2)))

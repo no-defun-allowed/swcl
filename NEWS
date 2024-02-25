@@ -1,6 +1,22 @@
 ;;;; -*- coding: utf-8; fill-column: 78 -*-
 
-changes relative to sbcl-2.4.0:
+changes relative to sbcl-2.4.1:
+  * bug fix: restore the ability to inherit from both SEQUENCE and
+    SB-MOP:FUNCALLABLE-STANDARD-OBJECT.  (lp#2050088, reported by Christophe
+    Junke)
+  * bug fix: COERCE will not convert lambda forms to functions if given a type
+    naming a (strict) subclass of FUNCTION.
+  * bug fix: LOG with a double-float and a ratio argument (in either order) do
+    not lose precision through a single-float intermediate argument.
+  * bug fix: LOG to the base 2 of integer powers of 2 are more likely to get
+    the mathematically precise answer.
+  * bug fix: LOG on ratios very near 1 with numerator or denominator being
+    near a power of 2 will use log1p and so will lose less precision.
+  * bug fix: the utf-8 external format with Unix line-endings updates its
+    character size information when taking the fast path for a buffer of ascii
+    characters.  (lp#2054169, reported by John Carroll)
+
+changes in sbcl-2.4.1 relative to sbcl-2.4.0:
   * enhancement: compact instance headers are partially supported with the
     mark-region parallel garbage collector.
   * enhancement: functions with declared return types have their return values

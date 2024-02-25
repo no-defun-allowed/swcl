@@ -231,7 +231,11 @@
            (unuse-package ext "CL-USER")))
 
 #+cmu
-(setq cl:*compile-print* nil) ; too much noise, can't see the actual warnings
+(progn
+  ;; too much noise, can't see the actual warnings
+  (setq cl:*compile-print* nil
+        ext:*gc-verbose* nil))
+
 #+sbcl
 (progn
   (setq cl:*compile-print* nil)
@@ -426,8 +430,7 @@
 ;;;; master list of source files and their properties
 
 ;;; flags which can be used to describe properties of source files
-(defparameter
-  *expected-stem-flags*
+(defparameter *expected-stem-flags*
   '(;; meaning: This file is needed to generate C headers if doing so
     ;; independently of make-host-1
     :c-headers
@@ -446,6 +449,10 @@
     ;; of exciting low-level information about representation selection,
     ;; VOPs used by the compiler, and bits of assembly.
     :trace-file
+    ;; meaning: When cold-loading this file while producing the
+    ;; initial cold core, genesis should produce a trace file of the
+    ;; fops (fasl operations) executed.
+    :foptrace-file
     ;; meaning: The #'COMPILE-STEM argument :BLOCK-COMPILE should be
     ;; T. That is, the entire file will be block compiled. Like
     ;; :TRACE-FILE, this applies to all COMPILE-FILEs which support
@@ -886,7 +893,7 @@
   ;; on top of the source file. For more than one, we could either merge them
   ;; or just ignore any modifications.
   (let* ((base "xfloat-math.lisp-expr")
-         (local (concatenate 'string sb-cold::*host-obj-prefix* base)))
+         (local (concatenate 'string *host-obj-prefix* base)))
     (pathname
      (ecase direction
        (:input (if (probe-file local) local base))
@@ -929,9 +936,29 @@
 ;;; or for parallelized build.
 (defvar *perfect-hash-generator-mode* :PLAYBACK)
 (defvar *perfect-hash-generator-memo* nil)
-(defvar *perfect-hash-generator-journal* "xperfecthash.lisp-expr")
-#+sbcl (when (and (find-symbol "MAKE-PERFECT-HASH-LAMBDA" "SB-C")
-                  (find-symbol "NEWCHARSTAR-STRING" "SB-INT"))
+
+;;; A separate file is used for each possible value of N-FIXNUM-BITS.
+;;; Therefore any particular set of symbols appears at most once per file.
+(defun perfect-hash-generator-journal (direction)
+  (let* ((bits (symbol-value (intern "N-FIXNUM-BITS" "SB-VM")))
+         (stem (ecase bits
+                 ((30 61 63)
+                  (format nil "xperfecthash~D.lisp-expr" bits)))))
+    (ecase direction
+      (:input stem)
+      (:output (if (search "/xbuild/" *host-obj-prefix*)
+                   ;; parallel build writes to a subdirectory
+                   (concatenate 'string *target-obj-prefix* stem)
+                   ;; normal build writes the file in place
+                   stem)))))
+
+(defun perfect-hash-generator-program ()
+  ;; The path depends on what the host is, not what the target is
+  #+unix "tools-for-build/perfecthash"
+  #+win32 "tools-for-build/perfecthash.exe")
+
+#+sbcl (when (and (probe-file (perfect-hash-generator-program))
+                  (find-symbol "RUN-PROGRAM" "SB-EXT"))
          (pushnew :use-host-hash-generator cl:*features*)
          (setq *perfect-hash-generator-mode* :RECORD))
 
@@ -941,34 +968,44 @@
 (defun preload-perfect-hash-generator (pathname)
   (with-open-file (stream pathname :if-does-not-exist nil)
     (when stream
-      (let ((entries (let ((*read-base* 16)) (read stream))))
+      (let ((entries (let ((*read-base* 16)) (read stream)))
+            (uniqueness-checker (make-hash-table :test 'equalp))
+            (errors 0)
+            (linenum 0))
         (setq *perfect-hash-generator-memo*
-              ;; Compute the XOR all the hashes of each entry as a quick pass/fail
+              ;; Compute the XOR of all the hashes of each entry as a quick pass/fail
               ;; when searching, assuming thst EQUALP compares (CAR CONS) before
               ;; the CDR, which is almost surely, though not necessarily, what it does.
               (mapcar (lambda (entry)
-                        (destructuring-bind (array . string) entry
+                        (incf linenum)
+                        (destructuring-bind (array identifier expression) entry
+                          ;; ARRAY is read as simple-vector, not UB32.
+                          ;; (It actually doesn't matter how it's stored in memory)
+                          (setq array (coerce array '(simple-array (unsigned-byte 32) (*))))
                           ;; assert that the entry was stored in canonical form
                           (assert (equalp array (sort (copy-seq array) #'<)))
+                          ;; assert that there are not redundant lines.
+                          ;; (Changing the pretty-printing from C must not write
+                          ;; a distinct line if its key already existed)
+                          (let ((existsp (gethash array uniqueness-checker)))
+                            (cond ((not existsp)
+                                   (setf (gethash array uniqueness-checker)
+                                         (list expression linenum)))
+                                  (t
+                                   (warn "~X maps to~%~{~S from line ~D~}~%~S from line ~D~%"
+                                         array existsp expression linenum)
+                                   (incf errors))))
                           (let ((digest (reduce #'logxor array)))
-                            (cons (cons digest array) string))))
-                      entries))))))
+                            (list* (cons digest array) identifier expression))))
+                      entries))
+        (when (plusp errors)
+          (error "hash generator duplicates: ~D" errors))))))
+(compile 'preload-perfect-hash-generator)
 
-(defun emulate-generate-perfect-hash-sexpr (array)
-  (let ((computed
-         #+use-host-hash-generator
-         (let ((string
-                (sb-int:newcharstar-string
-                 (sb-sys:with-pinned-objects (array)
-                   (sb-alien:alien-funcall
-                    (sb-alien:extern-alien
-                     "generate_perfhash_sexpr"
-                     (function (* sb-alien:char) sb-alien:system-area-pointer sb-alien:int))
-                    (sb-sys:vector-sap array) (length array))))))
-           ;; don't need the final newline, it looks un-lispy in the file
-           (let ((l (length string)))
-             (assert (char= (char string (1- l)) #\newline))
-             (subseq string 0 (1- l))))))
+(defun emulate-generate-perfect-hash-sexpr (array identifier)
+  (declare #-use-host-hash-generator (ignore identifier))
+  (let (computed)
+    (declare (ignorable computed))
     ;; Entries are written to disk with hashes sorted in ascending order so that
     ;; comparing as sets can be done using EQUALP.
     ;; Sort nondestructively in case something else looks at the value as supplied.
@@ -977,41 +1014,135 @@
            (match (assoc (cons digest canonical-array) *perfect-hash-generator-memo*
                          :test #'equalp)))
       (when match
-        (when computed (assert (string= (cdr match) computed)))
-        (return-from emulate-generate-perfect-hash-sexpr (cdr match)))
-    (ecase *perfect-hash-generator-mode*
-      (:playback
-       (error "perfect hash file is missing a needed entry for ~x" array))
-      (:record
-       (setf *perfect-hash-generator-memo*
-             (nconc *perfect-hash-generator-memo*
-                    (list (cons (cons digest canonical-array) computed))))
-       computed)))))
+        (return-from emulate-generate-perfect-hash-sexpr (cddr match)))
+      (ecase *perfect-hash-generator-mode*
+        (:playback
+         (error "perfect hash file is missing a needed entry for ~x" array))
+        (:record
+         ;; This will only display anything when we didn't have the data,
+         ;; so it's actually not too "noisy" in a normal build.
+         #+use-host-hash-generator
+         (let ((output (make-string-output-stream))
+               (process
+                (sb-ext:run-program (perfect-hash-generator-program)
+                                    '("perfecthash")
+                                    ;; win32 misbehaves with :input string-stream
+                                    :input :stream :output :stream
+                                    :wait nil
+                                    :allow-other-keys t
+                                    :use-posix-spawn t)))
+           (format (sb-ext:process-input process) "~{~X~%~}" (coerce array 'list))
+           (close (sb-ext:process-input process))
+           (loop for char = (read-char (sb-ext:process-output process) nil)
+                 while char
+                 do (write-char char output))
+           (sb-ext:process-wait process)
+           (sb-ext:process-close process)
+           (unless (zerop (sb-ext:process-exit-code process))
+             (error "Error running perfecthash: exit code ~D"
+                    (sb-ext:process-exit-code process)))
+           (let* ((string (get-output-stream-string output))
+                  ;; don't need the final newline, it looks un-lispy in the file
+                  (l (length string)))
+             (assert (char= (char string (1- l)) #\newline))
+             (setq computed (subseq string 0 (1- l))))
+           (let ((*print-right-margin* 200) (*print-level* nil) (*print-length* nil))
+             (format t "~&Recording perfect hash:~%~S~%~X~%"
+                     identifier array))
+           (setf *perfect-hash-generator-memo*
+                 (nconc *perfect-hash-generator-memo*
+                        (list (list* (cons digest canonical-array)
+                                     identifier
+                                     computed))))
+           computed))))))
 
-(defun compile-perfect-hashfun-for-host (lambda)
-  ;; Remove the declare:
-  ;;   (declare (optimize (safety 0) (sb-c:store-source-form 0)))
-  (let ((third (third lambda)))
-    (assert (eq (car third) 'declare))
-    (let ((new `(lambda ,(second lambda) ,@(cdddr lambda))))
-      (compile nil new))))
+;;; Unlike xfloat-math which expresses universal truths, the perfect-hash file
+;;; expresses facts about the behavior of a _particular_ SBCL revision.
+;;; It was overly challenging to alter the calc-symbol-name-hash algorithm
+;;; without being forced to re-run every cross-build to determine what the 32-bit
+;;; inputs would be to the perfect hash generator. By storing a representations of
+;;; objects that contributed to the key calculation, we can in theory recreate the
+;;; perfect hash file for all relevant objects without a rebuild under every
+;;; combination of architectures and features. A few difficulties:
+;;; * Hashes should be emitted in base 16 because the C program wants that,
+;;;   but our extended array syntax uses base 10 since it's more natural.
+;;;   i..e "#A((16) (unsigned-byte 8) ...)"
+;;; * Packages have to exist when the file is read, so we can't read symbols
+;;;   into an architecture-specific package like sb-arm-asm.
+;;;   Since symbol-name-hash is based solely on print-name, it's irrelevant what
+;;;   the package is, so it's always OK to use keywords.
+;;;
+;;; I screwed this up multiple differerent ways when developing it.
+;;; For example the symbol ADD was getting printed without a colon, and reparsed
+;;; as 2781 in base 16.
+;;; Finally I hit upon a solution which solves just about everything:
+;;; write the identifying information as a string, which works around nonexistence
+;;; of the following, among others:
+;;;  - symbol SB-KERNEL:SIMD-PACK-TYPE for #-x86-64
+;;;  - symbol SB-KERNEL:HANDLE-WIN32-EXCEPTION for #-win32
+;;;  - package SB-APROF for #-x86-64
+;;;
+;;; Separating the files by N-FIXNUM-TAG-BITS works to nearly guarantee
+;;; that any particular set of symbols appears once and once only, so you don't
+;;; have to wonder why it appears more than once, and under what circumstance
+;;; the hashes should be different for the same symbols.
+;;; Unfortunately, that was too aspirational. The problem stems from NIL in a
+;;; list of symbols. Since the address of NIL depends on the architecture,
+;;; and not only that, the particular *FEATURES*, we might have different
+;;; hashes for NIL. Like without sb-thread, there will be an alloc-region
+;;; placed in static space below NIL which shifts NIL's address higher,
+;;; which changes its hash.
+(defun save-perfect-hashfuns (pathname entries)
+  (with-open-file (*standard-output* pathname
+                   :direction :output
+                   :if-exists :supersede
+                   :if-does-not-exist :create)
+    (write-string "(
+")
+    (let ((*print-pretty* t) (*print-length* nil) (*print-level* nil)
+          (*print-lines* nil) (*print-right-margin* 128))
+      (dolist (entry entries)
+        (destructuring-bind ((digest . array) identifier . string) entry
+          (declare (ignore digest))
+          (unless (stringp identifier)
+            ;; If this entry was read from the file, it's already a string
+            (setq identifier
+                  (let ((*package* (find-package "SB-KERNEL")))
+                    (write-to-string identifier :escape :t :pretty nil))))
+          (format t "(~X~% ~S~% ~S)~%" array identifier string))))
+    (write-string ")
+;; EOF
+")))
+(compile 'save-perfect-hashfuns)
+
+(defun update-perfect-hashfuns (sources destination)
+  (flet ((load-file (pathname)
+           (mapcar (lambda (entry)
+                     (destructuring-bind (array identifier expression) entry
+                       (setq array (coerce array '(simple-array (unsigned-byte 32) (*))))
+                       (assert (equalp array (sort (copy-seq array) #'<)))
+                       (let ((digest (reduce #'logxor array)))
+                         (list* (cons digest array) identifier expression))))
+                   (with-open-file (stream pathname)
+                     (let ((*read-base* 16)) (read stream))))))
+    (let ((entries (load-file destination)))
+      (dolist (source sources)
+        (dolist (entry (load-file source))
+          (unless (assoc (car entry) entries :test #'equalp)
+            (nconc entries (list entry)))))
+      (save-perfect-hashfuns destination entries))))
+
 (defun maybe-save-perfect-hashfuns-for-playback ()
-  ;; FIXME: file corruption occurs for -jN > 1 from make-all-targets.sh
+  ;; Check again for corruption
+  (let ((uniqueness-checker (make-hash-table :test 'equalp)))
+    (dolist (entry *perfect-hash-generator-memo*)
+      (let ((array (cdar entry)))
+        (assert (not (gethash array uniqueness-checker)))
+        (setf (gethash array uniqueness-checker) t))))
   #+use-host-hash-generator
   (when (eq *perfect-hash-generator-mode* :record)
-    (with-open-file (stream *perfect-hash-generator-journal*
-                            :direction :output
-                            :if-existS :supersede :if-does-not-exist :create)
-      (write-char #\( stream)
-      (dolist (entry *perfect-hash-generator-memo*)
-        (destructuring-bind ((digest . array) . string) entry
-          (declare (ignore digest))
-          (write (cons array string):stream stream :length nil :base 16
-                 :pretty t :right-margin 128))
-        (terpri stream))
-      (write-string ")
-;; EOF
-" stream)))
+    (save-perfect-hashfuns (perfect-hash-generator-journal :output)
+                           *perfect-hash-generator-memo*))
   t)
 
 ;;;; Please avoid writing "consecutive" (un-nested) reader conditionals

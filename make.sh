@@ -29,6 +29,11 @@ sh make-config.sh "$@" --check-host-lisp || exit $?
 . output/prefix.def
 . output/build-config
 
+echo //building host tools
+# Build the perfect-hash-generator. It's actually OK if this fails,
+# as long as xperfecthash.lisp-expr is up-to-date
+$GNUMAKE -C tools-for-build perfecthash || true
+
 build_started=`date`
 echo "//Starting build: $build_started"
 # Apparently option parsing succeeded. Print out the results.
@@ -53,7 +58,7 @@ $SBCL_XC_HOST < tools-for-build/canonicalize-whitespace.lisp || exit 1
 #     system.
 #   On the target system:
 #     sh make-target-1.sh
-#   Copy src/runtime/sbcl.nm and output/stuff-groveled-from-headers.lisp
+#   Copy output/stuff-groveled-from-headers.lisp
 #     from the target system to the host system.
 #   On the host system:
 #     SBCL_XC_HOST=<whatever> sh make-host-2.sh

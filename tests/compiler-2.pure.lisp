@@ -2706,7 +2706,8 @@
                 (sb-kernel:lexenv (sb-c::lexenv-vars x))
                 (broadcast-stream (broadcast-stream-streams x))
                 (t :none))))))
-    ;; There should be no #<layout> referenced directly from the code header.
+    ;; There should be no #<layout> referenced directly from the code header
+    ;; (which implies that no type-check occurs when accessing a structure instance).
     ;; There is of course a vector of layouts in there to compare against.
     (assert (not (ctu:find-code-constants f :type 'sb-kernel:layout)))
     ;; The function had better work.
@@ -3413,7 +3414,7 @@
                               913097464
                               5)))
            39)))))
-    '(values (or (integer 21 22) (integer 336 337)) (integer -38 0) &optional))))
+    '(values (or (integer 22 22) (integer 337 337)) (integer -38 -1) &optional))))
 
 (with-test (:name :boundp-ir2-optimizer)
   (checked-compile-and-assert
@@ -4402,3 +4403,11 @@
     ((#'identity .0) (condition 'type-error))
     ((#'identity 1) 1)
     ((#'identity (expt 2 1000)) (condition 'type-error))))
+
+(with-test (:name :pop-values-unused)
+  (checked-compile-and-assert
+   ()
+   `(lambda (j l r)
+      (declare ((function (fixnum &rest t)) j))
+      (apply j l r))
+   ((#'+ 1 '(2)) 3)))

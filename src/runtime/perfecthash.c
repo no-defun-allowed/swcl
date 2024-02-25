@@ -238,6 +238,7 @@ static int initkey(
 {
   /* Do the initial hash of the keys */
   int finished = inithex(keys, nkeys, alen, blen, smax, salt, final, form);
+  if (finished < 0) return -1;
   if (finished) return 2;
   return inittab(tabb, blen, keys, form, FALSE);
 }
@@ -640,11 +641,12 @@ int findhash(
   bad_perfect = 0;
   for (trysalt=1; ; ++trysalt)
   {
-    ub4 rslinit;
+    int rslinit;
     /* Try to find distinct (A,B) for all keys */
 
     rslinit = initkey(keys, nkeys, *tabb, *alen, *blen, *smax, trysalt,
                       form, final);
+    if (rslinit < 0) return -1;
 
     if (rslinit == 2)
     {      /* initkey actually found a perfect hash, not just distinct (a,b) */
@@ -878,6 +880,8 @@ typedef uint8_t  ub1;\n");
       mem_stream_printf(f, infix ? "ub2 tab[] = {\n": "16)");
     }
 
+    // When emitting sexprs instead of C, assume that the Lisp pretty-printer
+    // can nicely reformat the string after reading it.
     if (blen < 16)
     {
       for (i=0; i<blen; ++i) mem_stream_printf(f, infix?"%3d,":" %d", scramble[tab[i].val_b]);
@@ -886,7 +890,7 @@ typedef uint8_t  ub1;\n");
     {
       for (i=0; i<blen; i+=16)
         mem_stream_printf(f, infix ? "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,\n"
-                        : " %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+                        : " %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
                 scramble[tab[i+0].val_b], scramble[tab[i+1].val_b],
                 scramble[tab[i+2].val_b], scramble[tab[i+3].val_b],
                 scramble[tab[i+4].val_b], scramble[tab[i+5].val_b],
@@ -899,7 +903,7 @@ typedef uint8_t  ub1;\n");
     else if (blen < USE_SCRAMBLE)
     {
       for (i=0; i<blen; i+=8)
-        mem_stream_printf(f, infix ? "%d,%d,%d,%d,%d,%d,%d,%d,\n" : " %d %d %d %d %d %d %d %d\n",
+        mem_stream_printf(f, infix ? "%d,%d,%d,%d,%d,%d,%d,%d,\n" : " %d %d %d %d %d %d %d %d",
                 scramble[tab[i+0].val_b], scramble[tab[i+1].val_b],
                 scramble[tab[i+2].val_b], scramble[tab[i+3].val_b],
                 scramble[tab[i+4].val_b], scramble[tab[i+5].val_b],
@@ -909,7 +913,7 @@ typedef uint8_t  ub1;\n");
     {
       for (i=0; i<blen; i+=16)
         mem_stream_printf(f, infix ? "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,\n"
-                        : " %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+                        : " %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
                 tab[i+0].val_b, tab[i+1].val_b,
                 tab[i+2].val_b, tab[i+3].val_b,
                 tab[i+4].val_b, tab[i+5].val_b,
@@ -923,22 +927,31 @@ typedef uint8_t  ub1;\n");
     ++extra_parens;
   }
   int indent = 0, newline = 0;
+  char *comment = 0;
   for (i=0; i<final->used; ++i) {
-    if (!final->line[i][0]) continue; // empty line
+    char* line = final->line[i];
+    if (!line[0]) continue; // empty line
     if (newline) mem_stream_printf(f,"\n");
     newline = 0;
     int j; for(j=0;j<indent;++j) mem_stream_printf(f," ");
     mem_stream_printf(f, "  ");
 
-    mem_stream_printf(f, "%s", final->line[i]);
+    comment = strchr(line, ';');
+    if (comment && !form->comments) { // strip the comment
+        mem_stream_printf(f, "%.*s", comment-line, line);
+        comment = 0;
+    } else
+        mem_stream_printf(f, "%s", line);
     // Delay the newline in lisp mode so we prettily
     // close all the parens on the last line.
-    if (infix) mem_stream_printf(f, ";\n"); else newline = 1;
-    if (!strncmp(final->line[i],"(let",4)) ++indent;
+    if (infix) mem_stream_printf(f, ";\n");
+    else newline = 1;
+    if (!strncmp(line,"(let",4)) ++indent;
   }
   if (infix) {
     mem_stream_printf(f, "  return rsl;\n}\n");
   } else {
+    if (comment) mem_stream_printf(f,"\n");
     indent += 1 + extra_parens;
     while (indent--) mem_stream_printf(f,")");
     mem_stream_printf(f,"\n");
@@ -950,7 +963,7 @@ typedef uint8_t  ub1;\n");
 Read in the keys, find the hash, and write the .c and .h files
 ------------------------------------------------------------------------------
 */
-static void driver(
+static int driver(
         hashform *form,                                   /* user directives */
         key* keys,
         int nkeys,
@@ -974,8 +987,8 @@ static void driver(
   for (i=0; i<10; ++i) final.line[i] = buf[i];
 
   /* find the hash */
-  findhash(&tab, &alen, &blen, &salt, &final,
-           scramble, &smax, keys, nkeys, form);
+  if (findhash(&tab, &alen, &blen, &salt, &final,
+               scramble, &smax, keys, nkeys, form) < 0) return -1;
 
   /* generate the phash.h file */
   if (form->infix) {
@@ -988,9 +1001,10 @@ static void driver(
 
   /* clean up memory sources */
   free((void *)tab);
+  return 0;
 }
 
-char* generate_perfhash_sexpr(unsigned int *key_array, int nkeys)
+char* lisp_perfhash_with_options(int flags, unsigned int *key_array, int nkeys)
 {
   key* keylist = 0;
   key* keyspace = calloc(nkeys, sizeof (key));
@@ -1001,19 +1015,31 @@ char* generate_perfhash_sexpr(unsigned int *key_array, int nkeys)
     this->next_k = keylist;
     keylist = this;
   }
-  hashform form = { .hashtype = INT_HT, .perfect = MINIMAL_HP, .speed = SLOW_HS, .infix = 0 };
+  hashform form = {
+    .hashtype = INT_HT,
+    .perfect = (flags & 1) ? MINIMAL_HP : NORMAL_HP,
+    .speed = (flags & 2) ? FAST_HS : SLOW_HS,
+    .infix = 0,
+    .comments = 1
+  };
   struct mem_stream * scratchfile = make_mem_stream();
-  driver(&form, keylist, nkeys, scratchfile);
+  if (driver(&form, keylist, nkeys, scratchfile) < 0) return NULL;
 
   char* result = realloc(scratchfile->buffer, scratchfile->position + 1);
+  //fprintf(stderr, "#|\n%s|#\n", result);
   free(scratchfile);
+  free(keyspace);
   return result;
+}
+char* generate_perfhash_sexpr(unsigned int *key_array, int nkeys) {
+  return lisp_perfhash_with_options(1, key_array, nkeys); // MINIMAL
 }
 
 #ifdef DEFINE_MAIN
 int main(int argc, char *argv[])
 {
-  hashform form = { .hashtype = INT_HT, .perfect = MINIMAL_HP, .speed = SLOW_HS, .infix = 0 };
+  hashform form = { .hashtype = INT_HT, .perfect = MINIMAL_HP, .speed = SLOW_HS,
+                    .infix = 0, .comments = 0 };
   if (argc == 2 && !strcmp(argv[1],"infix")) form.infix = 1;
   key* keylist = 0;
   int keycount = 0;

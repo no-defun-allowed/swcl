@@ -104,6 +104,25 @@
 
 ;;;; miscellaneous utilities
 
+(defun compile-perfect-hash (lambda test-inputs)
+  ;; Don't blindly trust the hash generator: assert that computed values are
+  ;; in range and not repeated.
+  (let ((seen (make-array (power-of-two-ceiling (length test-inputs))
+                          :element-type 'bit :initial-element 0))
+        (f #-sb-xc-host (compile nil lambda)
+           #+sb-xc-host
+           ;; Remove OPTIMIZE decls. Expressions passed to this function are largely
+           ;; boilerplate that never match random stuff like (LET ((OPTIMIZE ...)))
+           (compile nil (subst-if '(optimize)
+                                  (lambda (x) (typep x '(cons (eql optimize) (not null))))
+                                  lambda))))
+    (loop for input across test-inputs
+          do (let ((h (funcall f input)))
+               (unless (zerop (bit seen h))
+                 (bug "Perfect hash generator failed on ~X" test-inputs))
+               (setf (bit seen h) 1)))
+    f))
+
 (defstruct (debug-name-marker (:print-function print-debug-name-marker)
                               (:copier nil)))
 (declaim (freeze-type debug-name-marker))

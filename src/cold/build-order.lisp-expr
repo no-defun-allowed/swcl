@@ -165,8 +165,6 @@
 
  ("src/code/early-float")
 
- ("src/code/huffman")
-
  ;; 32-bit implementation of GET-INTERNAL-REAL-TIME needs some thread slots
  ("src/code/early-time" :c-headers)
 
@@ -509,7 +507,7 @@
  ("src/code/x86-64-simd"   :not-host)
  #+arm64
  ("src/code/arm64-simd"   :not-host)
- ("src/code/target-unicode" :not-host)
+ ("src/code/unicode-norm" :not-host)
  ("src/code/mipsstrops"     :not-host)
  ("src/code/string"         :not-host)
 
@@ -617,7 +615,6 @@
   ;; The definition in cold-error is good enough for self-build.
   "src/code/warm-error"
   "src/code/icf"
-  "src/code/warm-target-unicode"
   "src/code/defpackage")
 
  #+sb-fasteval
@@ -628,6 +625,8 @@
   "src/interpreter/special-forms"
   "src/interpreter/eval"
   "src/interpreter/debug")
+ ("src/code/huffman"
+  "src/code/target-unicode")
 
  ;; For an easy core size decrease by 3.5% put :UNICODE-LITE in
  ;; features to exclude a few external-formats that you'll probably

@@ -293,8 +293,8 @@
           `(lambda (x)
              ,(sb-impl:expand-symbol-case
                'x
-               '(((or (eql s 'a) (eql s 'b) (eql s 'c) (eql s 'd)) nil :foo)
-                 ((or (eql s 'e) (eql s 'f) (eql s '|a|)) nil :bar))
+               '(((or (eql s 'a) (eql s 'b) (eql s 'c) (eql s 'd)) :foo)
+                 ((or (eql s 'e) (eql s 'f) (eql s '|a|)) :bar))
                '(a b c d e f |a|)
                nil
                'wonky-hash 1)))))
@@ -308,8 +308,8 @@
           `(lambda (x)
              ,(sb-impl:expand-symbol-case
                'x
-               '(((or (eql s 'f) (eql s 'e) (eql s 'd) (eql s 'c)) nil :foo)
-                 ((or (eql s 'b) (eql s 'a) (eql s '|d|)) nil :bar))
+               '(((or (eql s 'f) (eql s 'e) (eql s 'd) (eql s 'c)) :foo)
+                 ((or (eql s 'b) (eql s 'a) (eql s '|d|)) :bar))
                '(a b c d e f |d|)
                nil
                'wonky-hash 1)))))
@@ -340,7 +340,7 @@
   (contains-if (lambda (x)
                  (and (symbolp x)
                       (or (string= x "SYMBOL-HASH")
-                          (string= x "SYMBOL-HASH*"))))
+                          (string= x "HASH-AS-IF-SYMBOL-NAME"))))
                tree))
 
 (with-test (:name :symbol-case-conservatively-fail)
@@ -350,12 +350,33 @@
   (assert (uses-symbol-hash-p
            (macroexpand-1 '(case x ((a b c) 1) ((e d f) 2))))))
 
+(deftype zook () '(member :a :b :c))
+;; TYPECASE should become CASE when it can, even if the resulting CASE
+;; will not expand using symbol-hash.
 (with-test (:name :typecase-to-case)
-  (let ((expansion
-         (macroexpand-1 '(typecase x
-                          ((member a b c) 1)
-                          ((member d e f) 2)))))
-    (assert (uses-symbol-hash-p expansion))))
+  ;; TYPECASE without a final T clause
+  (assert (equal (macroexpand-1 '(typecase x ((eql z) 1) ((member 2 3) hi) (zook :z)))
+                 '(case x ((z) 1) ((2 3) hi) ((:a :b :c) :z))))
+  ;; with final T
+  (assert (equal (macroexpand-1 '(typecase x ((eql z) 1) ((member 2 3) hi) (zook :z) (t 'def)))
+                 '(case x ((z) 1) ((2 3) hi) ((:a :b :c) :z) (t 'def))))
+  ;; with final OTHERWISE
+  (assert (equal (macroexpand-1 '(typecase x
+                                  ((eql z) 1) ((member 2 3) hi) (zook :z) (otherwise 'def)))
+                 '(case x ((z) 1) ((2 3) hi) ((:a :b :c) :z) (t 'def))))
+
+  ;; ETYPECASE without final T
+  (assert (equal (macroexpand-1 '(etypecase x ((eql z) 1) ((member 2 3) hi) (zook :z)))
+                 '(ecase x ((z) 1) ((2 3) hi) ((:a :b :c) :z))))
+  ;; and with
+  (assert (equal (macroexpand-1 '(etypecase x ((eql z) 1) ((member 2 3) hi) (zook :z) (t 'def)))
+                 '(case x ((z) 1) ((2 3) hi) ((:a :b :c) :z) (t 'def)))))
+
+(with-test (:name :cypecase-never-err)
+  (assert (eq (let ((x 1)) (ctypecase x (t 'a))) 'a)))
+
+(with-test (:name :typecase-t-shadows-rest)
+  (assert-signal (macroexpand-1 '(typecase x (atom 1) (t 2) (cons 3))) warning))
 
 (with-test (:name :symbol-case-default-form)
   (let ((f (checked-compile
@@ -401,3 +422,16 @@
 (with-test (:name :macro-with-dotted-list)
   (let ((expansion (macroexpand '(macro-with-dotted-list . 1))))
     (assert (equal expansion 1))))
+
+(with-test (:name :typecase)
+  (declare (muffle-conditions style-warning))
+  (assert
+   (equal (loop for x in '(a 1 1.4 "c")
+                collect (typecase x
+                          (t :good)
+                          (otherwise :bad)))
+          '(:good :good :good :good))))
+
+(with-test (:name :typecase-nonfinal-otherwise-errs)
+  (assert-error
+   (macroexpand-1 '(typecase x (cons 1) (otherwise 2) (t 3)))))

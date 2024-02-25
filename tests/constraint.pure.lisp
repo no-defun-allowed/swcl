@@ -1110,6 +1110,20 @@
                1))))
    (eql 1)))
 
+(with-test (:name :dead-blocks.2)
+  (checked-compile `(lambda (a b)
+                      (declare (type (integer 0 171951449) a)
+                               ((member -1965785401190741689 18014398509481983) b)
+                               (optimize (debug 2)))
+                      (let ((v3 b)
+                            (v6 116510974941639))
+                        (if (> v6 v3)
+                            (if (> v3 v6)
+                                (let ((v3 (logand a v3)))
+                                  (loop for lv1 below 3
+                                        count (let ((v8 (min lv1 v3)))
+                                                (<= v8  576460752303423490))))))))))
+
 (with-test (:name :multiple-equality-constraints)
   (checked-compile
    `(lambda (v)
@@ -1119,3 +1133,99 @@
         (loop
          (decf i)
          (print (aref v i)))))))
+
+(with-test (:name :min/max-constraints-set)
+  (checked-compile-and-assert
+   ()
+   `(lambda (a b c)
+      (let ((x
+              (if (< a c)
+                  c
+                  a))
+            (y (setq a (min most-positive-fixnum b))))
+        (> y x)))
+   ((1 5 3) t)
+   ((2 4 6) nil)))
+
+(with-test (:name :mod)
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     `(lambda (v i)
+                        (svref v (mod i (length v))))
+                     nil))
+             0)))
+
+(with-test (:name :index-ranges)
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     `(lambda (a)
+                        (when (= (length a) 2)
+                          (svref a 1)))
+                     nil))
+             0))
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     `(lambda (a l i)
+                        (declare ((integer 2 3) l)
+                                 ((integer 0 1) i))
+                        (when (= (length a) l)
+                          (svref a i)))
+                     nil))
+             0)))
+
+(with-test (:name :map-equality-constraints)
+  (checked-compile-and-assert
+   ()
+   `(lambda (c d)
+      (declare (notinline identity)
+               (bit d))
+      (dotimes (e 3 (identity (logior c 10 (- d -6 e))))))
+   ((2 1) 14)
+   ((9 0) 11)))
+
+(with-test (:name :local-call)
+  (assert-type
+   (lambda (a)
+     (flet ((b ()
+              a))
+       (declare (notinline b))
+       (the integer a)
+       (b)
+       (b)))
+   integer))
+
+#+var-value-constraints
+(with-test (:name :set-vars-equal)
+  (assert-type
+   (lambda (a)
+     (incf a 10)
+     (eq a (progn (loop repeat a do (print 20)) a)))
+   (eql t))
+  (checked-compile-and-assert
+   ()
+   `(lambda (a)
+      (logxor (unwind-protect a (setq a 7)) a))
+  ((0) 7)
+  ((7) 0)))
+
+(with-test (:name :set-vars-equal-leaf-change)
+  (checked-compile-and-assert
+   ()
+   `(lambda (b)
+      (declare (integer b))
+      (let ((c 1))
+        (decf c (shiftf b b))))
+   ((3) -2)
+   ((-4) 5)))
+
+(with-test (:name :all-var-values)
+  (checked-compile
+   `(lambda (c)
+      (declare (optimize (safety 0)))
+      (loop for lv3 below 1
+            do
+            (loop for lv4 below 3
+                  sum (progv nil nil
+                        (setq c 1000)))
+            (unless (eq  lv3 -1)
+              (the integer (catch 'ct4 16385)))))))

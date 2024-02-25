@@ -86,11 +86,6 @@
 (defknown (eq eql) (t t) boolean
   (movable foldable flushable commutative))
 (defknown (equal equalp) (t t) boolean (foldable flushable recursive))
-
-#+(or x86 x86-64 arm arm64)
-(defknown fixnum-mod-p (t fixnum) boolean
-  (movable flushable always-translatable))
-
 
 ;;;; classes
 
@@ -283,7 +278,7 @@
     (fixnum real fixnum) boolean
     (foldable flushable movable no-verify-arg-count))
 
-(defknown (check-range< check-range<= check-range<<= check-range<=<)
+(defknown (check-range<=)
     (fixnum t fixnum) boolean
     (foldable flushable movable no-verify-arg-count))
 
@@ -308,6 +303,10 @@
 
 (defknown expt (number number) number
   (movable foldable flushable recursive))
+
+(defknown sb-kernel::intexp ((or rational (complex rational)) integer) rational
+  (movable foldable flushable recursive no-verify-arg-count))
+
 (defknown log (number &optional real) irrational
   (movable foldable flushable recursive))
 (defknown sqrt (number) irrational
@@ -416,6 +415,10 @@
   (movable foldable unsafely-flushable))
 (defknown float-radix (float) sb-kernel::%float-radix
   (movable foldable unsafely-flushable))
+(defknown float-sign-bit (float) bit
+  (movable foldable unsafely-flushable))
+(defknown float-sign-bit-set-p (float) boolean
+  (movable foldable unsafely-flushable))
 ;;; This says "unsafely flushable" as if to imply that there is a possibility
 ;;; of signaling a condition in safe code, but in practice we can never trap
 ;;; on a NaN because the implementation uses foo-FLOAT-BITS instead of
@@ -504,9 +507,11 @@
 (defknown random-state-p (t) boolean (movable foldable flushable))
 
 ;;;; from the "Characters" chapter:
-(defknown (standard-char-p graphic-char-p alpha-char-p
+(defknown (graphic-char-p alpha-char-p
                            upper-case-p lower-case-p both-case-p alphanumericp)
   (character) boolean (movable foldable flushable))
+(defknown (standard-char-p)
+  (character) (or null base-char) (movable foldable flushable))
 
 (defknown digit-char-p (character &optional (integer 2 36))
   (or (integer 0 35) null) (movable foldable flushable))
@@ -543,7 +548,7 @@
 (defknown digit-char (unsigned-byte &optional (integer 2 36))
   (or character null) (movable foldable flushable))
 (defknown char-int (character) %char-code (movable foldable flushable))
-(defknown char-name (character) (or simple-string null)
+(defknown char-name (character) (or simple-base-string null)
   (movable foldable flushable))
 (defknown name-char (string-designator) (or character null)
   (movable foldable flushable))
@@ -647,7 +652,7 @@
                   (intern (concatenate 'string "VECTOR-MAP-INTO/"
                                        (string (sb-vm:saetp-primitive-type-name info)))
                           :sb-impl))
-    (simple-array index index function list)
+    (simple-array index index function &rest sequence)
     index
     (call no-verify-arg-count))
 

@@ -185,20 +185,12 @@
          (add-equality-constraint 'eq (make-vector-length-constraint var) second
                                   constraints consequent-constraints alternative-constraints))))
     (t
-     (let* ((constant-x (and (lvar-p first)
-                             (constant-lvar-p first)))
-            (constant-y (and (lvar-p second)
-                             (constant-lvar-p second)))
-            (x (cond (constant-x
-                      (nth-value 1 (lvar-value first)))
-                     ((lambda-var/vector-length-p first)
+     (let* ((x (cond ((lambda-var/vector-length-p first)
                       first)
                      ((ok-lvar-lambda-var/vector-length first constraints))
                      (t
                       first)))
-            (y (cond (constant-y
-                      (nth-value 1 (lvar-value second)))
-                     ((lambda-var/vector-length-p second)
+            (y (cond ((lambda-var/vector-length-p second)
                       second)
                      ((ok-lvar-lambda-var/vector-length second constraints))
                      (t
@@ -222,7 +214,6 @@
          (rotatef first second)
          (rotatef x y)
          (rotatef x-type y-type)
-         (rotatef constant-x constant-y)
          (setf operator (invert-operator operator)))
        (flet ((replace-var (var with)
                 (cond ((eq var with)
@@ -247,17 +238,13 @@
                   (conset-add-equality-constraint alternative operator x y t amount))))
          (do-eql-vars (eql-x ((constraint-var x) constraints))
            (let ((x (replace-var x eql-x)))
-             (when (and (vector-length-constraint-p x)
-                        (not constant-y)
-                        (neq y-type *universal-type*))
+             (when (neq y-type *universal-type*)
                (add x y-type :amount 0))
              (if (lambda-var/vector-length-p y)
                  (do-eql-vars (eql-y ((constraint-var y) constraints))
                    (let ((y (replace-var y eql-y)))
                      (add x y)
-                     (when (and (vector-length-constraint-p y)
-                                (not constant-x)
-                                (neq x-type *universal-type*))
+                     (when (neq x-type *universal-type*)
                        (add x-type y :amount 0))))
                  (add x y))
              (add x y)))
@@ -273,8 +260,7 @@
                                                  :amount inherit-amount
                                                  :consequent target
                                                  :alternative nil)
-                                     (when (and (vector-length-constraint-p in-y)
-                                                (not (constant-p x)))
+                                     (when (neq x-type *universal-type*)
                                        (add x-type in-y :operator inherit
                                                         :alternative nil
                                                         :consequent target
@@ -385,45 +371,43 @@
             (replace-combination-with-constant result call))
           t)))))
 
-(defun map-equality-constraints (x y constraints
-                                 function)
-  (let* ((constant-x (and (lvar-p x)
-                          (constant-lvar-p x)))
-         (constant-y (and (lvar-p y)
-                          (constant-lvar-p y)))
-         (x (cond (constant-x
-                   (nth-value 1 (lvar-value x)))
-                  ((lambda-var/vector-length-p x)
-                   x)
-                  ((ok-lvar-lambda-var/vector-length x constraints t))
+(defun map-equality-constraints (lvar-x lvar-y constraints function)
+  (let* ((x (cond ((lambda-var/vector-length-p lvar-x)
+                   lvar-x)
+                  ((ok-lvar-lambda-var/vector-length lvar-x constraints t))
                   (t
-                   x)))
-         (y (cond (constant-y
-                   (nth-value 1 (lvar-value y)))
-                  ((ok-lvar-lambda-var/vector-length y constraints t))
+                   lvar-x)))
+         (y (cond ((ok-lvar-lambda-var/vector-length lvar-y constraints t))
                   (t
-                   y)))
+                   lvar-y)))
          (invert))
     (unless (lambda-var/vector-length-p x)
       (unless (lambda-var/vector-length-p y)
         (return-from map-equality-constraints))
-
       (rotatef x y)
-      (rotatef constant-x constant-y)
+      (rotatef lvar-x lvar-y)
       (setf invert t))
     (do-equality-constraints (in-y op not-p) x constraints
       (when (or (vector-constraint-eq-p in-y y)
-                (and constant-y
-                     (constant-p in-y)
-                     (let ((a (constant-value in-y))
-                           (b (constant-value y)))
-                       (and (realp a)
-                            (realp b)
-                            (case op
-                              (< (unless not-p
-                                   (sb-xc:< a b)))
-                              (> (unless not-p
-                                   (sb-xc:> a b))))))))
+                (and (ctype-p in-y)
+                     (lvar-p lvar-y)
+                     (or (and (type-singleton-p in-y)
+                              (type= in-y (lvar-type lvar-y)))
+                         (let ((interval-in-y (type-approximate-interval in-y))
+                               (interval-y (type-approximate-interval (lvar-type lvar-y))))
+                           (when (and interval-y
+                                      interval-in-y)
+                             (let* ((a interval-in-y)
+                                    (b interval-y))
+                               (case op
+                                 (< (unless not-p
+                                      (interval-< a b)))
+                                 (> (unless not-p
+                                      (interval-< b a)))
+                                 (eq
+                                  (unless not-p
+                                    (cond ((interval-< b a)
+                                           (setf op '>))))))))))))
         (funcall function (if invert
                               (invert-operator op)
                               op)
@@ -689,7 +673,9 @@
                (when (and (ref-p ref1) (ref-p ref2))
                  (let ((var1 (ok-ref-lambda-var ref1))
                        (var2 (ok-ref-lambda-var ref2)))
-                   (when (and var1 var2)
+                   (when (and var1 var2
+                              (not (lambda-var-sets var1))
+                              (not (lambda-var-sets var2)))
                      (labels ((normalize-not (op not)
                                 (if not
                                     (case op
@@ -736,6 +722,14 @@
       (when vector-length
         (conset-add-equality-constraint target 'eq var vector-length nil)))))
 
+(defun add-mv-let-result-constraints (call fun constraints &optional (target constraints))
+  (let ((vars (lambda-vars fun))
+        (lvars (basic-combination-args call)))
+    (when (= (length lvars) 1)
+      (loop for (nth-value operator second min-amount max-amount) in (nth-value 1 (lvar-result-constraints (car lvars)))
+            do
+            (add-equality-constraint operator (elt vars nth-value) second constraints target nil min-amount max-amount)))))
+
 ;;; Need a separate function because a set clears the constraints of the var
 (defun add-set-constraints (var lvar constraints)
   (let (gen)
@@ -761,27 +755,45 @@
     gen))
 
 (defoptimizer (- constraint-propagate-result) ((a b) node)
-  (and (csubtypep (lvar-type a) (specifier-type 'integer))
-       (csubtypep (lvar-type b) (specifier-type '(integer 0)))
-       (let ((interval (type-approximate-interval (lvar-type b))))
-         (when interval
-           (let ((low (interval-low interval)))
-             (if (> low 0)
-                 (list (list '< a low (interval-high interval)))
-                 (list (list '<= a))))))))
+  (when (csubtypep (lvar-type a) (specifier-type 'integer))
+    (cond ((csubtypep (lvar-type b) (specifier-type '(integer 0)))
+           (let ((interval (type-approximate-interval (lvar-type b))))
+             (when interval
+               (let ((low (interval-low interval)))
+                 (list (if (> low 0)
+                           (list '< a low (interval-high interval))
+                           (list '<= a)))))))
+          ((csubtypep (lvar-type b) (specifier-type '(integer * -1)))
+           (let ((interval (type-approximate-interval (lvar-type b))))
+             (when interval
+               (let* ((interval (interval-neg interval))
+                      (low (interval-low interval)))
+                 (list (if (> low 0)
+                           (list '> a low (interval-high interval))
+                           (list '>= a))))))))))
 
 (defoptimizer (+ constraint-propagate-result) ((x y) node)
   (let (r)
     (flet ((try (a b)
-             (and (csubtypep (lvar-type a) (specifier-type 'integer))
-                  (csubtypep (lvar-type b) (specifier-type '(integer 0)))
-                  (let ((interval (type-approximate-interval (lvar-type b))))
-                    (when interval
-                      (let ((low (interval-low interval)))
-                        (push (if (> low 0)
-                                  (list '> a low (interval-high interval))
-                                  (list '>= a))
-                              r)))))))
+             (when (csubtypep (lvar-type a) (specifier-type 'integer))
+               (cond ((csubtypep (lvar-type b) (specifier-type '(integer 0)))
+                      (let ((interval (type-approximate-interval (lvar-type b))))
+                        (when interval
+                          (let ((low (interval-low interval)))
+                            (push (if (> low 0)
+                                      (list '> a low (interval-high interval))
+                                      (list '>= a))
+                                  r)))))
+                     ((csubtypep (lvar-type b) (specifier-type '(integer * -1)))
+                      (let ((interval (type-approximate-interval (lvar-type b))))
+                        (when interval
+                          (let* ((interval (interval-neg interval))
+                                 (low (interval-low interval)))
+                            (push
+                             (if (> low 0)
+                                 (list '< a low (interval-high interval))
+                                 (list '<= a))
+                             r)))))))))
       (try x y)
       (try y x))
     r))
@@ -819,3 +831,8 @@
 
 (defoptimizer (make-sequence constraint-propagate-result) ((type length &rest args) node)
   (list (list 'vector-length length)))
+
+(defoptimizer (floor constraint-propagate-result) ((x y) node)
+  (when (csubtypep (lvar-type y) (specifier-type '(real 0)))
+    (values nil
+            (list (list 1 '< y)))))

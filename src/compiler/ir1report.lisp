@@ -258,7 +258,10 @@
         (let* ((path (cond ((node-p context)
                             (node-source-path context))
                            ((lvar-annotation-p context)
-                            (lvar-annotation-source-path context))
+                            (let ((path (lvar-annotation-source-path context)))
+                             (if (typep path '(cons (eql detail)))
+                                 (third path)
+                                 path)))
                            ((ctran-p context)
                             (ctran-source-path context))
                            ((consp context) context)
@@ -612,11 +615,14 @@ has written, having proved that it is unreachable."))
 ;;; the compiler, hence the BOUNDP check.
 (defun note-undefined-reference (name kind)
   #+sb-xc-host
-  ;; Allowlist functions are looked up prior to UNCROSS,
-  ;; so that we can distinguish CL:SOMEFUN from SB-XC:SOMEFUN.
-  (when (and (eq kind :function)
-             (gethash name sb-cold:*undefined-fun-allowlist*))
-    (return-from note-undefined-reference (values)))
+  (progn
+    ;; Allowlist functions are looked up prior to UNCROSS,
+    ;; so that we can distinguish CL:SOMEFUN from SB-XC:SOMEFUN.
+    (when (and (eq kind :function)
+               (gethash name sb-cold:*undefined-fun-allowlist*))
+      (return-from note-undefined-reference (values)))
+    (when (eq kind :variable)
+      (error "Ref to undefined variable ~S disallowed" name)))
   (setq name (uncross name))
   (unless (and
            ;; Check for boundness so we don't blow up if we're called

@@ -65,6 +65,7 @@
   "tests/data/wonky4.lisp")
  ("load.pure.lisp"
   "tests/data/wonky1.lisp")
+ ("mrgc-ht-rehash.impure.lisp" "src/pcl/walk.lisp")
  ("octets.pure.lisp"
   "tests/data/compile-file-pos.lisp"
   "tests/data/compile-file-pos-utf16be.lisp")
@@ -78,6 +79,7 @@
   "tests/package-test-5.lisp"
   "tests/package-test-6.lisp"
   "tests/package-test-7.lisp")
+ ("perfecthash.impure.lisp" "tools-for-build/unicode-phash.lisp-expr")
  ("redblack.pure.lisp" "tests/bbtree-test-util.lisp" "src/code/redblack.lisp")
  ("run-program.impure.lisp" "contrib/sb-posix.fasl")
  ("sb-aclrepl.impure.lisp" "contrib/sb-aclrepl.fasl"

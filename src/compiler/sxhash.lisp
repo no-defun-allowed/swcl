@@ -134,26 +134,44 @@
 ;; All symbols have a precomputed hash.
 (deftransform sxhash ((x) (symbol)) `(symbol-hash x))
 
-(deftransform symbol-hash* ((object predicate) (symbol null) * :important nil)
-  `(symbol-hash* object 'symbolp)) ; annotate that object satisfies SYMBOLP
-(deftransform symbol-hash* ((object predicate)
-                            ((and (not null) symbol)
-                             (constant-arg (member nil symbolp)))
-                            * :important nil)
-  `(symbol-hash* object 'non-null-symbol-p)) ; etc
+(deftransform hash-as-if-symbol-name ((object) (symbol) * :important nil)
+  `(symbol-hash object))
+
+(intern "SCRAMBLE" "SB-C")
+(intern "TAB" "SB-C")
 
 ;;; To use this macro during cross-compilation we will have to emulate
 ;;; generate_perfhash_sexpr using a file, similar to xfloat-math.
-(defun make-perfect-hash-lambda (array)
+;;; MINIMAL (the default) returns a a function that returns an output
+;;; in the range 0..N-1 for N possible symbols. If non-minimal, the output
+;;; range is the power-of-2-ceiling of N.
+;;; It could be worth using a non-minimal perfect hash if it avoids needing
+;;; a lookup table and can be done entirely with arithmetic and logical ops.
+;;; That seldom seems to be the case.
+;;; FAST should make the generator try less hard to do a good job.
+;;; Practically speaking it does not often make the generator run faster,
+;;; and it might run slower! In no way does it say anything about the speed
+;;; of the generated function. So you pretty much don't want to supply it.
+;;; Indeed one should avoid passing either optional arg to this function.
+(defun make-perfect-hash-lambda (array &optional objects (minimal t) (fast nil))
   (declare (type (simple-array (unsigned-byte 32) (*)) array))
+  (declare (ignorable objects minimal fast))
+  (when (< (length array) 3) ; one or two keys - why are you doing this?
+    (return-from make-perfect-hash-lambda))
+  (let ((dedup (alloc-xset)))
+    (dovector (x array)
+      (when (xset-member-p x dedup) (return-from make-perfect-hash-lambda))
+      (add-to-xset x dedup)))
+  ;; no dups present
   (let* ((string
-          #+sb-xc-host (sb-cold::emulate-generate-perfect-hash-sexpr array)
+          #+sb-xc-host (sb-cold::emulate-generate-perfect-hash-sexpr array objects)
           #-sb-xc-host
           (sb-unix::newcharstar-string
            (sb-sys:with-pinned-objects (array)
              (alien-funcall (extern-alien
-                             "generate_perfhash_sexpr"
-                             (function (* char) system-area-pointer int))
+                             "lisp_perfhash_with_options"
+                             (function (* char) int system-area-pointer int))
+                            (logior (if minimal 1 0) (if fast 2 0))
                             (sb-sys:vector-sap array) (length array)))))
          (expr #+sb-xc-host ; don't rebind anything except *PACKAGE*
                ;; especially as we need to keep our #\A charmacro
@@ -166,6 +184,7 @@
                (if (consp e)
                    (or (containsp (car e) op) (containsp (cdr e) op))
                    (eq e op))))
+     (values
       `(lambda (val)
          (declare (optimize (safety 0) (debug 0) (sb-c:store-source-form 0)))
          (declare (type (unsigned-byte 32) val))
@@ -175,8 +194,9 @@
          (macrolet ,(remove-if-not
                      (lambda (m) (containsp expr (car m)))
                      '((& (a b) `(logand ,a ,b)) ; purposely look more C-like
-                       (^ (a b) `(logxor ,a ,b)) ;  (for debugging)
+                       (^ (&rest r) `(logxor ,@r)) ;  (for debugging)
                        (u32+ (a b) `(logand (+ ,a ,b) #xFFFFFFFF))
+                       (u32- (a) `(logand (- ,a) #xFFFFFFFF))
                        (^= (a b) `(setq ,a (logxor ,a ,b)))
                        (+= (a b) `(setq ,a (logand (+ ,a ,b) #xFFFFFFFF)))
                        (<< (n c) `(logand (ash ,n ,c) #xFFFFFFFF))
@@ -184,6 +204,5 @@
            ;; We generate _really_ crappy code for 32-bit math on 64-bit machines.
            ;; I think the steps are sufficiently trivial that a single vop could choose
            ;; how to translate the arbitrary s-expression
-           ,@expr)))))
-(intern "TAB")
-(intern "SCRAMBLE")
+           ,@expr))
+      string))))

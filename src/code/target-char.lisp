@@ -17,24 +17,6 @@
 (declaim (maybe-inline upper-case-p lower-case-p both-case-p
                        digit-char-p))
 
-(declaim (inline pack-3-codepoints))
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (defun pack-3-codepoints (first &optional (second 0) (third 0))
-    (declare (type (unsigned-byte 21) first second third))
-    (sb-c::mask-signed-field 63 (logior first (ash second 21) (ash third 42)))))
-
-(defun unpack-3-codepoints (codepoints)
-  (declare (type (signed-byte 63) codepoints))
-  (cond ((< codepoints (ash 1 21))
-         (list (code-char codepoints)))
-        ((< codepoints (ash 1 (* 21 2)))
-         (list (code-char (ldb (byte 21 0) codepoints))
-               (code-char (ldb (byte 21 21) codepoints))))
-        (t
-         (list (code-char (ldb (byte 21 0) codepoints))
-               (code-char (ldb (byte 21 21) codepoints))
-               (code-char (ldb (byte 21 (* 21 2)) codepoints))))))
-
 (declaim (inline clear-flag))
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defun clear-flag (bit integer)
@@ -43,48 +25,55 @@
 (eval-when (:compile-toplevel)
   (defconstant +misc-width+ 9)
   (defmacro misc-index-from-char-code (codepoint high-pages low-pages)
-    `(let* ((cp ,codepoint)
-            (cp-high (ash cp -8))
-            (high-index (aref ,high-pages cp-high)))
-       (if (logbitp 15 high-index)
-           (* ,+misc-width+ (clear-flag 15 high-index))
-           (* ,+misc-width+ (aref ,low-pages (* 2 (+ (ldb (byte 8 0) cp) (ash high-index 8))))))))
+    (let ((high-pages-value (and (boundp high-pages)
+                                 (symbol-value high-pages)))
+          (low-pages-value (and (boundp low-pages)
+                                (symbol-value low-pages))))
+      `(let* ((cp ,codepoint)
+              (cp-high (ash cp -8))
+              (high-index (aref ,high-pages cp-high)))
+         (* ,+misc-width+
+            (if (logbitp 15 high-index)
+                (truly-the
+                 (integer 0
+                          ,(if high-pages-value
+                               (loop for x across high-pages-value
+                                     when (logbitp 15 x)
+                                     maximize (clear-flag 15 x))
+                               '*))
+                 (clear-flag 15 high-index))
+                (truly-the
+                 (integer 0
+                          ,(if low-pages-value
+                               (loop for i below (length low-pages-value) by 2
+                                     maximize
+                                     (aref low-pages-value i))
+                               '*))
+                 (aref ,low-pages
+                       (* 2 (+ (ldb (byte 8 0) cp)
+                               (ash (truly-the
+                                     (integer 0
+                                              ,(if high-pages-value
+                                                   (loop for x across high-pages-value
+                                                         unless (logbitp 15 x)
+                                                         maximize x)
+                                                   '*))
+                                     high-index)
+                                    8))))))))))
   (setf (sb-xc:macro-function 'misc-index-from-char-code)
         (lambda (form env)
           (declare (ignore env))
-          (funcall (cl:macro-function 'misc-index-from-char-code) form nil)))
-)
+          (funcall (cl:macro-function 'misc-index-from-char-code) form nil))))
 
 (macrolet ((frob ()
              (flet ((file (name type)
                       (sb-cold:find-bootstrap-file (format nil "output/ucd/~A.~A" name type)))
-                    (read-ub8-vector (pathname)
-                      (with-open-file (stream pathname
-                                              :element-type '(unsigned-byte 8))
-                        (let* ((length (file-length stream))
-                               (array (sb-xc:make-array
-                                       length :element-type '(unsigned-byte 8)
-                                       :retain-specialization-for-after-xc-core t)))
-                          (read-sequence array stream)
-                          array)))
                     (make-ubn-vector (raw-bytes n)
-                      (let* ((et (if (= n 3)
-                                     '(unsigned-byte 31)
-                                     `(unsigned-byte ,(* 8 n))))
-                             (array (sb-xc:make-array (/ (length raw-bytes) n)
-                                                      :element-type et
-                                                      :retain-specialization-for-after-xc-core t)))
-                        (loop for i from 0 below (length raw-bytes) by n
-                           do (loop with element = 0
-                                 for offset from 0 below n
-                                 do (incf element (ash (aref raw-bytes (+ i offset))
-                                                       (* 8 (- n offset 1))))
-                                 finally (setf (aref array (/ i n)) element)))
-                        array)))
+                      (aver (member n '(1 2)))
+                      (ubN-array-from-octets raw-bytes `(unsigned-byte ,(* 8 n)) n)))
               (let* ((misc-database (read-ub8-vector (file "ucdmisc" "dat")))
                      (ucd-high-pages (read-ub8-vector (file "ucdhigh" "dat")))
                      (ucd-low-pages (read-ub8-vector (file "ucdlow" "dat")))
-                     (decompositions (read-ub8-vector (file "decomp" "dat")))
                      (case-data (read-ub8-vector (file "case" "dat")))
                      (case-pages (read-ub8-vector (file "casepages" "dat")))
                      (high-pages (make-ubn-vector ucd-high-pages 2))
@@ -95,8 +84,6 @@
                     (defconstant-eqx sb-unicode::+character-misc-database+ ,misc-database #'equalp)
                     (defconstant-eqx sb-unicode::+character-high-pages+ ,high-pages #'equalp)
                     (defconstant-eqx sb-unicode::+character-low-pages+ ,low-pages #'equalp)
-                    (defconstant-eqx sb-unicode::+character-decompositions+
-                        ,(make-ubn-vector decompositions 3) #'equalp)
                     (defconstant-eqx +character-case-pages+ ,%*character-case-pages*% #'equalp)
                     ,@(let* ((unicode-table
                                  (make-array
@@ -154,155 +141,8 @@
                                      (setf (aref table (* i 2)) lower
                                            (aref table (1+ (* i 2))) upper)))))
                           `((defconstant-eqx +character-unicode-cases+ ,unicode-table #'equalp)
-                            (defconstant-eqx +character-cases+ ,table #'equalp)))
-
-                    ,@(with-open-file
-                         (stream (file "ucd-names" "lisp-expr"))
-                       (with-open-file (u1-stream (file "ucd1-names" "lisp-expr"))
-                         (flet ((convert-to-double-vector (vector &optional reversed)
-                                  (let ((result (make-array (* (length vector) 2))))
-                                    (loop for (code . name) across vector
-                                          for i by 2
-                                          do
-                                          (when reversed
-                                            (rotatef code name))
-                                          (setf (aref result i) code
-                                                (aref result (1+ i)) name))
-                                    result)))
-                           (let ((names (make-hash-table))
-                                 (u1-names (make-hash-table)))
-                             (loop
-                               for code-point = (read stream nil nil)
-                               for char-name = (string-upcase (read stream nil nil))
-                               while code-point
-                               do (setf (gethash code-point names) char-name))
-                             (loop
-                               for code-point = (read u1-stream nil nil)
-                               for char-name = (string-upcase (read u1-stream nil nil))
-                               while code-point
-                               do (setf (gethash code-point u1-names) char-name))
-                             (let ((tree
-                                     (make-huffman-tree
-                                      (let (list)
-                                        (maphash (lambda (code name)
-                                                   (declare (ignore code))
-                                                   (push name list))
-                                                 names)
-                                        (maphash (lambda (code u1-name)
-                                                   (declare (ignore code))
-                                                   (push u1-name list))
-                                                 u1-names)
-                                        list)))
-                                   (code->name
-                                     (make-array (hash-table-count names)
-                                                 :fill-pointer 0))
-                                   (name->code nil)
-                                   (code->u1-name
-                                     (make-array (hash-table-count u1-names)
-                                                 :fill-pointer 0))
-                                   (u1-name->code nil))
-                               (maphash (lambda (code name)
-                                          (vector-push
-                                           (cons code (huffman-encode name tree))
-                                           code->name))
-                                        names)
-                               (maphash (lambda (code name)
-                                          (vector-push
-                                           (cons code (huffman-encode name tree))
-                                           code->u1-name))
-                                        u1-names)
-                               (setf name->code
-                                     (sort (copy-seq code->name) #'< :key #'cdr)
-                                     code->name
-                                     (sort (copy-seq name->code) #'< :key #'car)
-                                     u1-name->code
-                                     (sort (copy-seq code->u1-name) #'< :key #'cdr)
-                                     code->u1-name
-                                     (sort (copy-seq u1-name->code) #'< :key #'car))
-                               `((defconstant-eqx +unicode-char-name-database+
-                                     ,(convert-to-double-vector code->name) #'equalp)
-                                 (defconstant-eqx +unicode-name-char-database+
-                                     ,(convert-to-double-vector name->code t) #'equalp)
-                                 (defconstant-eqx sb-unicode::+unicode-1-char-name-database+
-                                     ,(convert-to-double-vector code->u1-name) #'equalp)
-                                 (defconstant-eqx +unicode-1-name-char-database+
-                                     ,(convert-to-double-vector u1-name->code t) #'equalp)
-                                 (defconstant-eqx sb-unicode::+unicode-character-name-huffman-tree+
-                                     ',tree #'equal))))))))))))
-
+                            (defconstant-eqx +character-cases+ ,table #'equalp))))))))
   (frob))
-
-(define-load-time-global *base-char-name-alist*
-  ;; Note: The *** markers here indicate character names which are
-  ;; required by the ANSI specification of #'CHAR-NAME. For the others,
-  ;; we prefer the ASCII standard name.
-  '((#x00 "Nul" "Null" "^@")
-    (#x01 "Soh" "^a")
-    (#x02 "Stx" "^b")
-    (#x03 "Etx" "^c")
-    (#x04 "Eot" "^d")
-    (#x05 "Enq" "^e")
-    (#x06 "Ack" "^f")
-    ;; Don't alias to Bell, another Unicode character has that name.
-    (#x07 "Bel" "^g")
-    (#x08 "Backspace" "^h" "Bs") ; *** See Note above
-    (#x09 "Tab" "^i" "Ht") ; *** See Note above
-    (#x0A "Newline" "Linefeed" "^j" "Lf" "Nl") ; *** See Note above
-    (#x0B "Vt" "^k")
-    (#x0C "Page" "^l" "Form" "Formfeed" "Ff" "Np") ; *** See Note above
-    (#x0D "Return" "^m" "Cr") ; *** See Note above
-    (#x0E "So" "^n")
-    (#x0F "Si" "^o")
-    (#x10 "Dle" "^p")
-    (#x11 "Dc1" "^q")
-    (#x12 "Dc2" "^r")
-    (#x13 "Dc3" "^s")
-    (#x14 "Dc4" "^t")
-    (#x15 "Nak" "^u")
-    (#x16 "Syn" "^v")
-    (#x17 "Etb" "^w")
-    (#x18 "Can" "^x")
-    (#x19 "Em" "^y")
-    (#x1A "Sub" "^z")
-    (#x1B "Esc" "Escape" "^[" "Altmode" "Alt")
-    (#x1C "Fs" "^\\")
-    (#x1D "Gs" "^]")
-    (#x1E "Rs" "^^")
-    (#x1F "Us" "^_")
-    (#x20 "Space" "Sp") ; *** See Note above
-    (#x7f "Rubout" "Delete" "Del")
-    (#x80 "C80")
-    (#x81 "C81")
-    (#x82 "Break-Permitted")
-    (#x83 "No-Break-Permitted")
-    (#x84 "C84")
-    (#x85 "Next-Line")
-    (#x86 "Start-Selected-Area")
-    (#x87 "End-Selected-Area")
-    (#x88 "Character-Tabulation-Set")
-    (#x89 "Character-Tabulation-With-Justification")
-    (#x8A "Line-Tabulation-Set")
-    (#x8B "Partial-Line-Forward")
-    (#x8C "Partial-Line-Backward")
-    (#x8D "Reverse-Linefeed")
-    (#x8E "Single-Shift-Two")
-    (#x8F "Single-Shift-Three")
-    (#x90 "Device-Control-String")
-    (#x91 "Private-Use-One")
-    (#x92 "Private-Use-Two")
-    (#x93 "Set-Transmit-State")
-    (#x94 "Cancel-Character")
-    (#x95 "Message-Waiting")
-    (#x96 "Start-Guarded-Area")
-    (#x97 "End-Guarded-Area")
-    (#x98 "Start-String")
-    (#x99 "C99")
-    (#x9A "Single-Character-Introducer")
-    (#x9B "Control-Sequence-Introducer")
-    (#x9C "String-Terminator")
-    (#x9D "Operating-System-Command")
-    (#x9E "Privacy-Message")
-    (#x9F "Application-Program-Command"))) ; *** See Note above
 
 ;;;; UCD accessor functions
 
@@ -375,11 +215,14 @@
 ;;; PRIMARY-COMPOSITION, with (+ (ash codepoint1 21) codepoint2) as
 ;;; keys and the composition as the value
 
-(declaim (ftype (sfunction (t) (unsigned-byte 16)) misc-index))
 (defun misc-index (char)
   (misc-index-from-char-code (char-code char)
                              sb-unicode::+character-high-pages+
                              sb-unicode::+character-low-pages+))
+
+(aver (csubtypep (global-ftype 'misc-index)
+                 (specifier-type '(sfunction (t) (unsigned-byte 16)))))
+(proclaim `(ftype ,(type-specifier (global-ftype 'misc-index)) misc-index))
 
 (declaim (ftype (sfunction (t) (unsigned-byte 8)) ucd-general-category)
          (inline ucd-general-category))
@@ -426,64 +269,27 @@ strings and symbols of length 1."
                   (do-error
                    "Symbol name is not of length one: ~S" (list object))))
       (t (do-error "~S cannot be coerced to a character." (list object))))))
-
-(defun char-name (char)
-  "Return the name (a STRING) for a CHARACTER object."
-  (let ((char-code (char-code char)))
-    (or (second (assoc char-code *base-char-name-alist*))
-        (let ((h-code (double-vector-binary-search char-code
-                                                   +unicode-char-name-database+)))
-          (cond
-            (h-code
-             (huffman-decode h-code sb-unicode::+unicode-character-name-huffman-tree+))
-            (t
-             (format nil "U~X" char-code)))))))
-
-(defun name-char (name)
-  "Given an argument acceptable to STRING, NAME-CHAR returns a character whose
-name is that string, if one exists. Otherwise, NIL is returned."
-  (let ((char-code (car (rassoc-if (lambda (names)
-                                     (member name names :test #'string-equal))
-                                   *base-char-name-alist*))))
-    (cond (char-code
-           (code-char char-code))
-          ((let ((start (cond ((eql (string-not-equal "U+" name) 2)
-                               2)
-                              ((eql (string-not-equal "U" name) 1)
-                               1))))
-             (and start
-                  (loop for i from start
-                        below (length name)
-                        always (digit-char-p (char name i) 16))
-                  (code-char (parse-integer name :start start :radix 16)))))
-          (t
-           (let ((encoding (huffman-encode (string-upcase name)
-                                           sb-unicode::+unicode-character-name-huffman-tree+)))
-             (when encoding
-               (let ((char-code
-                       (or
-                        (double-vector-binary-search encoding
-                                                     +unicode-name-char-database+)
-                        (double-vector-binary-search encoding
-                                                     +unicode-1-name-char-database+))))
-                 (and char-code
-                      (code-char char-code)))))))))
 
 ;;;; predicates
 
+(defmacro std-char-code-p (cc) `(or (< 31 ,cc 127) (= ,cc 10)))
 (defun standard-char-p (char)
-  "The argument must be a character object. STANDARD-CHAR-P returns T if the
+  "The argument must be a character object. STANDARD-CHAR-P returns true if the
 argument is a standard character -- one of the 95 ASCII printing characters or
 <return>."
-  (and (typep char 'base-char)
-       (let ((n (char-code (the base-char char))))
-         (or (< 31 n 127)
-             (= n 10)))))
+  (let ((n (char-code char)))
+    ;; returning CHAR for true is fine, and it's already in a register,
+    ;; but the compiler can't infer BASE-CHAR from the constraint on N,
+    ;; so we have to force it.
+    (if (std-char-code-p n) (truly-the base-char char) nil)))
 
-(defun %standard-char-p (thing)
+(defun %standard-char-p (thing) ; why is this symbol in SB-SYS: ? that's very random.
   "Return T if and only if THING is a standard-char. Differs from
 STANDARD-CHAR-P in that THING doesn't have to be a character."
-  (and (characterp thing) (standard-char-p thing)))
+  ;; This predicate must return a strict boolean, not a generalized boolean
+  (and (characterp thing)
+       (let ((n (char-code thing)))
+         (if (std-char-code-p n) t nil))))
 
 (defun graphic-char-p (char)
   "The argument must be a character object. GRAPHIC-CHAR-P returns T if the
@@ -550,7 +356,7 @@ lowercase eszet (U+DF)."
     (let ((code (aref cases (1+ index))))
       (if (zerop code)
           char
-          (code-char (truly-the %char-code code))))))
+          (code-char code)))))
 
 (defun char-downcase (char)
   "Return CHAR converted to lower-case if that is possible."
@@ -559,7 +365,7 @@ lowercase eszet (U+DF)."
     (let ((code (aref cases index)))
       (if (zerop code)
           char
-          (code-char (truly-the %char-code code))))))
+          (code-char code)))))
 
 (defun alphanumericp (char)
   "Given a character-object argument, ALPHANUMERICP returns T if the argument
@@ -594,11 +400,16 @@ is either numeric or alphabetic."
                    (aref #.+character-case-pages+ shifted))))
     (if (= page 255)
         code
-        (let ((down-code
-                (aref #.+character-cases+
-                      (* (+ (ash page 6)
-                            (ldb (byte 6 0) code))
-                         2))))
+        (let* ((page (truly-the (integer 0
+                                         #.(loop for x across +character-case-pages+
+                                                 unless (= x 255)
+                                                 maximize x))
+                                page))
+               (down-code
+                 (aref #.+character-cases+
+                       (* (+ (ash page 6)
+                             (ldb (byte 6 0) code))
+                          2))))
           (if (zerop down-code)
               code
               down-code)))))
@@ -735,6 +546,10 @@ that digit stands, else returns NIL."
   "All arguments must be integers. Returns a character object that represents
 a digit of the given weight in the specified radix. Returns NIL if no such
 character exists."
-  (and (typep weight 'fixnum)
-       (>= weight 0) (< weight radix) (< weight 36)
-       (code-char (if (< weight 10) (+ 48 weight) (+ 55 weight)))))
+  (declare (explicit-check weight))
+  (cond ((typep weight '(and unsigned-byte fixnum))
+         (and (< weight radix)
+              (code-char (if (< weight 10) (+ 48 weight) (+ 55 weight)))))
+        (t
+         (the unsigned-byte weight)
+         nil)))

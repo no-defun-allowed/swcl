@@ -390,32 +390,7 @@
          (high (numeric-type-high type)))
     (ecase (numeric-type-complexp type)
       (:real
-       (cond #-arm64
-             ((and (eql (numeric-type-class type) 'integer)
-                   (and (fixnump low)
-                        (fixnump high)
-                        #+(or x86 x86-64 arm arm64)
-                        (/= low 0)
-                        (< (- high low) 2)))
-              ;; The fixnum-mod-p case is worse than just EQ testing with
-              ;; only 2 values in the range. (INTEGER 1 2) would have become
-              ;;   (and (not (eq x 0)) (fixnump x) (not (> x 2))).
-              ;; If exactly 1 value, it should have been picked off by TYPE-SINGLETON-P
-              ;; in %SOURCE-TRANSFORM-TYPEP, but even if it wasn't,
-              ;; the OR will drop out due to constraint propagation.
-              `(or (eq ,object ,low) (eq ,object ,high)))
-             ((and (vop-existsp :translate fixnum-mod-p)
-                   (eql (numeric-type-class type) 'integer)
-                   (or (eql low 0)
-                       (and (eql low 1)
-                            (not (eql high most-positive-fixnum))))
-                   (fixnump high))
-              (let ((mod-p `(fixnum-mod-p ,object ,high)))
-                (if (eql low 1)
-                    `(and (not (eq ,object 0))
-                          ,mod-p)
-                    mod-p)))
-             ((and (vop-existsp :translate check-range<=)
+       (cond ((and (vop-existsp :translate check-range<=)
                    (eql (numeric-type-class type) 'integer)
                    (fixnump low)
                    (fixnump high))
@@ -427,17 +402,14 @@
               `(and (typep ,object ',base)
                     ,(transform-numeric-bound-test object type base)))))
       (:complex
-       `(and (complexp ,object)
-             ,(once-only ((n-real `(realpart (truly-the complex ,object)))
-                          (n-imag `(imagpart (truly-the complex ,object))))
-                `(progn
-                   ,n-imag ; ignorable
-                   (and (typep ,n-real ',base)
-                        ,@(when (eq class 'integer)
-                            `((typep ,n-imag ',base)))
-                        ,(transform-numeric-bound-test n-real type base)
-                        ,(transform-numeric-bound-test n-imag type
-                                                       base)))))))))
+       (let ((part-type (second (type-specifier type))))
+         `(and (typep ,object '(complex ,(case base
+                                           ((double-float single-float rational) base)
+                                           (t (if (eq class 'integer)
+                                                  'rational
+                                                  '*)))))
+               (typep (realpart ,object) ',part-type)
+               (typep (imagpart ,object) ',part-type)))))))
 
 ;;; Do the source transformation for a test of a hairy type.
 ;;; SATISFIES is converted into the obvious. Otherwise, we convert
@@ -604,8 +576,8 @@
               ;; don't test a range.
               ;; (and subtype-of-integer (not (integer x y)))
               (destructuring-bind (b a) types
-                (and (eq (numeric-type-class a) 'integer)
-                     (eq (numeric-type-class b) 'integer)
+                (and (integer-type-p a)
+                     (integer-type-p b)
                      (flet ((check (a b)
                               (let* ((a-hi (numeric-type-high a))
                                      (a-lo (numeric-type-low a))
@@ -636,8 +608,8 @@
               ;; (or (integer * fixnum-x) (integer fixnum-y))
               ;; only check for bignump and not its value.
               (destructuring-bind (b a) types
-                (and (eq (numeric-type-class a) 'integer)
-                     (eq (numeric-type-class b) 'integer)
+                (and (integer-type-p a)
+                     (integer-type-p b)
                      (flet ((check (a b)
                               (let* ((a-hi (numeric-type-high a))
                                      (a-lo (numeric-type-low a))
@@ -1641,7 +1613,12 @@
                            `(make-array ,dimension ,@specialization :initial-contents x))))))))
       ((type= tspec (specifier-type 'list))
        `(coerce-to-list x))
-      ((csubtypep tspec (specifier-type 'function))
+      ((csubtypep tspec (specifier-type 'extended-sequence))
+       (let ((class (and (symbolp tval) (find-class tval nil))))
+         (if (null class)
+             (give-up-ir1-transform)
+             `(coerce-to-extended-sequence x (load-time-value (find-class ',tval) t)))))
+      ((type= tspec (specifier-type 'function))
        (if (csubtypep (lvar-type x) (specifier-type 'symbol))
            `(coerce-symbol-to-fun x)
            ;; if X can later be derived as FUNCTION then we don't want
@@ -1695,26 +1672,6 @@
     (if pred
         `(not (,pred object))
         (give-up-ir1-transform))))
-
-(when-vop-existsp (:translate fixnum-mod-p)
-  (deftransform fixnum-mod-p ((x mod) (t (constant-arg fixnum)) * :important nil)
-    (let* ((type (lvar-type x))
-           (mod (lvar-value mod))
-           (intersect (type-intersection type (specifier-type 'fixnum)))
-           (mod-type (specifier-type `(mod ,(1+ mod)))))
-      (cond ((csubtypep intersect mod-type)
-             `(fixnump x))
-            ((and (csubtypep type (specifier-type 'fixnum))
-                  (csubtypep (type-intersection type (specifier-type 'unsigned-byte))
-                             mod-type))
-             `(>= x 0))
-            ((let ((int (type-approximate-interval intersect)))
-               (when int
-                 (let ((power-of-two (1- (ash 1 (integer-length (interval-high int))))))
-                   (when (< 0 power-of-two mod)
-                     `(fixnum-mod-p x ,power-of-two))))))
-            (t
-             (give-up-ir1-transform))))))
 
 (when-vop-existsp (:translate signed-byte-8-p)
   (macrolet ((def (bits)

@@ -1185,8 +1185,8 @@ bootstrapping.
                    `(,type
                      (,function-name
                       proto-generic-function proto-method specializer))))
-               '(specializer symbol t class-eq-specializer eql-specializer
-                 structure-class system-class class)))))
+               '(specializer symbol t #|class-eq-specializer eql-specializer
+                 structure-class system-class class|#)))))
     (delegations)))
 
 (unless (fboundp 'specializer-type-specifier)
@@ -1833,6 +1833,11 @@ bootstrapping.
           (make-method-spec name quals specls))
     (load-defmethod-internal class name quals specls
                              ll initargs source-location)))
+
+(define-condition find-method-length-mismatch
+    (reference-condition simple-error)
+  ()
+  (:default-initargs :references '((:ansi-cl :function find-method))))
 
 (defun load-defmethod-internal
     (method-class gf-spec qualifiers specializers lambda-list

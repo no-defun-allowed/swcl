@@ -1869,7 +1869,9 @@ function to be removed without further warning."
        (defmacro ,dispatch-name (&rest args)
          (aver (symbolp (first args)))
          (let ((tag (gensym "TAG")))
-           `(funcall
+           `(,',(if (find '&rest params)
+                    'apply
+                    'funcall)
              (truly-the function
                (let ((,tag 0))
                  (when (%other-pointer-p ,(first args))
@@ -1897,12 +1899,15 @@ function to be removed without further warning."
                        collect i)
               (,error-name ,@params))
              ,@(loop
-                   for info across *specialized-array-element-type-properties*
-                   collect `(,(ash (saetp-typecode info) -2)
-                             (let ((,(first params)
-                                    (truly-the (simple-array ,(saetp-specifier info) (*))
-                                               ,(first params))))
-                               ,@body))))))))))))
+                 for info across *specialized-array-element-type-properties*
+                 for specifier = (saetp-specifier info)
+                 collect `(,(ash (saetp-typecode info) -2)
+                           (let ((,(first params)
+                                   (truly-the (simple-array ,specifier (*))
+                                              ,(first params))))
+                             ,@(if (null specifier)
+                                   nil-array
+                                   body)))))))))))))
 
 (defun sb-kernel::check-array-shape (array dimensions)
   (when (let ((dimensions dimensions))

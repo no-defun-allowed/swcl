@@ -278,6 +278,45 @@
     (assert (eql 0.0d0 (funcall f 123.0d0 0.0d0)))
     (assert (eql 0.0d0 (funcall f 123.0 0.0d0)))))
 
+(with-test (:name (:log2 :non-negative-powers-of-two))
+  (let ((diffs
+          (loop for i from 0 to 128
+                for x = (log (expt 2 i) 2.0d0)
+                if (or (not (typep x 'double-float)) (/= x i)) collect (cons i x))))
+    (assert (null diffs))))
+
+(with-test (:name (:log2 :negative-powers-of-two))
+  (let ((diffs
+          (loop for i from -128 to -1
+                for x = (log (expt 2 i) 2.0d0)
+                if (or (not (typep x 'double-float)) (/= x i)) collect (cons i x))))
+    (assert (null diffs))))
+
+(with-test (:name (:log2 :powers-of-two-negative))
+  (let ((diffs
+          (loop for i from -128 to 128
+                for x = (log (- (expt 2 i)) 2.0d0)
+                if (or (not (typep x '(complex double-float)))
+                       (/= (realpart x) i))
+                collect (cons i x))))
+    (assert (null diffs))))
+
+(with-test (:name (:log :ratios-near-1))
+  ;; LOG of 1 +/- 1/2^100 is approximately +/-1/2^100, comfortably
+  ;; within single-float range.
+  (let ((nvals
+          (loop for i from -128 to 128
+                for x = (log (/ (+ i (expt 2 100)) (+ i (expt 2 100) 1)))
+                collect x))
+        (pvals
+          (loop for i from -128 to 128
+                for x = (log (/ (+ i (expt 2 100) 1) (+ i (expt 2 100))))
+                collect x)))
+    (assert (= (length (remove-duplicates nvals)) 1))
+    (assert (< (first nvals) 0))
+    (assert (= (length (remove-duplicates pvals)) 1))
+    (assert (> (first pvals) 0))))
+
 ;; Bug reported by Eric Marsden on July 15 2009. The compiler
 ;; used not to constant fold calls with arguments of type
 ;; (EQL foo).

@@ -803,6 +803,16 @@
     (reoptimize-lvar lvar)
     cast))
 
+(defun insert-cast-after (node lvar type policy &optional context)
+  (declare (type node node) (type lvar lvar) (type ctype type))
+  (with-ir1-environment-from-node node
+    (let ((cast (make-cast lvar type policy context)))
+      (let ((lvar (cast-value cast)))
+        (insert-node-after node cast)
+        (setf (lvar-dest lvar) cast)
+        (reoptimize-lvar lvar)
+        cast))))
+
 (defun insert-ref-before (leaf node)
   (let ((ref (make-ref leaf))
         (lvar (make-lvar node)))
@@ -953,7 +963,7 @@
               (return))
             nil))))
      combination
-     info)
+     :info info)
     t))
 
 (defun flushable-combination-p (call)
@@ -1346,11 +1356,11 @@
   (do-blocks (block component)
     (loop while
           (and (singleton-p (block-succ block))
-               (join-successor-if-possible block)))))
+               (join-successor-if-possible block t)))))
 
 ;;; Try to join with a successor block. If we succeed, we return true,
 ;;; otherwise false.
-(defun join-successor-if-possible (block)
+(defun join-successor-if-possible (block &optional local-calls)
   (declare (type cblock block))
   (let ((next (first (block-succ block))))
     (when (block-start next)  ; NEXT is not an END-OF-COMPONENT marker
@@ -1370,7 +1380,13 @@
               (not (eq (block-home-lambda block)
                        (block-home-lambda next)))
               (neq (block-type-check block)
-                   (block-type-check next)))
+                   (block-type-check next))
+              (and (not local-calls)
+                   (let ((last (block-last block)))
+                     (and (combination-p last)
+                          (eq (combination-kind last) :local)
+                          (memq (functional-kind (combination-lambda last))
+                                '(nil :assignment :optional :cleanup))))))
              nil)
             (t
              (join-blocks block next)
@@ -1421,7 +1437,13 @@
          ref-y
          (equal (block-succ x) (block-succ y))
          (eq (ref-lvar ref-x) (ref-lvar ref-y))
-         (eq (ref-leaf ref-x) (ref-leaf ref-y))
+         (let ((leaf-x (ref-leaf ref-x))
+               (leaf-y (ref-leaf ref-y)))
+           (or (eq leaf-x leaf-y)
+               (and (constant-p leaf-x)
+                    (constant-p leaf-y)
+                    (eq (constant-value leaf-x)
+                        (constant-value leaf-y)))))
          (eq (node-enclosing-cleanup ref-x)
              (node-enclosing-cleanup ref-y)))))
 
@@ -2477,6 +2499,7 @@ is :ANY, the function name is not checked."
                    (refs-unchanged-p x-use y-use)))
       y-use)))
 
+#-var-value-constraints
 (defun refs-unchanged-p (ref1 ref2)
   (block nil
     (let ((node ref1))
@@ -2492,6 +2515,14 @@ is :ANY, the function name is not checked."
                     (go :next))
                    (cast
                     (go :next))))))))))
+
+#+var-value-constraints
+(defun refs-unchanged-p (ref1 ref2)
+  (let ((mask (ref-var-id-mask ref1)))
+    (and (> mask 0)
+         (eq mask
+             (ref-var-id-mask ref2)))))
+
 
 ;;; Return true if VAR would have to be closed over if environment
 ;;; analysis ran now (i.e. if there are any uses that have a different
@@ -3209,10 +3240,12 @@ is :ANY, the function name is not checked."
            (%compile-time-type-error-warn annotation (type-specifier type)
                                           (type-specifier (lvar-type lvar))
                                           (let ((path (lvar-annotation-source-path annotation)))
-                                            (list
-                                             (if (eq (car path) 'original-source-start)
-                                                 (find-original-source path)
-                                                 (car path))))
+                                            (if (eq (car path) 'detail)
+                                                (second path)
+                                                (list
+                                                 (if (eq (car path) 'original-source-start)
+                                                     (find-original-source path)
+                                                     (car path)))))
                                           :condition condition))
           ((consp uses)
            (let ((condition (case condition

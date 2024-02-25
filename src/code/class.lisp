@@ -442,24 +442,30 @@ between the ~A definition and the ~A definition"
 
 ;;; Arrange the inherited layouts to appear at their expected depth,
 ;;; ensuring that hierarchical type tests succeed. Layouts with
-;;; DEPTHOID >= 0 (i.e. hierarchical classes) are placed first,
-;;; at exactly that index in the INHERITS vector. Then, non-hierarchical
+;;; DEPTHOID >= 0 (i.e. hierarchical classes) are placed first, at
+;;; exactly that index in the INHERITS vector. Then, non-hierarchical
 ;;; layouts are placed in remaining elements. Then, any still-empty
-;;; elements are filled with their successors, ensuring that each
-;;; element contains a valid layout.
+;;; elements are filled with their successors, as might happen when
+;;; layouts corresponding to classes which can be multiply-inherited
+;;; but aren't, ensuring that each element contains a valid layout.
 ;;;
-;;; *** FIXME *** the preceding comment seems dubious, and I'm not sure whether
-;;; to fix the code or the comment or both. The code works as-is, but is too hairy.
-;;; I fail to see how "still-empty" elements can exist after filling in mandatory
-;;; elements. It seems to anticipate being able to create a type whose INHERITS vector
-;;; length exceeds depthoid, or, say, a type at depthoid 5 which inherits STREAM but
-;;; might lack an entry at depth index 1 for example. As to why I think the comment
-;;; is false: FILE-STREAM and STRING-STREAM each have depthoid 4, but their INHERITS
-;;; vector has length 2. So they don't store elements that would be at index 2 and 3.
-;;; Length less than depthoid is opposite of what the fill-in logic supports.
-;;; How, in practice, could a user achieve such weird states as need this logic?
-;;; If impossible, then simplify it.
-
+;;; KLUDGE: when constructing the built in classoids themselves,
+;;; ORDER-LAYOUT-INHERITS is not called.  This leads to the
+;;; layout-inherits of those built-in-classoids not following the
+;;; rules (for example, the layout-inherits of FILE-STREAM is of
+;;; length 2, containing just the layouts of T and STREAM; STREAM is
+;;; defined to be at depth 3, so why don't we see problems?  For two
+;;; reasons, I think; firstly, type checks of the classoids at
+;;; specified fixed depth is actually handled through special bits in
+;;; the layout hash, rather than the previous implementation of
+;;; indexing the layout-inherits vector at the known depth and
+;;; checking for EQLity.  Secondly, the built-in-classoids with this
+;;; property (a specified depth with space for multiple-inheritance)
+;;; are all abstract; even if we were still indexing the
+;;; layout-inherits vector, it's not possible to create a direct
+;;; instance of FILE-STREAM / STRING-STREAM / SEQUENCE in order to
+;;; (possibly) get the wrong answer from TYPEP.  -- CSR, 2024-01-24
+;;;
 ;;; This reordering may destroy CPL ordering, so the inherits should
 ;;; not be read as being in CPL order.
 (defun order-layout-inherits (layouts)
@@ -1012,284 +1018,277 @@ between the ~A definition and the ~A definition"
   ;; hard about it, though, it might need to be sufficiently smart
   ;; to be able to handle nested backquotations and/or
   ;; backquotations within unquotations.
-  (let ((table (make-hash-table :test 'equal)))
-    (labels ((hash-cons (thing)
-               (cond
-                 ((atom thing) thing)
-                 ((gethash thing table))
-                 (t (setf (gethash thing table)
-                          (cons (hash-cons (car thing)) (hash-cons (cdr thing))))))))
-      (hash-cons
-       `((t :state :read-only :translation t)
-         (character :codes (,sb-vm:character-widetag)
-                    :translation (character-set)
-                    :prototype-form (code-char 42))
-         (symbol :codes (,sb-vm:symbol-widetag)
-                 :predicate symbolp
-                 :prototype-form '*)
+  (hash-cons
+   `((t :state :read-only :translation t)
+     (character :codes (,sb-vm:character-widetag)
+                :translation (character-set)
+                :prototype-form (code-char 42))
+     (symbol :codes (,sb-vm:symbol-widetag)
+             :predicate symbolp
+             :prototype-form '*)
 
-         (system-area-pointer :codes (,sb-vm:sap-widetag)
-                              :predicate system-area-pointer-p
-                              :prototype-form (int-sap 0))
-         (weak-pointer :codes (,sb-vm:weak-pointer-widetag)
-                       :predicate weak-pointer-p
-                       :prototype-form (make-weak-pointer 0))
-         (code-component :codes (,sb-vm:code-header-widetag)
-                         :predicate code-component-p
-                         :prototype-form (fun-code-header #'identity))
-         #-(or x86 x86-64 arm64 riscv)
-         (lra :codes (,sb-vm:return-pc-widetag)
-              :predicate lra-p
-              ;; Make the PROTOTYPE slot unbound.
-              :prototype-form sb-pcl:+slot-unbound+)
-         (fdefn :codes (,sb-vm:fdefn-widetag)
-                :predicate fdefn-p
-                :prototype-form (find-or-create-fdefn '(setf car)))
-         (random-class             ; used for unknown type codes
+     (system-area-pointer :codes (,sb-vm:sap-widetag)
+                          :predicate system-area-pointer-p
+                          :prototype-form (int-sap 0))
+     (weak-pointer :codes (,sb-vm:weak-pointer-widetag)
+                   :predicate weak-pointer-p
+                   :prototype-form (make-weak-pointer 0))
+     (code-component :codes (,sb-vm:code-header-widetag)
+                     :predicate code-component-p
+                     :prototype-form (fun-code-header #'identity))
+     #-(or x86 x86-64 arm64 riscv)
+     (lra :codes (,sb-vm:return-pc-widetag)
+          :predicate lra-p
           ;; Make the PROTOTYPE slot unbound.
           :prototype-form sb-pcl:+slot-unbound+)
-         (function
-          :codes (,sb-vm:closure-widetag ,sb-vm:simple-fun-widetag)
-          :predicate functionp
-          :state :read-only
-          :prototype-form #'identity)
+     (fdefn :codes (,sb-vm:fdefn-widetag)
+            :predicate fdefn-p
+            :prototype-form (find-or-create-fdefn '(setf car)))
+     (random-class                 ; used for unknown type codes
+      ;; Make the PROTOTYPE slot unbound.
+      :prototype-form sb-pcl:+slot-unbound+)
+     (function
+      :codes (,sb-vm:closure-widetag ,sb-vm:simple-fun-widetag)
+      :predicate functionp
+      :state :read-only
+      :prototype-form #'identity)
 
-         (number :translation number :prototype-form 0)
-         (complex
-          :translation complex
-          :inherits (number)
-          :codes (,sb-vm:complex-rational-widetag)
-          :prototype-form ,(complex 0 1))
-         (complex-single-float
-          :translation (complex single-float)
-          :inherits (complex number)
-          :codes (,sb-vm:complex-single-float-widetag)
-          :prototype-form ,(complex $0f0 $0f0))
-         (complex-double-float
-          :translation (complex double-float)
-          :inherits (complex number)
-          :codes (,sb-vm:complex-double-float-widetag)
-          :prototype-form ,(complex $0d0 $0d0))
-         #+long-float
-         (complex-long-float
-          :translation (complex long-float)
-          :inherits (complex number)
-          :codes (,sb-vm:complex-long-float-widetag)
-          :prototype-form ,(complex $0L0 $0L0))
-         #+sb-simd-pack
-         (simd-pack
-          :translation simd-pack
-          :codes (,sb-vm:simd-pack-widetag)
-          :prototype-form (%make-simd-pack-ub64 42 42))
-         #+sb-simd-pack-256
-         (simd-pack-256
-          :translation simd-pack-256
-          :codes (,sb-vm:simd-pack-256-widetag)
-          :prototype-form
-          ;; KLUDGE: doesn't work without AVX2 support from the CPU
-          ;; (%make-simd-pack-256-ub64 42 42 42 42)
-          sb-pcl:+slot-unbound+)
-         (real :translation real :inherits (number) :prototype-form 0)
-         (float :translation float :inherits (real number) :prototype-form $0f0)
-         (single-float
-          :translation single-float
-          :inherits (float real number)
-          :codes (,sb-vm:single-float-widetag)
-          :prototype-form $0f0)
-         (double-float
-          :translation double-float
-          :inherits (float real number)
-          :codes (,sb-vm:double-float-widetag)
-          :prototype-form $0d0)
-         #+long-float
-         (long-float
-          :translation long-float
-          :inherits (float real number)
-          :codes (,sb-vm:long-float-widetag)
-          :prototype-form $0L0)
-         (rational
-          :translation rational :inherits (real number) :prototype-form 0)
-         (ratio
-          :translation (and rational (not integer))
-          :inherits (rational real number)
-          :codes (,sb-vm:ratio-widetag)
-          :prototype-form 1/42)
-         (integer
-          :translation integer :inherits (rational real number) :prototype-form 0)
-         (fixnum
-          :translation (integer ,most-negative-fixnum ,most-positive-fixnum)
-          :inherits (integer rational real number)
-          :codes ,sb-vm::fixnum-lowtags
-          :prototype-form 42)
-         (bignum
-          :translation (and integer (not fixnum))
-          :inherits (integer rational real number)
-          :codes (,sb-vm:bignum-widetag)
-          :prototype-form ,(1+ most-positive-fixnum))
+     (number :translation number :prototype-form 0)
+     (complex
+      :translation complex
+      :inherits (number)
+      :codes (,sb-vm:complex-rational-widetag)
+      :prototype-form ,(complex 0 1))
+     (complex-single-float
+      :translation (complex single-float)
+      :inherits (complex number)
+      :codes (,sb-vm:complex-single-float-widetag)
+      :prototype-form ,(complex $0f0 $0f0))
+     (complex-double-float
+      :translation (complex double-float)
+      :inherits (complex number)
+      :codes (,sb-vm:complex-double-float-widetag)
+      :prototype-form ,(complex $0d0 $0d0))
+     #+long-float
+     (complex-long-float
+      :translation (complex long-float)
+      :inherits (complex number)
+      :codes (,sb-vm:complex-long-float-widetag)
+      :prototype-form ,(complex $0L0 $0L0))
+     #+sb-simd-pack
+     (simd-pack
+      :translation simd-pack
+      :codes (,sb-vm:simd-pack-widetag)
+      :prototype-form (%make-simd-pack-ub64 42 42))
+     #+sb-simd-pack-256
+     (simd-pack-256
+      :translation simd-pack-256
+      :codes (,sb-vm:simd-pack-256-widetag)
+      :prototype-form
+      ;; KLUDGE: doesn't work without AVX2 support from the CPU
+      ;; (%make-simd-pack-256-ub64 42 42 42 42)
+      sb-pcl:+slot-unbound+)
+     (real :translation real :inherits (number) :prototype-form 0)
+     (float :translation float :inherits (real number) :prototype-form $0f0)
+     (single-float
+      :translation single-float
+      :inherits (float real number)
+      :codes (,sb-vm:single-float-widetag)
+      :prototype-form $0f0)
+     (double-float
+      :translation double-float
+      :inherits (float real number)
+      :codes (,sb-vm:double-float-widetag)
+      :prototype-form $0d0)
+     #+long-float
+     (long-float
+      :translation long-float
+      :inherits (float real number)
+      :codes (,sb-vm:long-float-widetag)
+      :prototype-form $0L0)
+     (rational
+      :translation rational :inherits (real number) :prototype-form 0)
+     (ratio
+      :translation (and rational (not integer))
+      :inherits (rational real number)
+      :codes (,sb-vm:ratio-widetag)
+      :prototype-form 1/42)
+     (integer
+      :translation integer :inherits (rational real number) :prototype-form 0)
+     (fixnum
+      :translation (integer ,most-negative-fixnum ,most-positive-fixnum)
+      :inherits (integer rational real number)
+      :codes ,sb-vm::fixnum-lowtags
+      :prototype-form 42)
+     (bignum
+      :translation (and integer (not fixnum))
+      :inherits (integer rational real number)
+      :codes (,sb-vm:bignum-widetag)
+      :prototype-form ,(1+ most-positive-fixnum))
 
-         (array :translation array :codes (,sb-vm:complex-array-widetag)
-                :hierarchical-p nil
-                :prototype-form (make-array nil :adjustable t))
-         (simple-array
-          :translation simple-array :codes (,sb-vm:simple-array-widetag)
-          :inherits (array)
-          :prototype-form (make-array nil))
-         (sequence
-          :translation (or cons (member nil) vector extended-sequence)
-          :state :read-only
-          :depth 1)
-         (vector
-          :translation vector :codes (,sb-vm:complex-vector-widetag)
-          :direct-superclasses (array sequence)
-          :inherits (array sequence)
-          :prototype-form (make-array 0 :adjustable t))
-         (simple-vector
-          :translation simple-vector :codes (,sb-vm:simple-vector-widetag)
-          :direct-superclasses (vector simple-array)
-          :inherits (vector simple-array array sequence)
-          :prototype-form (make-array 0))
-         (bit-vector
-          :translation bit-vector :codes (,sb-vm:complex-bit-vector-widetag)
-          :inherits (vector array sequence)
-          :prototype-form (make-array 0 :element-type 'bit :fill-pointer t))
-         (simple-bit-vector
-          :translation simple-bit-vector :codes (,sb-vm:simple-bit-vector-widetag)
-          :direct-superclasses (bit-vector simple-array)
-          :inherits (bit-vector vector simple-array
-                                array sequence)
-          :prototype-form #*)
-         (string
-          :translation string
-          :direct-superclasses (vector)
-          :inherits (vector array sequence)
-          :prototype-form "")
-         (simple-string
-          :translation simple-string
-          :direct-superclasses (string simple-array)
-          :inherits (string vector simple-array array sequence)
-          :prototype-form "")
-         (vector-nil
-          :translation (vector nil)
-          :inherits (vector array sequence)
-          :prototype-form (make-array 0 :element-type 'nil :fill-pointer t)
-          :predicate vector-nil-p)
-         ;; This name is imperfect. It should be SIMPLE-RANK1-ARRAY-NIL
-         ;; to clearly convey that the dimensions are '(*) and not '*.
-         (simple-array-nil
-          :translation (simple-array nil (*))
-          :codes (,sb-vm:simple-array-nil-widetag)
-          :direct-superclasses (vector-nil)
-          :inherits (vector-nil vector simple-array array sequence)
-          :prototype-form (make-array 0 :element-type 'nil))
-         (base-string
-          :translation base-string
-          :codes (,sb-vm:complex-base-string-widetag)
-          :direct-superclasses (string)
-          :inherits (string vector array sequence)
-          :prototype-form (make-array 0 :element-type 'base-char :fill-pointer t))
-         (simple-base-string
-          :translation simple-base-string
-          :codes (,sb-vm:simple-base-string-widetag)
-          :direct-superclasses (base-string simple-string)
-          :inherits (base-string simple-string string vector simple-array
-                                 array sequence)
-          :prototype-form (make-array 0 :element-type 'base-char))
-         #+sb-unicode
-         (character-string
-          :translation (vector character)
-          :codes (,sb-vm:complex-character-string-widetag)
-          :direct-superclasses (string)
-          :inherits (string vector array sequence)
-          :prototype-form (make-array 0 :element-type 'character :fill-pointer t))
-         #+sb-unicode
-         (simple-character-string
-          :translation (simple-array character (*))
-          :codes (,sb-vm:simple-character-string-widetag)
-          :direct-superclasses (character-string simple-string)
-          :inherits (character-string simple-string string vector simple-array
-                                      array sequence)
-          :prototype-form (make-array 0 :element-type 'character))
-         (list
-          :translation (or cons (member nil))
-          :inherits (sequence)
-          :prototype-form 'nil)
-         (cons
-          :codes (,sb-vm:list-pointer-lowtag)
-          :translation cons
-          :inherits (list sequence)
-          :prototype-form (cons nil nil))
-         (null
-          :translation (member nil)
-          :inherits (symbol list sequence)
-          :direct-superclasses (symbol list)
-          :prototype-form 'nil)
+     (array :translation array :codes (,sb-vm:complex-array-widetag)
+            :hierarchical-p nil
+            :prototype-form (make-array nil :adjustable t))
+     (simple-array
+      :translation simple-array :codes (,sb-vm:simple-array-widetag)
+      :inherits (array)
+      :prototype-form (make-array nil))
+     (sequence
+      :translation (or cons (member nil) vector extended-sequence)
+      :state :read-only
+      :depth 2)
+     (vector
+      :translation vector :codes (,sb-vm:complex-vector-widetag)
+      :direct-superclasses (array sequence)
+      :inherits (array sequence)
+      :prototype-form (make-array 0 :adjustable t))
+     (simple-vector
+      :translation simple-vector :codes (,sb-vm:simple-vector-widetag)
+      :direct-superclasses (vector simple-array)
+      :inherits (vector simple-array array sequence)
+      :prototype-form (make-array 0))
+     (bit-vector
+      :translation bit-vector :codes (,sb-vm:complex-bit-vector-widetag)
+      :inherits (vector array sequence)
+      :prototype-form (make-array 0 :element-type 'bit :fill-pointer t))
+     (simple-bit-vector
+      :translation simple-bit-vector :codes (,sb-vm:simple-bit-vector-widetag)
+      :direct-superclasses (bit-vector simple-array)
+      :inherits (bit-vector vector simple-array
+                            array sequence)
+      :prototype-form #*)
+     (string
+      :translation string
+      :direct-superclasses (vector)
+      :inherits (vector array sequence)
+      :prototype-form "")
+     (simple-string
+      :translation simple-string
+      :direct-superclasses (string simple-array)
+      :inherits (string vector simple-array array sequence)
+      :prototype-form "")
+     (vector-nil
+      :translation (vector nil)
+      :inherits (vector array sequence)
+      :prototype-form (make-array 0 :element-type 'nil :fill-pointer t)
+      :predicate vector-nil-p)
+     ;; This name is imperfect. It should be SIMPLE-RANK1-ARRAY-NIL
+     ;; to clearly convey that the dimensions are '(*) and not '*.
+     (simple-array-nil
+      :translation (simple-array nil (*))
+      :codes (,sb-vm:simple-array-nil-widetag)
+      :direct-superclasses (vector-nil)
+      :inherits (vector-nil vector simple-array array sequence)
+      :prototype-form (make-array 0 :element-type 'nil))
+     (base-string
+      :translation base-string
+      :codes (,sb-vm:complex-base-string-widetag)
+      :direct-superclasses (string)
+      :inherits (string vector array sequence)
+      :prototype-form (make-array 0 :element-type 'base-char :fill-pointer t))
+     (simple-base-string
+      :translation simple-base-string
+      :codes (,sb-vm:simple-base-string-widetag)
+      :direct-superclasses (base-string simple-string)
+      :inherits (base-string simple-string string vector simple-array
+                             array sequence)
+      :prototype-form (make-array 0 :element-type 'base-char))
+     #+sb-unicode
+     (character-string
+      :translation (vector character)
+      :codes (,sb-vm:complex-character-string-widetag)
+      :direct-superclasses (string)
+      :inherits (string vector array sequence)
+      :prototype-form (make-array 0 :element-type 'character :fill-pointer t))
+     #+sb-unicode
+     (simple-character-string
+      :translation (simple-array character (*))
+      :codes (,sb-vm:simple-character-string-widetag)
+      :direct-superclasses (character-string simple-string)
+      :inherits (character-string simple-string string vector simple-array
+                                  array sequence)
+      :prototype-form (make-array 0 :element-type 'character))
+     (list
+      :translation (or cons (member nil))
+      :inherits (sequence)
+      :prototype-form 'nil)
+     (cons
+      :codes (,sb-vm:list-pointer-lowtag)
+      :translation cons
+      :inherits (list sequence)
+      :prototype-form (cons nil nil))
+     (null
+      :translation (member nil)
+      :inherits (symbol list sequence)
+      :direct-superclasses (symbol list)
+      :prototype-form 'nil)
 
-         (sb-pcl::slot-object
-          :translation (or structure-object standard-object condition)
-          :predicate slot-object-p
-          :hierarchical-p nil
-          :state :read-only
-          ;; Why is this its prototype-form? It sure looks like SLOT-OBJECT's
-          ;; metaobject has a valid prototype object that is the canonical
-          ;; CLOS object (the usual 2-word thing of layout + slot vector)
-          :prototype-form (make-defstruct-description 'arbitrary 0))
+     (sb-pcl::slot-object
+      :translation (or structure-object standard-object condition)
+      :predicate slot-object-p
+      :hierarchical-p nil
+      :state :read-only
+      ;; Why is this its prototype-form? It sure looks like SLOT-OBJECT's
+      ;; metaobject has a valid prototype object that is the canonical
+      ;; CLOS object (the usual 2-word thing of layout + slot vector)
+      :prototype-form (make-defstruct-description 'arbitrary 0))
 
-         ;; KLUDGE: the length must match the subsequent defstruct.
-         (pathname :depth 1
-                   :predicate pathnamep
-                   :length ,(+ 7 sb-vm:instance-data-start)
-                   :prototype-form (make-trivial-default-pathname))
-         (logical-pathname :depth 2
-                           :predicate logical-pathname-p
-                           :length ,(+ 7 sb-vm:instance-data-start)
-                           :prototype-form (make-trivial-default-logical-pathname)
-                           :inherits (pathname))
+     ;; KLUDGE: the length must match the subsequent defstruct.
+     (pathname :depth 1
+               :predicate pathnamep
+               :length ,(+ 7 sb-vm:instance-data-start)
+               :prototype-form (make-trivial-default-pathname))
+     (logical-pathname :depth 2
+                       :predicate logical-pathname-p
+                       :length ,(+ 7 sb-vm:instance-data-start)
+                       :prototype-form (make-trivial-default-logical-pathname)
+                       :inherits (pathname))
 
-         ;; These last few are strange. STREAM has only T as an ancestor,
-         ;; so you'd think it would be at depth 1. FILE- and STRING-STREAM
-         ;; each have STREAM and T as ancestors, so you'd think they'd be at depth
-         ;; 1 greater than STREAM, instead of 2 greater. But changing any of
-         ;; these to the "obvious" value makes various type checks go wrong.
-         ;;
-         ;; Essentially the hardwiring corresponds to the indices of the
-         ;; respective types in the inherits vector for FD-STREAM.
-         ;;  * (layout-inherits (find-layout 'fd-stream))
-         ;;  #(#<LAYOUT for T {50300003}>
-         ;;    #<LAYOUT for STRUCTURE-OBJECT {50300103}>
-         ;;    #<LAYOUT for STREAM {50301003}>
-         ;;    #<LAYOUT for ANSI-STREAM {50301183}>
-         ;;    #<LAYOUT for FILE-STREAM {50303303}>)
+     ;; These last few are strange. STREAM has only T as an ancestor,
+     ;; so you'd think it would be at depth 1. FILE- and STRING-STREAM
+     ;; each have STREAM and T as ancestors, so you'd think they'd be at depth
+     ;; 1 greater than STREAM, instead of 2 greater. But changing any of
+     ;; these to the "obvious" value makes various type checks go wrong.
+     ;;
+     ;; Essentially the hardwiring corresponds to the indices of the
+     ;; respective types in the inherits vector for FD-STREAM.
+     ;;  * (layout-inherits (find-layout 'fd-stream))
+     ;;  #(#<LAYOUT for T {50300003}>
+     ;;    #<LAYOUT for STRUCTURE-OBJECT {50300103}>
+     ;;    #<LAYOUT for STREAM {50301003}>
+     ;;    #<LAYOUT for ANSI-STREAM {50301183}>
+     ;;    #<LAYOUT for FILE-STREAM {50303303}>)
 
-         (stream
-          :predicate streamp
-          :state :read-only
-          :depth 2)
-         (file-stream
-          :predicate file-stream-p
-          :state :read-only
-          :depth 4
-          :inherits (stream))
-         (string-stream
-          :predicate string-stream-p
-          :state :read-only
-          :depth 4
-          :inherits (stream))
-         ,@(loop for x across sb-vm:*specialized-array-element-type-properties*
-                 unless (member (sb-vm:saetp-specifier x) '(t character base-char nil bit))
-                   collect
-                 ;; I'm not sure if it's an accident that there are distinct SB-KERNEL
-                 ;; versus SB-VM symbols for the specialized arrays. The former are types
-                 ;; in the language, and the latter are primitive object types,
-                 ;; but istm they should be designated by the same symbols.
-                 `(,(intern (string (sb-vm:saetp-primitive-type-name x)) *package*)
-                   :translation (simple-array ,(sb-vm:saetp-specifier x) (*))
-                   :codes (,(sb-vm:saetp-typecode x))
-                   :direct-superclasses (vector simple-array)
-                   :inherits (vector simple-array array sequence)
-                   :predicate ,(symbolicate (sb-vm:saetp-primitive-type-name x) "-P")
-                   :prototype-form
-                   (logically-readonlyize
-                    (make-array 0 :element-type ',(sb-vm:saetp-specifier x))))))))))
+     (stream
+      :predicate streamp
+      :state :read-only
+      :depth 3)
+     (file-stream
+      :predicate file-stream-p
+      :state :read-only
+      :depth 5
+      :inherits (stream))
+     (string-stream
+      :predicate string-stream-p
+      :state :read-only
+      :depth 5
+      :inherits (stream))
+     ,@(loop for x across sb-vm:*specialized-array-element-type-properties*
+             unless (member (sb-vm:saetp-specifier x) '(t character base-char nil bit))
+             collect
+             ;; I'm not sure if it's an accident that there are distinct SB-KERNEL
+             ;; versus SB-VM symbols for the specialized arrays. The former are types
+             ;; in the language, and the latter are primitive object types,
+             ;; but istm they should be designated by the same symbols.
+             `(,(intern (string (sb-vm:saetp-primitive-type-name x)) *package*)
+                :translation (simple-array ,(sb-vm:saetp-specifier x) (*))
+                :codes (,(sb-vm:saetp-typecode x))
+                :direct-superclasses (vector simple-array)
+                :inherits (vector simple-array array sequence)
+                :predicate ,(symbolicate (sb-vm:saetp-primitive-type-name x) "-P")
+                :prototype-form
+                (logically-readonlyize
+                 (make-array 0 :element-type ',(sb-vm:saetp-specifier x))))))))
 
 (eval-when (#-sb-xc-host :compile-toplevel)
   (defun compute-builtin-classoids ()

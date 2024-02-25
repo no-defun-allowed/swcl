@@ -11,33 +11,521 @@
 
 (in-package "SB-UNICODE")
 
+(export
+ '(general-category bidi-class combining-class decimal-value digit-value
+   numeric-value mirrored-p bidi-mirroring-glyph age hangul-syllable-type
+   east-asian-width script char-block unicode-1-name line-break-class
+   proplist-p uppercase-p lowercase-p cased-p case-ignorable-p alphabetic-p
+   ideographic-p math-p whitespace-p hex-digit-p soft-dotted-p default-ignorable-p
+   normalize-string normalized-p uppercase lowercase titlecase casefold
+   grapheme-break-class word-break-class sentence-break-class graphemes
+   words sentences lines
+   unicode= unicode-equal unicode< unicode<= unicode> unicode>=
+   confusable-p))
+
+(eval-when (:compile-toplevel :execute)
+  (defun lisp-expr-file-pathname (namestring)
+    (declare (notinline concatenate))
+    ;; Presence of slash in the NAMESTRING implies a source file,
+    ;; that is to say, *not* a generated file. Otherwise, it is generated.
+    (let ((dirname
+           ;; src/cold/warm assigns these directories our usual values
+           ;; but other build systems may arrange files differently.
+           (if (find #\/ namestring)
+               cl-user::*sbclroot*
+               cl-user::*generated-sources-root*)))
+      (pathname (concatenate 'string dirname namestring ".lisp-expr"))))
+  (defun read-lisp-expr-file (namestring)
+    (with-open-file (s (lisp-expr-file-pathname namestring))
+      (prog1 (read s)
+        (unless (eq (read s nil s) s)
+          (error "more than one expression in file ~S" namestring))))))
+
 (eval-when (:compile-toplevel)
   (defun plist-to-alist (list)
     (loop for (key value) on list by #'cddr collect (cons key value))))
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defparameter *proplist-properties*
-    (mapcar (lambda (x) (cons (car x) (sb-xc:coerce (cdr x) '(vector (unsigned-byte 32)))))
-            '#.(plist-to-alist (sb-cold:read-from-file "output/ucd/misc-properties.lisp-expr")))))
+    (mapcar (lambda (x) (cons (car x) (coerce (cdr x) '(vector (unsigned-byte 32)))))
+            '#.(plist-to-alist (read-lisp-expr-file "misc-properties")))))
 
-(sb-ext:define-load-time-global **confusables**
-    (let ((data '#.(sb-cold:read-from-file "output/ucd/confusables.lisp-expr")))
-      (sb-impl::%stuff-hash-table
-        (make-hash-table :test #'eq #+sb-unicode :size #+sb-unicode (length data))
-        (loop for (source . target) in data
-            when (and #-sb-unicode (< source char-code-limit))
-            collect (flet ((minimize (x)
-                        (case (length x)
-                          (1
-                           (elt x 0))
-                          (2
-                           (pack-3-codepoints (elt x 0) (elt x 1)))
-                          (3
-                           (pack-3-codepoints (elt x 0) (elt x 1) (elt x 2)))
-                          (t
-                           (logically-readonlyize
-                            (possibly-base-stringize (map 'string #'code-char x)))))))
-                      (cons (code-char source) (minimize target))))
-        t)))
+(eval-when (:compile-toplevel)
+  (defvar *phash-cache-file-pathname*
+    (lisp-expr-file-pathname "tools-for-build/unicode-phash"))
+  (defvar *phash-cache-file-contents* nil)
+  (defun cached-perfect-hash-lambda (keys)
+    (when (<= (length keys) 300) ; don't bother with the cache
+      (return-from cached-perfect-hash-lambda
+        (sb-c:make-perfect-hash-lambda keys)))
+    (unless *phash-cache-file-contents*
+      (let ((ht (make-hash-table :test 'equalp)))
+        (setf *phash-cache-file-contents* ht)
+        (with-open-file (stream *phash-cache-file-pathname* :if-does-not-exist nil)
+          (when stream
+            (let ((*package* (find-package "SB-C")))
+              (loop (acond ((let ((*read-base* 16)) (read stream nil))
+                            (setf (gethash it ht) (read stream)))
+                           (t
+                            (return)))))))))
+    (or (gethash keys *phash-cache-file-contents*)
+        (let ((start (get-internal-real-time))
+              (answer (sb-c:make-perfect-hash-lambda keys)))
+          (format *debug-io* "~&Computed perfect hash of ~D keys: ~F sec~%"
+                  (length keys)
+                  (/ (- (get-internal-real-time) start) internal-time-units-per-second))
+          ;; If you want to recreate the whole cache file from scratch, you need to
+          ;; initialize a 0-length file, because this won't write to a nonexistent file,
+          ;; which avoids attempting to write into a read-only source tree.
+          (with-open-file (stream *phash-cache-file-pathname*
+                                  :direction :output
+                                  :if-does-not-exist nil :if-exists :append)
+            (let ((*print-readably* t) ; cause array to get its specialization written
+                  (*package* (find-package "SB-C")) ; suppresses SB-C: prefixes
+                  (*print-pretty* t) (*print-right-margin* 200)
+                  (*print-lines* nil) (*print-length* nil))
+              (when stream (format stream "~X~%~S~%" keys answer))))
+          answer))))
+
+(defmacro find-in-perfect-hashmap (x filename value-type value-getter)
+  (let ((pairs
+         (remove-if (lambda (x) (>= (car x) char-code-limit))
+                    (read-lisp-expr-file filename))))
+    (unless (symbolp value-getter)
+      (setq value-getter (compile nil value-getter)))
+    (when (< (length pairs) 5)
+      ;; Call the pair transformer to signal invalid char-code errors if #-sb-unicode.
+      (let ((new (mapcar (lambda (x) (cons (car x) (funcall value-getter x))) pairs)))
+        (return-from find-in-perfect-hashmap
+          `(cdr (assoc (char-code ,x) ',new)))))
+    (let* ((mapped-chars (coerce (mapcar 'car pairs) '(array (unsigned-byte 32) (*))))
+           (lexpr (cached-perfect-hash-lambda mapped-chars))
+           ;; We need the lexpr at compile-time to build the key/value arrays
+           ;; and run-time of course, where the expression is stuffed in as
+           ;; a form headed by LAMBDA.
+           (hasher (sb-c::compile-perfect-hash lexpr mapped-chars))
+           (n (length mapped-chars))
+           ;; This array is pasted in as though written literally in source,
+           ;; therefore it gets relocated to read-only space in the core.
+           (key-array (make-array n :element-type '(unsigned-byte 32)))
+           (value-array (make-array n :element-type value-type)))
+      (dolist (pair pairs)
+        (let ((index (funcall hasher (car pair))))
+          (aver (/= (car pair) 0)) ; a key can't be zero
+          (aver (= (aref key-array index) 0)) ; confirm perfect hashing
+          (setf (aref key-array index) (car pair)
+                (aref value-array index) (funcall value-getter pair))))
+      `(let* ((code (char-code ,x)) (hash (,lexpr code)))
+         ;; Remember: even though the mapping is dense (range is 0..N-1)
+         ;; a key which was not in the mapping as specified to the hash function
+         ;; generator may cause it return any value outside the expected range.
+         ;; So bounds check it and then confirm a hit.
+         (when (and (< hash ,n) (= (aref ,key-array hash) code))
+           (aref ,value-array hash))))))
+
+(eval-when (:compile-toplevel)
+  (defun call-with-name-db-entries (function file)
+    (with-open-file (stream (lisp-expr-file-pathname file))
+      (loop for code-point = (read stream nil nil)
+            for char-name = (string-upcase (read stream nil nil))
+            while (and code-point (< code-point char-code-limit))
+            do (funcall function code-point (string-upcase char-name)))))
+  (defun charname-tree-maker (&aux (names (make-hash-table :test 'equal)))
+    (dolist (db '("ucd-names" "ucd1-names"))
+      (call-with-name-db-entries (lambda (codepoint name)
+                                   (declare (ignore codepoint))
+                                   (setf (gethash name names) t))
+                                 db))
+    (make-huffman-tree (loop for k being each hash-key of names collect k))))
+;; There's no reason not to encode some of the base char names, but we currently don't.
+;; Very few share prefixes so I would not expect much compression, however
+;; it would be nice to remove the KLUDGE explained below.
+(defconstant-eqx +character-name-huffman-tree+ '#.(charname-tree-maker)
+  #'equal)
+
+(sb-ext:defglobal *base-char-name-alist*
+  ;; Note: The *** markers here indicate character names which are
+  ;; required by the ANSI specification of #'CHAR-NAME. For the others,
+  ;; we prefer the ASCII standard name.
+  ;; Note 2: names in parenthese are omitted from the special cases of NAME-CHAR
+  ;; as the name is present in "ucd1-names.lisp-expr" and will be found via that.
+  ;; The indicated names will need to be reinstated if we drop Unicode 1 names.
+  '((#x00 "Nul" ("Null") "^@")
+    (#x01 "Soh" "^a")
+    (#x02 "Stx" "^b")
+    (#x03 "Etx" "^c")
+    (#x04 "Eot" "^d")
+    (#x05 "Enq" "^e")
+    (#x06 "Ack" "^f")
+    ;; Don't alias to Bell, another Unicode character has that name.
+    (#x07 "Bel" "^g")
+    (#x08 ("Backspace") "^h" "Bs") ; *** See Note above
+    (#x09 "Tab" "^i" "Ht") ; *** See Note above
+    (#x0A "Newline" "Linefeed" "^j" "Lf" "Nl") ; *** See Note above
+    (#x0B "Vt" "^k")
+    (#x0C "Page" "^l" "Form" "Formfeed" "Ff" "Np") ; *** See Note above
+    (#x0D "Return" "^m" "Cr") ; *** See Note above
+    (#x0E "So" "^n")
+    (#x0F "Si" "^o")
+    (#x10 "Dle" "^p")
+    (#x11 "Dc1" "^q")
+    (#x12 "Dc2" "^r")
+    (#x13 "Dc3" "^s")
+    (#x14 "Dc4" "^t")
+    (#x15 "Nak" "^u")
+    (#x16 "Syn" "^v")
+    (#x17 "Etb" "^w")
+    (#x18 "Can" "^x")
+    (#x19 "Em" "^y")
+    (#x1A "Sub" "^z")
+    (#x1B "Esc" ("Escape") "^[" "Altmode" "Alt")
+    (#x1C "Fs" "^\\")
+    (#x1D "Gs" "^]")
+    (#x1E "Rs" "^^")
+    (#x1F "Us" "^_")
+    (#x20 ("Space") "Sp") ; *** See Note above
+    (#x7f "Rubout" ("Delete") "Del") ; *** See Note above
+    (#x82 "Break-Permitted")
+    (#x83 "No-Break-Permitted")
+    (#x85 "Next-Line")
+    (#x86 "Start-Selected-Area")
+    (#x87 "End-Selected-Area")
+    (#x88 "Character-Tabulation-Set")
+    (#x89 "Character-Tabulation-With-Justification")
+    (#x8A "Line-Tabulation-Set")
+    (#x8B "Partial-Line-Forward")
+    (#x8C "Partial-Line-Backward")
+    (#x8D "Reverse-Linefeed")
+    (#x8E "Single-Shift-Two")
+    (#x8F "Single-Shift-Three")
+    (#x90 "Device-Control-String")
+    (#x91 "Private-Use-One")
+    (#x92 "Private-Use-Two")
+    (#x93 "Set-Transmit-State")
+    (#x94 "Cancel-Character")
+    (#x95 "Message-Waiting")
+    (#x96 "Start-Guarded-Area")
+    (#x97 "End-Guarded-Area")
+    (#x98 "Start-String")
+    (#x9A "Single-Character-Introducer")
+    (#x9B "Control-Sequence-Introducer")
+    (#x9C "String-Terminator")
+    (#x9D "Operating-System-Command")
+    (#x9E "Privacy-Message")
+    (#x9F "Application-Program-Command")))
+
+;;; This macro contains an unsightly KLUDGE - possibly having to do with support of
+;;; Unicode 1.0 char names but I'm not certain - and the fact that we don't Huffman-encode
+;;; *BASE-CHAR-NAME-ALIST*. The uncertainty is that my failing example was from ucd1-names
+;;; with a non-Unicode build, but I think it was a mere conincidence.
+;;; The underlying bug was that the vector which should contain only Huffman encodings
+;;; also contains strings. The resulting failure was as follows: you call NAME-CHAR on any
+;;; string whose perturbed PSXHASH maps to a cell containing a string. We returned that
+;;; string to NAME-CHAR where it expected an integer result from HUFFMAN-DECODE.
+;;;
+;;; I don't know why it never happened in #+sb-unicode, but I think it's simply that all
+;;; inputs in both ucd-names files are legal and map to exactly what they should under
+;;; the perfect hash. But by random luck under #-sb-unicode, some test string that should
+;;; have made NAME-CHAR return NIL crashed.
+;;; Specifically it was "LATIN_SMALL_LETTER_E_CIRCUMFLEX" from the ucd1 test file
+;;; but there were probably other examples. I didn't go looking. Incidentally the new name
+;;; of that is "LATIN_SMALL_LETTER_E_WITH_CIRCUMFLEX" but that's irrelevant.
+;;;
+;;; The temporary fix is that if a string buffer is provided, we have to make this macro
+;;; act as though it _always_ Huffman-decoded something, which means returning a count
+;;; of characters, and never just a string.
+;;; The permanent fix is that the names of base chars should be stored Huffman-encoded.
+;;;
+;;; And speaking of that example cited above, you may be wondering why NAME-CHAR crashed
+;;; if code point 234 exists regardless of +/- sb-unicode. That's simply because we look
+;;; in the unicode-1 names only after the "good" names. Flipping the lookup order would
+;;; not help the underlying problem that any bad input could randomly hash to a cell that
+;;; didn't contain an integer, and therefore would similarly crash.
+(macrolet
+    ((char->name (database-name exceptions-alist-name direct-map-end)
+       ;; DIRECT-MAP-END is an arbitrarily chosen codepoint below which we use char-code
+       ;; as an array index. It is an exclusive upper bound.
+       ;; Unused direct mappings waste memory.
+       (let* ((small-alist (symbol-value exceptions-alist-name))
+              (alist (mapcar (lambda (x &aux (name (second x)))
+                               (cons (first x) (if (listp name) (car name) name)))
+                             small-alist)))
+         (call-with-name-db-entries
+          (lambda (codepoint name)
+            (unless (assoc codepoint small-alist)
+              (push (cons codepoint (huffman-encode name +character-name-huffman-tree+))
+                    alist)))
+          database-name)
+         (binding*
+             ((max-codepoint (reduce #'max alist :key #'car))
+              (bits (make-array (- (1+ max-codepoint) direct-map-end)
+                                :element-type 'bit :initial-element 0))
+              (sparse-pairs
+               (remove-if (lambda (pair) (< (car pair) direct-map-end)) alist))
+              (hashes (map '(array (unsigned-byte 32) (*)) #'car sparse-pairs))
+              (lexpr (cached-perfect-hash-lambda hashes))
+              (hashfn (sb-c::compile-perfect-hash lexpr hashes))
+              ((data xref)
+               (pack-bit-strings (mapcan (lambda (pair)
+                                           (if (integerp (cdr pair)) (list (cdr pair))))
+                                         alist))))
+           ;; Every integer that represents an h-code gets replaced by a different
+           ;; integer representing an index into the densely packed h-codes.
+           (loop for index across xref for pair in alist
+                 do (rplacd pair index))
+           (let ((direct-map
+                  (when (plusp direct-map-end)
+                    (make-array direct-map-end :initial-element nil)))
+                 (indirect-map (make-array (length sparse-pairs)
+                                           :element-type '(unsigned-byte 32))))
+             (dolist (pair alist)
+               (let ((cp (car pair)))
+                 (if (< cp direct-map-end)
+                     (setf (svref direct-map cp) (cdr pair))
+                     (let ((hash (funcall hashfn cp)))
+                       (setf (aref indirect-map hash) (cdr pair)
+                             (sbit bits (- cp direct-map-end)) 1)))))
+             `(let* ((char-code (char-code character))
+                     (bitstream-index
+                      (cond ,@(when (plusp direct-map-end)
+                                `(((< char-code ,direct-map-end)
+                                   (svref ,direct-map char-code))))
+                            ;; This discards the keys (the characters themselves).
+                            ;; We ascertain that CHAR-CODE exists in the set via a bitmap.
+                            ((and (<= char-code ,max-codepoint)
+                                  (= 1 (sbit ,bits (- char-code ,direct-map-end))))
+                             (aref ,indirect-map (,lexpr char-code))))))
+                (cond ((integerp bitstream-index)
+                       (let ((start (ldb (byte 23 9) bitstream-index))
+                             (nbits (ldb (byte 9 0) bitstream-index)))
+                         (huffman-decode ,data start nbits
+                                         +character-name-huffman-tree+ result)))
+                      ,@(when (plusp direct-map-end)
+                          `(((and result (stringp bitstream-index))
+                             ;; KLUDGE/FIXME - see comments at top
+                             (replace result bitstream-index)
+                             (length bitstream-index))))
+                      (t
+                       bitstream-index))))))))
+(defun unicode-1-char->name (character result)
+  (char->name "ucd1-names" nil 0))
+(defun unicode-char->name (character result)
+  (char->name "ucd-names" *base-char-name-alist* #xA0)))
+
+(defun unicode-1-name (character)
+  "Returns the name assigned to CHARACTER in Unicode 1.0 if it is distinct
+from the name currently assigned to CHARACTER. Otherwise, returns NIL.
+This property has been officially obsoleted by the Unicode standard, and
+is only included for backwards compatibility."
+  (unicode-1-char->name character nil))
+
+(defun char-name (character)
+  "Return the name (a STRING) for a CHARACTER object."
+  (declare (notinline format)) ; will not be called on "reasonable" inputs
+  (sb-ext:truly-the
+   (or simple-base-string null)
+   (or (unicode-char->name character nil)
+       ;; spec says this can return NIL, so why don't we?
+       (format nil "U~X" (char-code character)))))
+
+;;; The NAME-CHAR function perfectly hashes the PSXHASH of name to an index
+;;; in a table of characters. Unfortunately PSXHASH is not good enough to feed
+;;; into the perfect hash generator.
+;;; For 64-bit, it almost is - we just add a murmur3 final mix because there exists
+;;; a 32-bit slice of the full hashes that are all distinct.
+;;; For 32-bit it's far from adequate because the PSXHASH of some strings collide:
+;;; * (eql (psxhash "HENTAIGANA_LETTER_SE-5") (psxhash "SHARADA_LETTER_VOCALIC_L")) => T
+;;; * (eql (psxhash "TANGSA_LETTER_UEQ") (psxhash "BOPOMOFO_LETTER_SH")) => T
+;;; but we can implement an ad-hoc final mix that makes the outputs differ
+;;; just enough to resolve all collisions.
+;;;
+;;; The mechanism can be extended as follows if collisions are unavoidable:
+;;; - take all names that do not have any collisions, and apply the fast logic
+;;; - build a separate table of names where collisions occur; instead of those
+;;;   table cells containing 1 character, they contain >1 to try inverting
+;;;   via CHAR-NAME.
+;;; Each lookup would have to search in both collection of characters,
+;;; not to mention that we already have to look in 3 different tables.
+;;;
+;;; The main goal of all this was to reduce the memory usage. But it's also much
+;;; faster as it does not call STRING-UPCASE or HUFFMAN-ENCODE. Core sizes:
+;;;          64-bit    32-bit
+;;;   old: 38114496  25629352
+;;;   new: 37524432  25485476
+;;;
+;;; Speed Test:
+#|
+(defvar *names*
+ (with-open-file (f "output/ucd/ucd-names.lisp-expr")
+   (read-line f)
+   (let (line) (loop while (setq line (read-line f nil))
+                     collect (read-from-string line t nil
+                              :start (position #\space line))))))
+(defun timeit () (loop for name in *names* count (name-char name)))
+|#
+;;; * (time (timeit)) ; old
+;;;   0.584 seconds of real time
+;;;   161,194,464 bytes consed
+;;; * (time (timeit)) ; new
+;;;   0.108 seconds of real time
+;;;   0 bytes consed
+(eval-when (:compile-toplevel :execute)
+(defmacro psxhash-to-name-hash (h str)
+  (declare (ignorable str))
+  #+64-bit `(ldb (byte 32 32) (sb-impl::murmur3-fmix-word (sb-ext:truly-the fixnum ,h)))
+  #-64-bit `(word-mix (sb-impl::murmur3-fmix-word (sb-ext:truly-the fixnum ,h))
+                      (let ((c (char-code (char ,str 0))))
+                        (if (or (<= (char-code #\a) c (char-code #\z))
+                                (<= (char-code #\A) c (char-code #\Z)))
+                            (sb-impl::murmur3-fmix-word (logand c #b11111))
+                            0))))
+;; This actually doesn't rely critically on caching the lambda.
+;; The compute times are quite tolerable:
+;; - Computed perfect hash of 1978 keys: 0.024 sec
+;; - Computed perfect hash of 45995 keys: 0.204 sec
+;; - Computed perfect hash of 181 keys: 0.004 sec
+;; The psxhash values differ by machine word size and I don't really
+;; see the need to cache.
+(defun ucd-name->char-expander (file charname-decoder temp-string)
+  ;; Figure out whether any names incur hash collisions
+  (let ((ht (make-hash-table))
+        (any-collisions))
+    (with-open-file (stream file)
+      (read-line stream) ; skip comment line
+      (loop
+        (let ((line (read-line stream nil)))
+          (unless line (return))
+          (sb-int:binding* (((codepoint end) (read-from-string line))
+                            (name (read-from-string line t nil :start end)))
+            (when (< codepoint char-code-limit)
+              (let ((name-hash (psxhash-to-name-hash (psxhash name) name)))
+                (when (gethash name-hash ht)
+                  (setf any-collisions t))
+                (push (cons codepoint name) (gethash name-hash ht))))))))
+    (when any-collisions
+      (format *error-output* "~&Hash collisions:~%")
+      (maphash (lambda (k v) (when (cdr v) (format t "~X = ~S~%" k v))) ht)
+      (error "Can't proceed. Please find a better string hashing algorithm"))
+    (let* ((hashes (make-array (hash-table-count ht)
+                               :initial-contents
+                               (loop for k being each hash-key of ht collect k)
+                               :element-type '(unsigned-byte 32)))
+           (lexpr (sb-c:make-perfect-hash-lambda hashes))
+           (hashfn (sb-c::compile-perfect-hash lexpr hashes))
+           ;; this could be shrunk to a UB8 array with each codepoint taking 3 octets
+           ;; but it would at best save only about 46kb
+           (chars (make-array (length hashes) :element-type '(signed-byte 32))))
+      (dohash ((k v) ht)
+        (setf (aref chars (funcall hashfn k)) (caar v)))
+      `(let ((index (,lexpr name-hash)))
+         (when (< index ,(length hashes))
+           (let* ((candidate (code-char (aref ,chars index)))
+                  (length (,charname-decoder candidate ,temp-string)))
+             (when (and (= length (length string))
+                        (string-equal ,temp-string string :end1 length))
+               candidate))))))))
+
+(macrolet ((try-base-char ()
+             (flet ((string-prehash (s) (ldb (byte 32 0) (psxhash s))))
+               (let* ((alist (mapcar (lambda (line)
+                                       (cons (code-char (car line))
+                                             (remove-if-not #'stringp (cdr line))))
+                                     *base-char-name-alist*))
+                      (hashes (mapcan (lambda (x) (mapcar #'string-prehash x)) alist)))
+                 (or (= (length (remove-duplicates hashes)) (length hashes))
+                     (error "can't perfectly hash *base-char-name-alist*"))
+                 (setq hashes (coerce hashes '(array (unsigned-byte 32) (*))))
+                 (let* ((lexpr (sb-c:make-perfect-hash-lambda hashes)) ; don't cache
+                        (hashfn (sb-c::compile-perfect-hash lexpr hashes))
+                        (bins (make-array (length hashes) :initial-element nil)))
+                   ;; This is less efficient than could be, because it maps a perfect hash
+                   ;; to a list of the names to test even though we know which should match.
+                   (dolist (list alist)
+                     (dolist (name (cdr list))
+                       (let ((index (funcall hashfn (string-prehash name))))
+                         (aver (null (aref bins index)))
+                         (setf (aref bins index) list))))
+                   `(let ((index (,lexpr name-hash)))
+                      (when (< index ,(length bins))
+                        (let ((candidate (svref ,bins index)))
+                          (when (member string (cdr candidate) :test #'string-equal)
+                            (car candidate)))))))))
+           (try-unicode (file charname-decoder)
+             (ucd-name->char-expander (lisp-expr-file-pathname file)
+                                      charname-decoder 'name-buffer)))
+(defun name-char (name)
+  "Given an argument acceptable to STRING, NAME-CHAR returns a character whose
+name is that string, if one exists. Otherwise, NIL is returned."
+  ;; Avoid a hash computation if it looks like NAME is comprised of hex digits.
+  ;; Does the Unicode Consortium promise never to name things
+  ;; like "UBAD" ("accidental hex")? I sure as hell hope it can't happen.
+  (let* ((string (string name))
+         (len (length string)))
+    (when (< len 2) ; there are no length 1 (or 0) names
+      (return-from name-char nil))
+    (when (char-equal (char string 0) #\U)
+      (let ((start (if (and (>= len 2) (char= (char string 1) #\+)) 2 1)))
+        ;; To prevent whitespace or +/- sign, just check DIGIT-CHAR-P on the next char.
+        (when (and (> len start) (digit-char-p (char string start) 16))
+          (multiple-value-bind (val end)
+              (parse-integer string :start start :radix 16 :junk-allowed t)
+            ;; It's not ok if PARSE-INTEGER did not consume all input.
+            ;; If a character were officially named UFAAAAA don't fail on it.
+            (when (and val (< val char-code-limit) (= (length name) end))
+              (return-from name-char (code-char val)))))))
+    (let ((psxhash (psxhash string)))
+      ;; The base char name alist is short enough that PSXHASH's result
+      ;; contains enough entropy to admit a perfect hash.
+      ;; The unicode lists need a final mix with improved avalanche behavior.
+      (or (let ((name-hash (ldb (byte 32 0) psxhash)))
+            (try-base-char))
+          (let ((name-hash (psxhash-to-name-hash psxhash string)))
+            (with-name->char-buffer (name-buffer)
+              ;; Look in ucd-names first, since there are overlaps with ucd1-names,
+              ;; and we always want to return the new codepoint that a name finds,
+              ;; not the old, in the case of a conflict.
+              (or (try-unicode "ucd-names" unicode-char->name)
+                  (try-unicode "ucd1-names" unicode-1-char->name)))))))))
+
+#+sb-unicode
+(macrolet ((lookup (arg)
+             (let* ((data (read-lisp-expr-file "comp"))
+                    (hashes (map '(array (unsigned-byte 32) (*))
+                                 (lambda (x) (ldb (byte 32 0) (car x)))
+                                 data))
+                    (lexpr (cached-perfect-hash-lambda hashes))
+                    (phashfun (sb-c::compile-perfect-hash lexpr hashes))
+                    (n (length hashes))
+                    (domain (make-array n :element-type (or #+x86-64 'fixnum t)))
+                    (range (make-array n :element-type '(unsigned-byte 32))))
+               (dovector (pair data)
+                 (let ((phash (funcall phashfun (ldb (byte 32 0) (car pair)))))
+                   (aver (zerop (aref range phash)))
+                   (setf (aref domain phash) (car pair)
+                         (aref range phash) (cdr pair))))
+               `(let* ((k ,arg) (phash (,lexpr (ldb (byte 32 0) k))))
+                  (if (and (< phash ,n) (eql (aref ,domain phash) k))
+                      (code-char (aref ,range phash)))))))
+(defun primary-composition (char1 char2)
+  (flet ((composition-hangul-syllable-type (cp)
+           (cond
+             ((and (<= #x1100 cp) (<= cp #x1112)) :L)
+             ((and (<= #x1161 cp) (<= cp #x1175)) :V)
+             ((and (<= #x11a8 cp) (<= cp #x11c2)) :T)
+             ((and (<= #xac00 cp) (<= cp #.(+ #xac00 11171)))
+              (if (= 0 (rem (- cp #xac00) 28)) :LV :LVT)))))
+    (declare (inline composition-hangul-syllable-type))
+    (let ((c1 (char-code char1))
+          (c2 (char-code char2)))
+       (cond
+         ((lookup (dpb c1 (byte 21 21) c2)))
+         ((and (eql (composition-hangul-syllable-type c1) :L)
+               (eql (composition-hangul-syllable-type c2) :V))
+          (let ((lindex (- c1 #x1100))
+                (vindex (- c2 #x1161)))
+            (code-char (+ #xac00 (* lindex 588) (* vindex 28)))))
+         ((and (eql (composition-hangul-syllable-type c1) :LV)
+               (eql (composition-hangul-syllable-type c2) :T))
+          (code-char (+ c1 (- c2 #x11a7)))))))))
 
 ;;; Unicode property access
 (defun ordered-ranges-member (item vector)
@@ -103,7 +591,7 @@ with underscores replaced by dashes."
 
 (eval-when (:compile-toplevel)
   (defvar *slurped-random-constants*
-    (sb-cold:read-from-file "tools-for-build/more-ucd-consts.lisp-expr"))
+    (read-lisp-expr-file "tools-for-build/more-ucd-consts"))
   (defun read-ucd-constant (symbol)
     (map 'vector
          (lambda (x) (keywordicate (substitute #\- #\_ (string-upcase x))))
@@ -128,11 +616,6 @@ with underscores replaced by dashes."
       (svref-or-null
        #.(read-ucd-constant '*bidi-classes*)
        (aref +character-misc-database+ (1+ (misc-index character))))))
-
-(declaim (inline combining-class))
-(defun combining-class (character)
-  "Returns the canonical combining class (CCC) of CHARACTER"
-  (aref +character-misc-database+ (+ 2 (misc-index character))))
 
 (defun decimal-value (character)
   "Returns the decimal digit value associated with CHARACTER or NIL if
@@ -183,22 +666,11 @@ If CHARACTER does not have a known block, returns :NO-BLOCK"
   (let* ((code (char-code character))
          (block-index (ordered-ranges-position
                        code
-                       #.(coerce (sb-cold:read-from-file "output/ucd/block-ranges.lisp-expr")
-                                       '(vector (unsigned-byte 32))))))
+                       #.(coerce (read-lisp-expr-file "block-ranges")
+                                 '(vector (unsigned-byte 32))))))
     (if block-index
-        (aref #.(sb-cold:read-from-file "output/ucd/block-names.lisp-expr") block-index)
+        (aref #.(read-lisp-expr-file "block-names") block-index)
         :no-block)))
-
-(defun unicode-1-name (character)
-  "Returns the name assigned to CHARACTER in Unicode 1.0 if it is distinct
-from the name currently assigned to CHARACTER. Otherwise, returns NIL.
-This property has been officially obsoleted by the Unicode standard, and
-is only included for backwards compatibility."
-  (let* ((char-code (char-code character))
-         (h-code (double-vector-binary-search char-code
-                                              +unicode-1-char-name-database+)))
-    (when h-code
-      (huffman-decode h-code +unicode-character-name-huffman-tree+))))
 
 (defun age (character)
   "Returns the version of Unicode in which CHARACTER was assigned as a pair
@@ -315,7 +787,7 @@ disappears when accents are placed on top of it. and NIL otherwise"
   (proplist-p character :soft-dotted))
 
 (eval-when (:compile-toplevel)
-  (sb-xc:defmacro coerce-to-ordered-ranges (array)
+  (defmacro coerce-to-ordered-ranges (array)
     (coerce array '(vector (unsigned-byte 32)))))
 
 (defun default-ignorable-p (character)
@@ -331,241 +803,8 @@ disappears when accents are placed on top of it. and NIL otherwise"
          (coerce-to-ordered-ranges
           #(#x0600 #x0604 #x06DD #x06DD #x070F #x070F #xFFF9 #xFFFB
             #x110BD #x110BD)))))))
-
-
-;;; Implements UAX#15: Normalization Forms
-(declaim (inline char-decomposition-info))
-(defun char-decomposition-info (char)
-  (let ((value (aref +character-misc-database+
-                     (+ 4 (misc-index char)))))
-    (values (clear-flag 7 value) (logbitp 7 value))))
-
-(defun char-decomposition (char length callback)
-  (declare (function callback))
-  ;; Caller should have gotten length from char-decomposition-info
-  (let* ((cp (char-code char))
-         (cp-high (ash cp -8))
-         (decompositions +character-decompositions+)
-         (high-page (aref +character-high-pages+ cp-high))
-         (index (unless (logbitp 15 high-page) ;; Hangul syllable
-                  (aref +character-low-pages+
-                        (+ 1 (* 2 (+ (ldb (byte 8 0) cp) (ash high-page 8))))))))
-    (cond ((= length 1)
-           (funcall callback (code-char (aref decompositions index))))
-          ((<= #xac00 cp #xd7a3)
-           ;; see Unicode 6.2, section 3-12
-           (let* ((sbase #xac00)
-                  (lbase #x1100)
-                  (vbase #x1161)
-                  (tbase #x11a7)
-                  (vcount 21)
-                  (tcount 28)
-                  (ncount (* vcount tcount))
-                  (sindex (- cp sbase))
-                  (lindex (floor sindex ncount))
-                  (vindex (floor (mod sindex ncount) tcount))
-                  (tindex (mod sindex tcount)))
-             (funcall callback (code-char (+ lbase lindex)))
-             (funcall callback (code-char (+ vbase vindex)))
-             (when (> tindex 0)
-               (funcall callback  (code-char (+ tbase tindex))))))
-
-          (t
-           (loop for i below length
-                 do
-                 (funcall callback (code-char (aref decompositions (+ index i)))))))))
-
-(defun decompose-char (char compatibility callback)
-  (declare (function callback))
-  (multiple-value-bind (info compat) (char-decomposition-info char)
-    (if (and (plusp info)
-             (or compatibility
-                 (not compat)))
-        (if compatibility
-            (dx-flet ((callback (char)
-                        (decompose-char char t callback)))
-              (char-decomposition char info #'callback))
-            (char-decomposition char info callback))
-        (funcall callback char))))
-
-(defun decompose-string (string compatibility filter)
-  (let (chars
-        (length 0)
-        (previous-combining-class 0))
-    (declare (type index length))
-    (dx-flet ((callback (char)
-                        (let ((combining-class (combining-class char)))
-                          (incf length)
-                          (cond ((< 0 combining-class previous-combining-class)
-                                 ;; Ensure it's sorted
-                                 (loop for cons on chars
-                                       for next-char = (cadr cons)
-                                       when (or (not next-char)
-                                                (<= 0 (combining-class next-char) combining-class))
-                                       do (setf (cdr cons)
-                                                (cons char (cdr cons)))
-                                          (return)))
-                                (t
-                                 (push char chars)
-                                 (setf previous-combining-class combining-class))))))
-      (sb-kernel:with-array-data ((string string) (start) (end)
-                                  :check-fill-pointer t)
-        (let ((calback (if filter
-                           (let ((filter (sb-kernel:%coerce-callable-to-fun filter)))
-                             (lambda (char)
-                               (when (funcall filter char)
-                                 (callback char))))
-                           #'callback)))
-          (loop for i from start below end
-                for char = (schar string i)
-                do
-                (decompose-char char compatibility calback))))
-      (nreverse chars))))
-
-(defun primary-composition (char1 char2)
-  #-sb-unicode
-  (declare (ignore char1 char2))
-  #-sb-unicode
-  #.(let* ((data (sb-cold:read-from-file "output/ucd/comp.lisp-expr"))
-           (entries (loop for pair across data
-                          for key = (car pair)
-                          for c1 = (ldb (byte 21 21) key)
-                          for c2 = (ldb (byte 21 0) key)
-                          when (and (< c1 sb-xc:char-code-limit)
-                                    (< c2 sb-xc:char-code-limit))
-                          collect pair)))
-      (aver (null entries))
-      nil)
-  #+sb-unicode
-  (flet ((composition-hangul-syllable-type (cp)
-           (cond
-             ((and (<= #x1100 cp) (<= cp #x1112)) :L)
-             ((and (<= #x1161 cp) (<= cp #x1175)) :V)
-             ((and (<= #x11a8 cp) (<= cp #x11c2)) :T)
-             ((and (<= #xac00 cp) (<= cp #.(+ #xac00 11171)))
-              (if (= 0 (rem (- cp #xac00) 28)) :LV :LVT)))))
-    (declare (inline composition-hangul-syllable-type))
-    (let ((c1 (char-code char1))
-          (c2 (char-code char2)))
-       (cond
-         ((gethash (dpb c1 (byte 21 21) c2)
-                   (load-time-value
-                    (let ((data '#.(sb-cold:read-from-file "output/ucd/comp.lisp-expr")))
-                      (sb-impl::%stuff-hash-table
-                       (make-hash-table :size (length data) #+64-bit :test #+64-bit #'eq)
-                       (loop for pair across data
-                             collect (cons (car pair) (code-char (cdr pair))))
-                       t))
-                    t)))
-         ((and (eql (composition-hangul-syllable-type c1) :L)
-               (eql (composition-hangul-syllable-type c2) :V))
-          (let ((lindex (- c1 #x1100))
-                (vindex (- c2 #x1161)))
-            (code-char (+ #xac00 (* lindex 588) (* vindex 28)))))
-         ((and (eql (composition-hangul-syllable-type c1) :LV)
-               (eql (composition-hangul-syllable-type c2) :T))
-          (code-char (+ c1 (- c2 #x11a7))))))))
-
-(defun canonically-compose (list)
-  (let* ((result list)
-         (combine-with (member 0 result :key #'combining-class))
-         (previous combine-with)
-         (current (cdr combine-with)))
-    (when (null current)
-      (return-from canonically-compose list))
-    (tagbody
-     again
-       (when (and (neq previous combine-with)
-                  ;; test for Blocked (Unicode 3.11 para. D115)
-                  ;;
-                  ;; (assumes here that string has sorted combiners,
-                  ;; so can look back just one step)
-                  (>= (combining-class (car previous))
-                      (combining-class (car current))))
-         (when (= (combining-class (car current)) 0)
-           (setf combine-with current))
-         (setf previous current)
-         (pop current)
-         (go next))
-
-       (let ((comp (primary-composition (car combine-with) (car current))))
-         (cond
-           (comp
-            (setf (car combine-with) comp
-                  (cdr previous) (setf current (cdr current))))
-           (t
-            (when (= (combining-class (car current)) 0)
-              (setf combine-with current))
-            (setf previous current)
-            (pop current))))
-     next
-       (when current
-         (go again)))
-    result))
-
-(defun normalize-string (string &optional (form :nfd)
-                                          filter)
-  "Normalize STRING to the Unicode normalization form FORM.
-Acceptable values for form are :NFD, :NFC, :NFKD, and :NFKC.
-If FILTER is a function it is called on each decomposed character and
-only characters for which it returns T are collected."
-  (declare (type (member :nfd :nfkd :nfc :nfkc) form))
-  #-sb-unicode
-  (declare (ignore filter))
-  #-sb-unicode
-  (etypecase string
-    ((array nil (*)) string)
-    (string
-     (ecase form
-       ((:nfc :nfkc) string)
-       ((:nfd :nfkd) (error "Cannot normalize to ~A form in #-SB-UNICODE builds" form)))))
-  #+sb-unicode
-  (etypecase string
-    (base-string string)
-    ((array character (*))
-     (coerce
-      (ecase form
-        ((:nfc)
-         (canonically-compose (decompose-string string nil filter)))
-        ((:nfd)
-         (decompose-string string nil filter))
-        ((:nfkc)
-         (canonically-compose (decompose-string string t filter)))
-        ((:nfkd)
-         (decompose-string string t filter)))
-      'string))
-    ((array nil (*)) string)))
-
-(defun normalized-p (string &optional (form :nfd))
-  "Tests if STRING is normalized to FORM"
-  (etypecase string
-    (base-string t)
-    ((array character (*))
-     (flet ((=-to-list (list)
-              (sb-kernel:with-array-data ((string string) (start) (end)
-                                          :check-fill-pointer t)
-                (loop for i from start below end
-                      for char = (schar string i)
-                      always (eql char (pop list))))))
-       (ecase form
-         ((:nfc)
-          (=-to-list (canonically-compose (decompose-string string nil nil))))
-         ((:nfd)
-          (=-to-list (decompose-string string nil nil)))
-         ((:nfkc)
-          (=-to-list (canonically-compose (decompose-string string t nil))))
-         ((:nfkd)
-          (=-to-list (decompose-string string t nil))))))
-    ((array nil (*)) t)))
-
 
 ;;; Unicode case algorithms
-;; FIXME: Make these parts less redundant (macro?)
-(sb-ext:define-load-time-global **special-titlecases**
-  '#.(sb-cold:read-from-file "output/ucd/titlecases.lisp-expr"))
-
-(sb-ext:define-load-time-global **special-casefolds**
-  '#.(sb-cold:read-from-file "output/ucd/foldcases.lisp-expr"))
 
 (defun has-case-p (char)
   ;; Bit 6 is the Unicode case flag, as opposed to the Common Lisp one
@@ -595,23 +834,30 @@ only characters for which it returns T are collected."
 
 (defun char-titlecase (char)
   (unless (has-case-p char) (return-from char-titlecase (list char)))
-  (let* ((cp (char-code char))
-         (value (assoc cp **special-titlecases**)))
-    (if value
-        (if (atom (cdr value))
-            (list (code-char (cdr value)))
-            (mapcar #'code-char (cdr value)))
-        (char-uppercase char))))
+  (or (find-in-perfect-hashmap char "titlecases" t
+                               (lambda (x)  (mapcar #'code-char (ensure-list (cdr x)))))
+      (char-uppercase char)))
+
+
+#-sb-unicode
+(defmacro find-in-abridged-casefold-map (arg file dummy1 dummy2)
+  (declare (ignore dummy1 dummy2))
+  (let ((filtered-pairs
+         (mapcan (lambda (pair)
+                   (let ((values (remove-if (lambda (x) (>= x char-code-limit))
+                                            (ensure-list (cdr pair))))
+                         (key (car pair)))
+                     (when (and (< key char-code-limit) values)
+                       (list (cons (code-char key) (mapcar 'code-char values))))))
+                 (read-lisp-expr-file file))))
+    `(cdr (assoc ,arg ',filtered-pairs))))
 
 (defun char-foldcase (char)
   (unless (has-case-p char) (return-from char-foldcase (list char)))
-  (let* ((cp (char-code char))
-         (value (assoc cp **special-casefolds**)))
-    (if value
-        (if (atom (cdr value))
-            (list (code-char (cdr value)))
-            (mapcar #'code-char (cdr value)))
-        (char-lowercase char))))
+  (or (#-sb-unicode find-in-abridged-casefold-map #+sb-unicode find-in-perfect-hashmap
+                    char "foldcases" t
+                    (lambda (x) (mapcar #'code-char (ensure-list (cdr x)))))
+      (char-lowercase char)))
 
 (defun string-somethingcase (fn string special-fn)
   (let (result (len (length string)))
@@ -1392,7 +1638,7 @@ it defaults to 80 characters"
 
 ;;; Collation
 (defconstant +maximum-variable-primary-element+
-  #.(sb-cold:read-from-file "output/ucd/other-collation-info.lisp-expr"))
+  #.(read-lisp-expr-file "other-collation-info"))
 
 (defun unpack-collation-key (key)
   (flet ((unpack (value)
@@ -1407,15 +1653,56 @@ it defaults to 80 characters"
 (defun variable-p (x)
   (<= 1 x +maximum-variable-primary-element+))
 
-(macrolet ((collations-hash-table ()
-             (let ((data (let ((*read-base* 16))
-                           (sb-cold:read-from-file "output/ucd/collation.lisp-expr"))))
-               #+64-bit (dovector (item data) (aver (fixnump (car item))))
-               `(load-time-value
-                 (sb-impl::%stuff-hash-table
-                  (make-hash-table :size ,(length data) #+64-bit :test #+64-bit 'eq)
-                  ',data t)
-                 t))))
+;;; I wanted to check the the performance of a non-minimal perfect hash function.
+;;; As expected, the simpler non-minimal formula is faster, but it uses 2^16
+;;; cells for the key and value vectors which is either less or more wsteful
+;;; than a hash-table depending on machine word size.
+;;;
+;;; Core file sizes:
+;;;     32-bit      64-bit
+;;;   ----------  ----------
+;;;    26125916    38770040    hash-table
+;;;    25982340    38868336    non-minimal perfect hash
+;;;    25736204    38376736    minimal perfect hash
+
+(macrolet
+    ((lookup-collation-key (key-expr)
+       (let*
+          ((data (let ((*read-base* 16)) (read-lisp-expr-file "collation")))
+           (key-type (or #+64-bit 'fixnum t))
+           ;; The hash values that are passed to the perfect hash generator
+           ;; are derived from MIX-EXPR on the key, because taking a slice
+           ;; of 32 bits anywhere within the keys as they are yields duplicates.
+           ;; The function at the bottom of this file can find the shift amounts
+           ;; that work.
+           (mix-expr '(ldb (byte 32 0) (logxor (ash k -25) k)))
+           (mixfun (compile nil `(lambda (x &aux (k (the ,key-type (car x))))
+                                   ,mix-expr)))
+           (hash-array (map '(array (unsigned-byte 32) (*)) mixfun data))
+           (lexpr (cached-perfect-hash-lambda hash-array))
+           (phashfun (sb-c::compile-perfect-hash lexpr hash-array))
+           ;; N will just be (LENGTH DATA) when the hash is minimal-perfect
+           (n (1+ (loop for pair across data
+                        maximize (funcall phashfun (funcall mixfun pair)))))
+           (domain (make-array n :element-type key-type
+                               :initial-element (if (eq key-type 'fixnum) -1)))
+           ;; One of the elements is a 574-bit integer- Look at the line whose
+           ;; CAR is #xFDFA (I have absolutely no idea how this table works)
+           (range (make-array n :initial-element nil)))
+         (dovector (pair data)
+           (let ((phash (funcall phashfun (funcall mixfun pair))))
+             (aver (null (aref range phash)))
+             (setf (aref domain phash) (car pair) (aref range phash) (cdr pair))))
+         `(let* ((k ,key-expr) (phash (,lexpr ,mix-expr)))
+            (if (and (< phash ,n) (eql (aref ,domain phash) k))
+                (svref ,range phash))))))
+
+(declaim (inline pack-3-codepoints))
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defun pack-3-codepoints (first &optional (second 0) (third 0))
+    (declare (type (unsigned-byte 21) first second third))
+    (sb-c::mask-signed-field 63 (logior first (ash second 21) (ash third 42)))))
+
 (defun collation-key (string start end)
   (let (char1
         (char2 (code-char 0))
@@ -1431,8 +1718,8 @@ it defaults to 80 characters"
        ;; There are never more than three characters in a contraction, right?
        (return-from collation-key nil)))
     (let* ((code1 (char-code char1))
-           (packed-key (gethash (pack-3-codepoints code1 (char-code char2) (char-code char3))
-                                (collations-hash-table))))
+           (packed-key (lookup-collation-key
+                        (pack-3-codepoints code1 (char-code char2) (char-code char3)))))
       (if packed-key
           (unpack-collation-key packed-key)
           (when (char= (code-char 0) char2 char3)
@@ -1575,22 +1862,119 @@ with variable-weight characters, as described in UTS #10"
    (unicode> string1 string2 :start1 start1 :end1 end1
              :start2 start2 :end2 end2)))
 
-
+;;;;
+
+;;; This macro produces a lookup table that uses half the storage of a hash-table
+;;; and achieves around double the performance on this test:
+;;;
+;;; * (time (loop for i below char-code-limit count (numeric-value (code-char i))))
+;;;
+;;; x86-64-based mac:
+;;; Old
+;;; ===
+;;;    0.029 seconds of real time
+;;;    0.029656 seconds of total run time (0.029644 user, 0.000012 system)
+;;;    103.45% CPU
+;;;    71,169,208 processor cycles
+;;; New
+;;; ===
+;;;    0.012 seconds of real time
+;;;    0.012075 seconds of total run time (0.012061 user, 0.000014 system)
+;;;    100.00% CPU
+;;;    29,034,292 processor cycles
+;;;
+;;; arm-based mac:
+;;; Old
+;;; ===
+;;;    0.051 seconds of real time
+;;;    0.050890 seconds of total run time (0.050709 user, 0.000181 system)
+;;;    100.00% CPU
+;;; New
+;;; ===
+;;;    0.033 seconds of real time
+;;;    0.033195 seconds of total run time (0.033104 user, 0.000091 system)
+;;;    100.00% CPU
+
+(defun numeric-value (character)
+  "Returns the numeric value of CHARACTER or NIL if there is no such value.
+Numeric value is the most general of the Unicode numeric properties.
+The only constraint on the numeric value is that it be a rational number."
+  (or (find-in-perfect-hashmap character "numerics" t cdr)
+      (digit-value character)))
+
+;;; FIXME: why does #-sb-unicode want or need this?
+;;; (Indeed the regression test for it is *disabled* so I reiterate - WHY?)
+(defun bidi-mirroring-glyph (character)
+  "Returns the mirror image of CHARACTER if it exists.
+Otherwise, returns NIL."
+  ;; This used to call MIRRORED-P before table lookup, but it's not faster to do so
+  #+sb-unicode
+  (find-in-perfect-hashmap character "bidi-mirrors"
+                           character (lambda (x) (code-char (second x))))
+  #-sb-unicode
+  (macrolet ((direct-map (&aux (a (make-array char-code-limit :element-type 'character)))
+               (dolist (pair (read-lisp-expr-file "bidi-mirrors") a)
+                 (let ((key (car pair)))
+                   (when (< key char-code-limit)
+                     (setf (char a key) (code-char (second pair))))))))
+    (let ((answer (char (direct-map) (char-code character))))
+      (unless (char= answer (code-char 0)) answer))))
+
 ;;; Confusable detection
 
+;;; hash-table:
+;;;   * (time (loop for i below char-code-limit count (gethash (code-char i) **confusables**)))
+;;;     0.020 seconds of real time
+;;; perfect hash:
+;;;   * (time (loop for i below char-code-limit count (lookup (code-char i))))
+;;;     0.008 seconds of real time
 (defun canonically-deconfuse (string)
-  (let (result)
-    (loop for char across string
-          for deconfused = (gethash char **confusables**)
-          do (cond ((not deconfused)
-                    (push (string char) result))
-                   ((integerp deconfused)
-                    (push (sb-impl::unpack-3-codepoints deconfused)
-                          result))
-                   (t
-                    (push deconfused result))))
-    (apply #'concatenate 'string (nreverse result))))
+  (declare (string string))
+  ;; BUG: filtering by (CAR pair) is inadequate for #-sb-unicode when reading confusables,
+  ;; and it always was. An error could be observed by calling canonically-deconfuse
+  ;; on any key of this alist:
+  ;; ((175 713) (240 8706 821) (162 99 824) (231 99 806) (199 67 806) (208 68 821)
+  ;;   (248 111 824) (216 79 824) (37 186 47 8320) (165 89 821) (181 956) (246 1577))
+  ;; which would call CODE-CHAR on illegal inputs. The list came from:
+  ;; (remove-if (lambda (x) (or (> (car x) 255) (< (reduce #'max (cdr x)) 256)))
+  ;;            (with-open-file (f "output/ucd/confusables.lisp-expr") (read f)))
+  ;; Maybe we should filter CDR pair here, though it would leave extra keys in the map
+  ;; which seems to cause no immediate harm.
+  (flet ((unpack-3-codepoints (codepoints)
+           (declare (type (signed-byte 63) codepoints))
+           (cond ((< codepoints (ash 1 21))
+                  (list (code-char codepoints)))
+                 ((< codepoints (ash 1 (* 21 2)))
+                  (list (code-char (ldb (byte 21 0) codepoints))
+                        (code-char (ldb (byte 21 21) codepoints))))
+                 (t
+                  (list (code-char (ldb (byte 21 0) codepoints))
+                        (code-char (ldb (byte 21 21) codepoints))
+                        (code-char (ldb (byte 21 (* 21 2)) codepoints))))))
+         (lookup (character)
+           (find-in-perfect-hashmap
+            character "confusables" t
+            (lambda (pair &aux (x (cdr pair)))
+              (case (length x)
+                (1 (elt x 0))
+                (2 (pack-3-codepoints (elt x 0) (elt x 1)))
+                (3 (pack-3-codepoints (elt x 0) (elt x 1) (elt x 2)))
+                (t (logically-readonlyize
+                    (possibly-base-stringize (map 'string #'code-char x)))))))))
+    (let (result)
+      (loop for char across string
+            for deconfused = (lookup char)
+            do (cond ((not deconfused)
+                      (push (string char) result))
+                     ((integerp deconfused)
+                      (push (unpack-3-codepoints deconfused) result))
+                     (t
+                      (push deconfused result))))
+      (apply #'concatenate 'string (nreverse result)))))
 
+;;; This function is weird! It reports that every string is confusable with itself
+;;; even if it contains no confusable characters at all.
+;;; e.g. (lookup-confusable #\W) => NIL but (confusable-p "W" "W") => T
 (defun confusable-p (string1 string2 &key (start1 0) end1 (start2 0) end2)
   "Determines whether STRING1 and STRING2 could be visually confusable
 according to the IDNA confusableSummary.txt table"
@@ -1602,3 +1986,30 @@ according to the IDNA confusableSummary.txt table"
       (string= skeleton1 skeleton2)))
 
 (clear-info :function :compiler-macro-function 'proplist-p)
+
+#|
+;;; For offline use.
+;;; This could insert a call to MIX if it found nothing that worked.
+(defun find-good-32-bit-hash-mixdown ()
+  (flet ((validp (input)
+           (let ((xset (alloc-xset)))
+             (dolist (elt input t)
+               (when (xset-member-p elt xset)
+                 (return-from validp nil))
+               (add-to-xset elt xset)))))
+    (let ((keys
+           (map 'list #'car
+                (with-open-file (f "output/ucd/collation.lisp-expr")
+                  (let ((*read-base* 16)) (read f))))))
+      (print (length keys))
+      (loop for right-shift from 1 to 30
+            do
+            (let ((32-bit-keys
+                   (mapcar (lambda (x)
+                             (ldb (byte 32 0)
+                                  (logxor (ash x (- right-shift)) x)))
+                           keys)))
+              (when (validp 32-bit-keys)
+                (format t "~&Valid: shr ~d, extract @ ~d~%"
+                        right-shift 0)))))))
+|#

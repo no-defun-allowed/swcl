@@ -271,8 +271,7 @@
 (defun lvar-externally-checkable-type (lvar)
   (declare (type lvar lvar))
   (let ((dest (lvar-dest lvar)))
-    (when (combination-p dest)
-      ;; TODO: MV-COMBINATION
+    (when (basic-combination-p dest)
       (when (call-full-like-p dest)
         (let ((info (and (eq (basic-combination-kind dest) :known)
                          (basic-combination-fun-info dest))))
@@ -287,7 +286,7 @@
                    (return-from lvar-externally-checkable-type
                      (coerce-to-values type))))
                dest
-               nil nil t t)))))
+               :defined-here t :asserted-type t)))))
     *wild-type*))
 
 ;;;; interface routines used by optimizers
@@ -410,6 +409,18 @@
                                       context)))
         (use-lvar cast internal-lvar)
         t))))
+
+(defun assert-node-type (node type policy &optional context)
+  (declare (type node node) (type ctype type))
+  (let ((lvar (node-lvar node)))
+    (unless (type-asserted-p lvar type)
+      (let ((new-lvar (make-lvar)))
+        (%delete-lvar-use node)
+        (use-lvar node new-lvar)
+        (let ((cast (insert-cast-after node new-lvar type policy
+                                       context)))
+          (use-lvar cast lvar)
+          t)))))
 
 
 ;;;; IR1-OPTIMIZE
@@ -1110,7 +1121,7 @@
                do
                (setf (combination-kind combination) :error)
                (return-from check-proper-sequences))))
-     combination info)))
+     combination :info info)))
 
 ;;; Do IR1 optimizations on a COMBINATION node.
 (defun ir1-optimize-combination (node &aux (show *show-transforms-p*))
@@ -1740,8 +1751,10 @@
                           (constant-lvar-ignore-types-p arg))
                 (return-from constant-fold-call-p)))
             combination
-            info
-            (lambda ()
+            :info info
+            :unknown-keys-fun
+            (lambda (lvars)
+              (declare (ignore lvars))
               (return-from constant-fold-call-p)))
            t)
           (t
@@ -2433,8 +2446,29 @@
                                                   (append (make-list min-args :initial-element 't)
                                                           '(&rest t))))
                             (lexenv-policy (node-lexenv call))
-                            :mv-call))))))
-
+                            :mv-call)))
+      (map-combination-args-and-types
+       (lambda (arg type lvars &optional annotation)
+         (declare (ignore lvars annotation))
+         ;; This disturbs the order of stack pushes
+         ;; (when (apply-type-annotation name arg type
+         ;;                              lvars policy annotation)
+         ;;   (reoptimize-lvar arg))
+         (add-annotation arg
+                         (make-lvar-type-annotation :type type
+                                                    :source-path
+                                                    (list 'detail
+                                                          (lvar-all-sources arg)
+                                                          (node-source-path call)))))
+       call
+       :defined-here t
+       :unknown-keys-fun (lambda (lvars)
+                           (dolist (lvar lvars)
+                             (unless (types-equal-or-intersect (lvar-type lvar)
+                                                               (specifier-type 'symbol))
+                               (setf (basic-combination-kind call) :error)
+                               (compiler-warn "Argument of type ~s cannot be used as a keyword."
+                                              (type-specifier (lvar-type lvar))))))))))
 
 (defun ir1-optimize-mv-call (node)
   (let* ((fun (basic-combination-fun node))

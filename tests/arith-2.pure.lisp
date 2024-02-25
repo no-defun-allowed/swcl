@@ -422,3 +422,57 @@
                (optimize speed))
       (the (signed-byte 8) (aref a 0)))
    :allow-notes nil))
+
+(with-test (:name :or-chain)
+  (checked-compile-and-assert
+   ()
+   `(lambda (b)
+      (declare (fixnum b))
+      (case b ((0 -3) 1) (t 2)))
+   ((0) 1)
+   ((-3) 1)
+   ((3) 2)
+   ((1) 2)))
+
+(with-test (:name :or-chain-types)
+  (checked-compile-and-assert
+   ()
+   `(lambda (b)
+      (declare ((integer -1 1) b))
+      (case b
+        ((-1 0) 0)
+        (t 1)))
+   ((-1) 0)
+   ((0) 0)
+   ((1) 1)))
+
+(with-test (:name :or-chain-types)
+  (checked-compile-and-assert
+   ()
+   `(lambda (b)
+      (declare ((integer -1 1) b))
+      (case b
+        ((-1 0) 0)
+        (t 1)))
+   ((-1) 0)
+   ((0) 0)
+   ((1) 1)))
+
+(with-test (:name :range<=-same)
+  (checked-compile-and-assert
+   ()
+   `(lambda (a c)
+      (declare (type fixnum a))
+      (let ((v7 (if c
+                    4611686018427387904
+                    -6)))
+        (if (> v7 a)
+            a
+            (if (<= a v7)
+                0
+                a))))
+    ((-7 nil) -7)
+    ((-7 t) -7)
+    ((-6 nil) 0)
+    ((-6 t) -6)
+    ((-3 nil) -3)))

@@ -599,6 +599,20 @@ status slot."
   (dir c-string)
   (preserve-fds (* int)))
 
+#+os-provides-posix-spawn
+(define-alien-routine pspawn
+     int
+  (program c-string)
+  (argv (* c-string))
+  (stdin int)
+  (stdout int)
+  (stderr int)
+  (search int)
+  (envp (* c-string))
+  (pty-name c-string)
+  (dir c-string)
+  (preserve-fds (* int)))
+
 #-win32
 (define-alien-routine wait-for-exec
   int
@@ -726,7 +740,8 @@ status slot."
                       directory
                       preserve-fds
                       #+win32 (escape-arguments t)
-                      #+win32 (window nil))
+                      #+win32 (window nil)
+                      #+os-provides-posix-spawn use-posix-spawn) ;; experimental
   "RUN-PROGRAM creates a new process specified by PROGRAM.
 ARGS is a list of strings to be passed literally to the new program.
 In POSIX environments, this list becomes the array supplied as the second
@@ -903,64 +918,76 @@ Users Manual for details about the PROCESS structure.
                  (let (child #+win32 handle)
                    (with-environment (environment-vec environment
                                       :null (not (or environment environment-p)))
-                     (with-alien (#-win32 (channel (array int 2)))
-                       (with-open-pty ((pty-name pty-stream) (pty cookie))
-                         (setf (values child #+win32 handle)
-                               #+win32
-                               (with-system-mutex (*spawn-lock*)
-                                 (sb-win32::mswin-spawn
-                                  progname
-                                  args
-                                  stdin stdout stderr
-                                  search environment-vec directory
-                                  window
-                                  preserve-fds))
-                               #-win32
-                               (let ((preserve-fds
-                                       (and preserve-fds
-                                            (sort (coerce-or-copy preserve-fds
-                                                                  '(simple-array (signed-byte #.(alien-size int)) (*)))
-                                                  #'<))))
-                                 (multiple-value-bind (readfd writefd) (sb-unix:unix-pipe)
-                                   (if (null readfd) ; writefd = errno when it fails
-                                       (file-perror nil writefd "Error creating pipe")
-                                       (setf (deref channel 0) readfd
-                                             (deref channel 1) writefd)))
-                                 (with-pinned-objects (preserve-fds)
-                                   (with-args (args-vec args)
-                                     (with-system-mutex (*spawn-lock*)
-                                       (spawn progname args-vec
-                                              stdin stdout stderr
-                                              (if search 1 0)
-                                              environment-vec pty-name
-                                              channel
-                                              directory
-                                              (if preserve-fds
-                                                  (vector-sap preserve-fds)
-                                                  (int-sap 0))))))))
-                         (unless (minusp child)
-                           #-win32
-                           (setf child (wait-for-exec child channel))
-                           (unless (minusp child)
-                             (setf proc
-                                   (make-process
-                                    :input input-stream
-                                    :output output-stream
-                                    :error error-stream
-                                    :status-hook status-hook
-                                    :cookie cookie
-                                    #-win32 :pty #-win32 pty-stream
-                                    :%status :running
-                                    :pid child
-                                    #+win32 :copiers #+win32 *handlers-installed*
-                                    #+win32 :handle #+win32 handle))
-                             (with-active-processes-lock ()
-                               (push proc *active-processes*))
-                             ;; In case a sigchld signal was missed
-                             ;; when the process wasn't on
-                             ;; *active-processes*
-                             (unless wait
-                               (get-processes-status-changes)))))))
+                     (with-open-pty ((pty-name pty-stream) (pty cookie))
+                       #+win32
+                       (setf (values child handle)
+                             (with-system-mutex (*spawn-lock*)
+                               (sb-win32::mswin-spawn
+                                progname
+                                args
+                                stdin stdout stderr
+                                search environment-vec directory
+                                window
+                                preserve-fds)))
+                       #-win32
+                       (let ((preserve-fds
+                               (and preserve-fds
+                                    (sort (coerce-or-copy preserve-fds
+                                                          '(simple-array (signed-byte #.(alien-size int)) (*)))
+                                          #'<))))
+                         (with-pinned-objects (preserve-fds)
+                           (with-args (args-vec args)
+                             (with-system-mutex (*spawn-lock*)
+                               (cond #+os-provides-posix-spawn
+                                     (use-posix-spawn
+                                      (setf child
+                                            (pspawn progname args-vec
+                                                    stdin stdout stderr
+                                                    (if search 1 0)
+                                                    environment-vec pty-name
+                                                    directory
+                                                    (if preserve-fds
+                                                        (vector-sap preserve-fds)
+                                                        (int-sap 0)))))
+                                     (t
+                                      (with-alien ((channel (array int 2)))
+                                        (multiple-value-bind (readfd writefd) (sb-unix:unix-pipe)
+                                          (if (null readfd) ; writefd = errno when it fails
+                                              (file-perror nil writefd "Error creating pipe")
+                                              (setf (deref channel 0) readfd
+                                                    (deref channel 1) writefd)))
+                                        (setf child
+                                              (spawn progname args-vec
+                                                     stdin stdout stderr
+                                                     (if search 1 0)
+                                                     environment-vec pty-name
+                                                     channel
+                                                     directory
+                                                     (if preserve-fds
+                                                         (vector-sap preserve-fds)
+                                                         (int-sap 0))))
+                                        (unless (minusp child)
+                                          (setf child (wait-for-exec child channel))))))))))
+                       (unless (minusp child)
+                         (setf proc
+                               (make-process
+                                :input input-stream
+                                :output output-stream
+                                :error error-stream
+                                :status-hook status-hook
+                                :cookie cookie
+                                #-win32 :pty #-win32 pty-stream
+                                :%status :running
+                                :pid child
+                                #+win32 :copiers #+win32 *handlers-installed*
+                                #+win32 :handle #+win32 handle))
+                         (with-active-processes-lock ()
+                           (push proc *active-processes*))
+                         ;; In case a sigchld signal was missed
+                         ;; when the process wasn't on
+                         ;; *active-processes*
+                         (unless wait
+                           (get-processes-status-changes)))))
                    ;; Report the error outside the lock.
                    (case child
                      (-1

@@ -738,6 +738,17 @@ __attribute__((unused)) static void check_contiguity()
       }
 }
 
+extern void verify_hash_tables(bool);
+/* This is a 3-state boolean. Set it to 1 to generally enable checking.
+ * It will get set to 2 on a particular GC cycle to actually do a one-shot check
+ * and then it resets to 1. I don't want it always on, because then we'd possibly
+ * introduce crashing other than in the test that tests for crashing.
+ * (i.e. it gets lucky enough to work most of the time because it allows
+ * silent breakage of hash-tables that never see another GETHASH operation)
+ * Also I think REMHASH can produce false positives in the checker.
+ * So don't enable unless you're looking for trouble */
+int check_hash_tables;
+
 #define PAGE_PINNED 0xFF
 
 /* Garbage collect a generation. If raise is 0 then the remains of the
@@ -968,6 +979,11 @@ garbage_collect_generation(generation_index_t generation, int raise,
     if (generation >= verify_gens)
         hexdump_and_verify_heap(cur_thread_approx_stackptr,
                                 VERIFY_POST_GC | (generation<<1) | raise);
+    if (check_hash_tables == 2) {
+        fprintf(stderr, "Verifying hashtables\n");
+        verify_hash_tables(0);
+        check_hash_tables = 1;
+    }
 
     extern int n_unboxed_instances;
     n_unboxed_instances = 0;
@@ -1528,8 +1544,8 @@ static void note_failure(lispobj thing, lispobj *where, struct verify_state *sta
     if (state->object_addr) {
         lispobj obj = compute_lispobj(state->object_addr);
         page_index_t pg = find_page_index(state->object_addr);
-        fprintf(stderr, "Ptr %p @ %"OBJ_FMTX" (lispobj %"OBJ_FMTX",pg%d) sees %s\n",
-                (void*)thing, (uword_t)where, obj, (int)pg, str);
+        fprintf(stderr, "Ptr %p @ %"OBJ_FMTX" (lispobj %"OBJ_FMTX",pg%d,h=%"OBJ_FMTX" sees %s\n",
+                (void*)thing, (uword_t)where, obj, (int)pg, *native_pointer(obj), str);
         // Record this in state->err_objs if possible
         int i;
         for(i=0; i<MAX_ERR_OBJS; ++i)

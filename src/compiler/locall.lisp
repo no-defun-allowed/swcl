@@ -129,6 +129,10 @@
   (declare (type ref ref) (type combination call) (type clambda fun))
   (propagate-to-args call fun)
   (setf (basic-combination-kind call) :local)
+
+  ;; Constraint propagation needs it to be the last node.
+  ;; join-blocks-if-possible will join things eventually.
+  (node-ends-block call)
   (sset-adjoin fun (lambda-calls-or-closes (node-home-lambda call)))
   (mark-dynamic-extent-args call fun)
   (merge-tail-sets call fun)
@@ -589,6 +593,8 @@
         (sset-adjoin ep (lambda-calls-or-closes (node-home-lambda call)))
         (merge-tail-sets call ep)
         (change-ref-leaf ref ep)
+        ;; For constraints
+        (node-ends-block call)
         (if (singleton-p args)
             (assert-lvar-type
              (first args)
@@ -769,6 +775,12 @@
              (temp more-temps (cddr temp)))
             ((null key))
           (let ((lvar (first key)))
+            (unless (types-equal-or-intersect (lvar-type lvar)
+                                              (specifier-type 'symbol))
+              (setf (combination-kind call) :error)
+              (compiler-warn "Argument of type ~s cannot be used as a keyword."
+                             (type-specifier (lvar-type lvar)))
+              (return-from convert-more-call))
             (unless (constant-lvar-p lvar)
               (when flame
                 (compiler-notify "non-constant keyword in keyword call"))
@@ -794,11 +806,11 @@
                                (setq loser (list name)))))
                 (let ((info (lambda-var-arg-info var)))
                   (when (eq (arg-info-key info) name)
-                      (ignores dummy)
-                      (if (member var (supplied) :key #'car)
-                          (ignores val)
-                          (supplied (cons var val)))
-                      (return)))))))
+                    (ignores dummy)
+                    (if (member var (supplied) :key #'car)
+                        (ignores val)
+                        (supplied (cons var val)))
+                    (return)))))))
 
         (when (and loser (not (optional-dispatch-allowp fun)) (not allowp))
           (compiler-warn "function called with unknown argument keyword ~S"

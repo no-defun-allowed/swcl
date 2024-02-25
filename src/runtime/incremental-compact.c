@@ -301,6 +301,8 @@ void run_compaction(_Atomic(uword_t) *copy_meter,
       METER(fix_meter, fix_slots());
       METER(resweep_meter, resweep_moved_lines());
       should_compact("I just moved, but still");
+      extern int check_hash_tables;
+      if (check_hash_tables) check_hash_tables = 2;
     }
     memset(target_pages, 0, page_table_pages);
     for (uword_t i = 0; i < gc_threads; i++)
