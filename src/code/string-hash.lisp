@@ -77,34 +77,6 @@
            (%sxhash-simple-substring x 0 (length x))))
     (declare (notinline trick))
     (trick x)))
-#+sb-xc-host
-(progn
-(defun symbol-name-hash (symbol) ; emulate our slot reader
-  (let ((name (symbol-name symbol)))
-    (calc-symbol-name-hash name (length name))))
-(defun calc-symbol-name-hash (string length)
-  ;; The reader passes a string buffer and length to avoid consing a new string
-  ;; for each symbol read. That does not occur in cross-compilation.
-  (aver (= length (length string)))
-  (if (string= string "NIL") ; :NIL must hash the same as NIL
-      ;; out-of-order with defconstant nil-value
-      (ash (sb-vm::get-nil-taggedptr) (- sb-vm:n-fixnum-tag-bits))
-      (logxor (%sxhash-simple-string string) most-positive-fixnum)))
-(defun sb-xc:sxhash (obj)
-  (let ((answer
-         (etypecase obj ; croak on anything but these
-            (symbol (let ((s (string obj)))
-                      ;; !PACKAGE-COLD-INIT will cross-check this hash
-                      (return-from sb-xc:sxhash
-                        (calc-symbol-name-hash s (length s)))))
-            (sb-xc:fixnum #.(sxhash-fixnum-xform 'obj))
-            ;; calc-member-type-hash seems to want to invoke sb-xc:sxhash on
-            ;; signed zeros. I'm not sure if the answer has to match SBCL's
-            ;; answer, but this makes it so it does.
-            (single-float #.(sxhash-single-float-xform 'obj))
-            (double-float #.(sxhash-double-float-xform 'obj)))))
-    (push (cons obj answer) *sxhash-crosscheck*)
-    answer)))
 
 ;;;; mixing hash values
 
@@ -196,12 +168,10 @@
 ;;; This hash function on sb-vm:word returns a fixnum, does not cons,
 ;;; and has better avalanche behavior then SXHASH - changing any one input bit
 ;;; should affect each bit of output with equal chance.
-#-sb-xc-host
-(progn
 (declaim (inline murmur-hash-word/fixnum)) ; don't want to cons the word to pass in
 (defun murmur-hash-word/fixnum (x) ; result may be positive or negative
   (%make-lisp-obj (logandc2 (murmur3-fmix-word (truly-the sb-vm:word x))
-                            sb-vm:fixnum-tag-mask))))
+                            sb-vm:fixnum-tag-mask)))
 ;;; Similar, but the sign bit is always 0
 (declaim (inline murmur-hash-word/+fixnum))
 (defun murmur-hash-word/+fixnum (x)

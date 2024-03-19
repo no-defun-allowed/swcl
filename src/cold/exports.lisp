@@ -1176,13 +1176,14 @@ like *STACK-TOP-HINT* and unsupported stuff like *TRACED-FUN-LIST*.")
            "DEBUG-BLOCK" "DEBUG-BLOCK-ELSEWHERE-P" "DEBUG-BLOCK-P"
            "DEBUG-CONDITION" "DEBUG-ERROR"
            "DEBUG-FUN" "DEBUG-FUN-FUN" "DEBUG-FUN-KIND"
-           "DEBUG-FUN-LAMBDA-LIST" "DEBUG-FUN-NAME" "DEBUG-FUN-CLOSURE-NAME"
+           "DEBUG-FUN-LAMBDA-LIST" "DEBUG-FUN-MORE-ARGS"
+           "DEBUG-FUN-NAME" "DEBUG-FUN-CLOSURE-NAME"
            "DEBUG-FUN-P" "DEBUG-FUN-START-LOCATION"
            "DEBUG-FUN-SYMBOL-VARS"  "DEBUG-SOURCE"
            "DEBUG-SOURCE-CREATED" "DEBUG-SOURCE-NAMESTRING"
            "DEBUG-SOURCE-P" "DEBUG-SOURCE-START-POSITIONS"
            "DEBUG-VAR" "DEBUG-VAR-ID" "DEBUG-VAR-INFO-AVAILABLE"
-           "DEBUG-VAR-SYMBOL-NAME" "DEBUG-VAR-P" "DEBUG-VAR-PACKAGE-NAME"
+           "DEBUG-VAR-NAME" "DEBUG-VAR-P" "DEBUG-VAR-PACKAGE"
            "DEBUG-VAR-SYMBOL" "DEBUG-VAR-VALID-VALUE"
            "DEBUG-VAR-VALIDITY" "DEBUG-VAR-VALUE"
            "DELETE-BREAKPOINT"
@@ -1297,7 +1298,6 @@ like *STACK-TOP-HINT* and unsupported stuff like *TRACED-FUN-LIST*.")
            "COMPARE-AND-SWAP-SLOT"
            "COMPILE-IN-LEXENV"
            "COMPILE-FILES"
-           "COMPILED-DEBUG-FUN-FORM-NUMBER"
            "%COMPILER-DEFUN" "COMPILER-ERROR" "FATAL-COMPILER-ERROR"
            "COMPILER-NOTIFY"
            "COMPILER-STYLE-WARN" "COMPILER-WARN"
@@ -1448,7 +1448,6 @@ like *STACK-TOP-HINT* and unsupported stuff like *TRACED-FUN-LIST*.")
            "CHANGE-VOP-FLAGS" "CONDITIONAL-FLAGS-FLAGS"
            "IMMEDIATE-CONSTANT-SC"
            "BOXED-IMMEDIATE-SC-P"
-           "COMBINATION-IMPLEMENTATION-STYLE"
            "CONVERT-CONDITIONAL-MOVE-P"
            "LOCATION-PRINT-NAME"
            "MAKE-CALL-OUT-TNS"
@@ -1476,7 +1475,7 @@ like *STACK-TOP-HINT* and unsupported stuff like *TRACED-FUN-LIST*.")
 
 
            "BRANCH-IF" "MULTIWAY-BRANCH-IF-EQ"
-
+           "JUMP-TABLE" "CASE-TO-JUMP-TABLE"
            ;; for SB-COVER
 
            "*CODE-COVERAGE-INFO*" "CODE-COVERAGE-RECORD-MARKED"
@@ -1484,11 +1483,7 @@ like *STACK-TOP-HINT* and unsupported stuff like *TRACED-FUN-LIST*.")
            "+CODE-COVERAGE-UNMARKED+"
            ;; for SB-INTROSPECT
 
-           "MAP-PACKED-XREF-DATA" "MAP-SIMPLE-FUNS"
-
-           "DO-BLOCKS" "DO-BLOCKS-BACKWARDS"
-           "DO-NODES" "DO-NODES-BACKWARDS"
-           "DO-IR2-BLOCKS"))
+           "MAP-PACKED-XREF-DATA" "MAP-SIMPLE-FUNS"))
 
 (defpackage* "SB-REGALLOC"
   (:documentation "private: implementation of the compiler's register allocator")
@@ -2561,7 +2556,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "MAKE-STATIC-CLASSOID"
            "%MAKE-SYMBOL"
            "%FUNCALLABLE-INSTANCE-FUN"
-           "SYMBOL-HASH" "SYMBOL-NAME-HASH" "HASH-AS-IF-SYMBOL-NAME"
+           "SYMBOL-HASH" "HASH-AS-IF-SYMBOL-NAME"
            "SYMBOL-%INFO" "SYMBOL-DBINFO" "%INFO-REF"
            "%SYMBOL-FUNCTION"
            "SYMBOL-PACKAGE-ID" "%SYMBOL-PACKAGE"
@@ -3005,6 +3000,7 @@ possibly temporarily, because it might be used internally.")
            "MIX" "MIXF" "WORD-MIX"
            "MURMUR-HASH-WORD/FIXNUM"
            "MURMUR-HASH-WORD/+FIXNUM"
+           "SYMBOL-NAME-HASH"
 
             ;; Macroexpansion that doesn't touch special forms
 
@@ -3243,6 +3239,7 @@ possibly temporarily, because it might be used internally.")
             ;; symbol-hacking idioms
 
            "GENSYMIFY" "GENSYMIFY*" "KEYWORDICATE" "SYMBOLICATE"
+           "SYMBOLICATE!"
            "INTERNED-SYMBOL-P" "PACKAGE-SYMBOLICATE"
            "LOGICALLY-READONLYIZE"
 
@@ -3264,6 +3261,7 @@ possibly temporarily, because it might be used internally.")
 
            "FORMAT-DECODED-TIME"
            "FORMAT-UNIVERSAL-TIME"
+           "UNIX-TO-UNIVERSAL-TIME"
 
             ;; used for FORMAT tilde paren
 

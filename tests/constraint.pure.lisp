@@ -189,16 +189,15 @@
 
 (with-test (:name :type-constraint-joining-terminates)
   (checked-compile
-   sb-c::
    `(lambda (name vop)
       (block foo
-        (do* ((block (vop-block vop) (ir2-block-prev block))
-              (last vop (ir2-block-last-vop block)))
+        (do* ((block (sb-c::vop-block vop) (sb-c::ir2-block-prev block))
+              (last vop (sb-c::ir2-block-last-vop block)))
              (nil)
-          (aver (eq (ir2-block-block block) (ir2-block-block (vop-block vop))))
-          (do ((current last (vop-prev current)))
+          (sb-c::aver (eq (sb-c::ir2-block-block block) (sb-c::ir2-block-block (sb-c::vop-block vop))))
+          (do ((current last (sb-c::vop-prev current)))
               ((null current))
-            (when (eq (vop-name current) name)
+            (when (eq (sb-c::vop-name current) name)
               (return-from foo current))))))))
 
 (with-test (:name :type-constraint-joining-conflicts)
@@ -1173,6 +1172,16 @@
                      nil))
              0)))
 
+(with-test (:name :constant-vector)
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     `(lambda (x)
+                        (declare (fixnum x))
+                        (and (<= x 2)
+                             (aref #(1 2 3) x)))
+                     nil))
+             0)))
+
 (with-test (:name :map-equality-constraints)
   (checked-compile-and-assert
    ()
@@ -1194,7 +1203,6 @@
        (b)))
    integer))
 
-#+var-value-constraints
 (with-test (:name :set-vars-equal)
   (assert-type
    (lambda (a)
@@ -1229,3 +1237,79 @@
                         (setq c 1000)))
             (unless (eq  lv3 -1)
               (the integer (catch 'ct4 16385)))))))
+
+(with-test (:name :cons-cells)
+  (assert-type
+   (lambda (x)
+     (if (car x)
+         (consp x)
+         t))
+   (eql t))
+  (assert-type
+   (lambda (x)
+     (if (car x)
+         nil
+         (consp x)))
+   boolean)
+  (assert-type
+   (lambda (x)
+     (if (> (car x) 1)
+         (consp x)
+         t))
+   (eql t))
+  (assert-type
+   (lambda (x)
+     (if (> (car x) 1)
+         t
+         (consp x)))
+   (eql t)))
+
+(with-test (:name :char-code)
+  (assert-type
+   (lambda (x)
+     (let ((n (char-code x)))
+       (when (or (< 31 n 127) (= n 10))
+         x)))
+   (or null standard-char))
+  (assert-type
+   (lambda (x)
+     (declare (optimize (debug 2)))
+     (when (standard-char-p x)
+       x))
+   (or null standard-char)))
+
+(with-test (:name :vector-length-alias)
+  (checked-compile-and-assert
+      ()
+      `(lambda (x)
+         (or (typep x '(integer 3 3))
+             (typep x '(simple-array character (3)))))
+    ((3) t)
+    (("000") t)
+    ((6) nil)
+    (("") nil)))
+
+(with-test (:name :eql-var-replacement)
+  (checked-compile-and-assert
+      (:allow-notes nil)
+      `(lambda (x y)
+         (declare (float x)
+                  ((simple-array double-float (*)) y))
+         (let ((d (aref y 0)))
+           (when (and (/= d 0)
+                      (eql d x))
+             x)))
+    ((1d0 (make-array 1 :element-type 'double-float :initial-element 1d0)) 1d0 :test #'equal)
+    ((1d0 (make-array 1 :element-type 'double-float :initial-element 0d0)) nil)
+    ((0d0 (make-array 1 :element-type 'double-float :initial-element 1d0)) nil)
+    ((0d0 (make-array 1 :element-type 'double-float :initial-element 0d0)) nil)))
+
+(with-test (:name :eql-var-initial-unused)
+  (checked-compile-and-assert
+      ()
+      `(lambda (p1 p2 p3)
+         (declare (type (integer -5) p3))
+         (let ((n (the (integer 0) p3)))
+           (setq n (dpb p1 (byte p2 35) n))
+           n))
+    ((1 2 3) 34359738371)))

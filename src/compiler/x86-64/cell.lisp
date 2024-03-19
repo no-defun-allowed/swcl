@@ -420,37 +420,28 @@
   (:policy :fast-safe)
   (:translate symbol-hash)
   (:args (symbol :scs (descriptor-reg)))
-  (:results (res :scs (any-reg)))
+  (:results (res :scs (unsigned-reg)))
   (:result-types positive-fixnum)
-  (:arg-refs args)
   (:generator 2
     (loadw res symbol symbol-hash-slot other-pointer-lowtag)
-    ;; The symbol-hash slot of NIL holds NIL because it is also the
-    ;; car slot, so we have to zero the fixnum tag bit(s) to make sure
-    ;; it is a fixnum.  The lowtag selection magic that is required to
-    ;; ensure this is explained in the comment in objdef.lisp
-    (unless (not-nil-tn-ref-p args)
-      (inst and res (lognot fixnum-tag-mask)))))
+    (inst shr res n-symbol-hash-discard-bits)))
 
 (eval-when (:compile-toplevel)
   ;; assumption: any object can be read 1 word past its base pointer
-  (assert (= sb-vm:symbol-hash-slot 1)))
+  (assert (= sb-vm:symbol-hash-slot 1))
+  ;; also: whatever pointer tag a non-immediate object has, we can subtract
+  ;; 3 without reading any byte outside of the object.
+  (aver (= (- (+ 4 (ash symbol-hash-slot word-shift)) other-pointer-lowtag)
+           -3))) ; 3 is the smallest pointer tag
 
-(define-vop (hash-as-if-symbol-name)
-  (:policy :fast-safe)
-  (:translate hash-as-if-symbol-name)
-  (:args (object :scs (descriptor-reg)))
-  ;; arg can not target the temp because they both have to be live
-  ;; in order that the tagged pointer not disappear.
-  ;; But temp and output could be in the same register.
-  (:temporary (:sc unsigned-reg :to (:result 0)) base-ptr)
-  (:results (res :scs (any-reg)))
-  (:result-types positive-fixnum)
-  (:generator 4
-    (inst mov base-ptr object)
-    (inst and base-ptr (lognot lowtag-mask))
-    (inst mov res (ea n-word-bytes base-ptr)) ; 1 word beyond the header
-    (inst and res (lognot fixnum-tag-mask))))
+(define-vop (symbol-name-hash symbol-hash)
+  ;; identical translations believe it or not
+  (:translate symbol-name-hash hash-as-if-symbol-name)
+  (:generator 1
+    ;; NIL gets 0 for its name hash since its upper 4 address bytes are 0
+    (inst mov :dword res
+          (ea (- (+ 4 (ash symbol-hash-slot word-shift)) other-pointer-lowtag)
+              symbol))))
 
 (aver (= sb-impl::package-id-bits 16))
 (define-vop ()
@@ -626,6 +617,7 @@
   (:temporary (:sc unsigned-reg) temp bsp)
   (:temporary (:sc complex-double-reg) zero)
   (:info symbols)
+  (:vop-var vop)
   (:generator 0
     (load-binding-stack-pointer bsp)
     (inst xorpd zero zero)
@@ -633,6 +625,16 @@
           for tls-index = (load-time-tls-offset symbol)
           for tls-cell = (thread-tls-ea tls-index)
           do
+          #+ultrafutex
+          (when (eq symbol '*current-mutex*)
+            (let ((uncontested (gen-label)))
+              (inst mov temp tls-cell) ; load the current value
+              (inst mov :qword (mutex-slot temp %owner) 0)
+              (inst dec :lock :byte (mutex-slot temp state))
+              (inst jmp :z uncontested) ; if ZF then previous value was 1, no waiters
+              (invoke-asm-routine 'call 'mutex-wake-waiter vop)
+              (emit-label uncontested)))
+
           (inst sub bsp (* binding-size n-word-bytes))
 
           ;; Load VALUE from stack, then restore it to the TLS area.
@@ -670,6 +672,16 @@
     #+sb-thread
     (progn
       (inst mov :dword symbol (ea (* binding-symbol-slot n-word-bytes) bsp))
+      ;; Maybe I should say that PROGV can never be allowed to bind *CURRENT-MUTEX*
+      ;; and I can eliminate this code here. However, UNWIND-TO-FRAME-AND-CALL
+      ;; still has to do this check.  Maybe one extra arg it needed to this function
+      ;; indicating whether it is an ordinary PROGV versus extra magical.
+      #+ultrafutex
+      (let ((notmutex (gen-label)))
+        (inst cmp :dword symbol (make-fixup '*current-mutex* :symbol-tls-index))
+        (inst jmp :ne notmutex)
+        (inst call (ea (make-fixup 'mutex-unlock :assembly-routine*)))
+        (emit-label notmutex))
       (inst test :dword symbol symbol))
     #-sb-thread
     (progn
@@ -695,6 +707,9 @@
   (:temporary (:sc unsigned-reg) symbol value bsp)
   (:temporary (:sc complex-double-reg) zero)
   (:generator 0
+    ;; Perhaps this vop should become an unbind-to-here asm routine especially for
+    ;; #+ultrafutex due to extra steps to unwind through a held mutex. On other other,
+    ;; the vop is fairly rare, used only by PROGV (and the debugger)
     (unbind-to-here where symbol value bsp zero)))
 
 ;;;; closure indexing

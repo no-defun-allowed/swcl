@@ -937,7 +937,8 @@
                                                    (let ((widetag (%other-pointer-widetag data)))
                                                      (if (eq widetag ,typecode)
                                                          (return t)
-                                                         (unless (>= widetag sb-vm:complex-vector-widetag)
+                                                         (unless (or (eq widetag sb-vm:simple-array-widetag)
+                                                                     (>= widetag sb-vm:complex-vector-widetag))
                                                            (return nil)))))))))))
                               t
                               t)
@@ -952,7 +953,9 @@
                                                    (let ((widetag (%other-pointer-widetag data)))
                                                      (if (eq widetag ,typecode)
                                                          (return t)
-                                                         (unless (>= widetag sb-vm:complex-vector-widetag)
+                                                         (unless (or
+                                                                  (eq widetag sb-vm:simple-array-widetag)
+                                                                  (>= widetag sb-vm:complex-vector-widetag))
                                                            (return nil)))))))))))
                               t))))))))))
 
@@ -1651,6 +1654,11 @@
 ;;; BIGNUMP is simpler than INTEGERP, so if we can rule out FIXNUM then ...
 (deftransform integerp ((x) ((not fixnum)) * :important nil) '(bignump x))
 
+(deftransform structure-typep ((object type) (t t) * :node node)
+  (if (types-equal-or-intersect (lvar-type object) (specifier-type 'instance))
+      (give-up-ir1-transform)
+      nil))
+
 (deftransform structure-typep ((object type) (t (constant-arg t)))
   (let* ((layout (lvar-value type))
          (type (case layout
@@ -1661,9 +1669,14 @@
                   (layout-classoid layout))))
          (diff (type-difference (lvar-type object) type))
          (pred (backend-type-predicate diff)))
-    (if pred
-        `(not (,pred object))
-        (give-up-ir1-transform))))
+    (cond ((not (types-equal-or-intersect (lvar-type object) type))
+           nil)
+          ((csubtypep (lvar-type object) type)
+           t)
+          (pred
+           `(not (,pred object)))
+          (t
+           (give-up-ir1-transform)))))
 
 (deftransform classoid-cell-typep ((cell object) ((constant-arg t) t))
   (let* ((type (specifier-type (classoid-cell-name (lvar-value cell))))

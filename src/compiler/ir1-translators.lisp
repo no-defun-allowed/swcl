@@ -32,8 +32,6 @@ otherwise evaluate ELSE and return its values. ELSE defaults to NIL."
          (then-block (ctran-starts-block then-ctran))
          (else-ctran (make-ctran))
          (else-block (ctran-starts-block else-ctran))
-         (maybe-instrument *instrument-if-for-code-coverage*)
-         (*instrument-if-for-code-coverage* t)
          (node (make-if :test pred-lvar
                         :consequent then-block
                         :alternative else-block)))
@@ -54,16 +52,65 @@ otherwise evaluate ELSE and return its values. ELSE defaults to NIL."
       (link-blocks start-block else-block))
 
     (let ((path (best-sub-source-path test)))
-      (ir1-convert (if (and path maybe-instrument)
+      (ir1-convert (if path
                        (let ((*current-path* path))
                          (instrument-coverage then-ctran :then test))
                        then-ctran)
                    next result then)
-      (ir1-convert (if (and path maybe-instrument)
+      (ir1-convert (if path
                        (let ((*current-path* path))
                          (instrument-coverage else-ctran :else test))
                        else-ctran)
                    next result else))))
+
+(def-ir1-translator jump-table ((index &rest targets) start next result)
+  (aver targets)
+  (let* ((index-ctran (make-ctran))
+         (index-lvar (make-lvar))
+         (node (make-jump-table index-lvar)))
+    (setf (lvar-dest index-lvar) node)
+    (ir1-convert start index-ctran index-lvar index)
+    (link-node-to-previous-ctran node index-ctran)
+
+    (let ((start-block (ctran-block index-ctran)))
+      (setf (block-last start-block) node)
+      (ctran-starts-block next)
+      (setf (jump-table-targets node)
+            (loop for (index . target) in targets
+                  for ctran = (make-ctran)
+                  for block = (ctran-starts-block ctran)
+                  do
+                  (ir1-convert-progn-body ctran next result target)
+                  (link-blocks start-block block)
+                  collect (cons index block))))))
+
+;;; then or else can be already converted blocks
+(def-ir1-translator if-to-blocks ((test then &optional else) start next result)
+  (flet ((to-block (x)
+           (if (block-p x)
+               (values nil x)
+               (let ((ctran (make-ctran)))
+                 (values ctran (ctran-starts-block ctran))))))
+    (multiple-value-bind (then-ctran then-block) (to-block then)
+      (multiple-value-bind (else-ctran else-block) (to-block else)
+        (let* ((pred-ctran (make-ctran))
+               (pred-lvar (make-lvar))
+               (node (make-if :test pred-lvar
+                              :consequent then-block
+                              :alternative else-block)))
+          (setf (lvar-dest pred-lvar) node)
+          (ir1-convert start pred-ctran pred-lvar test)
+          (link-node-to-previous-ctran node pred-ctran)
+
+          (let ((start-block (ctran-block pred-ctran)))
+            (setf (block-last start-block) node)
+            (ctran-starts-block next)
+            (link-blocks start-block then-block)
+            (link-blocks start-block else-block))
+          (when then-ctran
+            (ir1-convert then-ctran next result then))
+          (when else-ctran
+            (ir1-convert else-ctran next result else)))))))
 
 ;;; To get even remotely sensible results for branch coverage
 ;;; tracking, we need good source paths. If the macroexpansions
@@ -722,7 +769,7 @@ be a lambda expression."
               (ecase operator
                 (function (find-or-convert-fun-leaf definition start))
                 (global-function (values (find-global-fun definition t) start)))
-            (ir1-convert start next result `(,leaf ,@args))))
+            (ir1-convert-common-functoid start next result `(,leaf ,@args) leaf)))
         (let ((ctran (make-ctran))
               (fun-lvar (make-lvar)))
           (ir1-convert start ctran fun-lvar `(the function ,function))
@@ -837,7 +884,9 @@ have been evaluated."
                            forms
                            vars
                            :post-binding-lexenv post-binding-lexenv
-                           :debug-name (debug-name 'let bindings))))
+                           :debug-name (debug-name 'let
+                                                   (mapcar #'leaf-source-name
+                                                           vars)))))
                  (reference-leaf start ctran fun-lvar fun)))
              (ir1-convert-combination-args fun-lvar ctran next result values
                                            :arg-source-forms bindings))))))
@@ -1173,33 +1222,6 @@ care."
   (let ((*current-path* source-path))
     (ir1-convert start next result form)))
 
-(def-ir1-translator bound-cast ((array bound index) start next result)
-  (let ((check-bound-tran (make-ctran))
-        (index-ctran (make-ctran))
-        (index-lvar (make-lvar)))
-    ;; CHECK-BOUND transform ensures that INDEX won't be evaluated twice
-    (ir1-convert start check-bound-tran nil `(%check-bound ,array ,bound ,index))
-    (ir1-convert check-bound-tran index-ctran index-lvar index)
-    (let* ((check-bound-combination (ctran-use check-bound-tran))
-           (array (first (combination-args check-bound-combination)))
-           (bound (second (combination-args check-bound-combination)))
-           (derived (constant-lvar-p bound))
-           (type (specifier-type (if derived
-                                     `(integer 0 (,(lvar-value bound)))
-                                     '(and unsigned-byte fixnum))))
-           (cast (make-bound-cast :value index-lvar
-                                  :asserted-type type
-                                  :type-to-check type
-                                  :derived-type (coerce-to-values type)
-                                  :check check-bound-combination
-                                  :derived derived
-                                  :array array
-                                  :bound bound)))
-      (push cast (lvar-dependent-nodes array))
-      (link-node-to-previous-ctran cast index-ctran)
-      (setf (lvar-dest index-lvar) cast)
-      (use-continuation cast next result))))
-
 #-sb-xc-host
 (setf (info :function :macro-function 'truly-the)
       (lambda (whole env)
@@ -1212,7 +1234,7 @@ care."
       (info :function :macro-function 'with-source-form)
       (lambda (whole env)
         (declare (ignore env))
-                `(progn ,@(cddr whole))))
+        `(progn ,@(cddr whole))))
 
 ;;;; SETQ
 
@@ -1336,7 +1358,7 @@ to TAG."
                    (return-from ,tag (%unknown-values)))
                 :debug-name (debug-name 'escape-fun tag))))
         (ctran (make-ctran)))
-    (setf (functional-kind fun) :escape)
+    (setf (functional-kind fun) (functional-kind-attributes escape))
     (enclose start ctran (list fun))
     (reference-leaf ctran next result fun)))
 
@@ -1348,7 +1370,7 @@ to TAG."
   ;; (SETF FOO) here?
   (let ((fun (lexenv-find name funs)))
     (aver (lambda-p fun))
-    (setf (functional-kind fun) :cleanup)
+    (setf (functional-kind fun) (functional-kind-attributes cleanup))
     (reference-leaf start next result fun)))
 
 (def-ir1-translator catch ((tag &body body) start next result)

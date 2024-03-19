@@ -75,7 +75,10 @@ distinct from the global value. Can also be SETF."
 ;; object sought (having an exceptional hash) until it has been found.
 (defun calc-symbol-name-hash (string length)
   (declare (simple-string string) (index length))
-  (if (and (= length 3)
+  (cond
+    ;; first case is only needed if NIL's hash is unusual, but it's OK either way
+    #+64-bit
+    ((and (= length 3)
            (locally
             ;; SXHASH-SUBSTRING is unsafe, so this is too. but do we know that
             ;; length is ok, or is it an accident that it can scan too far?
@@ -85,10 +88,13 @@ distinct from the global value. Can also be SETF."
               (and (char= (schar string 0) #\N)
                    (char= (schar string 1) #\I)
                    (char= (schar string 2) #\L)))))
-      (sxhash nil) ; transformed
-      ;; flip the bits so that a symbol hashes differently from its print name
-      (logxor (%sxhash-simple-substring string 0 length)
-              most-positive-fixnum)))
+     #.(symbol-hash 'nil)) ; utilize the host's function
+    (t
+     ;; Flip the bits so that a symbol hashes differently from its print name,
+     ;; and extract the lesser of 32 or N-POSITIVE-FIXNUM-BITS significant bits.
+     (ldb (byte 32 0)
+          (logxor (%sxhash-simple-substring string 0 length)
+                  most-positive-fixnum)))))
 
 ;;; Return the function binding of SYMBOL or NIL if not fboundp.
 ;;; Don't strip encapsulations.
@@ -334,7 +340,7 @@ distinct from the global value. Can also be SETF."
     package))
 
 ;;; MAKE-SYMBOL is the external API, %MAKE-SYMBOL is the internal function receiving
-;;; a known simple-string, and %%MAKE-SYMBOL is the primitive constructor.
+;;; a known simple-string, and %ALLOC-SYMBOL is the primitive constructor.
 (defun make-symbol (string)
   "Make and return a new symbol with the STRING as its print name."
   (declare (type string string))
@@ -387,25 +393,40 @@ distinct from the global value. Can also be SETF."
                    ;; Readonly space is physically unwritable. Don't touch it.
                    (not (read-only-space-obj-p name)))
           (logior-array-flags name sb-vm:+vector-shareable+))) ; Set "logically read-only" bit
+       (name-hash (calc-symbol-name-hash name (length name)))
        (symbol
          (truly-the symbol
           ;; If no immobile-space, easy: all symbols go in dynamic-space
-          #-immobile-space (sb-vm::%%make-symbol name)
+          #-immobile-space (sb-vm::%alloc-symbol name)
           ;; If #+immobile-symbols, then uninterned symbols go in dynamic space, but
           ;; interned symbols go in immobile space. Good luck IMPORTing an uninterned symbol-
           ;; it'll work at least superficially, but if used as a code constant, the symbol's
           ;; address may violate the assumption that it's an imm32 operand.
           #+immobile-symbols
-          (if (eql kind 0) (sb-vm::%%make-symbol name) (sb-vm::make-immobile-symbol name))
+          (if (eql kind 0) (sb-vm::%alloc-symbol name) (sb-vm::%alloc-immobile-symbol name))
           #+(and immobile-space (not immobile-symbols))
           (if (or (eql kind 1) ; keyword
                   (and (eql kind 2) ; random interned symbol
                        (plusp (length name))
                        (char= (char name 0) #\*)
                        (char= (char name (1- (length name))) #\*)))
-              (sb-vm::make-immobile-symbol name)
-              (sb-vm::%%make-symbol name)))))
-    (%set-symbol-hash symbol (calc-symbol-name-hash name (length name)))
+              (sb-vm::%alloc-immobile-symbol name)
+              (sb-vm::%alloc-symbol name)))))
+    #-salted-symbol-hash (%set-symbol-hash symbol name-hash)
+    #+salted-symbol-hash
+    (let ((salt (murmur-hash-word/fixnum
+                 (word-mix name-hash (get-lisp-obj-address symbol)))))
+      #+64-bit
+      (let ((hash (logior (ash name-hash 32) (mask-field symbol-hash-prng-byte salt))))
+        ;; %SET-SYMBOL-HASH wants a unsigned fixnum, which HASH is not.
+        (%primitive sb-vm::set-slot symbol (%make-lisp-obj hash)
+                    'make-symbol sb-vm:symbol-hash-slot sb-vm:other-pointer-lowtag))
+      #-64-bit
+      (with-pinned-objects (symbol) ; no vop sets the raw slot
+        (setf (sap-ref-32 (int-sap (get-lisp-obj-address symbol))
+                          (- (ash sb-vm:symbol-hash-slot sb-vm:word-shift)
+                             sb-vm:other-pointer-lowtag))
+              (logior (ash name-hash 3) (ldb (byte 3 0) salt)))))
     ;; Compact-symbol (which is equivalent to #+64-bit) has the package already NIL
     ;; because the PACKAGE-ID-BITS field defaults to 0.
     #-compact-symbol (%set-symbol-package symbol nil)
@@ -686,3 +707,7 @@ distinct from the global value. Can also be SETF."
 ) ; end MACROLET
 
 #+sb-thread (defun symbol-tls-index (x) (symbol-tls-index x)) ; necessary stub
+
+(defun symbol-name-hash (symbol) (symbol-name-hash symbol)) ; transformed
+(sb-c::when-vop-existsp (:translate hash-as-if-symbol-name)
+  (defun hash-as-if-symbol-name (x) (hash-as-if-symbol-name x))) ; transformed

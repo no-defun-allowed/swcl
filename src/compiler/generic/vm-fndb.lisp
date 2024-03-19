@@ -113,17 +113,13 @@
 
 (defknown (%sxhash-simple-substring) (simple-string index index) hash-code
   (foldable flushable))
-(defknown sb-impl::calc-symbol-name-hash (simple-string index) hash-code ())
+(defknown sb-impl::calc-symbol-name-hash (simple-string index) symbol-name-hash ())
 
 (defknown (symbol-hash) (symbol) hash-code (flushable movable))
-;;; This accessor will read the word at SYMBOL-HASH-SLOT in any object, not only symbols.
-;;; The value is predictable only if the object is a symbol. The trick is to either:
-;;; 1) Access taggedptr - lowtag + offset using a few registers, OR
-;;; 2) Compute the untagged base pointer, while also holding the tagged pointer
-;;;    in a register (implicitly pinned), and then access via the untagged pointer.
-;;; x86-64 implements this as a vop, though arm64 probably could too, unless compiled
-;;; with #+relocatable-static-space.
-(defknown hash-as-if-symbol-name (t) hash-code (flushable movable always-translatable))
+(defknown (symbol-name-hash) (symbol) symbol-name-hash (flushable movable))
+;;; This accessor will read the half-lispword at SYMBOL-HASH-SLOT in any object,
+;;; not only symbols. The value is reliable only if the object is a symbol.
+(defknown hash-as-if-symbol-name (t) symbol-name-hash (flushable movable always-translatable))
 
 (defknown %set-symbol-hash (symbol hash-code)
   t ())

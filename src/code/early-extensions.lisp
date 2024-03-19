@@ -882,11 +882,22 @@ NOTE: This interface is experimental and subject to change."
 ;;; with this should reduce the size of the system by enough to be
 ;;; worthwhile.)
 (defmacro aver (expr)
-  `(unless ,expr
-     (%failed-aver ',expr)))
+  ;; Don't hold on to symbols, helping shake-packages.
+  (labels ((replace-symbols (expr)
+             (typecase expr
+               (null expr)
+               (symbol
+                (symbol-name expr))
+               (cons
+                (cons (replace-symbols (car expr))
+                      (replace-symbols (cdr expr))))
+               (t
+                expr))))
+    `(unless ,expr
+       (%failed-aver ',(replace-symbols expr)))))
 
 (defun %failed-aver (expr)
-  (bug "~@<failed AVER: ~2I~_~S~:>" expr))
+  (bug "~@<failed AVER: ~2I~_~A~:>" expr))
 
 (defun bug (format-control &rest format-arguments)
   (error 'bug

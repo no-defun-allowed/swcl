@@ -472,7 +472,7 @@
   (next nil :type (or null cblock))
   (prev nil :type (or null cblock))
   ;; This block's attributes: see above.
-  (flags (block-attributes reoptimize flush-p type-check)
+  (flags #.(block-attributes reoptimize flush-p type-check)
          :type attributes)
   ;; in constraint propagation: list of LAMBDA-VARs killed in this block
   ;; in copy propagation: list of killed TNs
@@ -927,14 +927,53 @@
   (functional :test functional))
 
 ;;;; function stuff
+(!def-boolean-attribute functional-kind
+  nil optional deleted external toplevel
+  escape cleanup let mv-let assignment
+  zombie toplevel-xep)
+
+(defmacro functional-kind-eq (functional &rest kinds)
+  `(,(if (cdr kinds)
+         'logtest
+         'eql)
+    (functional-kind ,functional)
+    (functional-kind-attributes ,@kinds)))
+
+(defmacro functional-kind-ecase (functional &body cases)
+  (let ((kind (gensym)))
+    `(let ((,kind (functional-kind ,functional)))
+       (cond
+         ,@(loop for (case* . forms) in cases
+                 for case = (ensure-list case*)
+                 collect
+                 `((,(if (singleton-p case)
+                         'eql
+                         'logtest) ,kind (functional-kind-attributes ,@case))
+                   ,@forms))
+         (t (error "Unhandled functional-kind ~a"
+                   (decode-functional-kind-attributes ,kind)))))))
+
+(defmacro functional-kind-case (functional &body cases)
+  (let ((kind (gensym)))
+    `(let ((,kind (functional-kind ,functional)))
+       (cond
+         ,@(loop for (case* . forms) in cases
+                 for case = (ensure-list case*)
+                 collect
+                 (if (eq case* t)
+                     `(t ,@forms)
+                     `((,(if (singleton-p case)
+                             'eql
+                             'logtest) ,kind (functional-kind-attributes ,@case))
+                       ,@forms)))))))
 
 ;;; We default the WHERE-FROM and TYPE slots to :DEFINED and FUNCTION.
 ;;; We don't normally manipulate function types for defined functions,
 ;;; but if someone wants to know, an approximation is there.
 (defstruct (functional (:include leaf
-                                 (%source-name '.anonymous.)
-                                 (where-from :defined)
-                                 (type (specifier-type 'function)))
+                        (%source-name '.anonymous.)
+                        (where-from :defined)
+                        (type (specifier-type 'function)))
                        (:copier nil))
   ;; (For public access to this slot, use LEAF-DEBUG-NAME.)
   ;;
@@ -969,8 +1008,8 @@
   ;;   %SOURCE-NAME=FOO (or maybe .ANONYMOUS.?)
   ;;   %DEBUG-NAME=(MACRO-FUNCTION FOO)
   (%debug-name nil
-               :type (or null (not (satisfies legal-fun-name-p)))
-               :read-only t)
+   :type (or null (not (satisfies legal-fun-name-p)))
+   :read-only t)
   ;; some information about how this function is used. These values
   ;; are meaningful:
   ;;
@@ -1031,9 +1070,7 @@
   ;;
   ;;    :ZOMBIE
   ;;    Effectless [MV-]LET; has no BIND node.
-  (kind nil :type (member nil :optional :deleted :external :toplevel
-                          :escape :cleanup :let :mv-let :assignment
-                          :zombie :toplevel-xep))
+  (kind #.(functional-kind-attributes nil) :type attributes)
   ;; Is this a function that some external entity (e.g. the fasl dumper)
   ;; refers to, so that even when it appears to have no references, it
   ;; shouldn't be deleted? In the old days (before
@@ -1112,18 +1149,16 @@
 
 ;;; Is FUNCTIONAL LET-converted? (where we're indifferent to whether
 ;;; it returns one value or multiple values)
-(defun functional-letlike-p (functional)
-  (member (functional-kind functional)
-          '(:let :mv-let)))
+(defmacro functional-letlike-p (functional)
+  `(functional-kind-eq ,functional let mv-let))
 
 ;;; Is FUNCTIONAL sorta LET-converted? (where even an :ASSIGNMENT counts)
 ;;;
 ;;; FIXME: I (WHN) don't understand this one well enough to give a good
 ;;; definition or even a good function name, it's just a literal copy
 ;;; of a CMU CL idiom. Does anyone have a better name or explanation?
-(defun functional-somewhat-letlike-p (functional)
-  (or (functional-letlike-p functional)
-      (eql (functional-kind functional) :assignment)))
+(defmacro functional-somewhat-letlike-p (functional)
+  `(functional-kind-eq ,functional let mv-let assignment))
 
 ;;; FUNCTIONAL name operations
 (defun functional-debug-name (functional)
@@ -1201,7 +1236,7 @@
              :pretty-ir-printer (pretty-print-functional structure stream))
   %source-name
   %debug-name
-  kind
+  (kind :princ (decode-functional-kind-attributes kind))
   (type :test (not (eq type *universal-type*)))
   (where-from :test (not (eq where-from :assumed)))
   (vars :prin1 (mapcar #'leaf-source-name vars)))
@@ -1219,7 +1254,7 @@
 ;;; :TOPLEVEL mess with a flag COMPONENT-HAS-EXTERNAL-REFERENCES-P
 ;;; along the lines of FUNCTIONAL-HAS-EXTERNAL-REFERENCES-P.
 (defun lambda-toplevelish-p (clambda)
-  (or (eql (lambda-kind clambda) :toplevel)
+  (or (functional-kind-eq clambda toplevel)
       (lambda-has-external-references-p clambda)))
 (defun component-toplevelish-p (component)
   (member (component-kind component)
@@ -1359,11 +1394,11 @@
   ;; Do not propagate constraints for this var
   no-constraints
   ;; Does it hold a constant that should't be destructively modified
-  constant)
+  constant
+  unused-initial-value)
 
 (defstruct (lambda-var (:include basic-var) (:copier nil))
-  (flags (lambda-var-attributes)
-         :type attributes)
+  (flags #.(lambda-var-attributes) :type attributes)
   ;; the CLAMBDA that this var belongs to. This may be null when we are
   ;; building a lambda during IR1 conversion.
   (home nil :type (or null clambda))
@@ -1389,11 +1424,9 @@
   (eql-var-constraints     nil :type (or null (vector t)))
   (inheritable-constraints nil :type (or null (vector t)))
   (equality-constraints    nil :type (or null (vector t)))
-
-  #+var-value-constraints
-  (value-id-constraints    nil :type (or null (vector t)))
-
+  (equality-constraints-hash nil :type (or null hash-table))
   source-form)
+
 (defprinter (lambda-var :identity t)
   %source-name
   (type :test (not (eq type *universal-type*)))
@@ -1415,6 +1448,8 @@
   `(lambda-var-attributep (lambda-var-flags ,var) no-constraints))
 (defmacro lambda-var-constant (var)
   `(lambda-var-attributep (lambda-var-flags ,var) constant))
+(defmacro lambda-var-unused-initial-value (var)
+  `(lambda-var-attributep (lambda-var-flags ,var) unused-initial-value))
 
 
 ;;;; basic node types
@@ -1434,16 +1469,21 @@
   (leaf nil :type leaf)
   ;; KLUDGE: This is supposed to help with keyword debug messages somehow.
   (%source-name (missing-arg) :type symbol :read-only t)
-  ;; After constraints two refs with same mask refer to the same value
-  ;; when a lambda-var has sets.
-  #+var-value-constraints
-  (var-id-mask -1 :type integer))
+  ;; An cons added by constraint-propagate to all REFs that have the
+  ;; same value when referencing a lambda-var with sets.
+  (same-refs nil :type (or null cons)))
 (defprinter (ref :identity t)
   (%source-name :test (neq %source-name '.anonymous.))
   leaf)
 
+(defstruct (multiple-successors-node
+            (:constructor nil)
+            (:include node)
+            (:copier nil)
+            (:conc-name node-)))
+
 ;;; Naturally, the IF node always appears at the end of a block.
-(defstruct (cif (:include node)
+(defstruct (cif (:include multiple-successors-node)
                 (:conc-name if-)
                 (:predicate if-p)
                 (:constructor make-if)
@@ -1461,6 +1501,16 @@
   consequent
   alternative)
 
+(defstruct (jump-table (:include multiple-successors-node)
+                       (:constructor make-jump-table (index))
+                       (:copier nil))
+  (index (missing-arg) :type lvar)
+  (targets nil :type list))
+
+(defprinter (jump-table :identity t)
+  index
+  targets)
+
 (defstruct (cset (:include valued-node
                            (derived-type (make-single-value-type
                                           *universal-type*)))
@@ -1471,10 +1521,7 @@
   ;; descriptor for the variable set
   (var (missing-arg) :type basic-var)
   ;; LVAR for the value form
-  (value (missing-arg) :type lvar)
-  ;; For constraints
-  #+var-value-constraints
-  (id 0 :type integer))
+  (value (missing-arg) :type lvar))
 (defprinter (cset :conc-name set- :identity t)
   var
   (value :prin1 (lvar-uses value)))
@@ -1624,22 +1671,6 @@
                    (asserted-type *wild-type*)
                    (type-to-check *wild-type*))
                   (:copier nil)))
-
-;;; A cast that always follows %check-bound and they are deleted together.
-;;; Created via BOUND-CAST ir1-translator by chaining it together with %check-bound.
-;;; IR1-OPTIMIZE-CAST handles propagation from BOUND to CAST-ASSERTED-TYPE
-;;; DELETE-CAST deletes BOUND-CAST-CHECK
-;;; GENERATE-TYPE-CHECKS ignores it, it never translates to a type check,
-;;; %CHECK-BOUND does all the checking.
-(defstruct (bound-cast (:include cast (%type-check nil))
-                       (:copier nil))
-  ;; %check-bound combination before the cast
-  (check (missing-arg) :type (or null combination))
-  ;; Tells whether the type information is in a state where it can be
-  ;; optimized away, i.e. when BOUND is a constant.
-  (derived nil :type boolean)
-  (array (missing-arg) :type lvar)
-  (bound (missing-arg) :type lvar))
 
 ;;; Inserted by ARRAY-CALL-TYPE-DERIVER so that it can be later deleted
 (defstruct (array-index-cast (:include cast) (:copier nil)))

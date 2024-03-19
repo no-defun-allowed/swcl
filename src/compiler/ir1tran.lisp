@@ -41,6 +41,8 @@
 
 (defvar *transforming* 0)
 (defvar *inlining* 0)
+(declaim (type fixnum *transforming* *inlining*)
+         #-sb-xc-host (always-bound *transforming* *inlining*))
 
 (defun ensure-source-path (form)
   (flet ((level> (value kind)
@@ -53,27 +55,12 @@
         (cond ((level> *transforming* 'transformed)
                ;; Don't hide all the transformed paths, since we might want
                ;; to look at the final form for error reporting.
-               (list* (simplify-source-path-form form)
-                      'transformed *transforming* *current-path*))
+               (list* form 'transformed *transforming* *current-path*))
               ;; Avoids notes about inlined code leaking out
               ((level> *inlining* 'inlined)
-               (list* (simplify-source-path-form form)
-                      'inlined *inlining* *current-path*))
+               (list* form 'inlined *inlining* *current-path*))
               (t
-               (cons (simplify-source-path-form form)
-                     *current-path*))))))
-
-(defun simplify-source-path-form (form)
-  (if (consp form)
-      (let ((op (car form)))
-        ;; In the compiler functions can be directly represented
-        ;; by leaves. Having leaves in the source path is pretty
-        ;; hard on the poor user, however, so replace with the
-        ;; source-name when possible.
-        (if (and (leaf-p op) (leaf-has-source-name-p op))
-            (cons (leaf-source-name op) (cdr form))
-            form))
-      form))
+               (cons form *current-path*))))))
 
 (defun note-source-path (form &rest arguments)
   (when (source-form-has-path-p form)
@@ -345,7 +332,6 @@
                             system-area-pointer
                             #+sb-simd-pack simd-pack
                             #+sb-simd-pack-256 simd-pack-256))
-      (cl:typep obj 'debug-name-marker)
       ;; STANDARD-OBJECT layouts use MAKE-LOAD-FORM, but all other layouts
       ;; have the same status as symbols - composite objects but leaflike.
       (and (typep obj 'layout) (not (layout-for-pcl-obj-p obj)))
@@ -543,11 +529,10 @@
     (setf (component-kind component) :initial)
     (let* ((forms (if for-value `(,form) `(,form nil)))
            (res (ir1-convert-lambda-body
-                 forms ()
-                 :debug-name (debug-name 'top-level-form #+sb-xc-host nil #-sb-xc-host form))))
+                 forms () :debug-name "top level form")))
       (setf (functional-entry-fun res) res
             (functional-arg-documentation res) ()
-            (functional-kind res) :toplevel)
+            (functional-kind res) (functional-kind-attributes toplevel))
       res)))
 
 ;;; This function is called on freshly read forms to record the
@@ -611,7 +596,8 @@
                       ir1-convert-combination-args reference-leaf
                       reference-constant
                       expand-compiler-macro
-                      maybe-reanalyze-functional))
+                      maybe-reanalyze-functional
+                      ir1-convert-common-functoid))
 
 ;;; Translate FORM into IR1. The code is inserted as the NEXT of the
 ;;; CTRAN START. RESULT is the LVAR which receives the value of the
@@ -644,17 +630,16 @@
 ;;; if necessary. If we are producing a fasl file, make sure that
 ;;; MAKE-LOAD-FORM gets used on any parts of the constant that it
 ;;; needs to be.
-(defun reference-constant (start next result value)
+(defun reference-constant (start next result value &optional (emit-load-forms (producing-fasl-file)))
   (declare (type ctran start next)
            (type (or lvar null) result))
-  (ir1-error-bailout (start next result value)
-    (when (producing-fasl-file)
-      (maybe-emit-make-load-forms value))
-    (let* ((leaf (find-constant value))
-           (res (make-ref leaf)))
-      (push res (leaf-refs leaf))
-      (link-node-to-previous-ctran res start)
-      (use-continuation res next result)))
+  (when emit-load-forms
+    (maybe-emit-make-load-forms value))
+  (let* ((leaf (find-constant value))
+         (res (make-ref leaf)))
+    (push res (leaf-refs leaf))
+    (link-node-to-previous-ctran res start)
+    (use-continuation res next result))
   (values))
 
 ;;; Add FUNCTIONAL to the COMPONENT-REANALYZE-FUNCTIONALS, unless it's
@@ -662,7 +647,7 @@
 ;;;
 ;;; FUNCTIONAL is returned.
 (defun maybe-reanalyze-functional (functional)
-  (aver (not (eql (functional-kind functional) :deleted))) ; bug 148
+  (aver (not (functional-kind-eq functional deleted))) ; bug 148
   (aver-live-component *current-component*)
   ;; When FUNCTIONAL is of a type for which reanalysis isn't a trivial
   ;; no-op
@@ -683,11 +668,10 @@
                         (neq (defined-fun-inlinep leaf) 'notinline)
                         (defined-fun-same-block-p leaf)
                         (let ((functional (defined-fun-functional leaf)))
-                          (when (and functional (not (functional-kind functional)))
+                          (when (and functional (functional-kind-eq functional nil))
                             (maybe-reanalyze-functional functional))))
                    (when (and (functional-p leaf)
-                              (memq (functional-kind leaf)
-                                    '(nil :optional)))
+                              (functional-kind-eq leaf nil optional))
                      (maybe-reanalyze-functional leaf))
                    leaf))
          (ref (make-ref leaf name)))
@@ -1075,11 +1059,6 @@
                                            (proper-list form)
                                            var))))))
 
-
-;;; KLUDGE: If we insert a synthetic IF for a function with the PREDICATE
-;;; attribute, don't generate any branch coverage instrumentation for it.
-(defvar *instrument-if-for-code-coverage* t)
-
 ;;; If the function has the PREDICATE attribute, and the RESULT's DEST
 ;;; isn't an IF, then we convert (IF <form> T NIL), ensuring that a
 ;;; predicate always appears in a conditional context.
@@ -1095,9 +1074,35 @@
     (if (and info
              (ir1-attributep (fun-info-attributes info) predicate)
              (not (if-p (and result (lvar-dest result)))))
-        (let ((*instrument-if-for-code-coverage* nil))
-          (ir1-convert start next result `(if ,form t nil)))
+        (wrap-predicate start next result form var)
         (ir1-convert-combination-checking-type start next result form var))))
+
+;;; Like (if form t nil) but without coverage and without inserting
+;;; leafs coming from %funcall into *current-path*
+(defun wrap-predicate (start next result form var)
+  (let* ((pred-ctran (make-ctran))
+         (pred-lvar (make-lvar))
+         (then-ctran (make-ctran))
+         (then-block (ctran-starts-block then-ctran))
+         (else-ctran (make-ctran))
+         (else-block (ctran-starts-block else-ctran))
+         (node (make-if :test pred-lvar
+                        :consequent then-block
+                        :alternative else-block)))
+    (setf (lvar-dest pred-lvar) node)
+    (ir1-convert-combination-checking-type start pred-ctran pred-lvar form var)
+    (link-node-to-previous-ctran node pred-ctran)
+
+    (let ((start-block (ctran-block pred-ctran)))
+      (setf (block-last start-block) node)
+      (ctran-starts-block next)
+
+      (link-blocks start-block then-block)
+      (link-blocks start-block else-block))
+    (let ((*current-path* (cons t *current-path*)))
+      (reference-constant then-ctran next result t))
+    (let ((*current-path* (cons nil *current-path*)))
+      (reference-constant else-ctran next result nil))))
 
 ;;; Actually really convert a global function call that we are allowed
 ;;; to early-bind.

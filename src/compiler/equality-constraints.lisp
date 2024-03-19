@@ -48,44 +48,61 @@
                              `((equality-constraint-amount ,con)))
                       (equality-constraint-not-p ,con))))))))
 
-(defun find-equality-constraint (operator amount x y not-p)
-  (let ((constraints (lambda-var-equality-constraints (constraint-var x))))
-    (flet ((constraints-eq-p (a b)
-             (or (eq a b)
-                 (and (vector-length-constraint-p a)
-                      (vector-length-constraint-p b)
-                      (eq (vector-length-constraint-var a)
-                          (vector-length-constraint-var b))))))
-      (when constraints
-        (loop for con across constraints
-              when (and (eq (equality-constraint-operator con) operator)
-                        (eql (equality-constraint-amount con) amount)
-                        (eq (constraint-not-p con) not-p)
-                        (constraints-eq-p (constraint-x con) x)
-                        (constraints-eq-p (constraint-y con) y))
-              return con)))))
+(defun find-equality-constraint (operator amount x x-var y y-key not-p)
+  (let ((constraints (lambda-var-equality-constraints-hash x-var)))
+    (when constraints
+      (let ((constraints (gethash y-key constraints)))
+        (if (typep y-key 'sb-kernel::type-class)
+            (loop for con in constraints
+                  when (and (eq (equality-constraint-operator con) operator)
+                            (eq (constraint-not-p con) not-p)
+                            (eql (equality-constraint-amount con) amount)
+                            (vector-constraint-eq-p (constraint-x con) x)
+                            (type= (constraint-y con) y))
+                  return con)
+            (loop for con in constraints
+                  when (and (eq (equality-constraint-operator con) operator)
+                            (eq (constraint-not-p con) not-p)
+                            (vector-constraint-eq-p (constraint-x con) x)
+                            (vector-constraint-eq-p (constraint-y con) y)
+                            (eql (equality-constraint-amount con) amount))
+                  return con))))))
 
 (defun find-or-create-equality-constraint (operator x y not-p &optional (amount 0))
   (unless amount
     (setf amount 0))
-  (or (find-equality-constraint operator amount x y not-p)
-      (let ((new (make-equality-constraint (length *constraint-universe*)
-                                           operator
-                                           x y not-p
-                                           amount)))
-        (vector-push-extend new *constraint-universe* (1+ (length *constraint-universe*)))
-        (flet ((add (var)
-                 (conset-adjoin new (lambda-var-constraints var))
-                 (macrolet ((ensure-vec (place)
-                              `(or ,place
-                                   (setf ,place
-                                         (make-array 8 :adjustable t :fill-pointer 0)))))
-                   (vector-push-extend new (ensure-vec (lambda-var-equality-constraints var))))))
-          (add (constraint-var x))
-          (let ((y (constraint-var y)))
-            (when (lambda-var-p y)
-              (add y))))
-        new)))
+  (let ((x-var (constraint-var x))
+        (cache-key (typecase y
+                     (numeric-type ;; eq-comparable
+                      y)
+                     (ctype
+                      (sb-kernel::type-class y))
+                     (vector-length-constraint y
+                      (vector-length-constraint-var y))
+                     (t
+                      y))))
+    (or (find-equality-constraint operator amount x x-var y cache-key not-p)
+        (let ((new (make-equality-constraint (length *constraint-universe*)
+                                             operator
+                                             x y not-p
+                                             amount)))
+          (vector-push-extend new *constraint-universe* (1+ (length *constraint-universe*)))
+          (flet ((add (var)
+                   (conset-adjoin new (lambda-var-constraints var))
+                   (macrolet ((ensure-vec (place)
+                                `(or ,place
+                                     (setf ,place
+                                           (make-array 8 :adjustable t :fill-pointer 0)))))
+                     (vector-push-extend new (ensure-vec (lambda-var-equality-constraints var))))))
+            (add x-var)
+            (let ((hash (or (lambda-var-equality-constraints-hash x-var)
+                            (setf (lambda-var-equality-constraints-hash x-var)
+                                  (make-hash-table :test #'eq)))))
+              (push new (gethash cache-key hash)))
+            (let ((y (constraint-var y)))
+              (when (lambda-var-p y)
+                (add y))))
+          new))))
 
 (defun conset-add-equality-constraint (conset operator x y not-p &optional (amount 0))
   (conset-adjoin (find-or-create-equality-constraint operator x y not-p amount)
@@ -599,6 +616,15 @@
                  (< (derive (integer * (0)))))))))))
   :give-up)
 
+(defoptimizer (%check-bound constraint-propagate) ((array dimension index) node gen)
+  (add-equality-constraint '< index dimension gen gen nil)
+  (let ((var (ok-lvar-lambda-var index gen))
+        (type (if (constant-lvar-p dimension)
+                  (specifier-type `(integer 0 (,(lvar-value dimension))))
+                  (specifier-type 'index))))
+    (when var
+      (list (list 'typep var type nil)))))
+
 (defoptimizer (%check-bound equality-constraint) ((array dimension index) node gen)
   (let ((array-var (ok-lvar-lambda-var array gen)))
     (when (and array-var
@@ -614,7 +640,11 @@
   :give-up)
 
 (deftransform %check-bound ((array dimension index) ((simple-array * (*)) t t) * :node node)
-  (if (eq (combination-info node) 'array-in-bounds-p)
+  (if (or (eq (combination-info node) 'array-in-bounds-p)
+          (let ((index (type-approximate-interval (lvar-type index)))
+                (dim (type-approximate-interval (lvar-type dimension))))
+            (and index dim
+                 (interval-< index dim))))
       ;; It's in bounds but it may be of the wrong type
       `(progn (the (and fixnum unsigned-byte) index)
               (values))

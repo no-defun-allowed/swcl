@@ -446,34 +446,3 @@
       (constant (format nil "Const~D" offset))
       (immediate-constant "Immed")
       (noise (symbol-name (sc-name sc))))))
-
-(defun combination-implementation-style (node)
-  (declare (type sb-c::combination node))
-  (flet ((valid-funtype (args result)
-           (sb-c::valid-fun-use node
-                                (sb-c::specifier-type
-                                 `(function ,args ,result)))))
-    (case (sb-c::combination-fun-source-name node)
-      (logtest
-       (cond
-         ((valid-funtype '(fixnum fixnum) '*)
-          (values :maybe nil))
-         ((valid-funtype '((signed-byte 32) (signed-byte 32)) '*)
-          (values :maybe nil))
-         ((valid-funtype '((unsigned-byte 32) (unsigned-byte 32)) '*)
-          (values :maybe nil))
-         (t (values :default nil))))
-      (logbitp
-       (cond
-         ((and (valid-funtype '((integer 0 29) fixnum) '*)
-               (sb-c:constant-lvar-p (first (sb-c::basic-combination-args node))))
-          (values :transform '(lambda (index integer)
-                               (%logbitp integer index))))
-         ((valid-funtype '((integer 0 31) (signed-byte 32)) '*)
-          (values :transform '(lambda (index integer)
-                               (%logbitp integer index))))
-         ((valid-funtype '((integer 0 31) (unsigned-byte 32)) '*)
-          (values :transform '(lambda (index integer)
-                               (%logbitp integer index))))
-         (t (values :default nil))))
-      (t (values :default nil)))))

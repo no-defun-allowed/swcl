@@ -1609,49 +1609,50 @@
 ;;; restrictive, but they do catch common cases, like allocating a (* 2
 ;;; N)-size buffer and blitting in the old N-size buffer in.
 
-(deftransform transform-bash-copy ((src src-offset dst dst-offset length)
-                                   * *
-                                   :defun-only t :info  n-bits-per-elem)
-  (declare (ignore src dst length))
-  (binding* ((n-elems-per-word (truncate sb-vm:n-word-bits n-bits-per-elem))
-             ((src-word src-elt) (truncate (lvar-value src-offset) n-elems-per-word))
-             ((dst-word dst-elt) (truncate (lvar-value dst-offset) n-elems-per-word)))
-    ;; Avoid non-word aligned copies.
-    (unless (and (zerop src-elt) (zerop dst-elt))
-      (give-up-ir1-transform))
-    ;; Avoid copies where we would have to insert code for
-    ;; determining the direction of copying.
-    (unless (= src-word dst-word)
-      (give-up-ir1-transform))
-    `(let ((end (+ ,src-word (truncate (the index length) ,n-elems-per-word)))
-           (extra (mod length ,n-elems-per-word)))
-       (declare (type index end))
-       ;; Handle any bits at the end.
-       (unless (zerop extra)
-         ;; MASK selects just the bits that we want from the ending word of
-         ;; the source array. The number of bits to shift out is
-         ;;   (- n-word-bits (* extra n-bits-per-elem))
-         ;; which is equal mod n-word-bits to the expression below.
-         (let ((mask (shift-towards-start
-                      most-positive-word (* extra ,(- n-bits-per-elem)))))
-           (%set-vector-raw-bits
-            dst end (logior (logand (%vector-raw-bits src end) mask)
-                            (logandc2 (%vector-raw-bits dst end) mask)))))
-       ;; Copy from the end to save a register.
-       (do ((i (1- end) (1- i)))
-           ((< i ,src-word))
-         (%set-vector-raw-bits dst i (%vector-raw-bits src i)))
-       (values))))
+(defun make-bash-copy-transform (n-bits-per-elem)
+  (deftransform transform-bash-copy ((src src-offset dst dst-offset length)
+                                     * *
+                                     :defun-only lambda)
+    (declare (ignore src dst length))
+    (binding* ((n-elems-per-word (truncate sb-vm:n-word-bits n-bits-per-elem))
+               ((src-word src-elt) (truncate (lvar-value src-offset) n-elems-per-word))
+               ((dst-word dst-elt) (truncate (lvar-value dst-offset) n-elems-per-word)))
+      ;; Avoid non-word aligned copies.
+      (unless (and (zerop src-elt) (zerop dst-elt))
+        (give-up-ir1-transform))
+      ;; Avoid copies where we would have to insert code for
+      ;; determining the direction of copying.
+      (unless (= src-word dst-word)
+        (give-up-ir1-transform))
+      `(let ((end (+ ,src-word (truncate (the index length) ,n-elems-per-word)))
+             (extra (mod length ,n-elems-per-word)))
+         (declare (type index end))
+         ;; Handle any bits at the end.
+         (unless (zerop extra)
+           ;; MASK selects just the bits that we want from the ending word of
+           ;; the source array. The number of bits to shift out is
+           ;;   (- n-word-bits (* extra n-bits-per-elem))
+           ;; which is equal mod n-word-bits to the expression below.
+           (let ((mask (shift-towards-start
+                        most-positive-word (* extra ,(- n-bits-per-elem)))))
+             (%set-vector-raw-bits
+              dst end (logior (logand (%vector-raw-bits src end) mask)
+                              (logandc2 (%vector-raw-bits dst end) mask)))))
+         ;; Copy from the end to save a register.
+         (do ((i (1- end) (1- i)))
+             ((< i ,src-word))
+           (%set-vector-raw-bits dst i (%vector-raw-bits src i)))
+         (values)))))
 
 ;;; Detect misuse with sb-devel. "Misuse" means mismatched array element types
 #-sb-devel
 (loop for i = 1 then (* i 2)
-      do (%deftransform (intern (format nil "UB~D-BASH-COPY" i) "SB-KERNEL")
+      do (%deftransform (package-symbolicate "SB-KERNEL" "UB" i "-BASH-COPY")
                         nil
                         '(function ((simple-unboxed-array (*)) (constant-arg index)
                                     (simple-unboxed-array (*)) (constant-arg index)
                                     index) *)
-                        (cons #'transform-bash-copy i))
+                        (make-bash-copy-transform i))
       until (= i sb-vm:n-word-bits))
 
 ;;; We expand copy loops inline in SUBSEQ and COPY-SEQ if we're copying
@@ -2737,6 +2738,8 @@
                            (csubtypep item element-type)
                            (memq test '(eq eql equal equalp =)))))))))
     (give-up-ir1-transform))
+  ;; Delay to prefer the string and bit-vector transforms
+  (delay-ir1-transform node :constraint)
   '(%find-position-vector-macro item sequence
     from-end start end key test))
 
@@ -2828,6 +2831,43 @@
     (format t "~&;; NOTE: ~A~%-> ~A~%" description expr))
   expr)
 
+;;; Construct a form which computes a 32-bit hash given an object in ITEM (which
+;;; customarily is named literally 'ITEM) whose values should be - but might not be -
+;;; one of the objects in KEYS. If it is not, the expression's result should be
+;;; irrelevant. (Calling code has to do some kind of "hit" test)
+;;; The 32-bit hash is then fed into a perfect hash expression.
+;;; TODO:
+;;; 1. There is potential for more optimization.
+;;;    For example, let's say the key set includes only symbols and characters.
+;;;    Clearly we have to call SYMBOLP or some variant thereof prior to dereferencing
+;;;    the HASH slot of a symbol. For non-symbols, it doesn't really matter if the
+;;;    item is a character, so we could use (ASH (GET-LISP-OBJ-ADDRESS OBJ) -32)
+;;;    instead of doing CHARACTERP and CHAR-CODE. They come out the same, and for
+;;;    non-characters it doesn't matter what the result is.
+;;; 2. this should probably take a ":MISS" argument which is a block name to return
+;;;    from if the key type doesn't match any of the accepted types
+;;;    rather than returning 0.
+(defun prehash-for-perfect-hash (item keys)
+  (let (symbolp fixnump characterp)
+    (dolist (key keys)
+      (cond ((symbolp key) (setq symbolp t))
+            ((fixnump key) (setq fixnump t))
+            ((characterp key) (setq characterp t))))
+    (collect ((calc))
+      (when symbolp
+        (if (vop-existsp :translate hash-as-if-symbol-name)
+            (calc '((pointerp item) (hash-as-if-symbol-name item)))
+            ;; NON-NULL-SYMBOL-P is the less expensive test as it omits the OR
+            ;; which accepts NIL along with OTHER-POINTER objects.
+            (calc `((,(if (member nil keys) 'symbolp 'non-null-symbol-p) item)
+                    (symbol-name-hash item)))))
+      (when fixnump
+        (calc '((fixnump item) (ldb (byte 32 0) item))))
+      (when characterp
+        (calc '((characterp item) (char-code item))))
+      (let ((calc `(cond ,@(calc) (t 0))))
+        (if (eq item 'item) calc (subst item 'item calc))))))
+
 ;;; This tries to optimize for MEMBER directed to an IF node by not using a value vector.
 ;;; FIND directed to an IF is a little funny because if you find a NIL then it has to
 ;;; return NIL; but FIND does not use a value vector anyway, so there is nothing gained
@@ -2872,9 +2912,10 @@
             (dest (node-dest node)))
         (when (and (combination-p dest)
                    (lvar-fun-is (combination-fun dest) expect)
-                   (lvar-has-single-use-p (car (combination-args dest))))
-          (unless (eq (lvar-use (car (combination-args dest))) node)
-            (return-from try-perfect-find/position-map))
+                   (let* ((args (combination-args dest)) (arg (first args)))
+                     (and (singleton-p args)
+                          (lvar-has-single-use-p arg)
+                          (eq (lvar-use arg) node))))
           (setq alistp :synthetic))))
     (cond ((vectorp items)
            (dotimes (position (length items))
@@ -2900,7 +2941,7 @@
                 (let* ((pair (car list)) (key (cdr pair)))
                   (unless (gethash key map)
                     (setf (gethash key map) (if (eq alistp t) pair (car pair))))))))))
-    (flet ((hash (key) (ldb (byte 32 0) (symbol-name-hash key))))
+    (flet () ; XXX: reindent from here down
       ;; Sort to avoid sensitivity to the hash-table iteration order when cross-compiling.
       ;; Not necessary for the target but not worth a #+/- either.
       ;; TODO: rather than sorting, compute KEYS from the originally-specified ITEMS after
@@ -2908,21 +2949,14 @@
       ;; there is not really a good sort order on a mixture of those, though I suppose
       ;; we could sort by the hash, since that has to be unique or the transform fails.
       (binding* ((keys (sort (loop for k being each hash-key of map collect k) #'string<))
-                 (hashes (map '(simple-array (unsigned-byte 32) (*)) #'hash keys))
+                 (hashes (map '(simple-array (unsigned-byte 32) (*)) #'symbol-name-hash keys))
                  (n (length hashes))
                  (certainp (csubtypep lvar-type (specifier-type `(member ,@keys))))
                  (pow2size (power-of-two-ceiling n))
-                 ;; For {FIND,POSITION,MEMBER} or a synthetic alist, a non-minimal hash
-                 ;; might avoid a few math operations at the cost of a few wasted cells.
-                 ;; If it's a "real" alist, there's a question of what to put in the empty
-                 ;; slots so that a CAR/CDR operation is valid, because it has to be a cons.
-                 (minimal
-                  (if (eq alistp t)
-                      t ; require minimal
-                      (let ((waste (- pow2size n)))
-                        (if (<= waste 3) ; arbitrary. Should it be a percentage of N maybe?
-                            nil   ; do not require minimal
-                            t)))) ; do require minimal
+                 ;; FIXME: I messed up the minimal/non-minimal thing that was
+                 ;; trying to simplify the calculation at the expense of a few extra cells.
+                 ;; Minimal will always be right.
+                 (minimal t)
                  (lambda (make-perfect-hash-lambda hashes items minimal) :exit-if-null)
                  (keyspace-size (if minimal n pow2size))
                  (domain (sb-xc:make-array keyspace-size :initial-element 0))
@@ -2946,7 +2980,7 @@
             (return-from try-perfect-find/position-map conditional))
           (when (eq fun-name 'find) ; nothing to do. Wasted some time, no big deal
             (return-from try-perfect-find/position-map 'item))) ; transform arg is always named ITEM
-        (maphash (lambda (key val &aux (phash (funcall phashfun (hash key))))
+        (maphash (lambda (key val &aux (phash (funcall phashfun (symbol-name-hash key))))
                    (cond ((eq alistp t)
                           (setf (aref domain phash) val)) ; VAL is the (key . val) pair
                          (t
@@ -2968,31 +3002,31 @@
         ;; TRULY-THE around PHASH is warranted when CERTAINP because while the compiler can
         ;; derive the type of the final LOGAND, it's a complete mystery to it that the range
         ;; of the perfect hash is smaller than 2^N.
-        (let* ((key-expr (let ((key `(svref ,domain phash)))
-                           (if (eq alistp t)
-                               `(,(if (eq fun-name 'assoc) 'car 'cdr) ,key)
-                               key)))
-               ;; An unexpected symbol-hash fed into a minimal perfect hash function
-               ;; can produce garbage out, so we have to bounds-check it.
-               ;; Otherwise, with a non-minimal hash function, the table size is
-               ;; exactly right for the number of bits of output of the function
-               (test-expr `(eq ,key-expr item))
-               (hit-expr (if minimal `(and (< phash ,n) ,test-expr) test-expr)))
-          (note-perfect-hash-used
-           `(,fun-name ,conditional ,items)
-           `(let* ((hash (ldb (byte 32 0) ; TODO: remove LDB after I change all the vops to
-                                        ; return a _NAME_ hash in 32 bits, with a different
-                                        ; vop to obtain pseudo-random stable hash bits,
-                                        ; stored as two halves of the SYMBOL-HASH slot.
-                            #+x86-64 (if (pointerp item) (hash-as-if-symbol-name item) 0)
-                            #-x86-64 (if (symbolp item) (symbol-name-hash item) 0)))
-                   (phash (,lambda hash)))
-              ,(if certainp
-                   `(aref ,range (truly-the (mod ,n) phash))
-                   `(if ,hit-expr
-                        ,(cond (conditional) ; return whatever this expression is
-                               ((eq fun-name 'find) 'item)
-                               (t `(aref ,range phash))))))))))))
+        (note-perfect-hash-used
+         `(,fun-name ,conditional ,items)
+         `(let* ((hash ,(prehash-for-perfect-hash 'item keys))
+                 (phash (,lambda hash)))
+            ,(if certainp
+                 `(aref ,range (truly-the (mod ,n) phash))
+                 (let* ((key-expr (if (eq alistp t)
+                                      `(,(if (eq fun-name 'assoc) 'car 'cdr) key)
+                                      'key))
+                        (expr `(let ((key (svref ,domain phash)))
+                                 (if (eq ,key-expr item)
+                                     ,(cond (conditional) ; return whatever this expression is
+                                            ((eq fun-name 'find) 'item)
+                                            ((eq range domain)
+                                             'key)
+                                            (t
+                                             `(aref ,range phash)))))))
+                   ;; An unexpected symbol-hash fed into a minimal perfect hash function
+                   ;; can produce garbage out, so we have to bounds-check it.
+                   ;; Otherwise, with a non-minimal hash function, the table size is
+                   ;; exactly right for the number of bits of output of the function
+                   (if minimal
+                       `(if (< phash ,n)
+                            ,expr)
+                       expr)))))))))
 
 (macrolet ((define-find-position (fun-name values-index)
              `(deftransform ,fun-name ((item sequence &key
@@ -3506,3 +3540,9 @@
                                        (interval<n n-int (length list)))))
                       (setf type (type-union (specifier-type 'null) type))))
             type)))
+
+(defoptimizer (car constraint-propagate-if) ((list))
+  (values list (specifier-type 'cons) nil nil t))
+
+(setf (fun-info-constraint-propagate-if (fun-info-or-lose 'cdr))
+      #'car-constraint-propagate-if-optimizer)

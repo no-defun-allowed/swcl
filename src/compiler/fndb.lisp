@@ -182,10 +182,10 @@
 (defknown symbol-name (symbol) simple-string (movable foldable flushable))
 (defknown make-symbol (string) symbol (flushable))
 ;; %make-symbol is the internal API, but the primitive object allocator
-;; is %%make-symbol, because when immobile space feature is present,
+;; is %alloc-symbol, because when immobile space feature is present,
 ;; we dispatch to either the C allocator or the Lisp allocator.
 (defknown %make-symbol (fixnum simple-string) symbol (flushable))
-(defknown sb-vm::%%make-symbol (simple-string) symbol (flushable))
+(defknown sb-vm::%alloc-symbol (simple-string) symbol (flushable))
 (defknown copy-symbol (symbol &optional t) symbol (flushable))
 (defknown gensym (&optional (or string unsigned-byte)) symbol ())
 (defknown symbol-package (symbol) (or package null) (flushable))
@@ -507,11 +507,9 @@
 (defknown random-state-p (t) boolean (movable foldable flushable))
 
 ;;;; from the "Characters" chapter:
-(defknown (graphic-char-p alpha-char-p
-                           upper-case-p lower-case-p both-case-p alphanumericp)
+(defknown (graphic-char-p alpha-char-p standard-char-p
+           upper-case-p lower-case-p both-case-p alphanumericp)
   (character) boolean (movable foldable flushable))
-(defknown (standard-char-p)
-  (character) (or null base-char) (movable foldable flushable))
 
 (defknown digit-char-p (character &optional (integer 2 36))
   (or (integer 0 35) null) (movable foldable flushable))
@@ -997,9 +995,8 @@
 ;;; - the number of bytes to allocate should be a fixnum
 ;;; - type-checking can use use efficient bit-masking approach
 ;;;   to combine the fixnum + range test into one instruction
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (defconstant make-list-limit
-    (ash most-positive-fixnum (- (+ sb-vm:word-shift 1)))))
+(defconstant make-list-limit
+  (ash most-positive-fixnum (- (+ sb-vm:word-shift 1))))
 (defknown make-list ((integer 0 #.make-list-limit) &key (:initial-element t)) list
   (movable flushable))
 (defknown %make-list ((integer 0 #.make-list-limit) t) list
@@ -1175,6 +1172,7 @@
 (defknown (sxhash psxhash) (t) hash-code (foldable flushable))
 (defknown hash-table-equalp (hash-table hash-table) boolean (foldable flushable))
 (defknown sb-impl::install-hash-table-lock (hash-table) sb-thread:mutex ())
+(defknown sb-vm::quick-try-mutex (sb-thread:mutex) boolean)
 ;; To avoid emitting code to test for nil-function-returned
 (defknown (sb-impl::signal-corrupt-hash-table
            sb-impl::signal-corrupt-hash-table-bucket)
@@ -2272,19 +2270,19 @@
 (defknown (sb-impl::%with-standard-io-syntax
            sb-impl::%with-rebound-io-syntax
            sb-impl::call-with-sane-io-syntax)
-    (function) *)
-(defknown sb-debug::funcall-with-debug-io-syntax (function &rest t) *)
-(defknown sb-impl::%print-unreadable-object (t t t &optional function) null)
+    ((function ())) *)
+(defknown sb-debug::funcall-with-debug-io-syntax ((function ((rest-args))) &rest t) *)
+(defknown sb-impl::%print-unreadable-object (t t t &optional (function ())) null)
 
 #+sb-thread
 (progn
 (defknown (sb-thread::call-with-mutex sb-thread::call-with-recursive-lock)
-    (function t t t) *)
+    ((function ()) t t t) *)
 (defknown (sb-thread::call-with-system-mutex
            sb-thread::call-with-system-mutex/allow-with-interrupts
            sb-thread::call-with-system-mutex/without-gcing
            sb-thread::call-with-recursive-system-lock)
-    (function t) *))
+    ((function ()) t) *))
 
 #+round-float
 (progn
@@ -2305,3 +2303,5 @@
   (integer t)
   integer
   (movable always-translatable))
+
+(defknown case-to-jump-table (t list &optional sequence t t) * (always-translatable))

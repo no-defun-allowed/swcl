@@ -629,12 +629,13 @@
            (inst lsl result number amount)))
         (positive
          (inst cmp amount n-word-bits)
-         (inst csinv temp amount zr-tn :lo)
          (ecase variant
-           (:signed (inst asr result number temp))
+           (:signed
+            (inst csinv temp amount zr-tn :lo)
+            (inst asr result number temp))
            (:unsigned
             (inst csel result number zr-tn :lo)
-            (inst lsr result result temp))))
+            (inst lsr result result amount))))
         (t
          (inst cmp amount 0)
          (inst csneg temp amount amount :ge)
@@ -900,6 +901,19 @@
     (:variant-cost 30))
 
 
+(deftransform %ldb ((size posn integer) (:or (((constant-arg (integer 1 #.(1- n-word-bits)))
+                                               (constant-arg integer)
+                                               word) unsigned-byte)
+                                             (((constant-arg (integer 1 #.(1- n-word-bits)))
+                                               (constant-arg integer)
+                                               signed-word) unsigned-byte)) *
+                    :vop t)
+  (and (plusp (lvar-value posn))
+       (or (= (lvar-value size) 1)
+           (<= (+ (lvar-value size)
+                  (lvar-value posn))
+               n-word-bits))))
+
 (define-vop (ldb-c/fixnum)
   (:translate %ldb)
   (:args (x :scs (any-reg)))
@@ -918,6 +932,21 @@
            ;; go to the signed variant, so do it manually.
            (inst asr res x (1+ posn))
            (inst and res res (ash most-positive-word (- size sb-vm:n-word-bits)))))))
+
+(deftransform %dpb ((new size posn integer) (:or ((word
+                                                   (constant-arg (integer 1 #.(1- n-word-bits)))
+                                                   (constant-arg (mod #.n-word-bits))
+                                                   word) *)
+                                                 ((signed-word
+                                                   (constant-arg (integer 1 #.(1- n-word-bits)))
+                                                   (constant-arg (mod #.n-word-bits))
+                                                   signed-word) *)) *
+                    :vop t)
+  (not (and (constant-lvar-p new)
+            (let* ((size (lvar-value size))
+                   (new (ldb (byte size 0) (lvar-value new))))
+              (or (zerop new)
+                  (= (logcount new) size))))))
 
 (define-vop (ldb-c)
   (:translate %ldb)
@@ -1210,6 +1239,12 @@
   (:arg-types * (:constant (satisfies fixnum-add-sub-immediate-p)))
   (:variant-cost 6))
 
+(deftransform logtest ((x y) (:or ((signed-word signed-word) *)
+                                  ((word word) *)
+                                  ((signed-word word) *)
+                                  ((word signed-word) *)) * :vop t)
+  t)
+
 (define-vop (fast-logtest)
   (:translate logtest)
   (:args (x :scs (signed-reg unsigned-reg any-reg))
@@ -1265,6 +1300,10 @@
 
 (define-source-transform lognand (x y)
   `(lognot (logand ,x ,y)))
+
+(deftransform logbitp ((x y) (:or (((constant-arg (mod #.n-word-bits)) signed-word) *)
+                                  (((constant-arg (mod #.n-word-bits)) word) *)) * :vop t)
+  t)
 
 (define-vop ()
   (:translate logbitp)
@@ -2648,6 +2687,10 @@
              (inst mul r x y)
              (inst cmp tmp-tn (asr r 63))
              (inst b :ne error))))))
+
+(deftransform signum ((x) (:or ((signed-word) *)
+                               ((word) *)) * :vop t)
+  t)
 
 (define-vop (signum-signed signed-unop)
   (:args (x :scs (signed-reg any-reg) :target res))

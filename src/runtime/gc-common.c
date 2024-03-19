@@ -385,7 +385,7 @@ trans_code(struct code *code)
     sword_t displacement = l_new_code - l_code;
 
 #if defined LISP_FEATURE_PPC || defined LISP_FEATURE_PPC64 || \
-    defined LISP_FEATURE_X86 || defined LISP_FEATURE_X86_64
+    defined LISP_FEATURE_X86 || defined LISP_FEATURE_X86_64 || defined LISP_FEATURE_ARM64
     // Fixup absolute jump tables. These aren't recorded in code->fixups
     // because we don't need to denote an arbitrary set of places in the code.
     // The count alone suffices. A GC immediately after creating the code
@@ -812,14 +812,20 @@ static lispobj trans_boxed(lispobj object) {
 static sword_t scav_symbol(lispobj *where,
                            __attribute__((unused)) lispobj header) {
     struct symbol* s = (void*)where;
-#ifdef LISP_FEATURE_COMPACT_SYMBOL
-    scavenge(&s->value, 3); // value, fdefn, info
+#ifdef LISP_FEATURE_64_BIT
+    /* The first 4 slots of a symbol are all boxed words, but vary in meaning
+     * based on #+relocatable-static-space. Scanning the hash is harmless - though
+     * unnecessary - at present, since it is of descriptor nature, be it fixnum,
+     * or NIL in the case of NIL. Though there is little or no benefit to gaining
+     * 1 bit, we could make hash a raw slot in which case we'd have to use care
+     * to avoid reading it. trace-object.inc uses three separate operations */
+    scavenge(where + 1, 4);
     lispobj name = decode_symbol_name(s->name);
     lispobj new = name;
     scavenge(&new, 1);
     if (new != name) set_symbol_name(s, new);
 #else
-    scavenge(&s->value, 4); // value, fdefn, info, name
+    scavenge(&s->fdefn, 4); // fdefn, value, info, name
 #endif
     return ALIGN_UP(SYMBOL_SIZE, 2);
 }
@@ -3329,79 +3335,42 @@ extern void check_barrier (lispobj young, lispobj old, int wp) {
 }
 #endif
 
-#ifdef LISP_FEATURE_MARK_REGION_GC
-static void verify_hash_table(struct hash_table* ht, bool fix_bad)
+// Return a native representation of the perturbed h0 supplied as a fixnum.
+unsigned prefuzz_ht_hash(lispobj h0)
 {
-    struct vector* kvv = (void*)native_pointer(ht->pairs);
-    lispobj* data = (void*)kvv->data;
-    gc_assert(!(data[1] & make_fixnum(3)));
-    struct vector* index_vector = (void*)native_pointer(ht->index_vector);
-    struct vector* next_vector = (void*)native_pointer(ht->next_vector);
-    uint32_t *ivdata = (void*)index_vector->data;
-    uint32_t *nvdata = (void*)next_vector->data;
-    uint32_t *hvdata = ht->hash_vector != NIL
-                       ? (void*)native_pointer(ht->hash_vector) : 0;
-    int table_kind = hashtable_kind(ht);
-    unsigned hwm = KV_PAIRS_HIGH_WATER_MARK(data);
-    unsigned j;
-    int pointer_hashed = 1;
-    if (0)
-        fprintf(stderr, "checking table %p kind %d count %d\n", ht, table_kind,
-                (int)fixnum_value(ht->_count));
-    for (j = 1; j <= hwm; j++) {
-        lispobj key = data[2*j];
-        if ((key & WIDETAG_MASK) == UNBOUND_MARKER_WIDETAG) continue;
-        /* With EQ tables, this will verify even the keys which can't move (non-pointers)
-         * which is just as well, as it asserts correctness of the hash calculation */
-        if (hvdata)
-            pointer_hashed = hvdata[j] == MAGIC_HASH_VECTOR_VALUE;
-        else if (table_kind == HASHTABLE_KIND_EQL) {
-            pointer_hashed = !stable_eql_hash_p(key);
-        }
-        if (!pointer_hashed) continue; // hash was something not based on the bits
-        /* Cautiously compute in the Lisp representation
-         * to ensure total consistency with the Lisp code.
-         * e.g. (SB-IMPL::EQ-HASH -1s0) => -2323857407723175924
-         */
-        sword_t h0 = key & ~(uword_t)FIXNUM_TAG_MASK; // this is a fixnum
-        /* PREFUZZ-HASH. All of the shifts are to the right, so we needn't consider
-         * overflow but we do need to kill the tag bit(s).
-         * The sum can wrap, but that's OK because it gets chopped at the end */
+#ifdef LISP_FEATURE_64_BIT
+    /* Cautiously compute in the Lisp representation
+     * to ensure total consistency with the Lisp code.
+     * e.g. (SB-IMPL::EQ-HASH -1s0) => -2323857407723175924
+     * All of the shifts are to the right, so we needn't consider
+     * overflow but we do need to kill the tag bit(s).
+     * The sum can wrap, but that's OK because it gets chopped at the end */
 #define fixnum_ashr(val,count) ((val>>count)&~(uword_t)FIXNUM_TAG_MASK)
-        sword_t sum = (h0 ^ make_fixnum(0x39516A7))
-                    + fixnum_ashr(h0, 3)
-                    + fixnum_ashr(h0, 12)
-                    + fixnum_ashr(h0, 20);
-        // Masking against a fixed value looks unnecessary, considering the next
-        // LOGAND is with the index vector mask. Why does Lisp do both???
-        sword_t mask = make_fixnum((1L<<31)-1);
-        int bucket = fixnum_value(mask & sum) & (vector_len(index_vector) - 1);
-        int nprobes = 0;
-        unsigned index = ivdata[bucket];
-        int maxprobes = vector_len(next_vector);
-        for ( ; maxprobes--, ++nprobes ; index = nvdata[index] )
-            if (index == j || index == 0) break;
-        if (index == j) {
-            // fprintf(stderr, "key=%lx bucket=%x probes=%d\n", key, bucket, nprobes);
-        } else if (fix_bad) {
-            char m[] = "GC: marking table for rehash\n";
-            write(2, m, sizeof m-1); // (avoid possible stdio deadlock)
-            data[1] |= make_fixnum(1);
-            return;
-        } else {
-            unsigned index = ivdata[bucket];
-            fprintf(stderr, "failed to find key %lx value %lx fuzzed_hash=%x ivmask=%x bucket=%x index=%d\n",
-                    key, data[2*j+1],
-                    (unsigned)fixnum_value(mask & sum),
-                    (unsigned)(vector_len(index_vector) - 1),
-                    bucket, index);
-            int maxprobes = vector_len(next_vector);
-            for ( ; maxprobes-- ; index = nvdata[index] ) {
-              fprintf(stderr, " index=%d key=%lx next=%d\n", index, data[2*index], nvdata[index]);
-              if (index == j || index == 0) break;
-            }
-            lose("ht should be marked for rehash");
-        }
+    sword_t sum = (h0 ^ make_fixnum(0x39516A7))
+      + fixnum_ashr(h0, 3)
+      + fixnum_ashr(h0, 12)
+      + fixnum_ashr(h0, 20);
+    // the mask looks wrong for 32-bit, but I'm not trying to debug 32-bit.
+    return fixnum_value(sum & (make_fixnum((1L<<31)-1)));
+#else
+    lose("Unimplemented");
+#endif
+}
+
+#ifdef LISP_FEATURE_MARK_REGION_GC
+static void maybe_fix_hash_table(struct hash_table* ht, bool fix_bad)
+{
+    extern int verify_lisp_hashtable(struct hash_table* ht, FILE* file);
+    int errors = verify_lisp_hashtable(ht, 0);
+    if (!errors) return;
+    if (fix_bad) {
+        lispobj* data = VECTOR(ht->pairs)->data;
+        char m[] = "GC: marking table for rehash\n";
+        write(2, m, sizeof m-1); // (avoid possible stdio deadlock)
+        data[1] |= make_fixnum(1);
+        return;
+    } else {
+      lose("table %p should be marked for rehash", ht);
     }
 }
 
@@ -3428,7 +3397,7 @@ static void verify_hash_table_if_possible(struct hash_table* ht, bool fix_bad)
         }
         return;
     }
-    verify_hash_table(ht, fix_bad);
+    maybe_fix_hash_table(ht, fix_bad);
 }
 
 static uword_t verify_tables_in_range(lispobj* start, lispobj* end, uword_t fix_bad)

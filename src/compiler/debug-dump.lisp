@@ -108,8 +108,8 @@
 
 (defun optional-leaf-p (leaf)
   (let ((home (lambda-var-home leaf)))
-    (case (functional-kind home)
-      (:external
+    (functional-kind-case home
+      (external
        (let ((entry (lambda-entry-fun home)))
          (when (optional-dispatch-p entry)
            (let ((pos (position leaf (lambda-vars home))))
@@ -122,8 +122,8 @@
 ;;; optional is alive at that point.
 (defun optional-processed (leaf)
   (let ((home (lambda-var-home leaf)))
-    (case (functional-kind home)
-      (:external
+    (functional-kind-case home
+      (external
        (let ((entry (lambda-entry-fun home)))
          (if (and (optional-dispatch-p entry)
                   *local-call-context*)
@@ -392,7 +392,19 @@
                                (truename (file-info-truename file-info)))))
                         (if (pathnamep pathname) pathname))
                       file-info))
-      :created (file-info-write-date file-info)
+      :created
+      #+sb-xc-host (file-info-write-date file-info)
+      #-sb-xc-host (let ((source-date-epoch (posix-getenv "SOURCE_DATE_EPOCH"))
+                         (file-write-date (file-info-write-date file-info)))
+                     (if source-date-epoch
+                         (multiple-value-bind (val end)
+                             (parse-integer source-date-epoch :junk-allowed t)
+                           (if (and (= end (length source-date-epoch))
+                                    (and val file-write-date)
+                                    (< (+ val unix-to-universal-time) file-write-date))
+                               (+ val unix-to-universal-time)
+                               file-write-date))
+                         file-write-date))
       :start-positions (coerce-to-smallest-eltype
                         (file-info-positions file-info))
      (if function
@@ -479,22 +491,31 @@
 (defun dump-1-var (fun var tn minimal buffer &optional name same-name-p)
   (declare (type lambda-var var) (type (or tn null) tn)
            (type clambda fun))
-  (let* ((save-tn (and tn (tn-save-tn tn)))
+  (let* ((package (sb-xc:symbol-package name))
+         (package-p (and package (not (eq package *package*))))
+         (save-tn (and tn (tn-save-tn tn)))
          (kind (and tn (tn-kind tn)))
          (flags 0)
-         (info (lambda-var-arg-info var))
          (indirect (and (lambda-var-indirect var)
                         (not (lambda-var-explicit-value-cell var))
                         (neq (lambda-environment fun)
-                             (lambda-environment (lambda-var-home var)))))
-         ;; Keep this condition in sync with PARSE-COMPILED-DEBUG-VARS
-         (large-fixnums (>= (integer-length most-positive-fixnum) 62))
-         more)
+                             (lambda-environment (lambda-var-home var))))))
     (declare (type (and sb-xc:fixnum unsigned-byte) flags))
-    (when minimal
-      (setq flags (logior flags compiled-debug-var-minimal-p))
-      (unless (and tn (tn-offset tn))
-        (setq flags (logior flags compiled-debug-var-deleted-p))))
+    (let ((info (lambda-var-arg-info var)))
+      ;; &more vars need no name
+      (when (and info
+                 (memq (arg-info-kind info)
+                       '(:more-context :more-count)))
+        (setq minimal t)))
+    (cond (minimal
+           (setq flags (logior flags compiled-debug-var-minimal-p))
+           (unless (and tn (tn-offset tn))
+             (setq flags (logior flags compiled-debug-var-deleted-p))))
+          (t
+           (unless package
+             (setq flags (logior flags compiled-debug-var-uninterned)))
+           (when package-p
+             (setq flags (logior flags compiled-debug-var-packaged)))))
     (when (and (or (eq kind :environment)
                    (and (eq kind :debug-environment)
                         (null (basic-var-sets var))))
@@ -508,56 +529,30 @@
       (setq flags (logior flags compiled-debug-var-save-loc-p)))
     (when indirect
       (setq flags (logior flags compiled-debug-var-indirect-p)))
-    (when info
-      (case (arg-info-kind info)
-        (:more-context
-         (setq flags (logior flags compiled-debug-var-more-context-p)
-               more t))
-        (:more-count
-         (setq flags (logior flags compiled-debug-var-more-count-p)
-               more t))))
-    (when (and same-name-p
-               (not (or more minimal)))
-      (setf flags (logior flags compiled-debug-var-same-name-p)))
-    (when large-fixnums
-      (cond (indirect
-             (setf (ldb (byte 27 8) flags) (tn-sc+offset tn))
-             (when save-tn
-               (setf (ldb (byte 27 35) flags) (tn-sc+offset save-tn))))
-            (t
-             (if (and tn (tn-offset tn))
-                 (setf (ldb (byte 27 8) flags) (tn-sc+offset tn))
-                 (aver minimal))
-             (when save-tn
-               (setf (ldb (byte 27 35) flags) (tn-sc+offset save-tn))))))
+    (when (and same-name-p (not minimal))
+      (setq flags (logior flags compiled-debug-var-same-name-p)))
     (vector-push-extend flags buffer)
-    (unless (or minimal
-                same-name-p
-                more) ;; &more vars need no name
-      ;; Dumping uninterned symbols as debug var names is kinda silly.
-      ;; Reconstruction of the name on fasl load produces a new gensym anyway.
-      ;; So rather than waste symbol space, just dump such symbols as strings,
-      ;; and PARSE-COMPILED-DEBUG-VARS can create the interned symbol.
-      ;; This reduces core size by omitting zillions of symbols whose names
-      ;; are spelled the same.
-      (vector-push-extend (if (cl:symbol-package name) name (string name)) buffer))
+    (unless minimal
+      (unless same-name-p
+        (write-var-string (symbol-name name) buffer))
+      (when package-p
+        (write-var-string (sb-xc:package-name package) buffer)))
 
     (cond (indirect
            ;; Indirect variables live in the parent frame, and are
            ;; accessed through a saved frame pointer.
            ;; The first one/two sc-offsets are for the frame pointer,
            ;; the third is for the stack offset.
-           (unless large-fixnums
-             (vector-push-extend (tn-sc+offset tn) buffer)
-             (when save-tn
-               (vector-push-extend (tn-sc+offset save-tn) buffer)))
-           (vector-push-extend (tn-sc+offset (leaf-info var)) buffer))
-          ((not large-fixnums)
+           (write-var-integer (tn-sc+offset tn) buffer)
+           (when save-tn
+             (write-var-integer (tn-sc+offset save-tn) buffer))
+           (write-var-integer (tn-sc+offset (leaf-info var)) buffer))
+          (t
            (if (and tn (tn-offset tn))
-               (vector-push-extend (tn-sc+offset tn) buffer)
+               (write-var-integer (tn-sc+offset tn) buffer)
                (aver minimal))
            (when save-tn
-             (vector-push-extend (tn-sc+offset save-tn) buffer)))))
+             (write-var-integer (tn-sc+offset save-tn) buffer)))))
   (values))
 
 (defun leaf-principal-name (leaf)
@@ -598,33 +593,33 @@
         (dolist (let (lambda-lets fun))
           (frob-lambda let (>= level 2)))))
 
+    (setf (fill-pointer *byte-buffer*) 0)
     (let ((sorted (sort (vars) #'string<
                         :key (lambda (x)
                                (symbol-name (car x)))))
           (prev-name nil)
           (i 0)
-          (buffer (make-array 0 :fill-pointer 0 :adjustable t))
           ;; XEPs don't have any useful variables
-          (minimal (eq (functional-kind fun) :external)))
+          (minimal (functional-kind-eq fun external)))
       (declare (type index i))
       (loop for (name var . tn) in sorted
             do
-            (dump-1-var fun var tn minimal buffer
+            (dump-1-var fun var tn minimal *byte-buffer*
                         name
                         (and prev-name (eq prev-name name)))
             (setf prev-name name)
             (setf (gethash var var-locs) i)
             (incf i))
-      (compact-vector buffer))))
+      (compact-vector *byte-buffer*))))
 
 ;;; Return a vector suitable for use as the DEBUG-FUN-VARS of
 ;;; FUN, representing the arguments to FUN in minimal variable format.
 (defun compute-minimal-vars (fun)
   (declare (type clambda fun))
-  (let ((buffer (make-array 0 :fill-pointer 0 :adjustable t)))
-    (dolist (var (lambda-vars fun))
-      (dump-1-var fun var (leaf-info var) t buffer))
-    (compact-vector buffer)))
+  (setf (fill-pointer *byte-buffer*) 0)
+  (dolist (var (lambda-vars fun))
+    (dump-1-var fun var (leaf-info var) t *byte-buffer*))
+  (compact-vector *byte-buffer*))
 
 ;;; Return VAR's relative position in the function's variables (determined
 ;;; from the VAR-LOCS hashtable).  If VAR is deleted, then return DEBUG-INFO-VAR-DELETED.
@@ -704,15 +699,17 @@
          (dispatch (lambda-optional-dispatch fun))
          (main-p (and dispatch
                       (eq fun (optional-dispatch-main-entry dispatch))))
-         (kind (if main-p nil (functional-kind fun)))
+         (kind (if main-p
+                   (functional-kind-attributes nil)
+                   (functional-kind fun)))
          (name (leaf-debug-name fun))
          (name (if (consp name)
                    (case (car name)
                      ((xep tl-xep)
-                      (aver (eq kind :external))
+                      (aver (eql kind (functional-kind-attributes external)))
                       (second name))
                      (&optional-processor
-                      (setf kind :optional)
+                      (setf kind (functional-kind-attributes optional))
                       (second name))
                      (&more-processor
                       (setf kind :more)
@@ -732,7 +729,6 @@
              (cdf-encode-locs
               (label-position (ir2-environment-environment-start 2env))
               (label-position (ir2-environment-elsewhere-start 2env))
-              (source-path-form-number (node-source-path (lambda-bind fun)))
               (label-position (block-label (lambda-block fun)))
               (when (ir2-environment-closure-save-tn 2env)
                 (tn-sc+offset (ir2-environment-closure-save-tn 2env)))
@@ -839,6 +835,7 @@
                (or (and (not (cdr entries))
                         (sb-c::entry-info-name (car entries)))
                    (component-name component)))
+       :package *package*
        :fun-map fun-map
        :contexts (compact-vector *contexts*)))))
 

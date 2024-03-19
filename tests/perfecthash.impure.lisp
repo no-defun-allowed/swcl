@@ -3,35 +3,30 @@
 ;;; The perfect hash generator can process any set of UB32 values.
 ;;; For example:
 #|
-(sb-c:make-perfect-hash-lambda
+(make-perfect-hash-lambda
   (map '(array (unsigned-byte 32) 1) (lambda (x) (ldb (byte 32 0) (sxhash x)))
        '(a b c d e f g h i j k l m n o p)))
  =>
-(LAMBDA (ARG &AUX (VAL (TRULY-THE (UNSIGNED-BYTE 32) ARG)))
-  (DECLARE (OPTIMIZE (SAFETY 0) (SB-C:STORE-SOURCE-FORM 0)))
-  (MACROLET ((& (A B)
-               `(LOGAND ,A ,B))
-             (^ (A B)
-               `(LOGXOR ,A ,B))
-             (<< (N C)
-               `(LOGAND (ASH ,N ,C) 4294967295))
-             (>> (N C)
-               `(ASH ,N (- ,C))))
-    (LET ((TAB #(0 12 11 13 0 0 12 1)))
-      (LET ((B (& (>> VAL 13) 7)))
-        (LET ((A (>> (<< VAL 5) 29)))
-(^ A (AREF TAB B)))))))
+(LAMBDA (VAL)
+  (DECLARE (OPTIMIZE (SAFETY 0) (DEBUG 0) (STORE-SOURCE-FORM 0)))
+  (DECLARE (TYPE (UNSIGNED-BYTE 32) VAL))
+  (SYMBOL-MACROLET ((TAB #(0 12 11 13 0 0 12 1)))
+    (THE (MOD 16)
+         (UINT32-MODULARLY VAL
+           (LET ((B (& (>> VAL 13) 7)))
+             (LET ((A (>> (<< VAL 5) 29)))
+               (^ A (AREF TAB B))))))))
 |#
 
 (with-test (:name :minimal-vs-non-minimal)
   (let* ((symbols (sb-impl::symtbl-cells (sb-impl::package-internal-symbols
                                           (find-package "SB-WALKER"))))
          (hashes (map '(simple-array (unsigned-byte 32) (*))
-                      (lambda (x) (ldb (byte 32 0) (sxhash x)))
+                      #'sb-kernel::symbol-name-hash
                       symbols))
          (n (length hashes))
-         (expr1 (sb-c:make-perfect-hash-lambda hashes))
-         (expr2 (sb-c:make-perfect-hash-lambda hashes nil nil))
+         (expr1 (sb-c:make-perfect-hash-lambda hashes :dummy t nil nil))
+         (expr2 (sb-c:make-perfect-hash-lambda hashes :dummy nil nil nil))
          (fun1 (compile nil expr1))
          (fun2 (compile nil expr2))
          (range1 (map 'list fun1 hashes))
@@ -53,7 +48,7 @@
              (etypecase key
                ((unsigned-byte 32) (funcall fun key))
                (symbol
-                (funcall fun (ldb (byte 32 0) (sb-kernel:symbol-hash key)))))))
+                (funcall fun (sb-kernel::symbol-name-hash key))))))
         (when print (format t "~s -> ~d~%" key hash))
         ;; Can't exceed N-1, and can't repeat
         (when (or (>= hash n) (aref seen hash))
@@ -227,10 +222,18 @@
 (defun generate-perfect-hashfun (symbols)
   (let ((hashes
          (map '(simple-array (unsigned-byte 32) (*))
-              (lambda (x) (ldb (byte 32 0) (sb-kernel:symbol-hash x)))
+              #'sb-kernel::symbol-name-hash
               symbols)))
-    ;; if symbols hash the same, we have a real problem
-    (assert (= (length (remove-duplicates hashes)) (length hashes)))
+    ;; if symbols hash the same, we can't test the generator on this package
+    (unless (= (length (remove-duplicates hashes)) (length hashes))
+      ;; diagnose it
+      (let ((ht (make-hash-table :test 'equal)))
+        (loop for s in symbols for h across hashes do (push s (gethash h ht)))
+        (format t "~&Collisions:~%")
+        (sb-int:dohash ((h symbols) ht)
+          (when (cdr symbols)
+            (format t "~x = ~S~%" h symbols))))
+      (return-from generate-perfect-hashfun (values nil nil)))
     (let ((expr (sb-c:make-perfect-hash-lambda hashes)))
       #+nil
       (let ((*package* (find-package "SB-IMPL"))
@@ -252,25 +255,20 @@
           (format t " ~D" (length symbols))
           (force-output)
           (let ((f (generate-perfect-hashfun symbols)))
-            (test-perfect-hashfun f symbols))))))
+            (when f
+              (test-perfect-hashfun f symbols)))))))
   (terpri))
 
 (defun find-tables (expression)
   (let (tab scramble)
-    (sb-int:named-let recurse ((x expression))
-      (when (consp x)
-        (cond ((eq (car x) 'let)
-               (let* ((bindings (second x))
-                      (binding (first bindings))
-                      (var (first binding)))
-                 (cond ((string= var "SCRAMBLE")
-                        (setq scramble (second binding)))
-                       ((string= var "TAB")
-                        (setq tab (second binding)))))
-               (recurse (cddr x)))
-              (t
-               (recurse (car x))
-               (recurse (cdr x))))))
+    (let ((fifth (fifth expression)))
+      (assert (typep fifth '(cons (member symbol-macrolet the))))
+      (when (eq (car fifth) 'symbol-macrolet)
+        (let ((bindings (second fifth)))
+          (dolist (binding bindings)
+            (let ((var (first binding)))
+              (cond ((string= var "SCRAMBLE") (setq scramble (second binding)))
+                    ((string= var "TAB") (setq tab (second binding)))))))))
     (values scramble tab)))
 
 (defun random-subset (random-state keys n)
@@ -530,3 +528,289 @@
          (lambda (sb-c:make-perfect-hash-lambda input))
          (fun (compile nil lambda)))
     (test-perfect-hashfun fun input)))
+
+;;; The 32-bit code generator is supposed to emit fewer and smaller instructions
+;;; than the compiler would, particularly when TAB and SCRAMBLE arrays are needed.
+;;; But sometimes it emits worse code, so I'm not ready to say it's usable.
+#|
+Good example:
+(LET ((B (& (>> VAL 8) 7)))
+  (LET ((A (>> (<< VAL 5) 29)))
+    (^ A (AREF TAB B))))
+Before:
+; Size: 59 bytes. Origin: #x5515E416
+; 16:       8BDA             MOV EBX, EDX
+; 18:       C1EB08           SHR EBX, 8
+; 1B:       83E30E           AND EBX, 14
+; 1E:       488BCA           MOV RCX, RDX
+; 21:       48C1E105         SHL RCX, 5
+; 25:       48230DC4FFFFFF   AND RCX, [RIP-60]                ; [#x5515E3F0] = #x1FFFFFFFE
+; 2C:       48C1F91D         SAR RCX, 29
+; 30:       4883E1FE         AND RCX, -2
+; 34:       488BD3           MOV RDX, RBX
+; 37:       48D1FA           SAR RDX, 1
+; 3A:       488B059FFFFFFF   MOV RAX, [RIP-97]                ; #(0 11 8 1 ...)
+; 41:       0FB6441001       MOVZX EAX, BYTE PTR [RAX+RDX+1]
+; 46:       D1E0             SHL EAX, 1
+; 48:       488BD1           MOV RDX, RCX
+; 4B:       4831C2           XOR RDX, RAX
+After:
+; Size: 43 bytes. Origin: #x55170C86
+; 86:       488BC2           MOV RAX, RDX
+; 89:       48D1E8           SHR RAX, 1
+; 8C:       8BC8             MOV ECX, EAX
+; 8E:       C1E908           SHR ECX, 8
+; 91:       83E107           AND ECX, 7
+; 94:       8BD8             MOV EBX, EAX
+; 96:       C1E305           SHL EBX, 5
+; 99:       C1EB1D           SHR EBX, 29
+; 9C:       488B05BDFFFFFF   MOV RAX, [RIP-67]                ; #(0 11 8 1 ...)
+; A3:       0FB6440801       MOVZX EAX, BYTE PTR [RAX+RCX+1]
+; A8:       31D8             XOR EAX, EBX
+; AA:       488D1400         LEA RDX, [RAX+RAX]
+
+Tolerable example: (& (+ (>> VAL 13) (>> VAL 24)) 7)
+Before:
+; Size: 28 bytes. Origin: #x5516B676
+; 76:       488BCA           MOV RCX, RDX
+; 79:       48C1F90D         SAR RCX, 13
+; 7D:       4883E1FE         AND RCX, -2
+; 81:       48C1FA18         SAR RDX, 24
+; 85:       4883E2FE         AND RDX, -2
+; 89:       4801CA           ADD RDX, RCX
+; 8C:       83E20E           AND EDX, 14
+After:
+; Size: 24 bytes. Origin: #x5516B706
+; 06:       488BC2           MOV RAX, RDX
+; 09:       48C1E80E         SHR RAX, 14
+; 0D:       8BC8             MOV ECX, EAX
+; 0F:       C1E90B           SHR ECX, 11
+; 12:       01C1             ADD ECX, EAX
+; 14:       83E107           AND ECX, 7
+; 17:       488D1409         LEA RDX, [RCX+RCX]
+
+Bad example: (& (- VAL (>> VAL 23)) 7)
+Before:
+; Size: 20 bytes. Origin: #x55178AA6
+; A6:       488BCA           MOV RCX, RDX
+; A9:       48C1F917         SAR RCX, 23
+; AD:       4883E1FE         AND RCX, -2
+; B1:       4829CA           SUB RDX, RCX
+; B4:       83E20E           AND EDX, 14
+After:
+; Size: 25 bytes. Origin: #x55178B36
+; 36:       488BC2           MOV RAX, RDX
+; 39:       48D1E8           SHR RAX, 1
+; 3C:       8BC8             MOV ECX, EAX
+; 3E:       C1E917           SHR ECX, 23
+; 41:       8BD8             MOV EBX, EAX
+; 43:       29CB             SUB EBX, ECX
+; 45:       83E307           AND EBX, 7
+; 48:       488D141B         LEA RDX, [RBX+RBX]
+|#
+
+#+nil
+(defun test-uint32-arithmetic (lambda inputs print &optional (n-random-inputs 100))
+  ;; As ugly as it is to have all the FIFTH and THIRD here,
+  ;; it works because LAMBDA has a known shape which is always this
+  ;; possibly without symbol macros -
+  ;;  (LAMBDA (VAL)
+  ;;    (DECLARE (OPTIMIZE ...))
+  ;;    (DEC:ARE (TYPE ...))
+  ;;    (SYMBOL-MACROLET # (THE (MOD n) (UINT32-MODULARLY VAL forms ...))))
+  ;;
+  (let ((tables)
+        (maybe-tables (fifth lambda))
+        (random-state (make-random-state t))
+        (calc))
+    (when print
+      (format t "~A~%" lambda))
+    (let ((cast (cond ((eq (car maybe-tables) 'symbol-macrolet)
+                       (setq tables (cadr maybe-tables))
+                       (third maybe-tables))
+                      (t
+                       maybe-tables))))
+      (assert (eq (car cast) 'the))
+      (assert (eq (caadr cast) 'mod))
+      (let ((expr (third cast)))
+        (assert (eq (car expr) 'sb-c::uint32-modularly))
+        (assert (eq (cadr expr) 'sb-c::val))
+        (setq calc (cddr expr))))
+    (multiple-value-bind (steps n-temps)
+        (sb-c:phash-renumber-temps
+         (sb-c:phash-convert-to-2-operand-code calc tables))
+      (when print
+        (let ((*print-readably* t))
+          (format t "tables=~X~%calc=~A~%n-temps=~D~%steps=~A~%"
+                  tables calc n-temps steps)))
+      (let* ((f (compile nil lambda))
+             (f-inst-model (get-simple-fun-instruction-model f))
+             (g (compile nil
+                         `(lambda (x)
+                            (declare (optimize (safety 0) (debug 0)))
+                            (sb-vm::calc-phash x ,n-temps ,steps))))
+             (g-inst-model (get-simple-fun-instruction-model g))
+             (predicted-best
+              (if (or tables (> (phash-count-32-bit-modular-ops calc) 1))
+                  'g ; predict that G is better
+                  'f)) ; predict that F is better
+             (actual-best
+              ;; If they're the same number of instructions, the tie counts
+              ;; as a win for 32-bit math because code size is always smaller.
+              ;; So F has to be strictly shorter to win.
+              (if (< (length f-inst-model) (length g-inst-model))
+                  'f
+                  'g)))
+        (when (or print (not (eq predicted-best actual-best)))
+          (format t "~&DEFAULT COMPILE:~%")
+          (disassemble f)
+          (format t "~&32-BIT MODULAR ARITH COMPILE:~%")
+          (disassemble g)
+          (terpri)
+          (unless (eq predicted-best actual-best)
+            (error "Wrong prediction, expected ~S best for~%~S"
+                   predicted-best lambda)))
+        (flet ((try (input)
+                 (unless (eql (funcall f input) (funcall g input))
+                   (error "functions disagree on ~X: ~X ~X"
+                          input
+                          (funcall f input)
+                          (funcall g input)))))
+          (map nil #'try inputs)
+          ;; Test the behavior on random inputs
+          (dotimes (i n-random-inputs)
+            (try (random (ash 1 32) random-state))))
+        (values actual-best n-temps
+                ;; size delta
+                (- (primitive-object-size (sb-kernel:fun-code-header g))
+                   (primitive-object-size (sb-kernel:fun-code-header f)))
+                ;; instruction count delta
+                (- (length g-inst-model) (length f-inst-model)))))))
+
+;;; This tested the 32-bit code generator, but now that it's enabled,
+;;; the perfect hash function itself it tested (in COMPILE-PERFECT-HASH) which means
+;;; that both the function and the codegen have to be correct.  But I still want to
+;;; keep the logic that guesses whether 32-bit untagged arithmetic in UNSIGNED-REG
+;;; is better than arithmetic on tagged words.
+(with-test (:name :32-bit-codegen :skipped-on :sbcl)
+  (flet ((test-file (filename)
+           (let ((tests (with-open-file (f filename)
+                          (let ((*read-base* 16)) (read f))))
+                 (wins 0))
+             (dolist (testcase tests)
+               (sb-int:binding*
+                   ((inputs (coerce (car testcase) '(array (unsigned-byte 32) (*))))
+                    (lambda (sb-c:make-perfect-hash-lambda inputs))
+                    ((winner n-temps) (test-uint32-arithmetic lambda inputs nil)))
+                   (assert (<= n-temps 3))
+                   (when (eq winner 'g)
+                     (incf wins))))
+             (let ((n-trials (length tests)))
+               (format t "32-bit modular vop wins ~d/~d times (~,,2F%)~%"
+                       wins n-trials (/ wins n-trials))))))
+    (mapc #'test-file
+          '("../xperfecthash30.lisp-expr"
+            "../xperfecthash63.lisp-expr"
+            "../xperfecthash61.lisp-expr"))))
+
+;;; Complicated expressions can be compiled much more concisely using the 32-bit modular
+;;; math vop because it removes instructions that mask intermediate results to
+;;; (FIXNUMIZE #xFFFFFFFF) or restore the fixnum tag following a right-shift.
+#|
+;;; Before:
+; Size: 130 bytes
+; 19:       48030DD0FFFFFF   ADD RCX, [RIP-48]                ; [#x10032D88F0] = #x17E57E524
+; 20:       48230DD1FFFFFF   AND RCX, [RIP-47]                ; [#x10032D88F8] = #x1FFFFFFFE
+; 27:       488BD9           MOV RBX, RCX
+; 2A:       48C1FB10         SAR RBX, 16
+; 2E:       4883E3FE         AND RBX, -2
+; 32:       4831D9           XOR RCX, RBX
+; 35:       488BD9           MOV RBX, RCX
+; 38:       48C1E308         SHL RBX, 8
+; 3C:       48231DB5FFFFFF   AND RBX, [RIP-75]                ; [#x10032D88F8] = #x1FFFFFFFE
+; 43:       4801D9           ADD RCX, RBX
+; 46:       48230DABFFFFFF   AND RCX, [RIP-85]                ; [#x10032D88F8] = #x1FFFFFFFE
+; 4D:       488BD9           MOV RBX, RCX
+; 50:       48C1FB04         SAR RBX, 4
+; 54:       4883E3FE         AND RBX, -2
+; 58:       4831D9           XOR RCX, RBX
+; 5B:       8BD9             MOV EBX, ECX
+; 5D:       C1EB08           SHR EBX, 8
+; 60:       81E3FE010000     AND EBX, 510
+; 66:       488BF1           MOV RSI, RCX
+; 69:       48C1E60D         SHL RSI, 13
+; 6D:       48233584FFFFFF   AND RSI, [RIP-124]               ; [#x10032D88F8] = #x1FFFFFFFE
+; 74:       488D1431         LEA RDX, [RCX+RSI]
+; 78:       48231579FFFFFF   AND RDX, [RIP-135]               ; [#x10032D88F8] = #x1FFFFFFFE
+; 7F:       48C1FA17         SAR RDX, 23
+; 83:       4883E2FE         AND RDX, -2
+; 87:       488B0552FFFFFF   MOV RAX, [RIP-174]               ; #(77 927 238 ...)
+; 8E:       0FB7441801       MOVZX EAX, WORD PTR [RAX+RBX+1]
+; 93:       D1E0             SHL EAX, 1
+; 95:       4831C2           XOR RDX, RAX
+;;; After:
+; Size: 69 bytes
+; 06:       48D1EA           SHR RDX, 1
+; 09:       81C292F22BBF     ADD EDX, -1087638894
+; 0F:       8BC2             MOV EAX, EDX
+; 11:       C1E810           SHR EAX, 16
+; 14:       31C2             XOR EDX, EAX
+; 16:       8BC2             MOV EAX, EDX
+; 18:       C1E008           SHL EAX, 8
+; 1B:       01C2             ADD EDX, EAX
+; 1D:       8BC2             MOV EAX, EDX
+; 1F:       C1E804           SHR EAX, 4
+; 22:       31C2             XOR EDX, EAX
+; 24:       8BC2             MOV EAX, EDX
+; 26:       C1E808           SHR EAX, 8
+; 29:       0FB6C0           MOVZX EAX, AL
+; 2C:       8BCA             MOV ECX, EDX
+; 2E:       C1E10D           SHL ECX, 13
+; 31:       01CA             ADD EDX, ECX
+; 33:       C1EA17           SHR EDX, 23
+; 36:       488B0DA3FFFFFF   MOV RCX, [RIP-93]                ; #(77 927 238 ...)
+; 3D:       0FB74C4101       MOVZX ECX, WORD PTR [RCX+RAX*2+1]
+; 42:       31D1             XOR ECX, EDX
+; 44:       488D1409         LEA RDX, [RCX+RCX]
+|#
+(with-test (:name :32-bit-codegen-big :skipped-on :sbcl)
+  (with-open-file (stream "../tools-for-build/unicode-phash.lisp-expr")
+    (loop
+     (let ((keys (let ((*read-base* 16)) (read stream nil))))
+       (unless keys
+         (return))
+       (let ((lexpr (let ((*package* (find-package "SB-C"))) (read stream))))
+         (multiple-value-bind (actual-best n-temps size-delta inst-count-delta)
+             (test-uint32-arithmetic lexpr keys nil 1000000)
+           (assert (eq actual-best 'g))
+           (assert (<=  n-temps 3))
+           (format t "delta=(~D bytes, ~D insts)~%"
+                   size-delta inst-count-delta)))))))
+
+
+(defvar *bug-2055794-test-form*
+  '(case x
+    ((#\g 5) 1)
+    ((#\} #\j #\y #\$) 2)
+    ((#\- #\|) 3)
+    ((#\X) 4)
+    ((0 7 4 #\% 3) 5)
+    ((#\{) 6)
+    ((#\l) 7)
+    (t 'dropthru)))
+
+(defun bug-2055794-tester (x) #.*bug-2055794-test-form*)
+
+(with-test (:name :lp-2055794)
+  (dolist (clause (butlast (cddr *bug-2055794-test-form*)))
+    (dolist (key (car clause))
+      (let ((answer (bug-2055794-tester key)))
+        (assert (eq answer (second clause))))))
+  (dolist (key '(foo bar baz))
+    (assert (eq (bug-2055794-tester key) 'dropthru))))
+
+(defun f340 (p1)
+  (position p1 '(string #:g4389630 #:|AABb|)))
+(compile 'f340)
+(with-test (:name :lp-2056341)
+  (assert (eq (f340 0) nil)))

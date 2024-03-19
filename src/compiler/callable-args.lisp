@@ -149,7 +149,9 @@
           (loop for (n kind . annotation) in (fun-type-annotation-positional annotation)
                 when (memq kind '(function function-designator))
                 do
-                (call (nth n arg-lvars) annotation))
+                (let ((arg (nth n arg-lvars)))
+                  (when arg
+                   (call arg annotation))))
           (loop with keys = (nthcdr (fun-type-positional-count type)
                                     arg-lvars)
                 for (key (kind . annotation)) on (fun-type-annotation-key annotation) by #'cddr
@@ -199,7 +201,7 @@
                               (t
                                (global-var-defined-type leaf)))))
          (entry-fun (if (and (functional-p leaf)
-                             (eq (functional-kind leaf) :external))
+                             (functional-kind-eq leaf external))
                         (functional-entry-fun leaf)
                         leaf))
          (lvar-type (cond ((and defined-type
@@ -210,7 +212,7 @@
                            (functional-type entry-fun))
                           ((and (not (fun-type-p lvar-type))
                                 (lambda-p entry-fun)
-                                (null (lambda-kind entry-fun))
+                                (functional-kind-eq entry-fun nil)
                                 (lambda-tail-set entry-fun))
                            (make-fun-type :wild-args t
                                           :returns
@@ -239,7 +241,7 @@
                                      (symbol
                                       value))))
                                 ((and (lambda-p leaf)
-                                      (eq (lambda-kind leaf) :external))
+                                      (functional-kind-eq leaf external))
                                  (leaf-debug-name (lambda-entry-fun leaf)))
                                 (t
                                  (leaf-debug-name leaf))))
@@ -271,8 +273,7 @@
           (and (not (memq (leaf-where-from leaf) '(:defined-here :declared-verify)))
                (not (and (functional-p leaf)
                          (or (lambda-p leaf)
-                             (member (functional-kind leaf)
-                                     '(:toplevel-xep)))))
+                             (functional-kind-eq leaf toplevel-xep))))
                (or (not fun-name)
                    (not (info :function :info fun-name)))))
       soft
@@ -425,15 +426,23 @@
             do (push rest result)))
     (nreverse result)))
 
-(defun report-arg-count-mismatch (callee caller type arg-count
+(defun report-arg-count-mismatch (fun caller type arg-count
                                   condition-type
-                                  &key lossage-fun)
+                                  &optional lossage-fun)
   (flet ((lose (format-control &rest format-args)
            (if lossage-fun
                (apply lossage-fun format-control format-args)
                (warn condition-type :format-control format-control
                                     :format-arguments format-args))
-           t))
+           t)
+         (callee ()
+           (nth-value 1 (lvar-fun-type fun)))
+         (caller ()
+           (or caller
+               (loop for annotation in (lvar-annotations fun)
+                     when (typep annotation 'lvar-function-designator-annotation)
+                     do (setf *compiler-error-context* annotation)
+                        (return (lvar-function-designator-annotation-caller annotation))))))
     (multiple-value-bind (min max optional) (fun-type-arg-limits type)
       (or
        (cond
@@ -443,19 +452,19 @@
           (when (/= arg-count min)
             (lose
              "The function ~S is called~@[ by ~S~] with ~R argument~:P, but wants exactly ~R."
-             callee caller
+             (callee) (caller)
              arg-count min)))
          ((< arg-count min)
           (lose
            "The function ~S is called~@[ by ~S~] with ~R argument~:P, but wants at least ~R."
-           callee caller
+           (callee) (caller)
            arg-count min))
          ((not max)
           nil)
          ((> arg-count max)
           (lose
            "The function ~S called~@[ by ~S~] with ~R argument~:P, but wants at most ~R."
-           callee caller
+           (callee) (caller)
            arg-count max)))
        (let ((positional (fun-type-positional-count type)))
          (when (and (fun-type-keyp type)
@@ -463,7 +472,7 @@
                     (oddp (- arg-count positional)))
            (lose
             "The function ~s is called with odd number of keyword arguments."
-            callee)))))))
+            (callee))))))))
 
 (defun disable-arg-count-checking (leaf type arg-count)
   (when (lambda-p leaf)
@@ -508,7 +517,7 @@
                                      'type-warning)))
                   (caller (lvar-function-designator-annotation-caller annotation))
                   (arg-count (length args)))
-             (or (report-arg-count-mismatch name caller
+             (or (report-arg-count-mismatch lvar caller
                                             type
                                             arg-count
                                             condition)

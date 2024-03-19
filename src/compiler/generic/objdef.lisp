@@ -365,21 +365,20 @@ during backtrace.
 
 ;;;; symbols
 
-(define-primitive-object (symbol :lowtag other-pointer-lowtag
-                                 :widetag symbol-widetag
-                                 :alloc-trans %%make-symbol
-                                 :type symbol)
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defparameter *symbol-primobj-defn-properties*
+    '(:lowtag other-pointer-lowtag
+      :widetag symbol-widetag
+      :alloc-trans %alloc-symbol
+      :type symbol)))
 
+#+(and 64-bit (not relocatable-static-space))
+(define-primitive-object (symbol . #.*symbol-primobj-defn-properties*)
   ;; Beware when changing this definition.  NIL-the-symbol is defined
   ;; using this layout, and NIL-the-end-of-list-marker is the cons
   ;; ( NIL . NIL ), living in the first two slots of NIL-the-symbol
   ;; (conses have no header).  Careful selection of lowtags ensures
-  ;; that the same pointer can be used for both purposes:
-  ;; OTHER-POINTER-LOWTAG is 7, LIST-POINTER-LOWTAG is 3, so if you
-  ;; subtract 3 from (SB-KERNEL:GET-LISP-OBJ-ADDRESS 'NIL) you get the
-  ;; first data slot, and if you subtract 7 you get a symbol header.
-  ;; (The numbers mentioned pertain to the 32-bit machines, not 64-bit)
-
+  ;; that the same pointer can be used for both purposes.
   ;; HASH and VALUE are the first two slots.
   ;; Traditionally VALUE was the first slot, corresponding to the CAR of
   ;; NIL-as-end-of-list; and HASH was the second, corresponding to CDR.
@@ -388,12 +387,7 @@ during backtrace.
   ;; using lisp code equivalent to "native_pointer(ptr)[1]".
   ;; This improves the code for CASE and ECASE over symbols
   ;; regardless of whether the object being tested is known to be a symbol.
-  ;; Accessing the hash requires masking off bits to yield a fixnum result,
-  ;; all the more so if the object is any random type.
-  #-relocatable-static-space
   (hash :set-trans %set-symbol-hash)
-  #+relocatable-static-space
-  unused
   (value :init :unbound
          :set-trans %set-symbol-global-value
          :set-known ())
@@ -420,15 +414,40 @@ during backtrace.
         :cas-trans sb-impl::cas-symbol-%info
         :type (or instance list)
         :init :null)
-  (name :init :arg #-compact-symbol :ref-trans #-compact-symbol symbol-name)
-  #+relocatable-static-space
+  (name :init :arg))
+
+;;; 64-bit relocatable-static is a little like 64-bit, a little like 32-bit.
+;;; Refer to comments above for details on each slot.
+#+(and 64-bit relocatable-static-space)
+(define-primitive-object (symbol . #.*symbol-primobj-defn-properties*)
+  (fdefn :ref-trans %symbol-fdefn :ref-known () :cas-trans cas-symbol-fdefn)
+  (value :init :unbound :set-trans %set-symbol-global-value :set-known ())
+  (info :ref-trans symbol-%info :ref-known (flushable)
+        :cas-trans sb-impl::cas-symbol-%info
+        :type (or instance list)
+        :init :null)
   (hash :set-trans %set-symbol-hash)
-  #-compact-symbol
+  (name :init :arg))
+
+#-64-bit
+(define-primitive-object (symbol . #.*symbol-primobj-defn-properties*)
+  ;; As described in the comments above for #+64-bit, the first two slots of SYMBOL
+  ;; have to work for NIL-as-cons, so they have to be NIL and NIL, which have to
+  ;; also be the correct value when reading the slot of NIL-as-symbol.
+  (fdefn :ref-trans %symbol-fdefn :ref-known () :cas-trans cas-symbol-fdefn)
+  (value :init :unbound :set-trans %set-symbol-global-value :set-known ())
+  (info :ref-trans symbol-%info :ref-known (flushable)
+        :cas-trans sb-impl::cas-symbol-%info
+        :type (or instance list)
+        :init :null)
+  (name :init :arg :ref-trans symbol-name)
+  ;; The remaining slots can be ignored by GC
+  #+salted-symbol-hash (hash)
+  #-salted-symbol-hash (hash :set-trans %set-symbol-hash :ref-trans symbol-hash)
   (package-id :type index ; actually 16 bits. (Could go in the header)
               :ref-trans symbol-package-id
               :set-trans sb-impl::set-symbol-package-id :set-known ())
   ;; 0 tls-index means no tls-index is allocated
-  ;; 64-bit put the tls-index in the header word.
   ;; For the 32-bit architectures, reading this slot as a descriptor
   ;; makes it "off" by N-FIXNUM-TAG-BITS, which is bothersome,
   ;; so there's a transform on SYMBOL-TLS-INDEX to make it sane.
@@ -438,7 +457,7 @@ during backtrace.
   ;; * (sb-vm:hexdump nil)
   ;;   1100008: 0110000B = NIL ; looks like NIL's TLS index is 0x110
   ;;   110000C: 0110000B = NIL
-  #+(and sb-thread (not 64-bit))
+  #+sb-thread
   (tls-index :type (and fixnum unsigned-byte) ; too generous still?
              :ref-known (flushable)
              :ref-trans %symbol-tls-index))

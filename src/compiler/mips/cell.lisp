@@ -85,22 +85,6 @@
   (:policy :fast)
   (:translate symbol-value))
 
-(define-vop (symbol-hash)
-  (:policy :fast-safe)
-  (:translate symbol-hash)
-  (:args (symbol :scs (descriptor-reg)))
-  (:temporary (:scs (non-descriptor-reg)) temp)
-  (:results (res :scs (any-reg)))
-  (:result-types positive-fixnum)
-  (:generator 2
-    ;; The symbol-hash slot of NIL holds NIL because it is also the
-    ;; cdr slot, so we have to strip off the two low bits to make sure
-    ;; it is a fixnum.  The lowtag selection magic that is required to
-    ;; ensure this is explained in the comment in objdef.lisp
-    (loadw temp symbol symbol-hash-slot other-pointer-lowtag)
-    (inst srl temp n-fixnum-tag-bits)
-    (inst sll res temp n-fixnum-tag-bits)))
-
 ;;; On unithreaded builds these are just copies of the non-global versions.
 (define-vop (%set-symbol-global-value set))
 (define-vop (symbol-global-value symbol-value)

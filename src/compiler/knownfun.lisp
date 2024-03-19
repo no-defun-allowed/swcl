@@ -29,10 +29,8 @@
   ;; FUN-TYPE.)
   (type (missing-arg) :type ctype)
   ;; the transformation function. Takes the COMBINATION node and
-  ;; returns a lambda expression, or throws out.
-  ;; If a cons, then the CAR is the function to call, and the CDR is an argument
-  ;; to pass to that function in addition to the NODE being considered.
-  (%fun (missing-arg) :type (or function (cons function)))
+  ;; returns a lambda expression, or THROWs out.
+  (function (missing-arg) :type function)
   ;; T if we should emit a failure note even if SPEED=INHIBIT-WARNINGS.
   (important nil :type (member nil :slightly t))
   ;; A function with NODE as an argument that checks wheteher the
@@ -42,8 +40,13 @@
   ;; wouldn't have been applied with the right types anyway,
   ;; or if another transform could be applied with the right policy.
   (policy nil :type (or null function)))
-(defun transform-function (transform)
-  (let ((fun (transform-%fun transform))) (if (listp fun) (car fun) fun)))
+
+;;; A transform inserted at the front of fun-info-transforms and stops
+;;; other from firing if it has a VOP that can do the job.
+(defstruct (vop-transform (:copier nil)
+                          (:predicate nil)
+                          (:include transform)))
+
 (defun transform-note (transform)
   (or #+sb-xc-host (documentation (transform-function transform) 'function)
       #-sb-xc-host (and (fboundp 'sb-pcl::fun-doc)
@@ -61,19 +64,34 @@
 (defun %deftransform (name policy type fun &optional (important :slightly))
   (let* ((ctype (specifier-type type))
          (info (fun-info-or-lose name))
-         (old (find ctype (fun-info-transforms info)
-                    :test #'type=
-                    :key #'transform-type)))
+         (transforms (fun-info-transforms info))
+         (old (find-if (lambda (transform)
+                         (and (if (eq important :vop)
+                                  (typep transform 'vop-transform)
+                                  (not (typep transform 'vop-transform)))
+                              (type= (transform-type transform)
+                                     ctype)))
+                       transforms)))
     (cond (old
            (style-warn 'redefinition-with-deftransform :transform old)
-           (setf (transform-%fun old) fun
-                 (transform-important old) important
-                 (transform-policy old) policy))
+           (setf (transform-function old) fun
+                 (transform-policy old) policy)
+           (unless (eq important :vop)
+             (setf (transform-important old) important)))
           (t
-           (push (make-transform :type ctype :%fun fun
-                                 :important important
-                                 :policy policy)
-                 (fun-info-transforms info))))
+           ;; Put vop-transform at the front.
+           (if (eq important :vop)
+               (push (make-vop-transform :type ctype :function fun
+                                         :policy policy)
+                     (fun-info-transforms info))
+               (let ((normal (member-if (lambda (transform)
+                                          (not (typep transform 'vop-transform)))
+                                        transforms))
+                     (transform (make-transform :type ctype :function fun
+                                                :important important
+                                                :policy policy)))
+                 (setf (fun-info-transforms info)
+                       (append (ldiff transforms normal) (list* transform normal)))))))
     name))
 
 ;;; Make a FUN-INFO structure with the specified type, attributes

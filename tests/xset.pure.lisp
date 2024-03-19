@@ -52,3 +52,16 @@
       (assert (= (sb-int:xset-count union1) (+ 26 10)))
       (let ((union2 (sb-int:xset-union s2 s1))) ; had better commute
         (assert (sb-int:xset= union1 union2))))))
+
+(with-test (:name :xset-dedup-list-to-hash)
+  (let ((x (sb-int:alloc-xset)))
+    (dotimes (i 20)
+      (sb-int:add-to-xset i x))
+    (assert (listp (sb-kernel::xset-data x)))
+    (dotimes (i 20)
+      (sb-int:add-to-xset i x))
+    ;; didn't upgrade to a hash-table
+    (assert (listp (sb-kernel::xset-data x)))
+    (sb-kernel::xset-generate-stable-hashes x)
+    ;; doesn't affect representation of DATA slot
+    (assert (listp (sb-kernel::xset-data x)))))

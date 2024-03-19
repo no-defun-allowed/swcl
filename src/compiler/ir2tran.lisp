@@ -227,7 +227,7 @@
            (type ir2-block ir2-block)
            (type functional functional)
            (type tn res))
-  (aver (not (eql (functional-kind functional) :deleted)))
+  (aver (not (functional-kind-eq functional deleted)))
   (unless (leaf-info functional)
     (setf (leaf-info functional) (make-entry-info)))
   (let ((closure (etypecase functional
@@ -235,7 +235,7 @@
                     (assertions-on-ir2-converted-clambda functional)
                     (environment-closure (get-lambda-environment functional)))
                    (functional
-                    (aver (eq (functional-kind functional) :toplevel-xep))
+                    (aver (functional-kind-eq functional toplevel-xep))
                     nil))))
     (cond (closure
            (let* ((this-env (node-environment ref))
@@ -290,7 +290,7 @@
     (dolist (fun (enclose-funs node))
       (let ((xep (functional-entry-fun fun)))
         ;; If there is no XEP then no closure needs to be created.
-        (when (and xep (not (eq (functional-kind xep) :deleted)))
+        (when (and xep (not (functional-kind-eq xep deleted)))
           (aver (xep-p xep))
           (let ((closure (environment-closure (get-lambda-environment xep))))
             (when closure
@@ -306,7 +306,7 @@
                      leaf-dx-p tn)
                 (loop for what in closure and n from 0 do
                   (if (lambda-p what)
-                      (unless (eq (functional-kind what) :deleted)
+                      (unless (functional-kind-eq what deleted)
                         (delayed (list tn (find-in-environment what env) n
                                        leaf-dx-p)))
                       (unless (and (lambda-var-p what)
@@ -698,6 +698,30 @@
     (ir2-convert-conditional node block (template-or-lose 'if-eq)
                              test-ref () node t)))
 
+(defun prepare-jump-table-targets (index targets)
+  (let* ((otherwise (assoc 'otherwise targets))
+         (targets (sort (remove otherwise targets) #'< :key #'car))
+         (min (caar targets))
+         (max (caar (last targets)))
+         (otherwise (and otherwise
+                         (block-label (cdr otherwise))))
+         (vector (make-array (1+ (- max min)) :initial-element (or otherwise 0))))
+    (loop for (index . target) in targets
+          do (setf (label-usedp
+                    (setf (aref vector (- index min)) (block-label target)))
+                   t))
+    (list vector (cond ((csubtypep (lvar-type index) (specifier-type `(integer ,min ,max)))
+                        nil)
+                       (otherwise))
+          min max)))
+
+(defun ir2-convert-jump-table (node block)
+  (declare (type ir2-block block) (type jump-table node))
+  (let ((index (jump-table-index node)))
+    (emit-template node block (template-or-lose 'jump-table)
+                   (reference-tn (lvar-tn node block index) nil)
+                   nil (prepare-jump-table-targets index (jump-table-targets node)))))
+
 ;;; Return a list of types that we can pass to LVAR-RESULT-TNS
 ;;; describing the result types we want for a template call. We are really
 ;;; only interested in the number of results required: in normal case
@@ -1009,10 +1033,10 @@
   (declare (type combination node) (type ir2-block block))
   (let* ((fun (ref-leaf (lvar-uses (basic-combination-fun node))))
          (kind (functional-kind fun)))
-    (cond ((eq kind :deleted))
-          ((eq kind :let)
+    (cond ((eql kind (functional-kind-attributes deleted)))
+          ((eql kind (functional-kind-attributes let))
            (ir2-convert-let node block fun))
-          ((eq kind :assignment)
+          ((eql kind (functional-kind-attributes assignment))
            (ir2-convert-assignment node block fun))
           ((node-tail-p node)
            (ir2-convert-tail-local-call node block fun))
@@ -1408,9 +1432,7 @@
 
 ;;;; entering functions
 (defun xep-verify-arg-count (node block fun arg-count-location)
-  (when (and (policy fun (plusp verify-arg-count))
-             ;; this property will be absent in most cases
-             (getf (functional-plist fun) 'verify-arg-count t))
+  (when (policy fun (plusp verify-arg-count))
     (let* ((ef (functional-entry-fun fun))
            (optional (optional-dispatch-p ef))
            (min (and optional
@@ -1445,14 +1467,14 @@
       (vop xep-allocate-frame node block start-label)
       ;; Arg verification needs to be done before the stack pointer is adjusted
       ;; so that the extra arguments are still present when the error is signalled
-      (let ((verified (unless (eq (functional-kind fun) :toplevel)
+      (let ((verified (unless (functional-kind-eq fun toplevel)
                         (setf arg-count-tn (make-arg-count-location))
                         (xep-verify-arg-count node block fun arg-count-tn))))
         #-x86-64
         (declare (ignore verified))
        (cond ((and (optional-dispatch-p ef)
                    (optional-dispatch-more-entry ef)
-                   (neq (functional-kind (optional-dispatch-more-entry ef)) :deleted))
+                   (not (functional-kind-eq (optional-dispatch-more-entry ef) deleted)))
               ;; XEP-SETUP-SP opens a window for an interrupt
               ;; clobbering any "more args" that may be on the stack.
               ;; As such, COPY-MORE-ARG is being given the
@@ -1481,7 +1503,7 @@
           (let ((n -1))
             (dolist (loc (ir2-environment-closure env))
               (vop closure-ref node block closure (incf n) (cdr loc))))))
-      (unless (eq (functional-kind fun) :toplevel)
+      (unless (functional-kind-eq fun toplevel)
         (let* ((vars (lambda-vars fun))
                (n 0)
                (name (functional-%source-name ef))
@@ -1544,9 +1566,7 @@
   (declare (type bind node) (type ir2-block block))
   (let* ((fun (bind-lambda node))
          (env (environment-info (lambda-environment fun))))
-    (aver (member (functional-kind fun)
-                  '(nil :external :optional :toplevel :cleanup)))
-
+    (aver (functional-kind-eq fun nil external optional toplevel cleanup))
     (cond ((xep-p fun)
            (init-xep-environment node block fun)
            #+sb-dyncount
@@ -1679,7 +1699,7 @@
   (let* ((fun (ref-leaf (lvar-uses (basic-combination-fun node))))
          (args (basic-combination-args node))
          (vars (lambda-vars fun)))
-    (aver (eq (functional-kind fun) :mv-let))
+    (aver (functional-kind-eq fun mv-let))
     (mapc (lambda (src var)
             (when (leaf-refs var)
               (let ((dest (leaf-info var)))
@@ -2348,7 +2368,7 @@
   (let* ((2block (block-info block))
          (last (block-last block))
          (succ (block-succ block)))
-    (unless (if-p last)
+    (unless (multiple-successors-node-p last)
       (aver (singleton-p succ))
       (let ((target (first succ)))
         (cond ((eq target (component-tail (block-component block)))
@@ -2428,6 +2448,9 @@
         (cif
          (when (lvar-info (if-test node))
            (ir2-convert-if node 2block)))
+        (jump-table
+         (when (lvar-info (jump-table-index node))
+           (ir2-convert-jump-table node 2block)))
         (bind
          (let ((fun (bind-lambda node)))
            (when (eq (lambda-home fun) fun)

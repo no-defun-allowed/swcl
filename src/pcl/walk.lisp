@@ -458,6 +458,7 @@
 ;;; FIXME: maybe we don't need this one any more, given that
 ;;; NAMED-LAMBDA now expands into (FUNCTION (NAMED-LAMBDA ...))?
 (define-walker-template named-lambda walk-named-lambda)
+(define-walker-template sb-c::jump-table (nil eval repeat ((quote repeat (eval)))))
 #|
 ;;; To find templateized symbols that aren't special operators:
 (do-all-symbols (s)
@@ -804,12 +805,25 @@ instead of
                                      ,(or (var-lexical-p name env) name)
                                      ,.args)
                                    env)
-                 (note-declaration (sb-c::canonized-decl-spec declaration) env))
+                 (let ((canonical (sb-c::canonized-decl-spec declaration)))
+                   (typecase canonical
+                     ((cons (eql type) cons)
+                      (destructuring-bind (type &rest vars) (cdr canonical)
+                        (loop for name in vars
+                              for symbol-macro = (and (symbolp name)
+                                                      (car (variable-symbol-macro-p name env)))
+                              do (if symbol-macro
+                                     (push (list* name 'sb-sys:macro
+                                                  `(the ,type ,(cddr symbol-macro)))
+                                           (cadddr (env-lock env)))
+                                     (note-declaration canonical env)))))
+                     (t
+                      (note-declaration canonical env)))))
              (push declaration declarations)))
          (recons body
                  form
                  (walk-declarations
-                   (cdr body) fn env doc-string-p declarations)))
+                  (cdr body) fn env doc-string-p declarations)))
         (t
          ;; Now that we have walked and recorded the declarations,
          ;; call the function our caller provided to expand the body.
@@ -1022,10 +1036,7 @@ instead of
              (val (caddr form))
              (symmac (and (symbolp var) (car (variable-symbol-macro-p var env)))))
         (if symmac
-            (let* ((type (env-var-type var env))
-                   (expanded (if (eq t type)
-                                 `(setf ,(cddr symmac) ,val)
-                                 `(setf ,(cddr symmac) (the ,type ,val))))
+            (let* ((expanded `(setf ,(cddr symmac) ,val))
                    (walked (walk-form-internal expanded context env)))
               (if (eq expanded walked)
                   form

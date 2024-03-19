@@ -37,8 +37,7 @@
 ;;; be used.
 ;;; This is only enabled for certain build configurations that need
 ;;; a scratch register in various random places.
-#-ubsan (eval-when (:compile-toplevel :load-toplevel :execute)
-          (defconstant global-temp-reg nil))
+#-ubsan (defconstant global-temp-reg nil)
 #+ubsan (progn (define-symbol-macro temp-reg-tn r11-tn)
                (defconstant global-temp-reg 11))
 
@@ -89,11 +88,7 @@
 
 (macrolet ((defreg (name offset size)
              (declare (ignore size))
-             `(eval-when (:compile-toplevel :load-toplevel :execute)
-                    ;; EVAL-WHEN is necessary because stuff like #.EAX-OFFSET
-                    ;; (in the same file) depends on compile-time evaluation
-                    ;; of the DEFCONSTANT. -- AL 20010224
-                (defconstant ,(symbolicate name "-OFFSET") ,offset)))
+             `(defconstant ,(symbolicate name "-OFFSET") ,offset))
            (defregset (name &rest regs)
              ;; FIXME: this would be DEFCONSTANT-EQX were it not
              ;; for all the style-warnings about earmuffs on a constant.
@@ -108,9 +103,7 @@
            (define-gprs (want-offsets offsets-list names array)
              `(progn
                 (defconstant-eqx ,names ,array #'equalp)
-                ;; We need the constants evaluable because of the DEFGLOBAL
-                ;; which is needed because of forms such as #.*qword-regs*
-                (eval-when (:compile-toplevel :load-toplevel :execute)
+                (progn
                   ,@(when want-offsets
                       (let ((i -1))
                         (map 'list
@@ -588,57 +581,6 @@
 
 (defconstant nargs-offset rcx-offset)
 (defconstant cfp-offset rbp-offset) ; pfw - needed by stuff in /code
-
-(defun combination-implementation-style (node)
-  (declare (type sb-c::combination node))
-  (flet ((valid-funtype (args result)
-           (sb-c::valid-fun-use node
-                                (sb-c::specifier-type
-                                 `(function ,args ,result)))))
-    (case (sb-c::combination-fun-source-name node)
-      (logtest
-       (cond
-         ((or (valid-funtype '(fixnum fixnum) '*)
-              ;; todo: nothing prevents this from testing an unsigned word against
-              ;; a signed word, except for the mess of VOPs it would demand
-              (valid-funtype '((signed-byte 64) (signed-byte 64)) '*)
-              (valid-funtype '((unsigned-byte 64) (unsigned-byte 64)) '*))
-          (values :maybe nil))
-         (t
-          (values :default nil))))
-      (logbitp
-       (if (and (or
-                 (valid-funtype '((mod 64) word) '*)
-                 (valid-funtype '((mod 64) signed-word) '*))
-                (destructuring-bind (index integer) (sb-c::basic-combination-args node)
-                  (not (sb-c::logbitp-to-minusp-p index integer))))
-           (values :direct nil)
-           (values :default nil)))
-      (truncate
-       (destructuring-bind (n &optional d) (sb-c::basic-combination-args node)
-         (if (and d
-                  (constant-lvar-p d)
-                  (power-of-two-p (lvar-value d))
-                  (and (csubtypep (sb-c::lvar-type n) (specifier-type 'signed-word))
-                       (not (csubtypep (sb-c::lvar-type n) (specifier-type 'word)))))
-             (values :maybe nil)
-             (values :default nil))))
-      (%dpb
-       (flet ((validp (type result-type)
-                (valid-funtype `((constant-arg integer)
-                                 (constant-arg (integer 1 1))
-                                 ,type
-                                 ,type)
-                               result-type)))
-         (if (and (or (validp 'signed-word 'signed-word)
-                      (validp 'word 'word))
-                  (not (destructuring-bind (new size posn integer) (sb-c::basic-combination-args node)
-                         (declare (ignore new size integer))
-                         (constant-lvar-p posn))))
-             (values :direct nil)
-             (values :default nil))))
-      (t
-       (values :default nil)))))
 
 (defvar *register-names* +qword-register-names+)
 

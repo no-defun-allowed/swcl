@@ -441,26 +441,21 @@
 ;;; on the argument types), but we make it a regular transform so that
 ;;; the VM has a chance to see the bare LOGTEST and potentiall choose
 ;;; to implement it differently.  --njf, 06-02-2006
-;;;
-;;; Other transforms may be useful even with direct LOGTEST VOPs; let
-;;; them fire (including the type-directed constant folding below), but
-;;; disable the inlining rewrite in such cases. -- PK, 2013-05-20
 (deftransform logtest ((x y) * * :node node)
+  (delay-ir1-transform node :ir1-phases)
+  `(not (zerop (logand x y))))
+
+(defoptimizer (logtest derive-type) ((x y))
   (let ((type (two-arg-derive-type x y
                                    #'logand-derive-type-aux
                                    #'logand)))
     (when type
-     (multiple-value-bind (typep definitely)
-         (ctypep 0 type)
-       (cond ((and (not typep) definitely)
-              t)
-             ((type= type (specifier-type '(eql 0)))
-              nil)
-             ((neq :default (combination-implementation-style node))
-              (give-up-ir1-transform))
-             (t
-              (delay-ir1-transform node :ir1-phases)
-              `(not (zerop (logand x y)))))))))
+      (multiple-value-bind (typep definitely)
+          (ctypep 0 type)
+        (cond ((and (not typep) definitely)
+               (specifier-type '(eql t)))
+              ((type= type (specifier-type '(eql 0)))
+               (specifier-type '(eql nil))))))))
 
 (defun logbitp-to-minusp-p (index integer)
   (let* ((int (type-approximate-interval (lvar-type integer)))
@@ -482,9 +477,7 @@
            (delay-ir1-transform node :ir1-phases)
            (if (logbitp-to-minusp-p index integer)
                `(minusp integer)
-               `(if (>= index ,sb-vm:n-word-bits)
-                    (minusp integer)
-                    (logtest integer (ash 1 (truly-the (integer 0 (,sb-vm:n-word-bits)) index))))))
+               `(logtest 1 (ash integer (- index)))))
           ((csubtypep integer-type (specifier-type 'bignum))
            (if (csubtypep (lvar-type index)
                           (specifier-type `(mod ,sb-vm:n-word-bits))) ; word-index
@@ -1148,65 +1141,79 @@
 ;;; Divide two intervals.
 (defun interval-div (top bot &optional integer)
   (declare (type interval top bot))
-  (flet ((bound-div (x y y-low-p)
-           ;; Compute x/y
-           (cond ((null y)
-                  ;; Divide by infinity means result is 0. However,
-                  ;; we need to watch out for the sign of the result,
-                  ;; to correctly handle signed zeros. We also need
-                  ;; to watch out for positive or negative infinity.
-                  (cond ((floatp (type-bound-number x))
-                         (if y-low-p
-                             (sb-xc:- (float-sign (type-bound-number x) $0.0))
-                             (float-sign (type-bound-number x) $0.0)))
-                        ((and integer
-                             (not (interval-contains-p 0 top)))
-                         '(0))
-                        (t
-                         0)))
-                 ((zerop (type-bound-number y))
-                  (if integer
-                      x
-                      ;; Divide by zero means result is infinity
-                      nil))
-                 ((and (numberp x) (zerop x))
-                  ;; Zero divided by anything is zero, but don't lose the sign
-                  (sb-xc:/ x (signum (type-bound-number y))))
-                 (t
-                  (bound-binop sb-xc:/ x y)))))
-    (let ((top-range (interval-range-info top))
-          (bot-range (interval-range-info bot)))
-      (cond ((null bot-range)
-             (if integer
-                 (destructuring-bind (bot- bot+) (interval-split 0 bot t t)
-                   (let ((r- (interval-div top bot- integer))
-                         (r+ (interval-div top bot+ integer)))
-                     (or (interval-merge-pair r- r+)
-                         (list r- r+))))
-                 ;; The denominator contains zero, so anything goes!
-                 (make-interval)))
-            ((eq bot-range '-)
-             ;; Denominator is negative so flip the sign, compute the
-             ;; result, and flip it back.
-             (interval-neg (interval-div top (interval-neg bot) integer)))
-            ((null top-range)
-             ;; Split top into two positive and negative parts, and
-             ;; divide each separately
-             (destructuring-bind (top- top+) (interval-split 0 top t t)
-               (or (interval-merge-pair (interval-div top- bot integer)
-                                        (interval-div top+ bot integer))
-                   (make-interval))))
-            ((eq top-range '-)
-             ;; Top is negative so flip the sign, divide, and flip the
-             ;; sign of the result.
-             (interval-neg (interval-div (interval-neg top) bot integer)))
-            ((and (eq top-range '+) (eq bot-range '+))
-             ;; the easy case
-             (make-interval
-              :low (bound-div (interval-low top) (interval-high bot) t)
-              :high (bound-div (interval-high top) (interval-low bot) nil)))
-            (t
-             (bug "excluded case in INTERVAL-DIV"))))))
+  (labels ((interval-div (top bot)
+             (flet ((bound-div (x y y-low-p)
+                      ;; Compute x/y
+                      (cond ((null y)
+                             ;; Divide by infinity means result is 0. However,
+                             ;; we need to watch out for the sign of the result,
+                             ;; to correctly handle signed zeros. We also need
+                             ;; to watch out for positive or negative infinity.
+                             (cond ((floatp (type-bound-number x))
+                                    (if y-low-p
+                                        (sb-xc:- (float-sign (type-bound-number x) $0.0))
+                                        (float-sign (type-bound-number x) $0.0)))
+                                   ((and integer
+                                         (not (interval-contains-p 0 top)))
+                                    '(0))
+                                   (t
+                                    0)))
+                            ((zerop (type-bound-number y))
+                             (if integer
+                                 x
+                                 ;; Divide by zero means result is infinity
+                                 nil))
+                            ((and (numberp x) (zerop x))
+                             ;; Zero divided by anything is zero, but don't lose the sign
+                             (sb-xc:/ x (signum (type-bound-number y))))
+                            (t
+                             (bound-binop sb-xc:/ x y)))))
+               (let ((top-range (interval-range-info top))
+                     (bot-range (interval-range-info bot)))
+                 (cond ((null bot-range)
+                        (if integer
+                            (destructuring-bind (bot- bot+) (interval-split 0 bot t t)
+                              (let ((r- (interval-div top bot-))
+                                    (r+ (interval-div top bot+)))
+                                (or (interval-merge-pair r- r+)
+                                    (list r- r+))))
+                            ;; The denominator contains zero, so anything goes!
+                            (make-interval)))
+                       ((eq bot-range '-)
+                        ;; Denominator is negative so flip the sign, compute the
+                        ;; result, and flip it back.
+                        (interval-neg (interval-div top (interval-neg bot))))
+                       ((null top-range)
+                        ;; Split top into two positive and negative parts, and
+                        ;; divide each separately
+                        (destructuring-bind (top- top+) (interval-split 0 top t t)
+                          (or (interval-merge-pair (interval-div top- bot)
+                                                   (interval-div top+ bot))
+                              (make-interval))))
+                       ((eq top-range '-)
+                        ;; Top is negative so flip the sign, divide, and flip the
+                        ;; sign of the result.
+                        (interval-neg (interval-div (interval-neg top) bot)))
+                       ((and (eq top-range '+) (eq bot-range '+))
+                        ;; the easy case
+                        (make-interval
+                         :low (bound-div (interval-low top) (interval-high bot) t)
+                         :high (bound-div (interval-high top) (interval-low bot) nil)))
+                       (t
+                        (bug "excluded case in INTERVAL-DIV")))))))
+    (let ((interval (interval-div top bot)))
+      (if (consp interval)
+          interval
+          (let ((low (interval-low interval))
+                (high (interval-high interval)))
+            (if (and (integerp low)
+                     (not (eql low 0))
+                     (eql low high))
+                ;; Don't return constants, as it will produce an error when divided by 0.
+                (if (plusp low)
+                    (make-interval :low '(0) :high low)
+                    (make-interval :low low :high '(0)))
+                interval))))))
 
 ;;; Apply the function F to the interval X. If X = [a, b], then the
 ;;; result is [f(a), f(b)]. It is up to the user to make sure the
@@ -2025,7 +2032,7 @@
                   (values 'integer nil))
                  (rational
                   (values 'rational nil))
-                 ((or single-float double-float #+long-float long-float)
+                 ((single-float double-float #+long-float long-float)
                   (values 'float rem-type))
                  (float
                   (values 'float nil))
@@ -2216,7 +2223,7 @@
                       (values 'integer nil))
                      (rational
                       (values 'rational nil))
-                     ((or single-float double-float #+long-float long-float)
+                     ((single-float double-float #+long-float long-float)
                       (values 'float result-type))
                      (float
                       (values 'float nil))
@@ -3126,7 +3133,8 @@
           (t
            (give-up-ir1-transform)))))
 
-(deftransform %dpb ((new size posn int) * word :node node)
+(deftransform %dpb ((new size posn int) (:or (* word)
+                                             (* sb-vm:signed-word)) * :node node)
   "convert to inline logical operations"
   (delay-ir1-transform node :ir1-phases)
   (or (and (constant-lvar-p size)
@@ -3143,30 +3151,8 @@
          (logior (ash (logand new mask) posn)
                  (logandc2 int (ash mask posn))))))
 
-(deftransform %dpb ((new size posn int) * sb-vm:signed-word :node node)
-  "convert to inline logical operations"
-  (delay-ir1-transform node :ir1-phases)
-  (or (and (constant-lvar-p size)
-           (constant-lvar-p new)
-           (let* ((size (lvar-value size))
-                  (new (ldb (byte size 0) (lvar-value new))))
-             (cond ((zerop new)
-                    `(logandc2 int
-                               (ash (ldb (byte size 0) -1) posn)))
-                   ((= (logcount new) size)
-                    `(logior int
-                             (ash new posn))))))
-      `(let ((mask (ldb (byte size 0) -1)))
-         (logior (ash (logand new mask) posn)
-                 (logandc2 int (ash mask posn))))))
-
-(deftransform %deposit-field ((new size posn int) * word)
-  "convert to inline logical operations"
-  `(let ((mask (ash (ldb (byte size 0) -1) posn)))
-     (logior (logand new mask)
-             (logand int (lognot mask)))))
-
-(deftransform %deposit-field ((new size posn int) * sb-vm:signed-word)
+(deftransform %deposit-field ((new size posn int) (:or (* word)
+                                                       (* sb-vm:signed-word)))
   "convert to inline logical operations"
   `(let ((mask (ash (ldb (byte size 0) -1) posn)))
      (logior (logand new mask)
@@ -3764,11 +3750,11 @@
                      (values-specifier-type '(values integer unsigned-byte &optional)))
                (erase-lvar-type result)
                `(values
-                 ;; transform again for
-                 ;; COMBINATION-IMPLEMENTATION-STYLE to trigger
                  (values (truncate x y))
                  (logand x ,mask)))
-              ((neq :default (combination-implementation-style node))
+              ((when-vop-existsp (:named sb-vm::truncate/signed-power-of-two)
+                 (and (csubtypep (lvar-type x) (specifier-type 'sb-vm:signed-word))
+                      (not (csubtypep (lvar-type x) (specifier-type 'word)))))
                (give-up-ir1-transform))
               (t
                `(if (minusp x)
@@ -4067,6 +4053,16 @@
                             (specifier-type `(unsigned-byte ,width))))
       (give-up-ir1-transform))
     'x))
+
+(deftransform logand ((x y) (t (constant-arg integer)) word
+                      :node node :important nil)
+  ;; Reduce constant width
+  (let* ((high (interval-high (type-approximate-interval (single-value-type (node-asserted-type node)))))
+         (mask (lvar-value y))
+         (cut (ldb (byte (integer-length high) 0) mask)))
+    (if (= cut mask)
+        (give-up-ir1-transform)
+        `(logand x ,cut))))
 
 (deftransform logandc2 ((x y) ((constant-arg (eql -1)) t) *)
   `(lognot y))
@@ -4625,6 +4621,7 @@
                     (not (and (csubtypep int-x (specifier-type 'integer))
                               (csubtypep int-y (specifier-type 'integer))))))
              (both-intersect-p 'array)
+             (both-intersect-p 'character)
              (both-intersect-p 'cons)
              (both-intersect-p 'pathname)
              (both-intersect-p 'instance)
@@ -6546,6 +6543,10 @@
 (deftransform fboundp ((symbol) (symbol))
   `(let ((fdefn (sb-vm::%symbol-fdefn symbol)))
      (and (not (eq fdefn 0))
+          ;; On 32-bit, where %SYMBOL-FDEFN of NIL returns NIL instead of 0,
+          ;; this is valid code! Watch closely:
+          ;; FDEFN-FUN is "MOV EDX, [EDX+1]"
+          ;; But [NIL+1] is the same as CDR of NIL, which is NIL.
           (fdefn-fun (truly-the fdefn fdefn)))))
 ;;; Normally we don't create fdefns by side-effect of calling FBOUNDP,
 ;;; but this transform is neutral in terms of the sum of code and data size.
@@ -6892,91 +6893,135 @@
                                                 #'characterp
                                                 #'fixnump))))
           (when (cdr chain)
-            ;; Transform contiguous ranges into range<=.
-            (when-vop-existsp (:translate range<)
-              (let ((constants
-                      (sort (loop for (node) in chain
-                                  for (nil b) = (combination-args node)
-                                  collect (if characterp
-                                              (char-code (lvar-value b))
-                                              (lvar-value b)))
-                            #'<)))
-                (when (loop for (a next) on constants
-                            always (or (not next)
-                                       (= (1+ a) next)))
-                  (let ((min (car constants))
-                        (max (car (last constants))))
-                    (setf (combination-args node) nil)
-                    (flush-dest b)
-                    (loop for ((node . if) next) on chain
-                          for (a2 b2) = (combination-args node)
-                          do
-                          (cond (next
-                                 (kill-if-branch-1 if (if-test if)
-                                                   (node-block if)
-                                                   (if-consequent if))
-                                 (flush-combination node))
-                                (t
-                                 (setf (lvar-dest a) node)
-                                 (setf (combination-args node)
-                                       (list a b2))
-                                 (flush-dest a2)
-                                 (transform-call node
-                                                 `(lambda (a b)
-                                                    (declare (ignore b))
-                                                    (range<= ,min ,(if characterp
-                                                                       '(char-code a)
-                                                                       'a) ,max))
-                                                 'or-eq-transform))))
-                    (return-from or-eq-transform t)))))
-            #+(or ppc ppc64 x86 x86-64) ;; breaks jump-tables
-            (when (>= (length chain) 4)
-              (return-from or-eq-transform))
+            (let ((constants (loop for (node) in chain
+                                   for (nil b) = (combination-args node)
+                                   collect (if characterp
+                                               (char-code (lvar-value b))
+                                               (lvar-value b)))))
+              (flet ((replace-chain (form)
+                       (setf (combination-args node) nil)
+                       (flush-dest b)
+                       (loop for ((node . if) next) on chain
+                             for (a2 b2) = (combination-args node)
+                             do
+                             (cond (next
+                                    (kill-if-branch-1 if (if-test if)
+                                                      (node-block if)
+                                                      (if-consequent if))
+                                    (flush-combination node))
+                                   (t
+                                    (setf (lvar-dest a) node)
+                                    (setf (combination-args node)
+                                          (list a b2))
+                                    (flush-dest a2)
+                                    (transform-call node
+                                                    form
+                                                    'or-eq-transform))))))
+                ;; Transform contiguous ranges into range<=.
+                (when (or (vop-existsp :translate range<)
+                          (> (length constants) 2))
+                  (setf constants (sort constants #'<))
+                  (when (loop for (a next) on constants
+                              always (or (not next)
+                                         (= (1+ a) next)))
+                    (let ((min (car constants))
+                          (max (car (last constants))))
+                      (replace-chain `(lambda (a b)
+                                        (declare (ignore b))
+                                        (<= ,min ,(if characterp
+                                                      '(char-code a)
+                                                      'a)
+                                            ,max)))
+                      (return-from or-eq-transform t))))
+                ;; Turn into a bit mask
+                (let (min max)
+                  (when (and (> (length constants) 2)
+                             (loop for c in constants
+                                   always (>= c 0) ;; negative numbers can be handled too
+                                   maximize c into max*
+                                   minimize c into min*
+                                   finally (setf max max*
+                                                 min min*))
+                             (< (- max min) sb-vm:n-word-bits)
+                             (equal constants
+                                    (remove-duplicates constants)))
+                    (replace-chain `(lambda (a b)
+                                      (declare (ignore b))
+                                      (let ((a ,(if characterp
+                                                    '(char-code a)
+                                                    'a)))
+                                        ,(cond ((< max sb-vm:n-word-bits)
+                                                `(and (<= 0 a ,max)
+                                                      (logbitp (truly-the (integer 0 ,max) a)
+                                                               ,(reduce (lambda (x y) (logior x (ash 1 y)))
+                                                                        constants :initial-value 0))))
+                                               (t
+                                                (decf max min)
+                                                `(let ((a (- a ,min)))
+                                                   (and (<= 0 a ,max)
+                                                        (logbitp (truly-the (integer 0 ,max) a)
+                                                                 ,(reduce (lambda (x y) (logior x (ash 1 (- y min))))
+                                                                          constants :initial-value 0)))))))))
+                    (return-from or-eq-transform t)))
 
-            ;; Comparing integers that differ by only one bit,
-            ;; which is useful for case-insensitive comparison of ASCII characters.
-            (loop for ((node . if) (next-node . next-if)) = chain
-                  while next-node
-                  do
-                  (pop chain)
-                  (destructuring-bind (a b) (combination-args node)
-                    (destructuring-bind (a2 b2) (combination-args next-node)
-                      (let ((c1 (lvar-value b))
-                            (c2 (lvar-value b2)))
-                        (when (and (if characterp
-                                       (and (characterp c1)
-                                            (characterp c2)
-                                            (setf c1 (char-code c1)
-                                                  c2 (char-code c2)))
-                                       (and (fixnump c1)
-                                            (fixnump c2)))
-                                   (and (= (ash c1 (- sb-vm:n-word-bits)) ;; same sign
-                                           (ash c2 (- sb-vm:n-word-bits)))
-                                        (= (logcount (logxor c1 c2)) 1)))
-                          (pop chain)
-                          (kill-if-branch-1 if (if-test if)
-                                            (node-block if)
-                                            (if-consequent if))
-                          (setf (combination-args node) nil)
-                          (flush-combination node)
-                          (setf (lvar-dest a) next-node)
-                          (setf (combination-args next-node)
-                                (list a b2))
-                          (flush-dest a2)
-                          (flush-dest b)
-                          (let ((min (min c1 c2))
-                                (value (if characterp
-                                           '(char-code a)
-                                           'a)))
-                            (transform-call next-node
-                                            `(lambda (a b)
-                                               (declare (ignore b))
-                                               ,(if (zerop min)
-                                                    `(not (logtest ,value (lognot ,(logxor c1 c2))))
-                                                    `(eq (logandc2 ,value
-                                                                   ,(logxor c1 c2))
-                                                         ,min)))
-                                            'or-eq-transform)))))))
+                (labels ((%one-bit-diff-p (c1 c2)
+                           (and (= (ash c1 (- sb-vm:n-word-bits)) ;; same sign
+                                   (ash c2 (- sb-vm:n-word-bits)))
+                                (= (logcount (logxor c1 c2)) 1)))
+                         (one-bit-diff-p (c1 c2)
+                           (or (%one-bit-diff-p c1 c2)
+                               ;; If the difference is a single bit
+                               ;; then it can be masked off and compared to 0.
+                               (let ((c1 (min c1 c2))
+                                     (c2 (max c1 c2)))
+                                 (= (logcount (- c2 c1)) 1)))))
+                  ;; Comparing integers that differ by only one bit,
+                  ;; which is useful for case-insensitive comparison of ASCII characters.
+                  (loop for ((node . if) (next-node . next-if)) = chain
+                        while next-node
+                        do
+                        (pop chain)
+                        (destructuring-bind (a b) (combination-args node)
+                          (destructuring-bind (a2 b2) (combination-args next-node)
+                            (let ((c1 (lvar-value b))
+                                  (c2 (lvar-value b2)))
+                              (when (and (if characterp
+                                             (and (characterp c1)
+                                                  (characterp c2)
+                                                  (setf c1 (char-code c1)
+                                                        c2 (char-code c2)))
+                                             (and (fixnump c1)
+                                                  (fixnump c2)))
+                                         (one-bit-diff-p c1 c2))
+                                (pop chain)
+                                (kill-if-branch-1 if (if-test if)
+                                                  (node-block if)
+                                                  (if-consequent if))
+                                (setf (combination-args node) nil)
+                                (flush-combination node)
+                                (setf (lvar-dest a) next-node)
+                                (setf (combination-args next-node)
+                                      (list a b2))
+                                (flush-dest a2)
+                                (flush-dest b)
+                                (let ((min (min c1 c2))
+                                      (max (max c1 c2))
+                                      (value (if characterp
+                                                 '(char-code a)
+                                                 'a)))
+                                  (transform-call next-node
+                                                  `(lambda (a b)
+                                                     (declare (ignore b))
+                                                     ,(cond ((%one-bit-diff-p c1 c2)
+                                                             (if (zerop min)
+                                                                 `(not (logtest ,value (lognot ,(logxor c1 c2))))
+                                                                 `(eq (logandc2 ,value
+                                                                                ,(logxor c1 c2))
+                                                                      ,min)))
+                                                            (t
+                                                             `(not (logtest (mask-signed-field sb-vm:n-fixnum-bits (- ,value ,min))
+                                                                            (lognot ,(- max min)))))))
+                                                  'or-eq-transform))))))))))
             (unless (node-prev node)
               ;; Don't proceed optimizing this node
               t)))))))
@@ -6987,3 +7032,249 @@
 
 (defoptimizer (char= optimizer) ((a b) node)
   (or-eq-transform 'char= a b node))
+
+(defun change-jump-table-targets (jump-table new-targets)
+  (let* ((block (node-block jump-table)))
+    (loop for (nil . target) in new-targets
+          unless (memq target (block-succ block))
+          do (link-blocks block target))
+    (loop for succ in (block-succ block)
+          unless (find succ new-targets :key #'cdr)
+          do (unlink-blocks block succ))
+    (setf (jump-table-targets jump-table) new-targets)
+    (reoptimize-node jump-table)))
+
+;;; Return T if KEYS are all of a type that is _directly_ amenable to being
+;;; the branch selector in the jump-table vop, and are within a sufficiently
+;;; dense range that the resulting table of assembler labels would be reasonably full.
+;;; Finally, ensure that any operand encoding restrictions would be adhered to.
+(defun suitable-jump-table-keys-p (keys)
+  (unless keys
+    (return-from suitable-jump-table-keys-p nil))
+  (cond ((every #'fixnump keys))
+        ((every #'characterp keys) (setq keys (mapcar #'char-code keys)))
+        (t (return-from suitable-jump-table-keys-p nil)))
+  ;; There could be a backend-aware aspect to the decision about whether to
+  ;; convert to a jump table.
+  (flet ((can-encode (min max)
+           (declare (ignorable min max))
+           #+(or ppc ppc64)
+           (and (typep (sb-vm:fixnumize min) '(signed-byte 16))
+                (typep (sb-vm:fixnumize (- max min)) '(signed-byte 16)))
+           #+(or x86 x86-64 arm64) t))
+    (let* ((min (reduce #'min keys))
+           (max (reduce #'max keys))
+           (table-size (1+ (- max min)))
+           ;; TOOD: this size could be reduced now. For spread-out fixnum keys,
+           ;; we'll use a perfect hash, making the table exactly sized.
+           ;; So the situation where low load factor is beneficial are few.
+           (size-limit (* (length keys) 2)))
+      ;; Don't waste too much space, e.g. {5,6,10,20} would require 16 words
+      ;; for 4 entries, which is excessive.
+      (and (<= table-size size-limit)
+           (can-encode min max)))))
+
+(defun expand-hash-case-for-jump-table (keys key-lists targets &optional constants default errorp)
+  (let* ((phash-lexpr (or (perfectly-hashable keys)
+                          (return-from expand-hash-case-for-jump-table (values nil nil))))
+         (temp '#1=#:key)               ; GENSYM considered harmful
+         (object-hash (prehash-for-perfect-hash temp keys))
+         (hashfn
+           (compile-perfect-hash
+            `(lambda (,temp) (,phash-lexpr ,object-hash))
+            (coerce keys 'vector)))
+         (result-vector
+           (make-array (length (if constants
+                                   keys key-lists))
+                       :initial-element nil))
+         (key-vector (make-array (length keys)
+                                 :element-type
+                                 (cond #+sb-unicode ((every #'base-char-p keys) 'base-char)
+                                       ((every #'characterp keys) 'character)
+                                       (t 't))))
+         (new-targets))
+    (loop for key-list in key-lists
+          for target = (cdr (pop targets))
+          for index from 0
+          do (dolist (key key-list)
+               (let ((phash (funcall hashfn key)))
+                 (setf (aref key-vector phash) key)
+                 (cond (constants
+                        (setf (aref result-vector phash) (aref constants index)))
+                       (t
+                        (push (cons phash target) new-targets)
+                        (push phash (aref result-vector index)))))))
+    (when (simple-vector-p keys)
+      (setq keys (coerce-to-smallest-eltype keys)))
+    (values `(let* ((#1# key)
+                    (h (,phash-lexpr ,object-hash)))
+               ;; EQL reduces to EQ for all object this expanders accepts as keys
+               ,(if constants
+                    (if (eq default :exact)
+                        `(aref ,result-vector (truly-the (mod ,(length result-vector)) h))
+                        `(if (and (< h ,(length key-vector)) (eq (aref ,key-vector h) #1#))
+                             ,(let ((all-equal (not (position (aref result-vector 0) result-vector :test-not #'eql))))
+                                (if all-equal
+                                    `',(aref result-vector 0)
+                                    `(aref ,result-vector h)))
+                             ,(if errorp
+                                  `(ecase-failure #1# ,(coerce errorp 'simple-vector))
+                                  (if default
+                                      `(funcall default)))))
+                    (let ((otherwise (cdr (assoc 'otherwise targets))))
+                      (if otherwise
+                          `(if-to-blocks
+                            (and (< h ,(length key-vector))
+                                 (eq (aref ,key-vector h) #1#))
+                            (truly-the (mod ,(length key-vector)) h)
+                            ,otherwise)
+                          `(truly-the (mod ,(length key-vector)) h)))))
+            new-targets)))
+
+(defun cull-jump-table-targets (key key-lists targets)
+  (let ((type (lvar-type key))
+        (keys))
+    (loop for key-list in key-lists
+          for target in targets
+          for new-list = (loop for key in key-list
+                               when (multiple-value-bind (p really) (ctypep key type)
+                                      (or p
+                                          (not really)))
+                               collect key
+                               and
+                               do (push key keys))
+          when new-list
+          collect new-list into new-lists
+          and
+          collect target into new-targets
+          finally (return (values (if (equal new-lists key-lists)
+                                      key-lists
+                                      new-lists)
+                                  (append new-targets
+                                          (unless (csubtypep type (specifier-type `(member ,@keys)))
+                                            (list (assoc 'otherwise targets))))
+                                  keys)))))
+
+(defun cull-jump-table-constant-targets (key key-lists constants)
+  (let ((type (lvar-type key))
+        (keys))
+    (loop for key-list in key-lists
+          for constant across constants
+          for new-list = (loop for key in key-list
+                               when (multiple-value-bind (p really) (ctypep key type)
+                                      (or p
+                                          (not really)))
+                               collect key
+                               and
+                               do (push key keys))
+          when new-list
+          collect new-list into new-lists
+          and
+          collect constant into new-constants
+          finally (return (let ((exact (csubtypep type (specifier-type `(member ,@keys)))))
+                            (if (equal new-lists key-lists)
+                                (values key-lists
+                                        constants
+                                        keys
+                                        exact)
+                                (values new-lists
+                                        (coerce new-constants 'vector)
+                                        keys
+                                        exact)))))))
+
+(deftransform case-to-jump-table ((key key-lists-lvar &optional constants default errorp) * * :node node)
+  (let* ((key-lists (lvar-value key-lists-lvar))
+         (original-keys (reduce #'append key-lists))
+         (jump-table (node-dest node))
+         (jump-table (and (jump-table-p jump-table)
+                          jump-table))
+         (constants (and constants
+                         (lvar-value constants))))
+    (cond (constants
+           (delay-ir1-transform node :constraint)
+           (multiple-value-bind (new-key-lists constants keys exact)
+               (cull-jump-table-constant-targets key key-lists constants)
+             (let ((default (and default
+                                 (not (and (constant-lvar-p default)
+                                           (null (lvar-value default))))))
+                   (original-keys (and (lvar-value errorp)
+                                       original-keys)))
+               (or (and (sb-impl::should-attempt-hash-based-case-dispatch keys)
+                        (expand-hash-case-for-jump-table keys new-key-lists nil
+                                                         constants (if exact
+                                                                       :exact
+                                                                       default)
+                                                         original-keys))
+                   (labels ((convert (constants)
+                              (destructuring-bind (&optional (constant nil constant-p) &rest rest) constants
+                                (let ((key (pop new-key-lists)))
+                                  (cond ((and (not rest)
+                                              exact)
+                                         `',constant)
+                                        (constant-p
+                                         `(if (memq key ',key)
+                                              ',constant
+                                              ,(convert rest)))
+                                        (original-keys
+                                         `(ecase-failure key ,(coerce original-keys 'simple-vector)))
+                                        (default
+                                         `(funcall default)))))))
+                     (convert (coerce constants 'list)))))))
+          ((not jump-table)
+           nil)
+          (t
+           (multiple-value-bind (key-lists targets keys)
+               (cull-jump-table-targets key key-lists (jump-table-targets jump-table))
+             (flet ((give-up ()
+                      (labels ((convert (targets)
+                                 (destructuring-bind ((index . target) (next-index . next-target) &rest rest) targets
+                                   (declare (ignore index next-index))
+                                   (let ((key (pop key-lists)))
+                                     (if rest
+                                         `(if-to-blocks (memq key ',key)
+                                                        ,target
+                                                        ,(convert (cdr targets)))
+                                         `(if-to-blocks (memq key ',key)
+                                                        ,target
+                                                        ,next-target))))))
+                        (if (cdr targets)
+                            (convert targets)
+                            `(if-to-blocks t ,(cdar targets))))))
+               (cond ((not (sb-impl::should-attempt-hash-based-case-dispatch keys))
+                      (give-up))
+                     ((delay-ir1-transform-p node :constraint)
+                      (change-ref-leaf (lvar-uses key-lists-lvar) (find-constant key-lists))
+                      (setf (node-reoptimize node) nil)
+                      (change-jump-table-targets jump-table targets)
+                      (throw 'give-up-ir1-transform :delayed))
+                     ((or (suitable-jump-table-keys-p original-keys)
+                          (and (policy node (= jump-table 3))
+                               (or (every #'fixnump original-keys)
+                                   (every #'characterp original-keys))))
+                      ;; No hashing required
+                      (let* ((otherwise (assoc 'otherwise (jump-table-targets jump-table)))
+                             new-targets)
+                        (loop for key-list in key-lists
+                              for (nil . target) in (jump-table-targets jump-table)
+                              for new-list = (loop for key in key-list
+                                                   for value = (if (characterp key)
+                                                                   (char-code key)
+                                                                   key)
+                                                   do (push (cons value target) new-targets)))
+                        (change-jump-table-targets jump-table (nreconc new-targets (and otherwise
+                                                                                        (list otherwise))))
+                        (if (characterp (first original-keys))
+                            `(if-to-blocks (characterp key)
+                                           (char-code key)
+                                           ,(cdr otherwise))
+                            `(if-to-blocks (fixnump key)
+                                           key
+                                           ,(cdr otherwise)))))
+                     (t
+                      (multiple-value-bind (code new-targets)
+                          (expand-hash-case-for-jump-table keys key-lists targets)
+                        (cond (code
+                               (change-jump-table-targets jump-table new-targets)
+                               code)
+                              (t
+                               (give-up))))))))))))

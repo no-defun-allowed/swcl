@@ -205,22 +205,23 @@
                                        other-pointer-lowtag)
           unbound-marker-widetag)))
 
-
 (define-vop (symbol-hash)
   (:policy :fast-safe)
   (:translate symbol-hash)
   (:args (symbol :scs (descriptor-reg)))
-  (:results (res :scs (any-reg)))
+  (:results (res :scs (unsigned-reg)))
   (:result-types positive-fixnum)
-  (:arg-refs args)
   (:generator 2
-    ;; The symbol-hash slot of NIL holds NIL because it is also the
-    ;; car slot, so we have to strip off the two low bits to make sure
-    ;; it is a fixnum.  The lowtag selection magic that is required to
-    ;; ensure this is explained in the comment in objdef.lisp
     (loadw res symbol symbol-hash-slot other-pointer-lowtag)
-    (unless (not-nil-tn-ref-p args)
-      (inst and res (lognot #b11)))))
+    ;; include the low 3 random bits but ensure res is a HASH-CODE
+    (inst and res (ldb (byte sb-vm:n-positive-fixnum-bits 0) -1))))
+
+(define-vop (symbol-name-hash symbol-hash)
+  (:translate symbol-name-hash)
+  (:generator 1
+    (loadw res symbol symbol-hash-slot other-pointer-lowtag)
+    ;; shift out the low 3 random bits
+    (inst shr res 3)))
 
 ;;;; fdefinition (FDEFN) objects
 

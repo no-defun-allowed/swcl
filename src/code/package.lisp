@@ -36,15 +36,14 @@
 ;;;       symbol whose name is spelled "NIL" have the identical strange hash
 ;;;       so that the hash is a pure function of the name's characters.
 
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (defconstant package-id-bits 16)
-  ;; Give 48 bits to SYMBOL-NAME, which spans 256 TiB of memory.
-  ;; Omitting the lowtag bits could span up to 4 PiB because we could left-shift
-  ;; and re-tag to read the name.  That seems excessive though. Another viable
-  ;; technique would be to store a heap-base-relative pointer, which might be
-  ;; needed if dynamic-space is small but at a very high address.
-  ;; For now, it seems fine to treat the low 48 bits as a tagged pointer.
-  (defconstant symbol-name-bits (- sb-vm:n-word-bits package-id-bits)))
+(defconstant package-id-bits 16)
+;; Give 48 bits to SYMBOL-NAME, which spans 256 TiB of memory.
+;; Omitting the lowtag bits could span up to 4 PiB because we could left-shift
+;; and re-tag to read the name.  That seems excessive though. Another viable
+;; technique would be to store a heap-base-relative pointer, which might be
+;; needed if dynamic-space is small but at a very high address.
+;; For now, it seems fine to treat the low 48 bits as a tagged pointer.
+(defconstant symbol-name-bits (- sb-vm:n-word-bits package-id-bits))
 (defconstant +package-id-overflow+ (1- (ash 1 package-id-bits)))
 (defconstant +package-id-none+     0)
 (defconstant +package-id-lisp+     1)
@@ -147,6 +146,12 @@
   `(logbitp 1 (package-%bits ,package)))
 
 (defmacro package-lock (package) `(logbitp 0 (package-%bits ,package)))
+
+(defmacro without-package-locks (&body body)
+  "Ignores all runtime package lock violations during the execution of
+body. Body can begin with declarations."
+  `(let ((*ignored-package-locks* t))
+    ,@body))
 
 (defmacro with-loader-package-names (&body body)
   #+sb-xc-host

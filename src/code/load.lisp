@@ -378,9 +378,8 @@
 
 ;;;; the FOP database
 
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  ;; The bottom 5 bits of the opcodes above 128 encode an implicit operand.
-  (defconstant n-ordinary-fops 128))
+;; The bottom 5 bits of the opcodes above 128 encode an implicit operand.
+(defconstant n-ordinary-fops 128)
 
 ;;; a vector indexed by a FaslOP that yields a function which performs
 ;;; the operation. Most functions take 0 arguments - they only manipulate
@@ -441,6 +440,7 @@
                  (error ,(format nil "Not-host fop invoked: ~A" name)))))
        (!%define-fop ',name ,fop-code ,(length operands) ,(if pushp 1 0)))))
 
+(defglobal *fop-name-to-opcode* (make-hash-table))
 (defun !%define-fop (name opcode n-operands pushp)
   (declare (type (mod 4) n-operands))
   (let ((function (svref **fop-funs** opcode)))
@@ -454,7 +454,7 @@
       (when (and existing-opcode (/= existing-opcode opcode))
         (error "multiple codes for fop name ~S: ~D and ~D"
                name opcode existing-opcode)))
-    (setf (get name 'opcode) opcode
+    (setf (gethash name *fop-name-to-opcode*) opcode
           (svref **fop-funs** opcode) (symbol-function name)
           (aref (car **fop-signatures**) opcode) n-operands
           (sbit (cdr **fop-signatures**) opcode) pushp))
@@ -786,12 +786,6 @@
               (%raw-instance-set/word res i val)))
         (incf ptr)))
     res))
-
-;;; Symbol-like entities
-(define-fop 49 :not-host (fop-debug-name-marker ((:operands kind)))
-  (ecase kind
-   (1 sb-c::*debug-name-sharp*)
-   (2 sb-c::*debug-name-ellipsis*)))
 
 (define-fop 45 :not-host (fop-layout ((:operands depthoid flags length)
                                        name bitmap inherits))

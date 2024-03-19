@@ -202,14 +202,11 @@
   (or (find-package string)
       (error "Cross-compiler bug: no package named ~S" string)))
 
-(defmacro without-package-locks (&body body)
-  `(progn ,@body))
-
 (defmacro with-single-package-locked-error ((&optional kind thing &rest format)
                                             &body body)
   (declare (ignore kind format))
-  `(let ((.dummy. ,thing))
-     (declare (ignore .dummy.))
+  `(progn
+     ,thing
      ,@body))
 
 (defun program-assert-symbol-home-package-unlocked (context symbol control)
@@ -268,6 +265,12 @@
   (bug "Unreachable reached"))
 
 (in-package "SB-KERNEL")
+
+(define-symbol-macro *gc-epoch* 0)
+(deftype weak-vector () nil)
+(defun weak-vector-p (x) (declare (ignore x)) nil)
+(defun sb-thread:make-mutex (&key name) (list :mock-mutex name))
+(deftype sb-thread:mutex () '(cons (eql :mock-mutex)))
 
 ;;; These functions are required to emulate SBCL kernel functions
 ;;; in a vanilla ANSI Common Lisp cross-compilation host.
@@ -353,6 +356,8 @@
 ;;;; Variables which have meaning only to the cross-compiler, defined here
 ;;;; in lieu of #+sb-xc-host elsewere which messes up toplevel form numbers.
 (in-package "SB-C")
+
+(defun allocate-weak-vector (n) (make-array (the integer n)))
 
 ;;; For macro lambdas that are processed by the host
 (declaim (declaration top-level-form))

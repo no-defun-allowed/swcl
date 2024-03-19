@@ -26,7 +26,7 @@
 
 (in-package "SB-KERNEL")
 
-(defstruct (xset (:constructor alloc-xset)
+(defstruct (xset (:constructor alloc-xset ())
                  (:constructor !new-xset (data extra))
                  (:copier nil)
                  (:predicate nil))
@@ -67,19 +67,19 @@
 ;;; Checks that the element is not in the set yet.
 (defun add-to-xset (elt xset)
   (let ((data (xset-data xset)))
-    (if (listp data)
-        (let ((size (xset-extra xset)))
-          (if (< size +xset-list-size-limit+)
-              (unless (member elt data :test #'eql)
-                (setf (xset-extra xset) (1+ size)
-                      (xset-data xset) (cons elt data)))
-              (let ((table (make-hash-table :size (* 2 size) :test #'eql)))
-                (setf (gethash elt table) t)
-                (dolist (x data)
-                  (setf (gethash x table) t))
-                (setf (xset-extra xset) 0 ; looks nice to clear it
-                      (xset-data xset) table))))
-        (setf (gethash elt data) t))))
+    (cond ((not (listp data)) (setf (gethash elt data) t))
+          ((member elt data)) ; ignore
+          ((< (xset-extra xset) +xset-list-size-limit+)
+           (setf (xset-extra xset) (1+ (xset-extra xset))
+                 (xset-data xset) (cons elt data)))
+          (t
+           (let ((table (make-hash-table :size 36))) ; arb
+             (setf (gethash elt table) t)
+             (dolist (x data)
+               (setf (gethash x table) t))
+             (setf (xset-extra xset) 0 ; looks nice to clear it
+                   (xset-data xset) table)))))
+  xset)
 
 (defun xset-member-p (elt xset)
   (let ((data (xset-data xset)))
@@ -195,72 +195,29 @@
             xset)
   t)
 
-#-sb-xc-host (defmacro plus-mod-fixnum (a b) `(sb-vm::+-modfx ,a ,b))
-
-;;; Every architecture needs this portable replacement for +-modfx.
-;;; Some, but not all, define +-modfx in cross-modular.
-;;; We need this available sooner than that because type-classes needs it
-;;; to compute a hash of a list of things order-insensitively.
-#+sb-xc-host
-(progn
-(defun plus-mod-fixnum (a b)
-  (declare (type sb-xc:fixnum a b))
-  (let* ((mask (ldb (byte sb-vm:n-fixnum-bits 0) -1))
-         (result (logand (+ (logand a mask) (logand b mask)) mask)))
-    (if (logbitp sb-vm:n-positive-fixnum-bits result) ; then it's negative
-        (dpb result (byte sb-vm:n-fixnum-bits 0) -1)
-        result)))
-
-;; Assume 2 fixnum tag bits:
-;;      significant bits      tag
-;;   #b01111...11111111111111  00
-;; + #b0                    1  00
-;;   ------------------------
-;; = #b10000...00000000000000  00
-(assert (= (plus-mod-fixnum sb-xc:most-positive-fixnum 1)
-           sb-xc:most-negative-fixnum))
-;; etc
-(assert (= (plus-mod-fixnum sb-xc:most-negative-fixnum sb-xc:most-negative-fixnum)
-           0))
-(assert (= (plus-mod-fixnum -1 most-negative-fixnum)
-           sb-xc:most-positive-fixnum))
-)
+(defmacro plus-mod-fixnum (a b)
+  `(#+sb-xc-host sb-c::plus-mod-fixnum #-sb-xc-host  sb-vm::+-modfx ,a ,b))
 
 ;;; Produce a hash that helps decide whether two xsets could be considered equivalent
-;;; as order-insensitive sets comparing elements by EQL. This shouldn't use EQL-HASH
-;;; because the intent is that it be useful for both host and target. SXHASH is fine
-;;; for SYMBOL, NUMBER, and CHARACTER since EQL and EQUAL are the the same
-;;; (SXHASH being the hash function for EQUAL). The target can include STRUCTURE-OBJECT
-;;; because we have stable hashes that do not depend on the slots. But it's no good
-;;; to mix in STRING, BIT-VECTOR, CONS, or other type where SXHASH reads the contents.
-;;; Use modular addition since it is commutative and associative, and the low bits
-;;; come out the same no matter the order of operations.
+;;; as order-insensitive sets comparing elements by EQL.
 (defun xset-elts-hash (xset)
+  #-sb-xc-host (declare (notinline sb-impl::eql-hash)) ; forward ref
   (let* ((c (xset-count xset))
          (h (mix c c)))
     (declare (sb-xc:fixnum h))
-    ;; Rather than masking each intermediate result to MOST-POSITIVE-FIXNUM,
-    ;; allow bits to rollover into the sign bit
+    ;; Use modular addition as the hash mixer since it is commutative and associative,
+    ;; and the low bits come out the same no matter the order of operations.
     (let ((hashes (xset-extra xset)))
       (if (simple-vector-p hashes)
           (dovector (x hashes)
             (setq h (plus-mod-fixnum h (truly-the sb-xc:fixnum (if (listp x) (cdr x) x)))))
-          (flet ((elt-hash (e)
-                   ;; SYMBOL-HASH is better than SXHASH for symbols (because SXHASH collides
-                   ;; on STRING= symbols - though SYMBOL-HASH does too at the moment).
-                   ;; and SXHASH is better than EQL-HASH for (OR CHARACTER NUMBER)
-                   ;; though either is technically an acceptable hash function on those types.
-                   #-sb-xc-host (if (symbolp e) (symbol-hash e) (sb-xc:sxhash e))
-                   #+sb-xc-host (sb-xc:sxhash e)))
-            ;; If stable hashes were never assigned, then the set must contain
-            ;; only these object types. There are some other objects (INSTANCE e.g.) that
-            ;; could have non-address-based EQL-hashes but they don't really appear
-            ;; in MEMBER types often enough to matter. (And in fact we'd have to use
-            ;; something other than EQL-hash)
-            (map-xset (lambda (x)
-                        (aver (typep x '(or symbol number character)))
-                        (setq h (plus-mod-fixnum (elt-hash x) h)))
-                      xset))))
+          ;; If stable hashes were never assigned, then the set contains
+          ;; a restricted type of element, which we AVER below
+          (map-xset (lambda (x)
+                      (aver (typep x '(or symbol number character)))
+                      (setq h (plus-mod-fixnum (truly-the sb-xc:fixnum (sb-impl::eql-hash x))
+                                               h)))
+                    xset)))
     ;; Now mix the bits thoroughly and then mask to a positive fixnum.
     ;; I think this does not need to be compatible between host and target.
     ;; But I'm trying to make it compatible anyway because I'm not 100% sure
@@ -282,30 +239,20 @@
 (defun xset-generate-stable-hashes (xset &aux (hashmap *xset-stable-hashes*))
   #-sb-xc-host (declare (notinline sb-impl::eql-hash) ; forward ref
                         (sb-c::tlab :system))
-  (flet ((get-stable-hash-cell (obj)
-           (let ((cell (gethash obj hashmap)))
-             (cond (cell
-                    (incf (car cell))
-                    cell)
-                   (t
-                    (setf (gethash obj hashmap) (cons 1 (ctype-random))))))))
-    (let ((hashes (make-array (xset-count xset)))
-          (index -1))
-      (map-xset (lambda (elt)
+  (let ((hashes (make-array (xset-count xset)))
+        (index -1))
+    (dx-flet ((assign-hash (x)
+                (multiple-value-bind (h address-based) (sb-impl::eql-hash x)
                   (setf (aref hashes (incf index))
-                        #-sb-xc-host
-                        (multiple-value-bind (hashval addr) (sb-impl::eql-hash elt)
-                          ;; EQL-HASH does _nothing_ to fixnums. Hash-tables perturb the hash
-                          ;; in PREFUZZ-HASH, so too should we mix bits some more here.
-                          (if addr (get-stable-hash-cell elt) (murmur-hash-word/fixnum hashval)))
-                        #+sb-xc-host
-                        (multiple-value-bind (hashval addr)
-                            (if (sb-xc:typep elt '(or symbol character number))
-                                (values (sb-xc:sxhash elt) nil)
-                                (values 4 ; chosen by algorithm of https://xkcd.com/221/
-                                        t)) ; yes, it's address-based
-                          (if addr (get-stable-hash-cell elt) hashval))))
-                xset)
+                        (acond ((not address-based)
+                                ;; EQL-HASH does not hash fixnums well enough
+                                (murmur-hash-word/fixnum h))
+                               ((gethash x hashmap)
+                                (incf (car it)) ; bump refcount
+                                it)
+                               (t ; new entry with refcount = 1
+                                (setf (gethash x hashmap) (cons 1 (ctype-random)))))))))
+      (map-xset #'assign-hash xset)
       (setf (xset-extra xset) hashes)))
   xset)
 (defun xset-delete-stable-hashes (xset &aux (hashmap *xset-stable-hashes*))

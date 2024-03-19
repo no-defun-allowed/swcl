@@ -153,3 +153,29 @@
   (def fast-if-eq-integer/c fast-if-eql-integer/c 2)
   (def fast-if-eq-signed fast-if-eql/signed 5)
   (def fast-if-eq-unsigned fast-if-eql/unsigned 5))
+
+(define-vop (jump-table)
+  (:args (index :scs (signed-reg unsigned-reg any-reg)
+                :target offset))
+  (:info targets otherwise min max)
+  (:temporary (:sc unsigned-reg) table)
+  (:temporary (:sc any-reg :from (:argument 0)) offset)
+  (:generator 0
+    (let ((fixnump (sc-is index any-reg)))
+      (flet ((fix (x)
+               (if fixnump
+                   (fixnumize x)
+                   x)))
+        (inst adr table (cdr (register-inline-constant :jump-table (coerce targets 'vector))))
+        (unless (zerop min)
+          (inst add-sub offset index (- (fix min)))
+          (setf index offset))
+        (when otherwise
+          (inst cmp index (add-sub-immediate (fix (- max min))))
+          (inst b :hi otherwise))
+        (cond (fixnump
+               (inst add table table (lsl index (- word-shift n-fixnum-tag-bits)))
+               (inst ldr table (@ table)))
+              (t
+               (inst ldr table (@ table (extend index :lsl word-shift)))))
+        (inst br table)))))

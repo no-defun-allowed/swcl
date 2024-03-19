@@ -206,6 +206,7 @@
   (or (let ((constant (lvar-constant array))
             min
             max
+            symbols
             union)
         (block nil
           (when constant
@@ -213,23 +214,22 @@
                 (setf (getf (leaf-info constant) nil)
                       (let ((array (constant-value constant)))
                         (or
+                         (and (zerop (array-total-size array))
+                              *empty-type*)
                          #-sb-xc-host
                          (flet ((int-min-max (array min max)
                                   (declare (optimize (insert-array-bounds-checks 0)))
                                   (with-array-data ((array array) (start) (end))
-                                    (let* ((min min)
-                                           (max max))
-                                      (cond ((= start end)
-                                             *wild-type*)
-                                            (t
-                                             (loop for i from start below end
-                                                   do
-                                                   (let ((elt (aref array i)))
-                                                     (when (> elt max)
-                                                       (setf max elt))
-                                                     (when (< elt min)
-                                                       (setf min elt))))
-                                             (make-numeric-type :class 'integer :low min :high max)))))))
+                                    (let ((min min)
+                                          (max max))
+                                      (loop for i from start below end
+                                            do
+                                            (let ((elt (aref array i)))
+                                              (when (> elt max)
+                                                (setf max elt))
+                                              (when (< elt min)
+                                                (setf min elt))))
+                                      (make-numeric-type :class 'integer :low min :high max)))))
                            (declare (inline int-min-max))
                            (macrolet ((test (type)
                                         (let ((ctype (specifier-type type)))
@@ -274,8 +274,15 @@
                                              (specifier-type 'base-char))
                                             (character
                                              (specifier-type 'character))
+                                            #+sb-xc-host
                                             (symbol
                                              (specifier-type 'symbol))
+                                            #-sb-xc-host
+                                            (symbol
+                                             (unless symbols
+                                               (setf symbols (alloc-xset)))
+                                             (add-to-xset elt symbols)
+                                             nil)
                                             (double-float
                                              (specifier-type 'double-float))
                                             (single-float
@@ -286,12 +293,18 @@
                                           (if union
                                               (type-union union type)
                                               type)))
-                               finally (return (if min
-                                                   (let ((int (make-numeric-type :class 'integer :low min :high max)))
-                                                     (if union
-                                                         (type-union union int)
-                                                         int))
-                                                   union))))))))))
+                               finally
+                               (when symbols
+                                (let ((symbols (make-member-type symbols nil)))
+                                  (setf union (if union
+                                                  (type-union union symbols)
+                                                  symbols))))
+                               (return (if min
+                                           (let ((int (make-numeric-type :class 'integer :low min :high max)))
+                                             (if union
+                                                 (type-union union int)
+                                                 int))
+                                           union))))))))))
       (type-array-element-type (lvar-type array))))
 
 (deftransform array-in-bounds-p ((array &rest subscripts))
@@ -1675,6 +1688,14 @@
 (deftransform length ((vector) (vector))
   '(vector-length vector))
 
+(deftransform length ((vector) ((or null vector)) * :important nil)
+  (unless (and (types-equal-or-intersect (lvar-type vector) (specifier-type 'null))
+               (types-equal-or-intersect (lvar-type vector) (specifier-type 'vector)))
+    (give-up-ir1-transform))
+  `(if vector
+       (vector-length vector)
+       0))
+
 ;;; If a simple array with known dimensions, then VECTOR-LENGTH is a
 ;;; compile-time constant.
 (deftransform vector-length ((vector))
@@ -1759,17 +1780,21 @@
            (%array-fill-pointer ,vector-sym)
            (sb-vm::fill-pointer-error ,vector-sym)))))
 
-(deftransform check-bound ((array dimension index))
+(defun check-bound-code (array dimension index-var index)
   ;; %CHECK-BOUND will perform both bound and type checking when
   ;; necessary, delete the cast so that it doesn't get confused by
   ;; its derived type.
   (let ((use (principal-lvar-ref-use index)))
     (when (array-index-cast-p use)
       (delete-cast use)))
-  `(bound-cast array ,(if (constant-lvar-p dimension)
-                          (lvar-value dimension)
-                          'dimension)
-               index))
+  `(progn (%check-bound ,array ,dimension ,index-var)
+          ,index-var))
+
+(deftransform check-bound ((array dimension index))
+  (check-bound-code 'array (if (constant-lvar-p dimension)
+                               (lvar-value dimension)
+                               'dimension)
+                    'index index))
 
 (defun check-bound-empty-p (bound index)
   (let* ((bound-type (lvar-type bound))
@@ -2047,9 +2072,11 @@
             (null (array-type-complexp type))
             (neq element-ctype *wild-type*)
             (eql (length (array-type-dimensions type)) 1))
-       (let* ((bare-form
-                `(data-vector-ref array
-                                  (check-bound array (array-dimension array 0) index))))
+       (let* ((index (if (policy node (zerop insert-array-bounds-checks))
+                         `index
+                         (check-bound-code 'array '(vector-length array) 'index index)))
+              (bare-form
+                `(data-vector-ref array ,index)))
          (if (type= declared-element-ctype element-ctype)
              bare-form
              `(the ,declared-element-ctype ,bare-form))))
@@ -2060,12 +2087,32 @@
 
 (deftransform (setf aref) ((new-value array index) (t t t) * :node node)
   (let* ((type (lvar-type array))
-         (declared-element-ctype (declared-array-element-type type)))
+         (declared-element-ctype (declared-array-element-type type))
+         (element-ctype (array-type-upgraded-element-type type))
+         (no-check (policy node (zerop insert-array-bounds-checks))))
     (truly-the-unwild
      declared-element-ctype
-     (if (policy node (zerop insert-array-bounds-checks))
-         `(hairy-data-vector-set array index ,(the-unwild declared-element-ctype 'new-value))
-         `(hairy-data-vector-set/check-bounds array index ,(the-unwild declared-element-ctype 'new-value))))))
+     (cond
+       ((and (array-type-p type)
+             (null (array-type-complexp type))
+             (neq element-ctype *wild-type*)
+             (eql (length (array-type-dimensions type)) 1))
+        (let ((element-type-specifier (type-specifier element-ctype))
+              (index (if no-check
+                         `index
+                         (check-bound-code 'array '(vector-length array) 'index index))))
+          `(locally
+               (declare (type ,element-type-specifier new-value))
+             ,(if (type= element-ctype declared-element-ctype)
+                  `(progn (data-vector-set array ,index new-value)
+                          new-value)
+                  `(progn (data-vector-set array ,index
+                                           ,(the-unwild declared-element-ctype 'new-value))
+                          ,(truly-the-unwild declared-element-ctype 'new-value))))))
+       (no-check
+        `(hairy-data-vector-set array index ,(the-unwild declared-element-ctype 'new-value)))
+       (t
+        `(hairy-data-vector-set/check-bounds array index ,(the-unwild declared-element-ctype 'new-value)))))))
 
 ;;; But if we find out later that there's some useful type information
 ;;; available, switch back to the normal one to give other transforms
@@ -2081,7 +2128,7 @@
                    (not (csubtypep type (specifier-type 'simple-string))))
               (not (null (conservative-array-type-complexp type))))
       (give-up-ir1-transform "Upgraded element type of array is not known at compile time."))
-    `(hairy-data-vector-ref array (check-bound array (array-dimension array 0) index))))
+    `(hairy-data-vector-ref array ,(check-bound-code 'array '(array-dimension array 0) 'index index))))
 
 (deftransform hairy-data-vector-set/check-bounds ((array index new-value))
   (let* ((type (lvar-type array))
@@ -2095,7 +2142,9 @@
                  (csubtypep (lvar-type new-value) (specifier-type '(not (or number character)))))
             `(hairy-data-vector-set/check-bounds (the simple-vector array) index new-value)
             (give-up-ir1-transform "Upgraded element type of array is not known at compile time."))
-        `(hairy-data-vector-set array (check-bound array (array-dimension array 0) index) new-value))))
+        `(hairy-data-vector-set array
+                                ,(check-bound-code 'array '(array-dimension array 0) 'index index)
+                                new-value))))
 
 
 ;;; Just convert into a HAIRY-DATA-VECTOR-REF (or
@@ -2103,10 +2152,10 @@
 ;;; array total size.
 (deftransform row-major-aref ((array index))
   `(hairy-data-vector-ref array
-                          (check-bound array (array-total-size array) index)))
+                          ,(check-bound-code 'array '(array-total-size array) 'index index)))
 (deftransform %set-row-major-aref ((array index new-value))
   `(hairy-data-vector-set array
-                          (check-bound array (array-total-size array) index)
+                          ,(check-bound-code 'array '(array-total-size array) 'index index)
                           new-value))
 
 ;;;; bit-vector array operation canonicalization
@@ -2176,10 +2225,16 @@
     ((array))
   (values array (specifier-type '(and array (not (simple-array * (*)))))))
 
+;;; For the code generated by TEST-ARRAY-ELEMENT-TYPE
 (defoptimizer (%other-pointer-widetag derive-type) ((object))
-  (unless (types-equal-or-intersect (lvar-type object) (specifier-type 'simple-array))
-    (specifier-type `(not (integer ,sb-vm:simple-array-widetag
-                                   (,sb-vm:complex-base-string-widetag))))))
+  (cond ((types-equal-or-intersect (lvar-type object) (specifier-type 'simple-array))
+         nil)
+        ((types-equal-or-intersect (lvar-type object) (specifier-type 'array))
+         (specifier-type `(and (not (integer ,sb-vm:simple-array-widetag
+                                             (,sb-vm:complex-base-string-widetag)))
+                               (unsigned-byte ,sb-vm:n-widetag-bits))))
+        (t
+         (specifier-type `(integer 0 (,sb-vm:simple-array-widetag))))))
 
 ;;; If ARRAY-HAS-FILL-POINTER-P returns true, then ARRAY
 ;;; is of the specified type.

@@ -34,12 +34,6 @@
 
   (values))
 
-(defun var-unused-before-sets-p (var)
-  (when (lambda-var-sets var)
-    (loop for ref in (leaf-refs var)
-          always (loop for set in (lambda-var-sets var)
-                       thereis (node-dominates-p set ref)))))
-
 ;;; We have to allocate the home TNs for variables before we can call
 ;;; ASSIGN-IR2-ENVIRONMENT so that we can close over TNs that haven't
 ;;; had their home environment assigned yet. Here we evaluate the
@@ -58,7 +52,7 @@
         (if (and let-p
                  (not debug-variable-p)
                  (not (lambda-var-indirect var))
-                 (var-unused-before-sets-p var))
+                 (lambda-var-unused-initial-value var))
             (let* ((type (loop with union
                                for set in (lambda-var-sets var)
                                for type = (lvar-type (set-value set))

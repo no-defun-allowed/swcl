@@ -79,6 +79,39 @@ WITH-CAS-LOCK can be entered recursively."
                (unless (eq ,old ,cas-form)
                  (bug "Failed to release CAS lock!")))))))))
 
+(defmacro grab-cas-lock (place &environment env)
+  (with-unique-names (owner self)
+    (multiple-value-bind (vars vals old new cas-form read-form)
+        (sb-ext:get-cas-expansion place env)
+      `(let* (,@(mapcar #'list vars vals)
+              (,owner (progn
+                        (barrier (:read))
+                        ,read-form))
+              (,self *current-thread*)
+              (,old nil)
+              (,new ,self))
+         (unless (eq ,owner ,self)
+           (loop until (loop repeat 100
+                             when (and (progn
+                                         (barrier (:read))
+                                         (not ,read-form))
+                                       (not (setf ,owner ,cas-form)))
+                             return t
+                             else
+                             do (sb-ext:spin-loop-hint))
+                 do (thread-yield)))))))
+
+(defmacro release-cas-lock (place &environment env)
+  (with-unique-names (self)
+    (multiple-value-bind (vars vals old new cas-form read-form)
+        (sb-ext:get-cas-expansion place env)
+      (declare (ignore read-form))
+      `(let* (,@(mapcar #'list vars vals)
+              (,self *current-thread*))
+         (let ((,old ,self)
+               (,new nil))
+           (unless (eq ,old ,cas-form)
+             (bug "Failed to release CAS lock!")))))))
 ;;; Conditions
 
 (define-condition thread-error (error)
@@ -497,12 +530,12 @@ See also: RETURN-FROM-THREAD and SB-EXT:EXIT."
        (unwind-protect
             (progn
               (setf (thread-waiting-for ,n-thread) ,new)
-              (barrier (:write))
+              (barrier (:memory))
               ,@forms)
          ;; Interrupt handlers and GC save and restore any
          ;; previous wait marks using WITHOUT-THREAD-WAITING-FOR
          (setf (thread-waiting-for ,n-thread) nil)
-         (barrier (:write))))))
+         (barrier (:memory))))))
 
 ;;;; Mutexes
 
@@ -513,36 +546,34 @@ See also: RETURN-FROM-THREAD and SB-EXT:EXIT."
 
 ;;; Signals an error if owner of LOCK is waiting on a lock whose release
 ;;; depends on the current thread. Does not detect deadlocks from sempahores.
+;;; Limited to 10 threads because it may not terminate if the threads
+;;; keep locking different locks in the meantime.
 #+sb-thread
 (defun check-deadlock ()
   (let* ((self *current-thread*)
-         (origin (progn
-                   (barrier (:read))
-                   ;; Not sure why a barrier is needed on our own data.
-                   ;; Who else stores thread-waiting-for of me?
-                   (thread-waiting-for self))))
-    (labels ((detect-deadlock (lock)
+         (origin (thread-waiting-for self))
+         unlock-deadlock-lock)
+    (labels ((detect-deadlock (lock limit)
+               (declare (fixnum limit))
+               (barrier (:read))
                (let ((other-vmthread-id (mutex-%owner lock)))
-                 (cond ((= 0 other-vmthread-id))
+                 (cond ((= limit 0) nil)
+                       ((= other-vmthread-id 0) nil)
                        ((= (current-vmthread-id) other-vmthread-id)
-                        (let ((chain
-                                (with-cas-lock ((symbol-value '**deadlock-lock**))
-                                  (prog1 (deadlock-chain self origin)
-                                    ;; We're now committed to signaling the
-                                    ;; error and breaking the deadlock, so
-                                    ;; mark us as no longer waiting on the
-                                    ;; lock. This ensures that a single
-                                    ;; deadlock is reported in only one
-                                    ;; thread, and that we don't look like
-                                    ;; we're waiting on the lock when print
-                                    ;; stuff -- because that may lead to
-                                    ;; further deadlock checking, in turn
-                                    ;; possibly leading to a bogus vicious
-                                    ;; metacycle on PRINT-OBJECT.
-                                    (setf (thread-waiting-for self) nil)))))
-                          (error 'thread-deadlock
-                                 :thread *current-thread*
-                                 :cycle chain)))
+                        ;; We're now committed to signaling the
+                        ;; error and breaking the deadlock, so
+                        ;; mark us as no longer waiting on the
+                        ;; lock. This ensures that a single
+                        ;; deadlock is reported in only one
+                        ;; thread, and that we don't look like
+                        ;; we're waiting on the lock when print
+                        ;; stuff -- because that may lead to
+                        ;; further deadlock checking, in turn
+                        ;; possibly leading to a bogus vicious
+                        ;; metacycle on PRINT-OBJECT.
+                        (grab-cas-lock **deadlock-lock**)
+                        (setf unlock-deadlock-lock t)
+                        (list (cons self origin)))
                        (t
                         (let* ((other-thread (mutex-owner-lookup other-vmthread-id))
                                (other-lock (when (thread-p other-thread)
@@ -552,34 +583,32 @@ See also: RETURN-FROM-THREAD and SB-EXT:EXIT."
                           ;; is a cons, and we don't consider it a deadlock -- since
                           ;; it will time out on its own sooner or later.
                           (when (mutex-p other-lock)
-                            (detect-deadlock other-lock)))))))
-             (deadlock-chain (thread lock)
-               (let* ((other-thread (mutex-owner lock))
-                      (other-lock (when (thread-p other-thread)
-                                    (barrier (:read))
-                                    (thread-waiting-for other-thread))))
-                 (cond ((member other-thread '(nil :thread-dead))
-                        ;; The deadlock is gone -- maybe someone unwound
-                        ;; from the same deadlock already?
-                        (return-from check-deadlock nil))
-                       ((consp other-lock)
-                        ;; There's a timeout -- no deadlock.
-                        (return-from check-deadlock nil))
-                       ((waitqueue-p other-lock)
-                        ;; Not a lock.
-                        (return-from check-deadlock nil))
-                       ((eq self other-thread)
-                        ;; Done
-                        (list (list thread lock)))
-                       (t
-                        (if other-lock
-                            (cons (cons thread lock)
-                                  (deadlock-chain other-thread other-lock))
-                            ;; Again, the deadlock is gone?
-                            (return-from check-deadlock nil)))))))
+                            (let ((chain (detect-deadlock other-lock (1- limit))))
+                              (when (and (consp chain)
+                                         ;; Recheck that the mutex is still owned by the same thread.
+                                         (progn (barrier (:read))
+                                                (let ((owner (mutex-%owner lock)))
+                                                  (= owner other-vmthread-id)))
+                                         ;; See if it hasn't been set to NIL above by another thread.
+                                         (eq (progn (barrier (:read))
+                                                    (thread-waiting-for other-thread))
+                                             other-lock))
+                                (cons (cons other-thread other-lock)
+                                      chain))))))))))
       ;; Timeout means there is no deadlock
       (when (mutex-p origin)
-        (detect-deadlock origin)
+        (let ((chain (detect-deadlock origin 10)))
+          (when (consp chain)
+            (setf (thread-waiting-for self) nil)
+            (sb-thread:barrier (:memory))
+            (release-cas-lock **deadlock-lock**)
+            (with-interrupts
+              (error 'thread-deadlock
+                     :thread *current-thread*
+                     :cycle (let ((last (last chain)))
+                              (append last (butlast chain))))))
+          (when unlock-deadlock-lock
+            (release-cas-lock **deadlock-lock**)))
         t))))
 
 ;;;; WAIT-FOR -- waiting on arbitrary conditions
@@ -782,6 +811,32 @@ returns NIL each time."
       (declare (dynamic-extent #'cas))
       (%%wait-for #'cas stop-sec stop-usec)))))
 
+#+ultrafutex
+(progn
+(declaim (inline fast-futex-wait))
+(defun fast-futex-wait (word-addr oldval to-sec to-usec)
+  (with-alien ((%wait (function int unsigned
+                                #+freebsd unsigned #-freebsd (unsigned 32)
+                                long unsigned-long)
+                      :extern "futex_wait"))
+    (alien-funcall %wait word-addr oldval to-sec to-usec)))
+(declaim (sb-ext:maybe-inline %wait-for-mutex-algorithm-3))
+(defun %wait-for-mutex-algorithm-3 (mutex)
+  #+nil ; in case I want to count calls to this function
+  (let ((sap (int-sap (thread-primitive-thread *current-thread*)))
+        (disp (ash sb-vm::thread-slow-path-allocs-slot sb-vm:word-shift)))
+    (incf (sap-ref-word sap disp)))
+  (symbol-macrolet ((val (mutex-state mutex)))
+    (let* ((mutex (sb-ext:truly-the mutex mutex))
+           (c (sb-ext:cas val 0 1))) ; available -> taken
+      (unless (= c 0) ; Got it right off the bat?
+        (unless (= c 2)
+          (setq c (%raw-instance-xchg/word mutex (get-dsd-index mutex state) 2)))
+        (loop while (/= c 0)
+              do (with-pinned-objects (mutex)
+                   (fast-futex-wait (mutex-state-address mutex) 2 -1 0))
+                 (setq c (%raw-instance-xchg/word mutex (get-dsd-index mutex state) 2))))))))
+
 #+mutex-benchmarks
 (symbol-macrolet ((val (mutex-state mutex)))
   (export '(wait-for-mutex-algorithm-2
@@ -791,15 +846,6 @@ returns NIL each time."
   (declaim (sb-ext:maybe-inline %wait-for-mutex-algorithm-2
                                 %wait-for-mutex-algorithm-3))
   (sb-ext:define-load-time-global *grab-mutex-calls-performed* 0)
-  ;; Like futex-wait but without garbage having to do with re-invoking
-  ;; a wake on account of async unwind while releasing the mutex.
-  (declaim (inline fast-futex-wait))
-  (defun fast-futex-wait (word-addr oldval to-sec to-usec)
-    (with-alien ((%wait (function int unsigned
-                                  #+freebsd unsigned #-freebsd (unsigned 32)
-                                  long unsigned-long)
-                        :extern "futex_wait"))
-      (alien-funcall %wait word-addr oldval to-sec to-usec)))
 
   (defun %wait-for-mutex-algorithm-2 (mutex)
     (incf *grab-mutex-calls-performed*)
@@ -813,17 +859,6 @@ returns NIL each time."
               (fast-futex-wait (mutex-state-address mutex) 2 -1 0)))
           ;; Try to get it, still marking it as contested.
           (when (= 0 (setq c (sb-ext:cas val 0 2))) (return)))))) ; win
-  (defun %wait-for-mutex-algorithm-3 (mutex)
-    (incf *grab-mutex-calls-performed*)
-    (let* ((mutex (sb-ext:truly-the mutex mutex))
-           (c (sb-ext:cas val 0 1))) ; available -> taken
-      (unless (= c 0) ; Got it right off the bat?
-        (unless (= c 2)
-          (setq c (%raw-instance-xchg/word mutex (get-dsd-index mutex state) 2)))
-        (loop while (/= c 0)
-              do (with-pinned-objects (mutex)
-                   (fast-futex-wait (mutex-state-address mutex) 2 -1 0))
-                 (setq c (%raw-instance-xchg/word mutex (get-dsd-index mutex state) 2))))))
 
   (defun wait-for-mutex-algorithm-2 (mutex)
     (declare (inline %wait-for-mutex-algorithm-2))

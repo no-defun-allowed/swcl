@@ -368,3 +368,12 @@
 (defun sb-pcl::class-has-a-forward-referenced-superclass-p (x)
   (declare (ignore x))
   nil)
+
+(defun non-null-symbol-p (x) (and x (symbolp x)))
+;; these two functions don't need to be fully general
+(defun pointerp (x)
+  (aver (or (symbolp x) (fixnump x)))
+  (symbolp x))
+;; Use of non-ASCII during build occurs no sooner than make-target-2,
+;; therefore _every_ character satisfies BASE-CHAR-P prior to that.
+#+sb-unicode (defun base-char-p (x) (characterp x))

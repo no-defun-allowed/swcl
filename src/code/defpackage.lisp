@@ -754,7 +754,7 @@ specifies to signal a warning if SWANK package is in variance, and an error othe
              (return-from rehash)) ; already hashed
            (let* ((cells (cdr cells))
                   (hashes (map '(simple-array (unsigned-byte 32) (*))
-                               (lambda (symbol) (ldb (byte 32 0) (symbol-hash symbol)))
+                               #'symbol-name-hash
                                (remove-if-not #'symbolp cells)))
                   (hash-expr (sb-c:make-perfect-hash-lambda hashes)))
              (unless hash-expr
@@ -763,7 +763,7 @@ specifies to signal a warning if SWANK package is in variance, and an error othe
                    (new-cells (make-array (length hashes) :initial-element 0)))
                (dovector (s cells)
                  (when (symbolp s)
-                   (let ((hash (funcall fun (ldb (byte 32 0) (symbol-hash s)))))
+                   (let ((hash (funcall fun (symbol-name-hash s))))
                      (aver (eq (svref new-cells hash) 0))
                      (setf (svref new-cells hash) s))))
                (setf (symtbl-%cells table) (cons fun new-cells)
@@ -820,7 +820,7 @@ specifies to signal a warning if SWANK package is in variance, and an error othe
            (when (functionp reciprocals)
              (return-from metrics (values 1 1 1))) ; 1 probe max+avg, 100% load
            (flet ((probe-seq-len (symbol)
-                    (let* ((name-hash (sxhash symbol))
+                    (let* ((name-hash (symbol-name-hash symbol))
                            (index (symbol-table-hash 1 name-hash nslots))
                            (h2 (symbol-table-hash 2 name-hash nslots))
                            (nprobes 1))

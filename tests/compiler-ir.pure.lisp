@@ -11,6 +11,9 @@
 
 (enable-test-parallelism)
 
+#-sb-devel
+(invoke-restart 'run-tests::skip-file)
+
 (import '(sb-c::combination-fun-debug-name
           sb-c::combination-fun-source-name
           sb-c::*compile-component-hook*
@@ -53,7 +56,7 @@
     (inspect-ir
      form
      (lambda (component)
-       (sb-c:do-ir2-blocks (block component)
+       (sb-c::do-ir2-blocks (block component)
          (do ((vop (sb-c::ir2-block-start-vop block)
                    (sb-c:vop-next vop)))
              ((null vop))
@@ -145,6 +148,7 @@
                                   (lambda (&optional z)
                                     z))))))))
 
+#+sb-devel
 (with-test (:name (:assignment-convert :iterative-tail))
   (let ((converted nil))
     (let ((fun (inspect-ir
@@ -157,7 +161,7 @@
                 (lambda (component)
                   (dolist (lambda (sb-c::component-lambdas component))
                     (dolist (lambda-let (sb-c::lambda-lets lambda))
-                      (when (eq (sb-c::lambda-kind lambda-let) :assignment)
+                      (when (sb-c::functional-kind-eq lambda-let sb-c::assignment)
                         (setq converted t))))))))
       (assert (= (funcall fun 9) 362880))
       (assert converted))))
@@ -174,7 +178,7 @@
                 (lambda (component)
                   (dolist (lambda (sb-c::component-lambdas component))
                     (dolist (lambda-let (sb-c::lambda-lets lambda))
-                      (when (eq (sb-c::lambda-kind lambda-let) :assignment)
+                      (when (sb-c::functional-kind-eq lambda-let sb-c::assignment)
                         (setq converted t))))))))
       (assert (= (funcall fun 9) 362881))
       (assert converted))))
@@ -193,7 +197,7 @@
                 (lambda (component)
                   (dolist (lambda (sb-c::component-lambdas component))
                     (dolist (lambda-let (sb-c::lambda-lets lambda))
-                      (when (eq (sb-c::lambda-kind lambda-let) :assignment)
+                      (when (sb-c::functional-kind-eq lambda-let sb-c::assignment)
                         (setq converted t))))))))
       (assert (= (funcall fun 5 3 4) 8))
       (assert (= (funcall fun 6 3 4) 12))
@@ -216,7 +220,7 @@
                 (lambda (component)
                   (dolist (lambda (sb-c::component-lambdas component))
                     (dolist (lambda-let (sb-c::lambda-lets lambda))
-                      (when (eq (sb-c::lambda-kind lambda-let) :assignment)
+                      (when (sb-c::functional-kind-eq lambda-let sb-c::assignment)
                         (incf converted))))))))
       (assert (equal (funcall fun 0 5) '(:rip :another nil nil)))
       ;; There should be two converted :ASSIGNMENT lambdas: one for
@@ -244,7 +248,7 @@
                 (lambda (component)
                   (dolist (lambda (sb-c::component-lambdas component))
                     (dolist (lambda-let (sb-c::lambda-lets lambda))
-                      (when (eq (sb-c::lambda-kind lambda-let) :assignment)
+                      (when (sb-c::functional-kind-eq lambda-let sb-c::assignment)
                         (setf converted t))))))))
       (assert (= (funcall fun 'a) 1))
       (assert (= (funcall fun 'l) 2))
@@ -266,9 +270,9 @@
      (lambda (component)
        (dolist (lambda (sb-c::component-lambdas component))
          (dolist (lambda-let (sb-c::lambda-lets lambda))
-           (when (eq (sb-c::lambda-kind lambda-let) :assignment)
+           (when (sb-c::functional-kind-eq lambda-let sb-c::assignment)
              (setf assignment t))
-           (when (eq (sb-c::lambda-kind lambda-let) :let)
+           (when (sb-c::functional-kind-eq lambda-let let)
              (setf let t))))))
     (assert (not assignment))
     (assert let)))
@@ -291,7 +295,7 @@
                  (lambda (component)
                    (dolist (lambda (sb-c::component-lambdas component))
                      (dolist (lambda-let (sb-c::lambda-lets lambda))
-                       (when (eq (sb-c::lambda-kind lambda-let) :assignment)
+                       (when (sb-c::functional-kind-eq lambda-let sb-c::assignment)
                          (setf assignment t))))))))
       (assert (eq (funcall fun 3) 'GOOD))
       (assert (eq (funcall fun -3) 'GOOD))
@@ -357,7 +361,7 @@
                   (lambda (call)
                     (let ((fun (sb-c::ref-leaf (sb-c::lvar-uses (sb-c::combination-fun call)))))
                       (and (sb-c::functional-p fun)
-                           (eq (sb-c::functional-kind fun) :let))))
+                           (sb-c::functional-kind-eq fun let))))
                   calls)))))
 
 (with-test (:name :unused-flet-values)

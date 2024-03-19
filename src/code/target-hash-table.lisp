@@ -168,6 +168,7 @@
      (eq-hash key))))
 
 (declaim (inline prefuzz-hash))
+(export 'prefuzz-hash) ; for regression tests
 (defun prefuzz-hash (hash)
   ;; We're using power of two tables which obviously are very
   ;; sensitive to the exact values of the low bits in the hash
@@ -281,8 +282,7 @@ Examples:
 ;;; The smallest table holds 14 items distributed among 16 buckets.
 ;;; So we allocate 14 k/v pairs = 28 cells + 3 overhead = 31 cells,
 ;;; and at maximum load the table will have a load factor of 87.5%
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (defconstant kv-pairs-overhead-slots 3))
+(defconstant kv-pairs-overhead-slots 3)
 (defconstant bad-next-value #xfefefefe)
 ;;; This constant is referenced via its name in cold load, so it needs to
 ;;; be evaluable in the host.
@@ -1469,8 +1469,7 @@ nnnn 1_    any       linear scan (don't try to read when rehash already in progr
        ;; It would be ideal if we were consistent about all tables NOT having
        ;; synchronization unless created with ":SYNCHRONIZED T"
        ;; but it looks tricky to support concurrent gethash on weak tables,
-       ;; so we mostly default to locking, except where there is an outer scope
-       ;; providing mutual exclusion such as WITH-FINALIZER-STORE.
+       ;; so we default to locking.
        (if (hash-table-synchronized-p hash-table)
            ;; Use the private slot accessor for the lock because it's known
            ;; to have a mutex.

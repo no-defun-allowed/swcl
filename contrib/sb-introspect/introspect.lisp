@@ -79,10 +79,6 @@ For example, the debug source for a function compiled from a file will
 include the pathname of the file and the position of the definition."
   'sb-c::debug-source)
 
-(deftype debug-function ()
-  "Debug function represent static compile-time information about a function."
-  'sb-c::compiled-debug-fun)
-
 (declaim (ftype (sfunction (function) debug-info) function-debug-info))
 (defun function-debug-info (function)
   (let* ((function-object (%fun-fun function))
@@ -96,12 +92,6 @@ include the pathname of the file and the position of the definition."
 (declaim (ftype (sfunction (debug-info) debug-source) debug-info-source))
 (defun debug-info-source (debug-info)
   (sb-c::debug-info-source debug-info))
-
-(declaim (ftype (sfunction (t debug-info) debug-function) debug-info-debug-function))
-(defun debug-info-debug-function (function debug-info)
-  (sb-di::compiled-debug-fun-from-pc debug-info
-                                     (sb-di::function-start-pc-offset function)
-                                     t))
 
 (defun valid-function-name-p (name)
   "True if NAME denotes a valid function name, ie. one that can be passed to
@@ -459,10 +449,10 @@ If an unsupported TYPE is requested, the function will return NIL.
             (type-of object)))))
 
 (defun find-function-definition-source (function)
-  (let* ((debug-info (function-debug-info function))
-         (debug-source (debug-info-source debug-info))
-         (debug-fun (debug-info-debug-function function debug-info))
-         (tlf (if debug-fun (sb-c::compiled-debug-fun-tlf-number debug-fun))))
+  (let* ((debug-source (debug-info-source (function-debug-info function)))
+         (debug-fun (sb-di::fun-debug-fun function))
+         (tlf (sb-c::compiled-debug-fun-tlf-number
+               (sb-di::compiled-debug-fun-compiler-debug-fun debug-fun))))
     (make-definition-source
      :pathname
      (when (stringp (debug-source-namestring debug-source))
@@ -471,7 +461,8 @@ If an unsupported TYPE is requested, the function will return NIL.
      (if tlf
          (elt (sb-c::debug-source-start-positions debug-source) tlf))
      :form-path (if tlf (list tlf))
-     :form-number (sb-c::compiled-debug-fun-form-number debug-fun)
+     :form-number (sb-di::code-location-form-number
+                   (sb-di::debug-fun-start-location debug-fun))
      :file-write-date (debug-source-created debug-source)
      :plist (sb-c::debug-source-plist debug-source))))
 

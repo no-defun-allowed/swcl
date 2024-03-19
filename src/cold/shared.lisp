@@ -319,6 +319,12 @@
           (pushnew :immobile-code sb-xc:*features*))
         (when (target-featurep :64-bit)
           (push :compact-symbol sb-xc:*features*))
+        (when (target-featurep :64-bit)
+          ;; Considering that a single config file governs rv32 and rv64, I don't
+          ;; know how to make this properly configurable. In theory, 32-bit builds could
+          ;; have a salted hash (gaining 3 bits by making the hash slot raw), but
+          ;; they don't, so in light of things, this is a valid criterion.
+          (push :salted-symbol-hash sb-xc:*features*))
         (when (target-featurep '(:and :sb-thread (:or (:and :darwin (:not (:or :ppc :x86))) :openbsd)))
           (push :os-thread-stack sb-xc:*features*))
         (when (target-featurep '(:and :x86 :int4-breakpoints))
@@ -1002,7 +1008,7 @@
           (error "hash generator duplicates: ~D" errors))))))
 (compile 'preload-perfect-hash-generator)
 
-(defun emulate-generate-perfect-hash-sexpr (array identifier)
+(defun emulate-generate-perfect-hash-sexpr (array identifier digest)
   (declare #-use-host-hash-generator (ignore identifier))
   (let (computed)
     (declare (ignorable computed))
@@ -1010,7 +1016,6 @@
     ;; comparing as sets can be done using EQUALP.
     ;; Sort nondestructively in case something else looks at the value as supplied.
     (let* ((canonical-array (sort (copy-seq array) #'<))
-           (digest (reduce #'logxor canonical-array))
            (match (assoc (cons digest canonical-array) *perfect-hash-generator-memo*
                          :test #'equalp)))
       (when match

@@ -26,7 +26,7 @@
      (flet ((add (lvar type)
               (let ((var (ok-lvar-lambda-var lvar gen)))
                 (when var
-                  (conset-add-constraint-to-eql consequent 'typep var type nil)))))
+                  (conset-add-constraint-to-eql gen 'typep var type nil consequent)))))
        (cond ((csubtypep constraint (specifier-type 'integer))
               (let ((x-integerp (csubtypep (lvar-type x) (specifier-type 'integer)))
                     (y-integerp (csubtypep (lvar-type y) (specifier-type 'integer))))
@@ -63,7 +63,7 @@
      (flet ((add (lvar type)
               (let ((var (ok-lvar-lambda-var lvar gen)))
                 (when var
-                  (conset-add-constraint-to-eql consequent 'typep var type nil)))))
+                  (conset-add-constraint-to-eql gen 'typep var type nil consequent)))))
        (cond ((csubtypep constraint (specifier-type 'integer))
               (let ((x-integerp (csubtypep (lvar-type x) (specifier-type 'integer)))
                     (y-integerp (csubtypep (lvar-type y) (specifier-type 'integer))))
@@ -106,7 +106,7 @@
      (flet ((add (lvar type)
               (let ((var (ok-lvar-lambda-var lvar gen)))
                 (when var
-                  (conset-add-constraint-to-eql consequent 'typep var type nil)))))
+                  (conset-add-constraint-to-eql gen 'typep var type nil consequent)))))
        (let* ((complex-p (or (types-equal-or-intersect (lvar-type x) (specifier-type 'complex))
                              (types-equal-or-intersect (lvar-type x) (specifier-type 'complex))))
               ;; complex rationals multiplied by 0 will produce an integer 0.
@@ -146,6 +146,17 @@
                               (not x-realp))
                          (add x (specifier-type 'real))))))))))))
 
+(defoptimizer (car constraint-propagate-back) ((x) node nth-value kind constraint gen consequent alternative)
+  (declare (ignore nth-value alternative))
+  (case kind
+    (typep
+     (unless (types-equal-or-intersect constraint (specifier-type 'null))
+       (let ((var (ok-lvar-lambda-var x gen)))
+         (when var
+           (conset-add-constraint-to-eql gen 'typep var (specifier-type '(not null)) nil consequent)))))))
+
+(setf (fun-info-constraint-propagate-back (fun-info-or-lose 'cdr)) #'car-constraint-propagate-back-optimizer)
+
 ;;; If the remainder is non-zero then X can't be zero.
 (defoptimizer (truncate constraint-propagate-back) ((x y) node nth-value kind constraint gen consequent alternative)
   (let ((var (ok-lvar-lambda-var x gen)))
@@ -158,10 +169,10 @@
         (when (and (constant-p constraint)
                    (eql (constant-value constraint) 0)
                    alternative)
-          (conset-add-constraint-to-eql alternative 'typep var (specifier-type '(and integer (not (eql 0)))) nil)))
+          (conset-add-constraint-to-eql gen 'typep var (specifier-type '(and integer (not (eql 0)))) nil alternative)))
        (>
         (when (csubtypep (lvar-type constraint) (specifier-type '(integer 0)))
-          (conset-add-constraint-to-eql consequent 'typep var (specifier-type '(integer 1)) nil)))))))
+          (conset-add-constraint-to-eql gen 'typep var (specifier-type '(integer 1)) nil consequent)))))))
 
 (defoptimizer (%negate constraint-propagate-back) ((x) node nth-value kind constraint gen consequent alternative)
   (declare (ignore nth-value alternative))
@@ -174,5 +185,84 @@
                     (numberp (interval-high range)))
            (let ((var (ok-lvar-lambda-var x gen)))
              (when var
-               (conset-add-constraint-to-eql consequent 'typep var (specifier-type `(rational (,(- (interval-high range)))))
-                                             nil)))))))))
+               (conset-add-constraint-to-eql gen 'typep var (specifier-type `(rational (,(- (interval-high range)))))
+                                             nil consequent)))))))))
+
+(defoptimizer (char-code constraint-propagate-back) ((x) node nth-value kind constraint gen consequent alternative)
+  (declare (ignore nth-value))
+  (case kind
+    ((< > eq)
+     (when (csubtypep (lvar-type constraint) (specifier-type 'rational))
+       (let ((range (type-approximate-interval (lvar-type constraint))))
+         (when (and range
+                    (numberp (interval-high range)))
+           (let ((var (ok-lvar-lambda-var x gen))
+                 (low (interval-low range))
+                 (high (interval-high range)))
+             (when var
+               (interval-high range)
+               (case kind
+                 (<
+                  (when (and (numberp high)
+                             (< high (1- char-code-limit)))
+                    (conset-add-constraint-to-eql gen 'typep var
+                                                  (if (<= high 0)
+                                                      *empty-type*
+                                                      (specifier-type `(character-set ((0 . ,(1- high))))))
+                                                  nil
+                                                  consequent))
+                  (when (and alternative
+                             (numberp low)
+                             (> low 0))
+                    (conset-add-constraint-to-eql gen 'typep var
+                                                  (specifier-type `(character-set ((,low . #.(1- char-code-limit)))))
+                                                  nil
+                                                  alternative)))
+                 (>
+                  (when (and (numberp low)
+                             (> low 0))
+                    (conset-add-constraint-to-eql gen 'typep var
+                                                  (if (>= low (1- char-code-limit))
+                                                      *empty-type*
+                                                      (specifier-type `(character-set ((,(1+ low) . #.(1- char-code-limit))))))
+                                                  nil
+                                                  consequent))
+                  (when (and alternative
+                             (numberp high)
+                             (< high (1- char-code-limit)))
+                    (conset-add-constraint-to-eql gen 'typep var
+                                                  (specifier-type `(character-set ((0 . ,high))))
+                                                  nil alternative)))
+                 (eq
+                  (let ((low (if (numberp low)
+                                 low
+                                 0))
+                        (high (if (numberp high)
+                                  high
+                                  (1- char-code-limit))))
+                    (when (and (> low 0)
+                               (< high (1- char-code-limit)))
+                      (let ((type (specifier-type `(character-set ((,low . ,high))))))
+                        (conset-add-constraint-to-eql gen 'typep var type nil consequent)
+                        (conset-add-constraint-to-eql gen 'typep var type t alternative))))))))))))))
+
+(defoptimizer (data-vector-ref-with-offset constraint-propagate-back)
+    ((array index offset) node nth-value kind constraint gen consequent alternative)
+  (declare (ignore nth-value alternative))
+  (case kind
+    (eq
+     (when (and (constant-lvar-p array)
+                (constant-lvar-p offset)
+                (zerop (lvar-value offset)))
+       (let ((array (lvar-value array))
+             (type (lvar-type constraint))
+             misses
+             var)
+         (when (and (typep array 'simple-vector)
+                    (setf var (ok-lvar-lambda-var index gen)))
+           (loop for i below (length array)
+                 for e = (aref array i)
+                 unless (types-equal-or-intersect (ctype-of e) type)
+                 do (push i misses))
+           (when misses
+             (conset-add-constraint-to-eql gen 'typep var (specifier-type `(member ,@misses)) t consequent))))))))

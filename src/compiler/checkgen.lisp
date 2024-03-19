@@ -449,7 +449,7 @@
                                      lvar (combination-args dest))))
                            (format nil "~:[A possible~;The~] binding of ~S"
                                    (and (lvar-has-single-use-p lvar)
-                                        (eq (functional-kind lambda) :let))
+                                        (functional-kind-eq lambda let))
                                    (leaf-source-name (elt (lambda-vars lambda)
                                                           pos)))))))
             (cond ((and (ref-p use) (constant-p (ref-leaf use)))
@@ -515,9 +515,8 @@
                        (casts node))))))
           (setf (block-type-check block) nil)))
       (dolist (cast (casts))
-        (unless (or (bound-cast-p cast)
-                    ;; Disabled by cast-externally-checkable-p of a different cast.
-                    (not (cast-type-check cast)))
+        ;; Disabled by cast-externally-checkable-p of a different cast.
+        (when (cast-type-check cast)
           (multiple-value-bind (check types) (cast-check-types cast)
             (ecase check
               (:simple

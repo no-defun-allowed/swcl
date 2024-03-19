@@ -2223,7 +2223,7 @@
 ;;;
 (macrolet
     ((define-fastrem (bits opsize
-                           &aux (name (symbolicate "FASTREM-" (write-to-string bits))))
+                           &aux (name (symbolicate "FASTREM-" bits)))
        `(define-vop (,name)
           (:translate ,name)
           (:policy :fast-safe)
@@ -2554,21 +2554,26 @@
                (inst test :byte `(,x . :high-byte) (ash y -8))
                (inst test size x y))))))
 
+(deftransform logtest ((x y) (:or ((signed-word signed-word) *)
+                                  ((word word) *))
+                       * :vop t)
+  t)
+
 (macrolet ((define-logtest-vops ()
              `(progn
-               ,@(loop for suffix in '(/fixnum -c/fixnum
-                                       /signed -c/signed
-                                       /unsigned -c/unsigned)
-                       for cost in '(4 3 6 5 6 5)
-                       collect
-                       `(define-vop (,(symbolicate "FAST-LOGTEST" suffix)
-                                     ,(symbolicate "FAST-CONDITIONAL" suffix))
-                         (:translate logtest)
-                         (:conditional :ne)
-                         (:generator ,cost
-                          (emit-optimized-test-inst x
-                           ,(if (eq suffix '-c/fixnum) `(fixnumize y) 'y)
-                           temp nil)))))))
+                ,@(loop for suffix in '(/fixnum -c/fixnum
+                                        /signed -c/signed
+                                        /unsigned -c/unsigned)
+                        for cost in '(4 3 6 5 6 5)
+                        collect
+                        `(define-vop (,(symbolicate "FAST-LOGTEST" suffix)
+                                      ,(symbolicate "FAST-CONDITIONAL" suffix))
+                           (:translate logtest)
+                           (:conditional :ne)
+                           (:generator ,cost
+                             (emit-optimized-test-inst x
+                               ,(if (eq suffix '-c/fixnum) `(fixnumize y) 'y)
+                               temp nil)))))))
   (define-logtest-vops))
 
 ;;; This works for tagged or untagged values, but the vop optimizer
@@ -2653,35 +2658,46 @@
 (setf (sb-c::vop-info-optimizer (template-or-lose 'fast-logtest-c/unsigned))
       (cons #'vop-optimize-fast-logtest-c/fixnum-optimizer 'sb-c::select-representations))
 
+(deftransform logbitp ((index integer) (:or ((signed-word signed-word) *)
+                                  ((word word) *)) * :vop t)
+  (not (sb-c::logbitp-to-minusp-p index integer)))
+
 ;;; TODO: The TEST instruction preceding this JEQ is entirely superfluous
 ;;; and can be removed with a vop optimizer:
 ;;; E1:       25FE0F0000       AND EAX, 4094
 ;;; E6:       4885C0           TEST RAX, RAX
 ;;; E9:       74C9             JEQ L2
-;;; Normally we define a spectrum of vops to handle {unsigned,signed,any}-reg and
-;;; constant/non-constant operands. That's often unnecessary. Certainly for this vop.
 (define-vop (logbitp fast-safe-arith-op)
   (:translate logbitp)
   (:conditional :c)
-  (:args (bit :scs (signed-reg signed-stack unsigned-reg unsigned-stack
-                    any-reg control-stack))
+  (:args (bit :scs (signed-reg unsigned-reg))
          ;; CONSTANT here is to allow integers exceeding a fixnum which get NIL
          ;; from IMMEDIATE-CONSTANT-SC. This is only an issue for vops which don't
          ;; take a codegen info for the constant.
          ;; IMMEDIATE is always allowed and pertains to fixnum-sized constants.
          (int :scs (constant signed-reg signed-stack unsigned-reg unsigned-stack)
               :load-if nil))
+  (:arg-refs bit-ref)
   (:arg-types untagged-num untagged-num)
   (:temporary (:sc unsigned-reg) temp)
   (:generator 4
     (when (sc-is int constant immediate) (setq int (tn-value int)))
     ;; Force INT to be a RIP-relative operand if it is a constant.
-    (let ((word (if (integerp int) (register-inline-constant :qword int) int))
-          (bit (cond ((sc-is bit signed-reg unsigned-reg) bit)
-                     (t (inst mov :dword temp bit)
-                        (when (sc-is bit any-reg control-stack)
-                          (inst shr :dword temp n-fixnum-tag-bits))
-                        temp))))
+    (let ((word (if (integerp int) (register-inline-constant :qword int) int)))
+      (unless (csubtypep (tn-ref-type bit-ref) (specifier-type '(integer 0 63)))
+        (cond ((if (integerp int)
+                   (typep int 'signed-word)
+                   (sc-is word signed-reg signed-stack))
+               (inst mov temp 63)
+               (inst cmp bit temp)
+
+               (inst cmov :na temp bit)
+               (setf bit temp))
+              (t
+               (zeroize temp)
+               (inst cmp bit 63)
+               (inst cmov :na temp word)
+               (setf word temp))))
       (inst bt word bit))))
 
 (define-vop (logbitp/c fast-safe-arith-op)
@@ -3894,6 +3910,17 @@
 
   (def check-range<= nil nil t))
 
+(deftransform %dpb ((new size posn integer) (:or ((word
+                                                   (constant-arg integer)
+                                                   (constant-arg (integer 1 1))
+                                                   word) *)
+                                                 ((signed-word
+                                                   (constant-arg integer)
+                                                   (constant-arg (integer 1 1))
+                                                   signed-word) *)) *
+                    :vop t)
+  (not (constant-lvar-p posn)))
+
 (define-vop (dpb-c/fixnum)
   (:translate %dpb)
   (:args (posn :scs (unsigned-reg) :target temp)
@@ -3951,3 +3978,92 @@
     (if (logbitp 0 new)
         (inst bts res posn)
         (inst btr res posn))))
+
+(defknown calc-phash ((unsigned-byte 32) (integer 1 4) simple-vector)
+  (unsigned-byte 32) (flushable always-translatable))
+
+;;; TODO: sometimes there's (LDB (BYTE 32 0) KEY) in front of the calculation
+;;; which we don't need, or rather, need but can be done in the vop basically
+;;; for free compared to referencing #x1FFFFFFFE as a code header constant.
+;;; Even if the initial untagging right-shift is required to use a :QWORD
+;;; operand size, it could be followed by a :DWORD mov into the same register.
+(define-vop ()
+  (:translate calc-phash)
+  (:args (arg :scs (any-reg) :target temp0))
+  (:arg-types positive-fixnum (:constant t) (:constant t))
+  (:info n-temps steps)
+  (:ignore n-temps)
+  (:temporary (:sc unsigned-reg :from (:argument 0) :to (:result 0))
+              temp0 temp1)
+  (:temporary (:sc unsigned-reg :from (:argument 0) :to (:result 0)
+               :unused-if (< n-temps 3)) temp2)
+  (:temporary (:sc unsigned-reg :from (:argument 0) :to (:result 0)
+               :unused-if (< n-temps 4)) temp3)
+  (:results (res :scs (any-reg)))
+  (:result-types positive-fixnum)
+  (:policy :fast-safe)
+  (:generator 3
+    (aver (eq (cadr (svref steps 0)) 'sb-c::t0))
+    ;; this should be a null move due to :target on arg
+    (move temp0 arg)
+    (flet ((tn-from-metasyntactic-var (var)
+             (ecase var
+               (sb-c::t0 temp0)
+               (sb-c::t1 temp1)
+               (sb-c::t2 temp2)
+               (sb-c::t3 temp3))))
+      ;; Replace placeholder symbols with TNs, and perform a few assembly tricks
+      (do ((i 0 (1+ i))
+           (prev-op))
+          ((= i (length steps)))
+        (destructuring-bind (&whole stmt op arg1 &optional arg2 arg3) (svref steps i)
+          (declare (ignore arg3))
+          (when (eq op 'move) ; MOVE becomes MOV
+            (setf op 'mov (first stmt) op))
+          (when (symbolp arg1)
+            (setf arg1 (tn-from-metasyntactic-var arg1)
+                  (second stmt) arg1))
+          (when (setf arg2 (typecase arg2
+                             ((and symbol (not null)) (tn-from-metasyntactic-var arg2))
+                             (array (emit-constant arg2))
+                             (t arg2)))
+            (setf (third stmt) arg2))
+          ;; ANDing with #xFF or #xFFFF is MOVZX, and might subsume a MOV too,
+          ;; but MOV / AND #xFF is so rare that I couldn't make it occur.
+          (when (and (eq op 'and) (or (eql arg2 #xFF) (eql arg2 #xFFFF)))
+            ;; Emit as MOVZX which avoids using a 4-byte immediate in the AND.
+            ;; (A 1-byte immediate would get sign-extended)
+            (let ((size (if (eql arg2 #xFF) :byte :word)))
+              (setf (svref steps i) `(movzx (,size :dword) ,arg1 ,arg1))))
+          (setq prev-op op))))
+    ;; Emit instructions
+    (dotimes (i (length steps))
+      (destructuring-bind (&whole stmt op dest &optional src arg3) (svref steps i)
+        (cond ((eq op 'sb-c::neg) ; unary op
+               (inst neg :dword dest))
+              ((eq op 'aref)
+               (let* ((disp (- (ash vector-data-offset word-shift)
+                               other-pointer-lowtag)) ; complicated way of computing 1
+                      (scale arg3)
+                      (ea (ea disp dest src scale)))
+                 (ecase scale
+                   (1 (inst movzx '(:byte :dword) dest ea))
+                   (2 (inst movzx '(:word :dword) dest ea))
+                   (4 (inst mov :dword dest ea)))))
+              ((or (eq op 'movzx) (and (eq op 'mov) (constant-tn-p src)))
+               (apply #'inst* stmt)) ; zero-extending or 64-bit move
+              ((eq i 0)
+               (aver (eq op 'sb-c::shr))
+               ;; fixnum-untagging MOV is 64-bit to avoid losing 1 bit,
+               ;; unless I can show that the expression doesn't care about bit 31
+               (inst* op dest src))
+              ((and (eq op 'sb-c::xor) (eql src #xFFFFFFFF))
+               (inst not :dword dest))
+              (t
+               (inst* op :dword dest src)))))
+    ;; Move result and re-tag. Restrict the output to 31 significant bits,
+    ;; totally reasonable considering that you'd probably have to wait for
+    ;; days to produce a perfect hash function of 2 billion keys.
+    (let* ((step (svref steps (1- (length steps))))
+           (tn (second step)))
+      (inst lea :dword res (ea tn tn)))))

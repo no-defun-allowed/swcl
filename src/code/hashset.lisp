@@ -19,7 +19,6 @@
 
 (eval-when ()
   (pushnew :hashset-debug sb-xc:*features*))
-#+sb-xc-host (define-symbol-macro sb-kernel::*gc-epoch* 0)
 
 (define-load-time-global *hashset-print-statistics* nil)
 
@@ -32,7 +31,7 @@
             (:conc-name hss-)
             (:copier nil)
             (:predicate nil))
-  (cells #() :type (or simple-vector #-sb-xc-host weak-vector) :read-only t)
+  (cells #() :type (or simple-vector weak-vector) :read-only t)
   ;; We always store a hash-vector even if inexact (see below)
   ;; so that we can avoid calling the comparator on definite mismatches.
   (hash-vector (make-array 0 :element-type '(unsigned-byte 16))
@@ -59,7 +58,7 @@
   (test-function #'error :type function)
   #+hashset-metrics (count-find-hits 0 :type sb-vm:word)
   #+hashset-metrics (count-finds 0 :type sb-vm:word)
-  (mutex nil :type (or null #-sb-xc-host sb-thread:mutex)))
+  (mutex nil :type (or null sb-thread:mutex)))
 
 (defmacro hs-cells-len (v)
   #-weak-vector-readbarrier `(length ,v)
@@ -88,8 +87,7 @@
      (if (simple-vector-p v) (svref v i) (weak-vector-ref v i))))
 
 ;;; The last few elements in the cell vector are metadata.
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (defconstant hs-storage-trailer-cells 3))
+(defconstant hs-storage-trailer-cells 3)
 (defmacro hs-cells-capacity (v)
   `(truly-the index (- (hs-cells-len ,v) ,hs-storage-trailer-cells)))
 (defmacro hs-cells-mask (v)
@@ -121,7 +119,7 @@
          ;; if so chosen by the the current thread, thereby ignoring
          ;; the SB-C::TLAB declaration above. ALLOCATE-WEAK-VECTOR
          ;; will respect the local declaration.
-         (cells (cond #-sb-xc-host (weakp (sb-c::allocate-weak-vector len))
+         (cells (cond (weakp (sb-c::allocate-weak-vector len))
                       (t (make-array len :initial-element 0))))
          (psl-vector (make-array capacity :element-type '(unsigned-byte 8)
                                           :initial-element 0))
@@ -137,8 +135,7 @@
     (!make-hs-storage cells psl-vector hash-vector (> capacity 65536))))
 
 (defun hashset-weakp (hashset)
-  #+sb-xc-host (declare (ignore hashset))
-  #-sb-xc-host (weak-vector-p (hss-cells (hashset-storage hashset))))
+  (weak-vector-p (hss-cells (hashset-storage hashset))))
 
 ;;; The hash-function provided to this constructor has to be reasonably strong.
 ;;; You could probably get away with SXHASH for instance types since we have stable
@@ -151,8 +148,7 @@
          (storage (allocate-hashset-storage capacity weakness)))
     (make-robinhood-hashset :hash-function hash-function
                             :test-function test-function
-                            :mutex (if synchronized #-sb-xc-host (sb-thread:make-mutex :name "hashset")
-                                                    #+sb-xc-host nil)
+                            :mutex (if synchronized (sb-thread:make-mutex :name "hashset"))
                             :storage storage)))
 
 ;;; The following terms are synonyms: "probe sequence position", "probe sequence index".
@@ -281,7 +277,7 @@
 ;;; [Sidebar: I may need to change the tombstone and/or unassigned value.
 ;;; Currently these hashsets can't represent 0 or NIL as a key per se]
 (defun hs-cells-occupancy (cells limit)
-  (declare (type (or simple-vector #-sb-xc-host weak-vector) cells)
+  (declare (type (or simple-vector weak-vector) cells)
            (index limit))
   (let ((count-live 0)
         (count-nil 0) ; GC smashes to NIL, so these are tombstones
@@ -292,7 +288,7 @@
       (let ((val (hs-cell-ref cells i)))
         (cond ((eql val nil) (incf count-nil))
               ((eql val 0) (incf count-0))
-              #-sb-xc-host ((unbound-marker-p val) (incf count-ubm))
+              ((unbound-marker-p val) (incf count-ubm))
               (t (incf count-live)))))
     (values count-live count-nil count-0 count-ubm)))
 
@@ -496,52 +492,6 @@
               (hashset-count self)
               (hs-cells-capacity cells)
               (hs-cells-max-psl cells)))))
-
-;;; We need to avoid dependence on the host's SXHASH function when producing
-;;; hash values for hashset lookup, so that elements end up in an order
-;;; that is host-lisp-insensitive. But the logic for our SXHASH is used here
-;;; and also in the compiler transforms (which defines the ordinary function).
-;;; Spewing it all over would lead invariably to getting it wrong,
-;;; so we define the expression that the compiler will use, and then
-;;; we paste the expressions into the cross-compilers emulation of our SXHASH.
-
-(eval-when (#+sb-xc-host :compile-toplevel :load-toplevel :execute)
-(defun sxhash-fixnum-xform (x)
-  (let ((c (logand 1193941380939624010 most-positive-fixnum)))
-    ;; shift by -1 to get sign bit into hash
-    `(logand (logxor (ash ,x 4) (ash ,x -1) ,c) most-positive-fixnum)))
-
-(defun sxhash-single-float-xform (x)
-  `(let ((bits (logand (single-float-bits ,x) ,(1- (ash 1 32)))))
-     (logxor 66194023
-             (sxhash (the sb-xc:fixnum
-                          (logand most-positive-fixnum
-                                  (logxor bits (ash bits -7))))))))
-
-(defun sxhash-double-float-xform (x)
-  #-64-bit
-  `(let* ((hi (logand (double-float-high-bits ,x) ,(1- (ash 1 32))))
-          (lo (double-float-low-bits ,x))
-          (hilo (logxor hi lo)))
-     (logxor 475038542
-             (sxhash (the fixnum
-                          (logand most-positive-fixnum
-                                  (logxor hilo
-                                          (ash hilo -7)))))))
-  ;; Treat double-float essentially the same as a fixnum if words are 64 bits.
-  #+64-bit
-  `(let ((x (double-float-bits ,x)))
-     ;; ensure we mix the sign bit into the hash
-     (logand (logxor (ash x 4)
-                     (ash x (- (1+ sb-vm:n-fixnum-tag-bits)))
-                     ;; logical negation of magic constant ensures
-                     ;; that 0.0d0 hashes to something other than what
-                     ;; the fixnum 0 hashes to (as tested in
-                     ;; hash.impure.lisp)
-                     #.(logandc1 1193941380939624010 most-positive-fixnum))
-             most-positive-fixnum)))
-(defvar *sxhash-crosscheck* nil)
-)
 
 #-sb-xc-host
 (progn

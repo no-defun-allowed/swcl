@@ -61,9 +61,7 @@
 ;;;; Graham (evidently not considering the abstraction "vector" to be
 ;;;; such a simple thing:-)
 
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (defconstant +smallvec-length+
-    (expt 2 16)))
+(defconstant +smallvec-length+ (expt 2 16))
 
 ;;; an element of a BIGVEC -- a vector small enough that we have
 ;;; a good chance of it being portable to other Common Lisps
@@ -1140,7 +1138,24 @@ core and return a descriptor to it."
 
 (defvar *cold-symbol-gspace* (or #+immobile-space '*immobile-fixedobj* '*dynamic*))
 (defun encode-symbol-name (package-id name)
-  (logior (ash package-id sb-impl::symbol-name-bits) (descriptor-bits name)))
+  (declare (ignorable package-id))
+  (logior #+compact-symbol (ash package-id sb-impl::symbol-name-bits)
+          (descriptor-bits name)))
+
+(defun assign-symbol-hash (descriptor wordindex name)
+  ;; "why not just call sb-c::symbol-name-hash?" you ask? because: no symbol.
+  (let ((name-hash (sb-c::calc-symbol-name-hash name (length name))))
+    #-salted-symbol-hash
+    (write-wordindexed descriptor wordindex (make-fixnum-descriptor name-hash))
+    #+salted-symbol-hash
+    (let* ((salt (sb-impl::murmur3-fmix-word (descriptor-bits descriptor)))
+           (prng-byte sb-impl::symbol-hash-prng-byte)
+           ;; 64-bit: Low 4 bytes to high 4 bytes of slot
+           ;; 32-bit: name-hash to high 29 bits
+           ;; plus salt the hash any way you want as long as the build is reproducible.
+           (name-hash-pos (+ (byte-size prng-byte) (byte-position prng-byte)))
+           (hash (logior (ash name-hash name-hash-pos) (mask-field prng-byte salt))))
+      (write-wordindexed/raw descriptor wordindex hash))))
 
 ;;; Allocate (and initialize) a symbol.
 ;;; Even though all symbols are the same size now, I still envision the possibility
@@ -1153,19 +1168,14 @@ core and return a descriptor to it."
       (let* ((cold-name (string-literal-to-core name))
              (pkg-id (if cold-package
                          (descriptor-fixnum (read-slot cold-package :id))
-                         sb-impl::+package-id-none+))
-             (hash (make-fixnum-descriptor
-                    (sb-impl::calc-symbol-name-hash name (length name)))))
+                         sb-impl::+package-id-none+)))
+        (assign-symbol-hash symbol sb-vm:symbol-hash-slot name)
         (write-wordindexed symbol sb-vm:symbol-value-slot *unbound-marker*)
-        (write-wordindexed symbol sb-vm:symbol-hash-slot hash)
         (write-wordindexed symbol sb-vm:symbol-info-slot *nil-descriptor*)
-        #+compact-symbol
         (write-wordindexed/raw symbol sb-vm:symbol-name-slot
                                (encode-symbol-name pkg-id cold-name))
-        #-compact-symbol
-        (progn (write-wordindexed symbol sb-vm:symbol-package-id-slot
-                                  (make-fixnum-descriptor pkg-id))
-               (write-wordindexed symbol sb-vm:symbol-name-slot cold-name))))
+        #-compact-symbol (write-wordindexed symbol sb-vm:symbol-package-id-slot
+                                            (make-fixnum-descriptor pkg-id))))
     symbol))
 
 ;;; Set the cold symbol value of SYMBOL-OR-SYMBOL-DES, which can be either a
@@ -1579,7 +1589,7 @@ core and return a descriptor to it."
                    :doc-string (if (and docstring #-sb-doc nil)
                                    (string-literal-to-core docstring)
                                    *nil-descriptor*)))
-    (push (cons name (mapcar 'sb-xc:package-name use-list)) *package-graph*)
+    (push (cons name (sort (mapcar 'sb-xc:package-name use-list) #'string<)) *package-graph*)
     ;; COLD-INTERN AVERs that the package has an ID, so delay writing
     ;; the shadowing-symbols until the package is ready.
     (write-slots cold-package
@@ -1779,27 +1789,18 @@ core and return a descriptor to it."
         ;; The header-word for NIL "as a symbol" contains a length + widetag.
         (write-wordindexed des 1 (make-other-immediate-descriptor (1- sb-vm:symbol-size)
                                                                   sb-vm:symbol-widetag))
-        (write-wordindexed des (+ 1 sb-vm:symbol-value-slot) nil-val)
-        #+relocatable-static-space
-        (write-wordindexed des (+ 1 sb-vm::symbol-unused-slot) nil-val)
-        (write-wordindexed des (+ 1 sb-vm:symbol-hash-slot) nil-val)
+        ;; Write the CAR and CDR of nil-as-cons
+        (let* ((nil-cons-base-addr (- sb-vm:nil-value sb-vm:list-pointer-lowtag))
+               (nil-cons-car-offs (- nil-cons-base-addr (gspace-byte-address *static*)))
+               (nil-cons-cdr-offs (+ nil-cons-car-offs sb-vm:n-word-bytes)))
+          (setf (bvref-word (descriptor-mem des) nil-cons-car-offs) sb-vm:nil-value
+                (bvref-word (descriptor-mem des) nil-cons-cdr-offs) sb-vm:nil-value))
+        ;; Assign HASH if and only if NIL's hash is address-insensitive
+        #+(or relocatable-static-space (not 64-bit))
+        (assign-symbol-hash des (+ 1 sb-vm:symbol-hash-slot) "NIL")
         (write-wordindexed des (+ 1 sb-vm:symbol-info-slot) initial-info)
-        (write-wordindexed des (+ 1 sb-vm:symbol-name-slot) name)
-        #+ppc64
-        (progn
-          ;; We don't usually create an FDEFN for NIL, however on PP64 there is one
-          ;; made now. Due to unique lowtagging on that architectures, it doesn't magically
-          ;; work to access slots of NIL as a symbol the way the vops expect.
-          ;; There are hacks in the symbol slot reading vops, but not the writing vops,
-          ;; because nothing should write to slots of NIL. The sole exception would be that
-          ;; if someone tries to funcall NIL there can be an undefined tramp,
-          ;; so we make one here without adding complications to the lisp side.
-          (write-wordindexed des (+ 1 sb-vm:symbol-fdefn-slot) (ensure-cold-fdefn nil))
-          (remhash nil *cold-fdefn-objects*))
-        #+compact-symbol
         (write-wordindexed/raw des (+ 1 sb-vm:symbol-name-slot)
-                               (encode-symbol-name sb-impl::+package-id-lisp+ name))
-        #-compact-symbol (write-wordindexed des (+ 1 sb-vm:symbol-name-slot) name)))
+                               (encode-symbol-name sb-impl::+package-id-lisp+ name))))
     nil))
 
 ;;; Since the initial symbols must be allocated before we can intern
@@ -2398,7 +2399,7 @@ Legal values for OFFSET are -4, -8, -12, ..."
 (defmacro define-cold-fop ((name &optional arglist) &rest forms)
   #+c-headers-only (declare (ignore name arglist forms))
   #-c-headers-only
-  (let* ((code (get name 'opcode))
+  (let* ((code (gethash name *fop-name-to-opcode*))
          (argc (aref (car **fop-signatures**)
                      (or code
                          (error "~S is not a defined FOP." name))))
@@ -4128,9 +4129,13 @@ III. initially undefined function references (alphabetically):
 
       ;; Initialize the *COLD-SYMBOLS* system with the information
       ;; from XC-STRICT-CL.
-      (do-external-symbols (symbol (find-package "XC-STRICT-CL"))
-        (cold-intern (intern (symbol-name symbol) *cl-package*)
-                     :access :external))
+      (let (symbols)
+        (do-external-symbols (symbol (find-package "XC-STRICT-CL"))
+          (push symbol symbols))
+        (setf symbols (sort symbols #'string<))
+        (dolist (symbol symbols)
+          (cold-intern (intern (symbol-name symbol) *cl-package*)
+                       :access :external)))
 
       ;; Make LOGICALLY-READONLYIZE no longer a no-op
       (setf (symbol-function 'logically-readonlyize)

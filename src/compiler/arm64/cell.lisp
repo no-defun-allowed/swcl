@@ -216,17 +216,16 @@
   (:policy :fast-safe)
   (:translate symbol-hash)
   (:args (symbol :scs (descriptor-reg)))
-  (:arg-refs args)
-  (:results (res :scs (any-reg)))
+  (:results (res :scs (unsigned-reg)))
   (:result-types positive-fixnum)
   (:generator 2
-    ;; The symbol-hash slot of NIL holds NIL because it is also the
-    ;; car slot, so we have to strip off the fixnum-tag-mask to make sure
-    ;; it is a fixnum.  The lowtag selection magic that is required to
-    ;; ensure this is explained in the comment in objdef.lisp
     (loadw res symbol symbol-hash-slot other-pointer-lowtag)
-    (unless (not-nil-tn-ref-p args)
-      (inst and res res (bic-mask fixnum-tag-mask)))))
+    (inst lsr res res n-symbol-hash-discard-bits)))
+(define-vop (symbol-name-hash symbol-hash)
+  (:translate symbol-name-hash #-relocatable-static-space hash-as-if-symbol-name)
+  (:generator 1 ; ASSUMPTION: little-endian
+    (inst ldr (32-bit-reg res)
+          (@ symbol (- (+ 4 (ash symbol-hash-slot word-shift)) other-pointer-lowtag)))))
 
 (define-vop ()
   (:args (symbol :scs (descriptor-reg)))
@@ -596,6 +595,7 @@
          (values :more t :scs (descriptor-reg any-reg)))
   (:temporary (:sc descriptor-reg) val-temp)
   (:info indices)
+  (:vop-var vop)
   (:generator 1
     (emit-gengc-barrier instance nil tmp-tn values)
     (do ((tn-ref values (tn-ref-across tn-ref))
@@ -603,31 +603,18 @@
         ((null tn-ref))
       (let* ((value (tn-ref-tn tn-ref))
              (source
-              (sc-case value
-               (immediate
-                ;; Pretty sure this should not be a copy-and-paste from
-                ;; LOAD-IMMEDIATE. What am I doing wrong?
-                (let ((val (tn-value value)))
-                  (etypecase val
-                    (integer
-                     ;; This is a FIXNUM, as IMMEDIATE-CONSTANT-SC only
-                     ;; accepts integers if they are FIXNUMs.
-                     (load-immediate-word val-temp (fixnumize val)))
-                    (character
-                     (let* ((codepoint (char-code val))
-                            (tagged (dpb codepoint (byte 24 8) character-widetag)))
-                       (load-immediate-word val-temp tagged)))
-                    (symbol
-                     (load-symbol val-temp val))))
-                val-temp)
-               (constant
-                (inst load-constant val-temp (tn-byte-offset value))
-                val-temp)
-               (control-stack
-                (load-stack-tn val-temp value)
-                val-temp)
-               ((any-reg descriptor-reg)
-                value))))
+               (sc-case value
+                 (immediate
+                  (load-immediate vop value val-temp)
+                  val-temp)
+                 (constant
+                  (inst load-constant val-temp (tn-byte-offset value))
+                  val-temp)
+                 (control-stack
+                  (load-stack-tn val-temp value)
+                  val-temp)
+                 ((any-reg descriptor-reg)
+                  value))))
         (inst str source
               (@ instance (load-store-offset
                            (- (ash (+ instance-slots-offset (car indices)) word-shift)

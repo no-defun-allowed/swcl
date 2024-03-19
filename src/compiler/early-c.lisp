@@ -104,18 +104,53 @@
 
 ;;;; miscellaneous utilities
 
+;;; COMPILE-FILE usually puts all nontoplevel code in immobile space, but COMPILE
+;;; offers a choice. Because the immobile space GC does not run often enough (yet),
+;;; COMPILE usually places code in the dynamic space managed by our copying GC.
+;;; Change this variable if your application always demands immobile code.
+;;; In particular, ELF cores shrink the immobile code space down to just enough
+;;; to contain all code, plus about 1/2 MiB of spare, which means that you can't
+;;; subsequently compile a whole lot into immobile space.
+;;; The value is changed to :AUTO in make-target-2-load.lisp which supresses
+;;; codegen optimizations for immobile space, but nonetheless prefers to allocate
+;;; the code there, falling back to dynamic space if there is no room left.
+;;; These controls exist whether or not the immobile-space feature is present.
+(declaim (type (member :immobile :dynamic :auto) *compile-to-memory-space*)
+         (type (member :immobile :dynamic) *compile-file-to-memory-space*))
+(defvar *compile-to-memory-space* :immobile) ; BUILD-TIME default
+(export '*compile-file-to-memory-space*) ; silly user code looks at, even if no immobile-space
+(defvar *compile-file-to-memory-space* :immobile) ; BUILD-TIME default
+
 (defun compile-perfect-hash (lambda test-inputs)
   ;; Don't blindly trust the hash generator: assert that computed values are
   ;; in range and not repeated.
   (let ((seen (make-array (power-of-two-ceiling (length test-inputs))
                           :element-type 'bit :initial-element 0))
-        (f #-sb-xc-host (compile nil lambda)
+        (f #-sb-xc-host ; use fasteval if possible
+           (cond #+sb-fasteval
+                 ((< (length test-inputs) 100) ; interpreting is faster
+                  (let ((*evaluator-mode* :interpret))
+                    (eval lambda)))
+                 (t (let ((*compile-to-memory-space* :dynamic))
+                      (compile nil lambda))))
            #+sb-xc-host
-           ;; Remove OPTIMIZE decls. Expressions passed to this function are largely
-           ;; boilerplate that never match random stuff like (LET ((OPTIMIZE ...)))
-           (compile nil (subst-if '(optimize)
-                                  (lambda (x) (typep x '(cons (eql optimize) (not null))))
-                                  lambda))))
+           (destructuring-bind (head lambda-list . body) lambda
+             (aver (eq head 'lambda))
+             (multiple-value-bind (forms decls) (parse-body body nil)
+               (declare (ignore decls))
+               ;; Give the host a definition for SB-C::UINT32-MODULARLY and remove _all_
+               ;; OPTIMIZE decls hidden within. We don't need to pedantically correctly
+               ;; code-walk here, because hash expressions are largely boilerplate that
+               ;; will not confusingly match forms such as (LET ((OPTIMIZE ...))).
+               (let ((new-body
+                      `(macrolet ((uint32-modularly (&whole form &rest exprs)
+                                    (declare (ignore exprs))
+                                    (funcall (sb-xc:macro-function 'sb-c::uint32-modularly)
+                                             form nil)))
+                         ,@(subst-if '(optimize)
+                                     (lambda (x) (typep x '(cons (eql optimize) (not null))))
+                                     forms))))
+                 (compile nil `(lambda ,lambda-list ,new-body)))))))
     (loop for input across test-inputs
           do (let ((h (funcall f input)))
                (unless (zerop (bit seen h))
@@ -123,60 +158,13 @@
                (setf (bit seen h) 1)))
     f))
 
-(defstruct (debug-name-marker (:print-function print-debug-name-marker)
-                              (:copier nil)))
-(declaim (freeze-type debug-name-marker))
-
-(defvar *debug-name-level* 4)
-(defvar *debug-name-length* 12)
-(defvar *debug-name-punt*)
-(define-load-time-global *debug-name-sharp* (make-debug-name-marker))
-(define-load-time-global *debug-name-ellipsis* (make-debug-name-marker))
-
-(defun print-debug-name-marker (marker stream level)
-  (declare (ignore level))
-  (cond ((eq marker *debug-name-sharp*)
-         (write-char #\# stream))
-        ((eq marker *debug-name-ellipsis*)
-         (write-string "..." stream))
-        (t
-         (write-string "???" stream))))
-
 (declaim (ftype (sfunction () list) name-context))
 (defun debug-name (type thing &optional context)
-  (let ((*debug-name-punt* nil))
-    (labels ((walk (x)
-               (typecase x
-                 (cons
-                  (if (plusp *debug-name-level*)
-                      (let ((*debug-name-level* (1- *debug-name-level*)))
-                        (do ((tail (cdr x) (cdr tail))
-                             (name (cons (walk (car x)) nil)
-                                   (cons (walk (car tail)) name))
-                             (n (1- *debug-name-length*) (1- n)))
-                            ((or (not (consp tail))
-                                 (not (plusp n))
-                                 *debug-name-punt*)
-                             (cond (*debug-name-punt*
-                                    (setf *debug-name-punt* nil)
-                                    (nreverse name))
-                                   ((atom tail)
-                                    (nconc (nreverse name) (walk tail)))
-                                   (t
-                                    (setf *debug-name-punt* t)
-                                    (nconc (nreverse name) (list *debug-name-ellipsis*)))))))
-                      *debug-name-sharp*))
-                 ((or symbol number string)
-                  x)
-                 (t
-                  ;; wtf?? This looks like a source of sensitivity to the cross-compiler host
-                  ;; in addition to which it seems generally a stupid idea.
-                  (type-of x)))))
-      (let ((name (list* type (walk thing) (when context (name-context)))))
-        (when (legal-fun-name-p name)
-          (bug "~S is a legal function name, and cannot be used as a ~
-                debug name." name))
-        name))))
+  (let ((name (list* type thing (when context (name-context)))))
+    (when (legal-fun-name-p name)
+      (bug "~S is a legal function name, and cannot be used as a ~
+            debug name." name))
+    name))
 
 ;;; Bound during eval-when :compile-time evaluation.
 (defvar *compile-time-eval* nil)

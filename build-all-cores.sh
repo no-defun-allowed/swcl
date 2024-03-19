@@ -33,7 +33,8 @@
 (defparameter *all-configurations*
   '(("arm"    ("arm" :little-endian :largefile))
     ("arm64"  ("arm64" :little-endian :sb-thread)
-              ("arm64-darwin" :darwin :bsd :unix :mach-o :little-endian :sb-thread :darwin-jit))
+              ("arm64-darwin" :darwin :bsd :unix :mach-o :little-endian :sb-thread :darwin-jit)
+              ("arm64-reloc"  :little-endian :sb-thread :relocatable-static-space))
     ("mips"   ("mips" :largefile :little-endian))
     ("ppc"    ("ppc" :big-endian)
               ("ppc-thread" :big-endian :sb-thread))
@@ -46,7 +47,8 @@
               ("x86-thread" :little-endian :largefile :sb-thread)
               ("x86-linux" :little-endian :largefile :sb-thread :linux :unix :elf :sb-thread))
     ("x86-64" ("x86-64" :little-endian :avx2 :gencgc :sb-simd-pack :sb-simd-pack-256)
-              ("x86-64-linux" :linux :unix :elf :little-endian :avx2 :gencgc :sb-simd-pack :sb-simd-pack-256)
+              ("x86-64-linux" :linux :unix :elf :little-endian :avx2 :gencgc :sb-simd-pack :sb-simd-pack-256
+                              (not :sb-eval) :sb-fasteval)
               ("x86-64-darwin" :darwin :bsd :unix :mach-o :little-endian :avx2 :gencgc
                                :sb-simd-pack :sb-simd-pack-256)
               ("x86-64-imm" :little-endian :avx2 :gencgc :sb-simd-pack :sb-simd-pack-256

@@ -197,23 +197,22 @@
 (define-vop (fast-symbol-global-value fast-symbol-value)
   (:translate symbol-global-value))
 
+#+64-bit
+(progn
 (define-vop (symbol-hash)
   (:policy :fast-safe)
   (:translate symbol-hash)
   (:args (symbol :scs (descriptor-reg)))
-  (:temporary (:scs (non-descriptor-reg)) temp)
-  (:results (res :scs (any-reg)))
+  (:results (res :scs (unsigned-reg)))
   (:result-types positive-fixnum)
   (:generator 2
-    ;; The symbol-hash slot of NIL holds NIL because it is also the
-    ;; cdr slot, so we have to strip off the two low bits to make
-    ;; sure it is a fixnum.  The lowtag selection magic that is
-    ;; required to ensure this is explained in the comment in
-    ;; objdef.lisp
-    (loadw temp symbol symbol-hash-slot other-pointer-lowtag)
-    (inst andi res temp (lognot fixnum-tag-mask))))
-
-#+64-bit
+    (loadw res symbol symbol-hash-slot other-pointer-lowtag)
+    (inst srli res res n-symbol-hash-discard-bits)))
+(define-vop (symbol-name-hash symbol-hash)
+  (:translate symbol-name-hash hash-as-if-symbol-name)
+  (:generator 1
+    (inst lwu res symbol ; little-endian
+          (- (+ 4 (ash symbol-hash-slot word-shift)) other-pointer-lowtag))))
 (define-vop ()
   (:args (symbol :scs (descriptor-reg)))
   (:results (result :scs (unsigned-reg)))
@@ -224,7 +223,6 @@
    (inst lhu result symbol (+ (ash symbol-name-slot word-shift)
                               (- other-pointer-lowtag)
                               6)))) ; little-endian
-#+64-bit
 (define-vop ()
   (:policy :fast-safe)
   (:translate symbol-name)
@@ -236,6 +234,7 @@
       (loadw result symbol symbol-name-slot other-pointer-lowtag)
       (inst slli result result sb-impl::package-id-bits)
       (inst srli result result sb-impl::package-id-bits))))
+) ; end PROGN
 
 ;;;; Fdefinition (fdefn) objects.
 
