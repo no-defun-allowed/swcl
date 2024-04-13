@@ -1802,10 +1802,11 @@ register."
     (let* ((var-count (length (debug-fun-debug-vars debug-fun)))
            (compiler-debug-fun (compiled-debug-fun-compiler-debug-fun
                                 debug-fun))
-           (compressed-data
-            (or (sb-c::compiled-debug-fun-blocks compiler-debug-fun)
-                (return-from parse-compiled-debug-blocks nil)))
-           (blocks (sb-c::lz-decompress compressed-data))
+           (blocks
+             (let ((blocks (sb-c::compiled-debug-fun-blocks compiler-debug-fun)))
+               (if (typep blocks '(or null integer))
+                   (return-from parse-compiled-debug-blocks nil)
+                   (sb-c::lz-decompress blocks))))
            ;; KLUDGE: 8 is a hard-wired constant in the compiler for the
            ;; element size of the packed binary representation of the
            ;; blocks data.
@@ -2282,7 +2283,8 @@ register."
 (defun debug-var-symbol (debug-var)
   (let ((package (debug-var-package debug-var)))
     (if package
-        (intern (debug-var-name debug-var) package)
+        (without-package-locks
+          (intern (debug-var-name debug-var) package))
         (make-symbol (debug-var-name debug-var)))))
 
 ;;; Return the value stored for DEBUG-VAR in frame, or if the value is

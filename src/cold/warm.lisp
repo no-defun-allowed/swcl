@@ -25,7 +25,12 @@ sb-kernel::
          (,(find-classoid-cell 'step-condition) . sb-impl::invoke-stepper))))
 ;;;; And now a trick: splice those into the oldest *HANDLER-CLUSTERS*
 ;;;; which had a placeholder NIL reserved for this purpose.
-sb-kernel::(rplaca (last *handler-clusters*) (car **initial-handler-clusters**))
+(defun splice-handler-clusters ()
+  sb-kernel::(rplaca (last *handler-clusters*) (car **initial-handler-clusters**)))
+
+;;; Don't use the evaluator, it establishes its own dynamic-extent
+;;; bindings for *handler-clusters*
+(splice-handler-clusters)
 
 ;;;; Use the same settings as PROCLAIM-TARGET-OPTIMIZATION
 ;;;; I could not think of a trivial way to ensure that this stays functionally
@@ -81,7 +86,7 @@ sb-kernel::(rplaca (last *handler-clusters*) (car **initial-handler-clusters**))
 ;;; Verify that compile-time floating-point math matches load-time.
 (defvar *compile-files-p*)
 (when (or (not (boundp '*compile-files-p*)) *compile-files-p*)
-  (with-open-file (stream "xfloat-math.lisp-expr" :if-does-not-exist nil)
+  (with-open-file (stream "output/xfloat-math.lisp-expr" :if-does-not-exist nil)
     (when stream
       (format t "; Checking ~S~%" (pathname stream))
       ;; Ensure that we're reading the correct variant of the file
@@ -107,12 +112,21 @@ sb-kernel::(rplaca (last *handler-clusters*) (car **initial-handler-clusters**))
               (let ((result (if (eq (first result) 'sb-kernel::&values)
                                 (rest result)
                                 result))
-                    (actual (multiple-value-list (apply fun (sb-int:ensure-list args)))))
-                (unless (equalp actual result)
-                  (#+sb-devel-xfloat cerror #+sb-devel-xfloat ""
-                   #-sb-devel-xfloat format #-sb-devel-xfloat t
-                   "FLOAT CACHE LINE ~S vs COMPUTED ~S~%"
-                   expr actual))))))))))
+                    (actual (if (eql fun 'read-from-string)
+                                (let ((*read-default-float-format* (car args)))
+                                  (multiple-value-list (apply fun (sb-int:ensure-list (cdr args)))))
+                                (multiple-value-list (apply fun (sb-int:ensure-list args))))))
+                (labels ((eqal (x y) ; non-ideal name, but other names are also non-ideal
+                           (etypecase x
+                             (cons (and (consp y) (eqal (car x) (car y)) (eqal (cdr x) (cdr y))))
+                             (symbol (eql x y))
+                             (rational (eql x y))
+                             (float (eql x y))
+                             (string (string= x y)))))
+                  (unless (eqal actual result)
+                    (cerror "Continue"
+                     "FLOAT CACHE LINE ~S vs COMPUTED ~S~%"
+                     expr actual)))))))))))
 
 (when (if (boundp '*compile-files-p*) *compile-files-p* t)
   (with-open-file (output "output/cold-vop-usage.txt" :if-does-not-exist nil)

@@ -2297,7 +2297,7 @@ directly to the LVAR-DEST of LVAR, which must be a combination. If FUN
 is :ANY, the function name is not checked."
   (declare (type lvar lvar)
            (type symbol fun)
-           (type index num-args))
+           (type (or index null) num-args))
   (flet ((give-up ()
            (if give-up
                (give-up-ir1-transform)
@@ -2311,9 +2311,11 @@ is :ANY, the function name is not checked."
         (unless (or (eq fun :any)
                     (eq (lvar-fun-name inside-fun) fun))
           (give-up))
+
         (let ((inside-args (combination-args inside)))
-          (unless (= (length inside-args) num-args)
-            (give-up))
+          (when num-args
+            (unless (= (length inside-args) num-args)
+              (give-up)))
           (let* ((outside-args (combination-args outside))
                  (arg-position (position lvar outside-args))
                  (before-args (subseq outside-args 0 arg-position))
@@ -3318,3 +3320,10 @@ is :ANY, the function name is not checked."
                  (node-lexenv (lvar-dest lvar)))
                 *lexenv*)))
     t))
+
+(defun compiling-p (environment)
+  (and (boundp 'sb-c:*compilation*)
+       #+sb-fasteval
+       (not (typep environment 'sb-interpreter:basic-env))
+       #+sb-eval
+       (not (typep environment 'sb-eval::eval-lexenv))))

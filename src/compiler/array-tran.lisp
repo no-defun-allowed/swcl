@@ -932,16 +932,8 @@
             (allocate-vector #+ubsan ,(not (or initial-contents initial-element))
                              ,(sb-vm:saetp-typecode saetp) %length nwords))))
 
-    (flet ((eliminate-keywords ()
-             (eliminate-keyword-args
-              call 1
-              '((:element-type element-type)
-                (:initial-contents initial-contents)
-                (:initial-element initial-element)
-                (:adjustable adjustable)
-                (:fill-pointer fill-pointer))))
-           (wrap (underlying)
-             `(let* ((%length ,(or c-length '(the index length)))
+    (flet ((wrap (underlying)
+             `(let* ((%length ,(or c-length '(the index dims)))
                      (nwords ,n-words-form))
                 (declare (flushable sb-vm::splat))
                 ,(if (not array-header-p)
@@ -997,25 +989,22 @@
                                          default-initial-element))
                    (init (if (constant-lvar-p initial-element)
                              (list 'quote (lvar-value initial-element))
-                             'initial-element))
-                   (lambda-list `(length ,@(eliminate-keywords))))
-               `(lambda ,lambda-list
-                  (declare (ignorable ,@lambda-list))
-                  ,(wrap (cond ((not splat)
-                                `(quickfill ,data-alloc-form
-                                            ,(if (eq elt-spec t) init
-                                                 `(the ,elt-spec ,init))))
-                               ((or (eq splat :unbound)
-                                    (and (constant-lvar-p initial-element)
-                                         (testable-type-p elt-ctype)
-                                         (ctypep (lvar-value initial-element) elt-ctype)))
-                                ;; all good
-                                `(sb-vm::splat ,data-alloc-form nwords ,splat))
-                               (t
-                                ;; uncertain if initial-element is type-correct
-                                `(progn (the ,elt-spec ,init) ; check en passant
-                                        (sb-vm::splat ,data-alloc-form nwords
-                                                      ,splat))))))))
+                             'initial-element)))
+               (wrap (cond ((not splat)
+                            `(quickfill ,data-alloc-form
+                                        ,(if (eq elt-spec t) init
+                                             `(the ,elt-spec ,init))))
+                           ((or (eq splat :unbound)
+                                (and (constant-lvar-p initial-element)
+                                     (testable-type-p elt-ctype)
+                                     (ctypep (lvar-value initial-element) elt-ctype)))
+                            ;; all good
+                            `(sb-vm::splat ,data-alloc-form nwords ,splat))
+                           (t
+                            ;; uncertain if initial-element is type-correct
+                            `(progn (the ,elt-spec ,init) ; check en passant
+                                    (sb-vm::splat ,data-alloc-form nwords
+                                                  ,splat)))))))
 
             ;; Case (2) - neither element nor contents specified.
             ((not initial-contents)
@@ -1049,19 +1038,16 @@
                (compiler-style-warn 'initial-element-mismatch-style-warning
                                     :format-control "The default initial element ~S is not a ~S."
                                     :format-arguments (list default-initial-element elt-spec)))
-             (let ((lambda-list `(length ,@(eliminate-keywords))))
-               `(lambda ,lambda-list
-                  (declare (ignorable ,@lambda-list))
-                  ,(wrap (cond ((eql (sb-vm:saetp-typecode saetp) sb-vm:simple-vector-widetag)
-                                `(sb-vm::splat ,data-alloc-form nwords
-                                               ;; uninitialized reads are trapped regardless of safety
-                                               ;; if #+ubsan
-                                               #+ubsan :trap
-                                               #-ubsan 0))
-                               (t
-                                ;; otherwise, reading an element can't cause an invalid bit pattern
-                                ;; to be observed, but the bits could be random.
-                                data-alloc-form))))))
+             (wrap (cond ((eql (sb-vm:saetp-typecode saetp) sb-vm:simple-vector-widetag)
+                          `(sb-vm::splat ,data-alloc-form nwords
+                                         ;; uninitialized reads are trapped regardless of safety
+                                         ;; if #+ubsan
+                                         #+ubsan :trap
+                                         #-ubsan 0))
+                         (t
+                          ;; otherwise, reading an element can't cause an invalid bit pattern
+                          ;; to be observed, but the bits could be random.
+                          data-alloc-form))))
 
             ;; Case (3) - constant :INITIAL-CONTENTS and LENGTH
             ((and c-length
@@ -1079,16 +1065,13 @@
                (unless (= c-length (length contents))
                  (abort-ir1-transform "~S has ~S elements, vector length is ~S."
                                       :initial-contents (length contents) c-length))
-               (let ((lambda-list `(length ,@(eliminate-keywords))))
-                 `(lambda ,lambda-list
-                    (declare (ignorable ,@lambda-list))
-                    ,(wrap `(initialize-vector
-                             ,data-alloc-form
-                             ,@(map 'list
-                                     (if (eq elt-spec t) ; THE would be pure noise
-                                         (lambda (elt) `',elt)
-                                         (lambda (elt) `(the ,elt-spec ',elt)))
-                                     contents)))))))
+               (wrap `(initialize-vector
+                       ,data-alloc-form
+                       ,@(map 'list
+                              (if (eq elt-spec t) ; THE would be pure noise
+                                  (lambda (elt) `',elt)
+                                  (lambda (elt) `(the ,elt-spec ',elt)))
+                              contents)))))
 
             ;; Case (4)
             ;; :INITIAL-CONTENTS (LIST ...), (VECTOR ...) and `(1 1 ,x) with constant LENGTH.
@@ -1099,7 +1082,13 @@
                                              sb-impl::|List| sb-impl::|Vector|)
                                 :arg-count c-length
                                 :notinline nil))
-             (let ((parameters (eliminate-keywords))
+             (let ((parameters (eliminate-keyword-args
+                                call 1
+                                '((:element-type element-type)
+                                  (:initial-contents initial-contents)
+                                  (:initial-element initial-element)
+                                  (:adjustable adjustable)
+                                  (:fill-pointer fill-pointer))))
                    (elt-vars (make-gensym-list c-length))
                    (lambda-list '(length)))
                (splice-fun-args initial-contents :any c-length)
@@ -1116,37 +1105,34 @@
 
             ;; Case (5) - :INITIAL-CONTENTS and indeterminate length
             (t
-             (let ((lambda-list `(length ,@(eliminate-keywords))))
-               `(lambda ,lambda-list
-                  (declare (ignorable ,@lambda-list))
-                  (let ((content-length (length initial-contents)))
-                    (unless (= content-length ,(or c-length 'length))
-                      (sb-vm::initial-contents-error content-length  ,(or c-length 'length))))
-                  ,(wrap
-                    (if (and (lvar-matches initial-contents :fun-names '(reverse sb-impl::list-reverse
-                                                                         sb-impl::vector-reverse))
-                             ;; Nothing should be modifying the original sequence
-                             (almost-immediately-used-p initial-contents (lvar-use initial-contents)
-                                                        :flushable t))
-                        (let* ((reverse (lvar-use initial-contents))
-                               (initial-contents-type (lvar-type (car (combination-args reverse)))))
-                          (splice-fun-args initial-contents :any 1)
-                          (cond ((csubtypep initial-contents-type (specifier-type 'list))
-                                 `(let ((data ,data-alloc-form))
-                                    (loop for i from (1- ,(or c-length 'length)) downto 0
-                                          for elt in initial-contents
-                                          do (setf (aref data i) elt))
-                                    data))
-                                ((csubtypep initial-contents-type (specifier-type 'simple-vector))
-                                 `(let ((data ,data-alloc-form))
-                                    (loop for i from (1- ,(or c-length 'length)) downto 0
-                                          for j from 0
-                                          do (setf (aref data i) (aref initial-contents j)))
-                                    data))
-                                (t
-                                 `(nreverse (replace ,data-alloc-form initial-contents)))))
+             `(let ((content-length (length initial-contents)))
+                (unless (= content-length ,(or c-length 'dims))
+                  (sb-vm::initial-contents-error content-length  ,(or c-length 'dims)))
+                ,(wrap
+                  (if (and (lvar-matches initial-contents :fun-names '(reverse sb-impl::list-reverse
+                                                                       sb-impl::vector-reverse))
+                           ;; Nothing should be modifying the original sequence
+                           (almost-immediately-used-p initial-contents (lvar-use initial-contents)
+                                                      :flushable t))
+                      (let* ((reverse (lvar-use initial-contents))
+                             (initial-contents-type (lvar-type (car (combination-args reverse)))))
+                        (splice-fun-args initial-contents :any 1)
+                        (cond ((csubtypep initial-contents-type (specifier-type 'list))
+                               `(let ((data ,data-alloc-form))
+                                  (loop for i from (1- ,(or c-length 'dims)) downto 0
+                                        for elt in initial-contents
+                                        do (setf (aref data i) elt))
+                                  data))
+                              ((csubtypep initial-contents-type (specifier-type 'simple-vector))
+                               `(let ((data ,data-alloc-form))
+                                  (loop for i from (1- ,(or c-length 'dims)) downto 0
+                                        for j from 0
+                                        do (setf (aref data i) (aref initial-contents j)))
+                                  data))
+                              (t
+                               `(nreverse (replace ,data-alloc-form initial-contents)))))
 
-                        `(replace ,data-alloc-form initial-contents))))))))))
+                      `(replace ,data-alloc-form initial-contents)))))))))
 
 ;;; IMPORTANT: The order of these three MAKE-ARRAY forms matters: the least
 ;;; specific must come first, otherwise suboptimal transforms will result for
@@ -1847,37 +1833,47 @@
   (once-only ((n-array array)
               (n-svalue `(the index ,svalue))
               (n-evalue `(the (or index null) ,evalue)))
-    (let ((check-bounds (policy env (plusp insert-array-bounds-checks))))
-      `(multiple-value-bind (,data-var
-                             ,start-var
-                             ,end-var
-                             ,@ (when offset-var `(,offset-var)))
-           (cond ,@(and (not array-header-p)
-                        `(((not (array-header-p ,n-array))
-                           (let ((,n-array ,n-array))
-                             (declare (type vector ,n-array))
-                             ,(once-only ((n-len `(length ,n-array))
-                                          (n-end `(or ,n-evalue ,n-len)))
-                                (if check-bounds
-                                    `(if (<= 0 ,n-svalue ,n-end ,n-len)
-                                         (values (truly-the simple-array ,n-array)
-                                                 ,n-svalue ,n-end 0)
-                                         ,(if check-fill-pointer
-                                              `(sequence-bounding-indices-bad-error ,n-array ,n-svalue ,n-evalue)
-                                              `(array-bounding-indices-bad-error ,n-array ,n-svalue ,n-evalue)))
-                                    `(values (truly-the simple-array ,n-array)
-                                             ,n-svalue ,n-end 0)))))))
-                 (t
-                  ,(cond (force-inline
-                          `(%with-array-data-macro ,n-array ,n-svalue ,n-evalue
-                                                   :check-bounds ,check-bounds
-                                                   :check-fill-pointer ,check-fill-pointer
-                                                   :array-header-p t))
-                         (check-fill-pointer
-                          `(%with-array-data/fp ,n-array ,n-svalue ,n-evalue))
-                         (t
-                          `(%with-array-data ,n-array ,n-svalue ,n-evalue)))))
-         ,@forms))))
+    (multiple-value-bind (forms declarations) (parse-body forms nil)
+      (let ((check-bounds (policy env (plusp insert-array-bounds-checks))))
+        `(multiple-value-bind (,data-var
+                               ,start-var
+                               ,end-var
+                               ,@ (when offset-var `(,offset-var)))
+             (cond ,@(and (not array-header-p)
+                          `(((not (array-header-p ,n-array))
+                             (let ((,n-array ,n-array))
+                               (declare (type vector ,n-array))
+                               ,(once-only ((n-len `(length ,n-array))
+                                            (n-end `(or ,n-evalue ,n-len)))
+                                  (if check-bounds
+                                      `(if (<= 0 ,n-svalue ,n-end ,n-len)
+                                           (values (truly-the simple-array ,n-array)
+                                                   ,n-svalue ,n-end 0)
+                                           ,(if check-fill-pointer
+                                                `(sequence-bounding-indices-bad-error ,n-array ,n-svalue ,n-evalue)
+                                                `(array-bounding-indices-bad-error ,n-array ,n-svalue ,n-evalue)))
+                                      `(values (truly-the simple-array ,n-array)
+                                               ,n-svalue ,n-end 0)))))))
+                   (t
+                    ,(cond (force-inline
+                            `(%with-array-data-macro ,n-array ,n-svalue ,n-evalue
+                                                     :check-bounds ,check-bounds
+                                                     :check-fill-pointer ,check-fill-pointer
+                                                     :array-header-p t))
+                           (check-fill-pointer
+                            `(%with-array-data/fp ,n-array ,n-svalue ,n-evalue))
+                           (t
+                            `(%with-array-data ,n-array ,n-svalue ,n-evalue)))))
+           ,@declarations
+           ,@(and (and check-bounds
+                       (compiling-p env)
+                       (loop for (nil . declare) in declarations
+                             never (loop for declaration in declare
+                                         thereis
+                                         (and (typep declaration '(cons (eql ignore)))
+                                              (member end-var (cdr declaration))))))
+                  `((%in-bounds-constraint ,data-var ,end-var)))
+           ,@forms)))))
 
 ;;; This is the fundamental definition of %WITH-ARRAY-DATA, for use in
 ;;; DEFTRANSFORMs and DEFUNs.
@@ -2227,14 +2223,20 @@
 
 ;;; For the code generated by TEST-ARRAY-ELEMENT-TYPE
 (defoptimizer (%other-pointer-widetag derive-type) ((object))
-  (cond ((types-equal-or-intersect (lvar-type object) (specifier-type 'simple-array))
-         nil)
-        ((types-equal-or-intersect (lvar-type object) (specifier-type 'array))
-         (specifier-type `(and (not (integer ,sb-vm:simple-array-widetag
-                                             (,sb-vm:complex-base-string-widetag)))
-                               (unsigned-byte ,sb-vm:n-widetag-bits))))
-        (t
-         (specifier-type `(integer 0 (,sb-vm:simple-array-widetag))))))
+  (let ((object (lvar-type object)))
+    (cond ((types-equal-or-intersect object (specifier-type 'simple-array))
+           (when (csubtypep object (specifier-type 'simple-array))
+             (let ((eltype (array-type-upgraded-element-type object)))
+               (if (and (csubtypep object (specifier-type 'vector))
+                        (neq eltype *wild-type*))
+                   (specifier-type `(eql ,(sb-vm:saetp-typecode (find-saetp-by-ctype eltype))))
+                   (specifier-type `(integer ,sb-vm:simple-array-widetag (,sb-vm:complex-base-string-widetag)))))))
+          ((types-equal-or-intersect object (specifier-type 'array))
+           (specifier-type `(and (not (integer ,sb-vm:simple-array-widetag
+                                               (,sb-vm:complex-base-string-widetag)))
+                                 (unsigned-byte ,sb-vm:n-widetag-bits))))
+          (t
+           (specifier-type `(integer 0 (,sb-vm:simple-array-widetag)))))))
 
 ;;; If ARRAY-HAS-FILL-POINTER-P returns true, then ARRAY
 ;;; is of the specified type.

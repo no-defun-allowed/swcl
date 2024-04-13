@@ -1751,10 +1751,13 @@
                                (values res
                                        (- x (* f
                                                #+round-float
-                                               (,',(ecase type
-                                                     (double-float 'round-double)
-                                                     (single-float 'round-single))
-                                                div :truncate)
+                                               (- (,',(ecase type
+                                                        (double-float 'round-double)
+                                                        (single-float 'round-single))
+                                                      div :truncate)
+                                                  ,,(ecase type
+                                                      (double-float $-0.0d0)
+                                                      (single-float $-0.0f0)))
                                                #-round-float
                                                (locally
                                                    (declare (flushable ,',coerce))
@@ -1809,10 +1812,13 @@
                                     (rem (- number (* ,@(unless one-p
                                                           '(f-divisor))
                                                       #+round-float
-                                                      (,',(ecase type
-                                                            (double-float 'round-double)
-                                                            (single-float 'round-single))
-                                                       div :truncate)
+                                                      (- (,',(ecase type
+                                                               (double-float 'round-double)
+                                                               (single-float 'round-single))
+                                                             div :truncate)
+                                                         ,,(ecase type
+                                                             (double-float $-0.0d0)
+                                                             (single-float $-0.0f0)))
                                                       #-round-float
                                                       (locally
                                                           (declare (flushable ,',coerce))
@@ -1868,11 +1874,10 @@
 
 #-round-float
 (progn
-  (defknown %unary-ftruncate (real) float (movable foldable flushable))
-  (defknown %unary-ftruncate/single (single-float) single-float
-      (movable foldable flushable))
-  (defknown %unary-ftruncate/double (double-float) double-float
-      (movable foldable flushable))
+  (defknown (%unary-ftruncate %unary-fround) (real) float (movable foldable flushable))
+  #-64-bit
+  (defknown (%unary-ftruncate/double %unary-fround/double) (double-float) double-float
+    (movable foldable flushable))
 
   (deftransform %unary-ftruncate ((x) (single-float))
     `(cond ((or (typep x '(single-float ($-1f0) ($0f0)))
@@ -1884,45 +1889,123 @@
            (t
             x)))
 
-  #-32-bit
-  (deftransform %unary-ftruncate ((x) (double-float))
-    `(cond ((or (typep x '(double-float ($-1d0) ($0d0)))
-                (eql x $-0d0))
-            $-0d0)
-           ((typep x '(double-float ,(float (- (expt 2 sb-vm:double-float-digits)) $1d0)
-                       ,(float (1- (expt 2 sb-vm:double-float-digits)) $1d0)))
-            (float (truncate x) $1d0))
+  (deftransform %unary-fround ((x) (single-float))
+    `(cond ((or (typep x '(single-float $-0.5f0 ($0f0)))
+                (eql x $-0f0))
+            $-0f0)
+           ((typep x '(single-float ,(float (- (expt 2 sb-vm:single-float-digits)) $1f0)
+                       ,(float (1- (expt 2 sb-vm:single-float-digits)) $1f0)))
+            (float (round x) $1f0))
            (t
             x)))
 
-  #+(and (not sb-xc-host) 32-bit)
-  (defun %unary-ftruncate/double (x)
-    (declare (muffle-conditions compiler-note))
-    (declare (type double-float x))
-    (declare (optimize speed (safety 0)))
-    (let* ((high (double-float-high-bits x))
-           (low (double-float-low-bits x))
-           (exp (ldb sb-vm:double-float-hi-exponent-byte high))
-           (biased (the double-float-exponent
-                        (- exp sb-vm:double-float-bias))))
-      (declare (type (signed-byte 32) high)
-               (type (unsigned-byte 32) low))
-      (cond
-        ((= exp sb-vm:double-float-normal-exponent-max) x)
-        ((<= biased 0) (* x $0d0))
-        ((>= biased (float-digits x)) x)
-        (t
-         (let ((frac-bits (- (float-digits x) biased)))
-           (cond ((< frac-bits 32)
-                  (setf low (logandc2 low (- (ash 1 frac-bits) 1))))
-                 (t
-                  (setf low 0)
-                  (setf high (logandc2 high (- (ash 1 (- frac-bits 32)) 1)))))
-           (make-double-float high low))))))
-  #+32-bit
-  (deftransform %unary-ftruncate ((x) (double-float))
-    `(%unary-ftruncate/double x)))
+  #+64-bit
+  (progn
+    (deftransform %unary-ftruncate ((x) (double-float))
+      `(cond ((or (typep x '(double-float ($-1d0) ($0d0)))
+                  (eql x $-0d0))
+              $-0d0)
+             ((typep x '(double-float ,(float (- (expt 2 sb-vm:double-float-digits)) $1d0)
+                         ,(float (1- (expt 2 sb-vm:double-float-digits)) $1d0)))
+              (float (truncate x) $1d0))
+             (t
+              x)))
 
+    (deftransform %unary-fround ((x) (double-float))
+      `(cond ((or (typep x '(double-float $-0.5d0 ($0d0)))
+                  (eql x $-0d0))
+              $-0d0)
+             ((typep x '(double-float ,(float (- (expt 2 sb-vm:double-float-digits)) $1d0)
+                         ,(float (1- (expt 2 sb-vm:double-float-digits)) $1d0)))
+              (float (round x) $1d0))
+             (t
+              x))))
+
+  #-64-bit
+  (progn
+    #-sb-xc-host
+    (progn
+      (defun %unary-ftruncate/double (x)
+        (declare (muffle-conditions compiler-note))
+        (declare (type double-float x))
+        (declare (optimize speed (safety 0)))
+        (let* ((high (double-float-high-bits x))
+               (low (double-float-low-bits x))
+               (exp (ldb sb-vm:double-float-hi-exponent-byte high))
+               (biased (the double-float-exponent
+                            (- exp sb-vm:double-float-bias))))
+          (declare (type (signed-byte 32) high)
+                   (type (unsigned-byte 32) low))
+          (cond
+            ((= exp sb-vm:double-float-normal-exponent-max) x)
+            ((<= biased 0) (* x $0d0))
+            ((>= biased (float-digits x)) x)
+            (t
+             (let ((frac-bits (- (float-digits x) biased)))
+               (cond ((< frac-bits 32)
+                      (setf low (logandc2 low (- (ash 1 frac-bits) 1))))
+                     (t
+                      (setf low 0)
+                      (setf high (logandc2 high (- (ash 1 (- frac-bits 32)) 1)))))
+               (make-double-float high low))))))
+      (defun %unary-fround/double (x)
+        (declare (muffle-conditions compiler-note))
+        (declare (type double-float x))
+        (declare (optimize speed (safety 0)))
+        (let* ((high (double-float-high-bits x))
+               (low (double-float-low-bits x))
+               (exp (ldb sb-vm:double-float-hi-exponent-byte high))
+               (biased (the double-float-exponent
+                            (- exp sb-vm:double-float-bias))))
+          (declare (type (signed-byte 32) high)
+                   (type (unsigned-byte 32) low))
+          (cond
+            ((= exp sb-vm:double-float-normal-exponent-max) x)
+            ((<= biased -1) (* x $0d0)) ; [0,0.5)
+            ((and (= biased 0) (= low 0) (= (ldb sb-vm:double-float-hi-significand-byte high) 0)) ; [0.5,0.5]
+             (* x $0d0))
+            ((= biased 0) (float-sign x $1d0)) ; (0.5,1.0)
+            ((= biased 1) ; [1.0,2.0)
+             (cond
+               ((>= (ldb sb-vm:double-float-hi-significand-byte high) (ash 1 19))
+                (float-sign x $2d0))
+               (t (float-sign x $1d0))))
+            ((>= biased (float-digits x)) x)
+            (t
+             ;; it's probably possible to do something very contorted
+             ;; to avoid consing intermediate bignums, by performing
+             ;; arithmetic on the fractional part, the low integer
+             ;; part, the high integer part, and the exponent of the
+             ;; double float.  But in the interest of getting
+             ;; something correct to start with, delegate to ROUND.
+             (float (round x) $1d0))))))
+    (deftransform %unary-ftruncate ((x) (double-float))
+      `(%unary-ftruncate/double x))
+    (deftransform %unary-fround ((x) (double-float))
+      `(%unary-fround/double x))))
+
+#+round-float
+(deftransform fround ((number &optional divisor) (double-float &optional t))
+  (if (or (not divisor)
+          (and (constant-lvar-p divisor)
+               (= (lvar-value divisor) 1)))
+      `(let ((res (round-double number :round)))
+         (values res (- number res)))
+      `(let* ((divisor (%double-float divisor))
+              (res (round-double (/ number (%double-float divisor)) :round)))
+         (values res (- number (* res divisor))))))
+
+#+round-float
+(deftransform fround ((number &optional divisor) (single-float &optional (or null single-float rational)))
+  (if (or (not divisor)
+          (and (constant-lvar-p divisor)
+               (= (lvar-value divisor) 1)))
+      `(let ((res (round-single number :round)))
+         (values res (- number res)))
+      `(let* ((divisor (%single-float divisor))
+              (res (round-single (/ number divisor) :round)))
+         (values res (- number (* res divisor))))))
+
 ;;;; TESTS
 
 ;;; Dumping of double-float literals in genesis got some bits messed up,
@@ -1959,32 +2042,24 @@
                 thereis (typep (code-header-ref code index) 'complex))))
   (fmakunbound test))
 
-;;; An example that we can't cross-compile: CTYPE-OF-NUMBER tries to compute
-;;; low/high bounds so that it can return (COMPLEX (SINGLE-FLOAT <LOW> <HIGH>))
-;;; but we haven't taught the MIN,MAX interceptors how to operate on infinity.
-#+nil
 (defun more-folding ()
   (values (complex single-float-positive-infinity single-float-positive-infinity)
           (complex single-float-negative-infinity single-float-positive-infinity)
           (complex single-float-negative-infinity single-float-negative-infinity)
           (complex single-float-positive-infinity single-float-negative-infinity)))
 
-#+round-float
-(deftransform fround ((number &optional divisor) (double-float t))
-  (if (or (not divisor)
-          (and (constant-lvar-p divisor)
-               (= (lvar-value divisor) 1)))
-      `(let ((res (round-double number :round)))
-         (values res (- number res)))
-      `(let ((res (round-double (/ number (%double-float divisor)) :round)))
-         (values res (- number (* res divisor))))))
-
-#+round-float
-(deftransform fround ((number &optional divisor) (single-float (or null single-float rational)))
-  (if (or (not divisor)
-          (and (constant-lvar-p divisor)
-               (= (lvar-value divisor) 1)))
-      `(let ((res (round-single number :round)))
-         (values res (- number res)))
-      `(let ((res (round-single (/ number (%single-float divisor)) :round)))
-         (values res (- number (* res divisor))))))
+#-sb-xc-host
+(multiple-value-bind (a b c d) (funcall 'more-folding)
+  (assert (sb-ext:float-infinity-p (realpart a)))
+  (assert (sb-ext:float-infinity-p (imagpart a)))
+  (assert (sb-ext:float-infinity-p (realpart b)))
+  (assert (sb-ext:float-infinity-p (imagpart b)))
+  (assert (sb-ext:float-infinity-p (realpart c)))
+  (assert (sb-ext:float-infinity-p (imagpart c)))
+  (assert (sb-ext:float-infinity-p (realpart d)))
+  (assert (sb-ext:float-infinity-p (imagpart d)))
+  (let ((code (fun-code-header (symbol-function 'more-folding))))
+    (aver (loop for index from sb-vm:code-constants-offset
+                below (code-header-words code)
+                thereis (typep (code-header-ref code index) 'complex))))
+  (fmakunbound 'more-folding))

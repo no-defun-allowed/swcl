@@ -83,11 +83,13 @@
 ;;;
 (defun get-space (id spacemap)
   (find id (cdr spacemap) :key #'space-id))
-(defun compute-nil-object (spacemap)
+(defun compute-nil-addr (spacemap)
   (let ((space (get-space static-core-space-id spacemap)))
     ;; TODO: The core should store its address of NIL in the initial function entry
     ;; so this kludge can be removed.
-    (%make-lisp-obj (logior (space-addr space) #x117)))) ; SUPER KLUDGE
+    (logior (space-addr space) #x117))) ; SUPER KLUDGE
+(defun compute-nil-object (spacemap) ; terrible, don't use!
+  (%make-lisp-obj (compute-nil-addr spacemap)))
 
 ;;; Given OBJ which is tagged pointer into the target core, translate it into
 ;;; the range at which the core is now mapped during execution of this tool,
@@ -149,54 +151,6 @@
                          ppd)
     ppd))
 
-(defun c-name (lispname core pp-state &optional (prefix ""))
-  (when (typep lispname '(string 0))
-    (setq lispname "anonymous"))
-  ;; Perform backslash escaping on the exploded string
-  ;; Strings were stringified without surrounding quotes,
-  ;; but there might be quotes embedded anywhere, so escape them,
-  ;; and also remove newlines and non-ASCII.
-  (let ((characters
-         (mapcan (lambda (char)
-                   (cond ((not (typep char 'base-char)) (list #\?))
-                         ((member char '(#\\ #\")) (list #\\ char))
-                         ((eql char #\newline) (list #\_))
-                         (t (list char))))
-                 (coerce (cond
-                           #+darwin
-                           ((and (stringp lispname)
-                                 ;; L denotes a symbol which can not be global on macOS.
-                                 (char= (char lispname 0) #\L))
-                            (concatenate 'string "_" lispname))
-                           (t
-                            (write-to-string lispname
-                              ;; Printing is a tad faster without a pretty stream
-                              :pretty (not (typep lispname 'core-sym))
-                              :pprint-dispatch *editcore-ppd*
-                              ;; FIXME: should be :level 1, however see
-                              ;; https://bugs.launchpad.net/sbcl/+bug/1733222
-                              :escape t :level 2 :length 5
-                              :case :downcase :gensym nil
-                              :right-margin 10000)))
-                         'list))))
-    (let ((string (concatenate 'string prefix characters)))
-      ;; If the string appears in the linker symbols, then string-upcase it
-      ;; so that it looks like a conventional Lisp symbol.
-      (cond ((find-if (lambda (x) (string= string (if (consp x) (car x) x)))
-                      (core-linkage-symbols core))
-             (setq string (string-upcase string)))
-            ((string= string ".") ; can't use the program counter symbol either
-             (setq string "|.|")))
-      ;; If the symbol is still nonunique, add a random suffix.
-      ;; The secondary value is whether the symbol should be a linker global.
-      ;; For now, make nothing global, thereby avoiding potential conflicts.
-      (let ((occurs (incf (gethash string (car pp-state) 0))))
-        (if (> occurs 1)
-            (values (concatenate 'string  string "_" (write-to-string occurs))
-                    nil)
-            (values string
-                    nil))))))
-
 (defmethod print-object ((sym core-sym) stream)
   (format stream "~(~:[~*~;~:*~A~:[:~;~]:~]~A~)"
           (core-sym-package sym)
@@ -230,64 +184,11 @@
                      (translate (symbol-name (translate x spacemap)) spacemap))
                  x)))))
 
-(defun %fun-name-from-core (name core &aux (spacemap (core-spacemap core))
-                                           (packages (core-packages core))
-                                           (core-nil (core-nil-object core)))
-  (named-let recurse ((depth 0) (x name))
-    (unless (is-lisp-pointer (get-lisp-obj-address x))
-      (return-from recurse x)) ; immediate object
-    (when (eq x core-nil)
-      (return-from recurse nil))
-    (setq x (translate x spacemap))
-    (ecase (lowtag-of x)
-      (#.list-pointer-lowtag
-       (cons (recurse (1+ depth) (car x))
-             (recurse (1+ depth) (cdr x))))
-      ((#.instance-pointer-lowtag #.fun-pointer-lowtag) "?")
-      (#.other-pointer-lowtag
-       (cond
-        ((stringp x)
-         (let ((p (position #\/ x :from-end t)))
-           (if p (subseq x (1+ p)) x)))
-        ((symbolp x)
-         (let ((package-id (symbol-package-id x))
-               (name (translate (symbol-name x) spacemap)))
-           (when (eq package-id 0) ; uninterned
-             (return-from recurse (string-downcase name)))
-           (let* ((package (truly-the package
-                                      (aref (core-pkg-id->package core) package-id)))
-                  (package-name (translate (package-%name package) spacemap)))
-             ;; The name-cleaning code wants to compare against symbols
-             ;; in CL, PCL, and KEYWORD, so use real symbols for those.
-             ;; Other than that, we avoid finding host symbols
-             ;; because the externalness could be wrong and misleading.
-             ;; It's a very subtle point, but best to get it right.
-             (when (member package-name '("COMMON-LISP" "KEYWORD" "SB-PCL")
-                           :test #'string=)
-               ;; NIL can't occur. It was picked off above.
-               (awhen (find-symbol name package-name) ; if existing symbol, use it
-                 (return-from recurse it)))
-             (unless (gethash name (core-nonunique-symbol-names core))
-               ;; Don't care about package
-               (return-from recurse (make-core-sym nil name nil)))
-             (when (string= package-name "KEYWORD") ; make an external core-symbol
-               (return-from recurse (make-core-sym nil name t)))
-             (let ((externals (gethash package-name packages))
-                   (n 0))
-               (unless externals
-                 (scan-symbol-table
-                  (lambda (string symbol)
-                    (declare (ignore symbol))
-                    (incf n)
-                    (push string externals))
-                  (package-external-symbols package)
-                  core)
-                 (setf externals (make-string-hashset externals n)
-                       (gethash package-name packages) externals))
-               (make-core-sym package-name
-                              name
-                              (sb-int:hashset-find externals name))))))
-        (t "?"))))))
+(defun core-package-from-id (id core)
+  (if (/= id 0)
+      (let ((package (aref (core-pkg-id->package core) id)))
+        (translate (package-%name (truly-the package package))
+                   (core-spacemap core)))))
 
 (defun remove-name-junk (name)
   (setq name
@@ -301,6 +202,11 @@
                       (let ((mismatch (mismatch (string x) "CLEANUP-FUN-")))
                         (or (eql mismatch nil) (= mismatch (length "CLEANUP-FUN-")))))
                  '#:cleanup-fun)
+                ;; Try to chop off all the directory names in strings resembling
+                ;; (lambda () in "/some/very/long/pathname/to/a/thing.lisp")
+                ((stringp x)
+                 (let ((p (position #\/ x :from-end t)))
+                   (if p (subseq x (1+ p)) x)))
                 ((consp x) (recons x (recurse (car x)) (recurse (cdr x))))
                 (t x))))
   ;; Shorten obnoxiously long printed representations of methods.
@@ -321,64 +227,6 @@
           (dolist (qual last)
             (unpackageize qual))))))
   name)
-
-(defun fun-name-from-core (name core)
-  (remove-name-junk (%fun-name-from-core name core)))
-
-;;; A problem: COMPILED-DEBUG-FUN-ENCODED-LOCS (a packed integer) might be a
-;;; bignum - in fact probably is. If so, it points into the target core.
-;;; So we have to produce a new instance with an ENCODED-LOCS that
-;;; is the translation of the bignum, and call the accessor on that.
-;;; The accessors for its sub-fields are abstract - we don't know where the
-;;; fields are so we can't otherwise unpack them. (See CDF-DECODE-LOCS if
-;;; you really need to know)
-(defun cdf-offset (compiled-debug-fun spacemap)
-  ;; (Note that on precisely GC'd platforms, this operation is dangerous,
-  ;; but no more so than everything else in this file)
-  (let ((locs (sb-c::compiled-debug-fun-encoded-locs
-               (truly-the sb-c::compiled-debug-fun compiled-debug-fun))))
-    (when (consp locs)
-      (setq locs (cdr (translate locs spacemap))))
-    (sb-c::compiled-debug-fun-offset
-     (sb-c::make-compiled-debug-fun
-      :name nil
-      :encoded-locs (if (fixnump locs) locs (translate locs spacemap))))))
-
-;;; Return a list of ((NAME START . END) ...)
-;;; for each C symbol that should be emitted for this code object.
-;;; Start and and are relative to the object's base address,
-;;; not the start of its instructions. Hence we add HEADER-BYTES
-;;; too all the PC offsets.
-(defun code-symbols (code core &aux (spacemap (core-spacemap core)))
-  (let ((cdf (translate
-                  (sb-c::compiled-debug-info-fun-map
-                   (truly-the sb-c::compiled-debug-info
-                              (translate (%code-debug-info code) spacemap)))
-                  spacemap))
-        (header-bytes (* (code-header-words code) n-word-bytes))
-        (start-pc 0)
-        (blobs))
-    (loop
-      (let* ((name (fun-name-from-core
-                    (sb-c::compiled-debug-fun-name
-                     (truly-the sb-c::compiled-debug-fun cdf))
-                    core))
-             (next (when (%instancep (sb-c::compiled-debug-fun-next cdf))
-                     (translate (sb-c::compiled-debug-fun-next cdf) spacemap)))
-             (end-pc (if next
-                         (+ header-bytes (cdf-offset next spacemap))
-                         (code-object-size code))))
-        (unless (= end-pc start-pc)
-          ;; Collapse adjacent address ranges named the same.
-          ;; Use EQUALP instead of EQUAL to compare names
-          ;; because instances of CORE-SYMBOL are not interned objects.
-          (if (and blobs (equalp (caar blobs) name))
-              (setf (cddr (car blobs)) end-pc)
-              (push (list* name start-pc end-pc) blobs)))
-        (if next
-            (setq cdf next start-pc end-pc)
-            (return))))
-    (nreverse blobs)))
 
 (defstruct (descriptor (:constructor make-descriptor (bits)))
   (bits 0 :type word))
@@ -524,59 +372,72 @@
     (values (sb-c::unpack-code-fixup-locs
              (if (fixnump locs) locs (translate locs spacemap))))))
 
+(declaim (ftype function extract-object-from-core))
+(defun extract-fun-map (code core)
+  ;; Pointers to target objects should be SAPified before passing them,
+  ;; so that this is safe under precise GC. Consider what happens if you pass an object
+  ;; via its tagged pointer that looks like it's into the host's heap, but it's physically
+  ;; mapped elsewhere. GC sees the bits of the alleged object and thinks you mean to refer
+  ;; to the host's heap. That's completely wrong, but it mostly does no harm on
+  ;; conservative GC. However, it _does_ do harm even on conservative GC if we actually
+  ;; store such pointer somewhere that pointer tracing sees it. So we're technically
+  ;; in the clear only as long as the pointer is _always_ ambiguous (i.e. on the stack)
+  ;; or else made into a proper SAP. And all deref operations should read via the SAP
+  ;; and return a SAP. I didn't feel up to the task of emulating every single primitive object
+  ;; reader and structure slot reader needed in this file. Though maybe I'll get around
+  ;; to it some day, as all the emulations could be autogenerated somehow.
+  (let* ((di-sap (int-sap (get-lisp-obj-address (%code-debug-info code))))
+         (proxy-di (extract-object-from-core di-sap core)))
+    (sb-c::compiled-debug-info-fun-map proxy-di)))
+
 ;;; Examine CODE, returning a list of lists describing how to emit
 ;;; the contents into the assembly file.
 ;;;   ({:data | :padding} . N) | (start-pc . end-pc)
-(defun get-text-ranges (code spacemap)
-    (let ((cdf (translate (sb-c::compiled-debug-info-fun-map
-                           (truly-the sb-c::compiled-debug-info
-                                      (translate (%code-debug-info code) spacemap)))
-                          spacemap))
-          (next-simple-fun-pc-offs (%code-fun-offset code 0))
-          (start-pc (code-n-unboxed-data-bytes code))
-          (simple-fun-index -1)
-          (simple-fun)
-          (blobs))
-      (when (plusp start-pc)
-        (aver (zerop (rem start-pc n-word-bytes)))
-        (push `(:data . ,(ash start-pc (- word-shift))) blobs))
-      (loop
-        (let* ((next (when (%instancep (sb-c::compiled-debug-fun-next
-                                        (truly-the sb-c::compiled-debug-fun cdf)))
-                       (translate (sb-c::compiled-debug-fun-next
-                                   (truly-the sb-c::compiled-debug-fun cdf))
-                                  spacemap)))
-               (end-pc (if next
-                           (cdf-offset next spacemap)
-                           (%code-text-size code))))
-          (cond
-            ((= start-pc end-pc)) ; crazy shiat. do not add to blobs
-            ((<= start-pc next-simple-fun-pc-offs (1- end-pc))
-             (incf simple-fun-index)
-             (setq simple-fun (%code-entry-point code simple-fun-index))
-             (let ((padding (- next-simple-fun-pc-offs start-pc)))
-               (when (plusp padding)
-                 ;; Assert that SIMPLE-FUN always begins at an entry
-                 ;; in the fun-map, and not somewhere in the middle:
-                 ;;   |<--  fun  -->|<--  fun  -->|
-                 ;;   ^- start (GOOD)      ^- alleged start (BAD)
-                 (cond ((eq simple-fun (%code-entry-point code 0))
-                        (bug "Misaligned fun start"))
-                       (t ; sanity-check the length of the filler
-                        (aver (< padding (* 2 n-word-bytes)))))
-                 (push `(:pad . ,padding) blobs)
-                 (incf start-pc padding)))
-             (push `(,start-pc . ,end-pc) blobs)
-             (setq next-simple-fun-pc-offs
-                   (if (< (1+ simple-fun-index ) (code-n-entries code))
-                       (%code-fun-offset code (1+ simple-fun-index))
-                       -1)))
-            (t
-             (let ((current-blob (car blobs)))
-               (setf (cdr current-blob) end-pc)))) ; extend this blob
-          (unless next
-            (return (nreverse blobs)))
-          (setq cdf next start-pc end-pc)))))
+;;; CODE is supplied as a _physical_ object, i.e. whever it is currently
+;;; mapped into memory which on AMD64 Linux is typically around #x7F.........F
+(defun get-text-ranges (code core)
+  (let* ((fun-map (extract-fun-map code core))
+         (next-simple-fun-pc-offs (%code-fun-offset code 0))
+         (start-pc (code-n-unboxed-data-bytes code))
+         (simple-fun-index -1)
+         (simple-fun)
+         (blobs))
+    (when (plusp start-pc)
+      (aver (zerop (rem start-pc n-word-bytes)))
+      (push `(:data . ,(ash start-pc (- word-shift))) blobs))
+    (loop
+      (let* ((next (sb-c::compiled-debug-fun-next fun-map))
+             (end-pc (if next
+                         (sb-c::compiled-debug-fun-offset next)
+                         (%code-text-size code))))
+        (cond
+          ((= start-pc end-pc)) ; crazy shiat. do not add to blobs
+          ((<= start-pc next-simple-fun-pc-offs (1- end-pc))
+           (incf simple-fun-index)
+           (setq simple-fun (%code-entry-point code simple-fun-index))
+           (let ((padding (- next-simple-fun-pc-offs start-pc)))
+             (when (plusp padding)
+               ;; Assert that SIMPLE-FUN always begins at an entry
+               ;; in the fun-map, and not somewhere in the middle:
+               ;;   |<--  fun  -->|<--  fun  -->|
+               ;;   ^- start (GOOD)      ^- alleged start (BAD)
+               (cond ((eq simple-fun (%code-entry-point code 0))
+                      (bug "Misaligned fun start"))
+                     (t   ; sanity-check the length of the filler
+                      (aver (< padding (* 2 n-word-bytes)))))
+               (push `(:pad . ,padding) blobs)
+               (incf start-pc padding)))
+           (push `(,start-pc . ,end-pc) blobs)
+           (setq next-simple-fun-pc-offs
+                 (if (< (1+ simple-fun-index) (code-n-entries code))
+                     (%code-fun-offset code (1+ simple-fun-index))
+                     -1)))
+          (t
+           (let ((current-blob (car blobs)))
+             (setf (cdr current-blob) end-pc)))) ; extend this blob
+        (unless next
+          (return (nreverse blobs)))
+        (setq fun-map next start-pc end-pc)))))
 
 (defun %widetag-of (word) (logand word widetag-mask))
 
@@ -1126,7 +987,7 @@
                   (sap-ref-16 sap 8) (logior (page-words-used pte) (page-single-obj-p pte)))
             (write-sequence buffer output)))
         (let* ((bytes-written (* 10 (length (space-page-table dynamic-space))))
-               (diff (- (align-up bytes-written sb-vm:n-word-bytes)
+               (diff (- (align-up bytes-written n-word-bytes)
                         bytes-written)))
           (fill buffer 0)
           (write-sequence buffer output :end diff))))
@@ -1310,8 +1171,9 @@
 ;;; Now "step2.core" has a text space, and all lisp-to-lisp calls bypass their FDEFN.
 ;;; At this point split-core on "step2.core" can run in the manner of elfcore.test.sh
 
-(defun get-code-segments (code vaddr spacemap)
+(defun get-code-segments (code vaddr core)
   (let ((di (%code-debug-info code))
+        (spacemap (core-spacemap core))
         (inst-base (+ vaddr (ash (code-header-words code) word-shift)))
         (result))
     (aver (%instancep di))
@@ -1324,7 +1186,7 @@
             (push (make-code-segment code start (- (1+ end) start)
                                      :virtual-location (+ inst-base start))
                   result)))
-        (dolist (range (get-text-ranges code spacemap))
+        (dolist (range (get-text-ranges code core))
           (let ((car (car range)))
             (when (integerp car)
               (push (make-code-segment code car (- (cdr range) car)
@@ -1345,8 +1207,8 @@
           (if (range-labeled self) "L:" "  ")
           (range-vaddr self)
           (range-bytecount self)))
-(defun get-code-instruction-model (code vaddr spacemap)
-  (let* ((segments (get-code-segments code vaddr spacemap))
+(defun get-code-instruction-model (code vaddr core)
+  (let* ((segments (get-code-segments code vaddr core))
          (insts-vaddr (+ vaddr (ash (code-header-words code) word-shift)))
          (dstate (sb-disassem:make-dstate))
          (fun-header-locs
@@ -1542,6 +1404,136 @@
     (loop for i from first below last do (scan-slot i))))
 ) ; end MACROLET
 
+;;; Convert the object at SAP (which represents a tagged lispobj)
+;;; into a host proxy for that object, with a few caveats:
+;;; - Structure types *must* match the host's type for the classoid,
+;;;   or bad things happen.
+;;; - Symbols can optionally be returned as instances of CORE-SYM
+;;;
+;;; Structures use the host's LAYOUT instances. The addresses don't
+;;; have to match, but the slots do have to.
+;;;
+;;; Shared substructure / circularity are OK (I think)
+;;;
+(defparameter *allowed-instance-types*
+  '(sb-c::compiled-debug-info sb-c::debug-source
+    sb-di::compiled-debug-var sb-di::compiled-debug-block sb-di::compiled-code-location
+    sb-c::compiled-debug-fun-external
+    sb-c::compiled-debug-fun sb-c::compiled-debug-fun-toplevel
+    sb-c::compiled-debug-fun-more
+    sb-c::compiled-debug-fun-optional sb-c::compiled-debug-fun-cleanup))
+(defparameter *ignored-instance-types*
+  '("CORE-DEBUG-SOURCE"))
+
+(dolist (type *allowed-instance-types*)
+  (let ((dd (find-defstruct-description type)))
+    (assert (= (sb-kernel::dd-bitmap dd) +layout-all-tagged+))))
+
+(defun extract-object-from-core (sap core &optional proxy-symbols
+                                 &aux (spacemap (core-spacemap core))
+                                      (targ-nil (compute-nil-addr spacemap))
+                                      ;; address (an integer) -> host object
+                                      (seen (make-hash-table)))
+  (declare (ignorable proxy-symbols)) ; not done
+  (macrolet ((word (i)
+               `(sap-ref-word sap (ash ,i word-shift)))
+             (memoize (result)
+               `(setf (gethash addr seen) ,result)))
+    (labels ((recurse (addr)
+               (unless (is-lisp-pointer addr)
+                 (return-from recurse (%make-lisp-obj addr)))
+               (awhen (gethash addr seen) ; NIL is not recorded
+                 (return-from recurse it))
+               (when (eql addr targ-nil)
+                 (return-from recurse nil))
+               (let ((sap (int-sap (translate-ptr (logandc2 addr lowtag-mask)
+                                                  spacemap))))
+                 (flet ((translated-obj ()
+                          (%make-lisp-obj (translate-ptr addr spacemap))))
+                   (case (logand addr lowtag-mask)
+                     (#.list-pointer-lowtag
+                      (let ((new (memoize (cons 0 0))))
+                        (rplaca new (recurse (word 0)))
+                        (rplacd new (recurse (word 1)))
+                        new))
+                     (#.instance-pointer-lowtag
+                      (let* ((layout
+                              (truly-the layout
+                               (translate (%instance-layout (translated-obj)) spacemap)))
+                             (classoid
+                              (truly-the classoid
+                                (translate (layout-classoid layout) spacemap)))
+                             (classoid-name
+                              (truly-the symbol
+                              (translate (classoid-name classoid) spacemap)))
+                             (classoid-name-string
+                              (translate (symbol-name classoid-name) spacemap))
+                             (allowed
+                              (find classoid-name-string *allowed-instance-types*
+                                    :test 'string=)))
+                        ;; In general, I want to correctly intern the symbol into the host
+                        ;; and then perform FIND-LAYOUT on that symbol.
+                        ;; These few cases are enough to get by.
+                        (cond
+                          (allowed
+                           (let* ((nslots (%instance-length (translated-obj)))
+                                  (new (memoize (%make-instance nslots)))
+                                  (exclude-slot-mask
+                                   (logior
+                                    ;; skip the layout slot if #-compact-instance-header
+                                    (if (= sb-vm:instance-data-start 1) 1 0)
+                                    ;; everything else except for compiled-debug-info-memo-cell
+                                    ;; (Why is it ever non-NIL as saved? That's another bug)
+                                    (if (eq allowed 'sb-c::compiled-debug-info)
+                                        (ash 1 (get-dsd-index sb-c::compiled-debug-info sb-c::memo-cell))
+                                        0))))
+                             (setf (%instance-layout new) (find-layout allowed))
+                             (dotimes (i nslots new)
+                               (unless (logbitp i exclude-slot-mask)
+                                 (setf (%instance-ref new i)
+                                       (recurse (word (+ instance-slots-offset i))))))))
+                          ((string= classoid-name-string "PACKAGE")
+                           ;; oh dear, this is completely wrong
+                           (let ((package-name
+                                  (translate
+                                   (sb-impl::package-%name (truly-the package (translated-obj)))
+                                   spacemap)))
+                             (memoize (or (find-package package-name)
+                                          (make-package package-name)))))
+                          ((member classoid-name-string *ignored-instance-types* :test 'string=)
+                           (sb-kernel:make-unbound-marker))
+                          (t
+                           (error "Not done: type ~s" classoid-name-string)))))
+                     (#.fun-pointer-lowtag
+                      ;; CORE-DEBUG-SOURCE has a :FUNCTION but don't care the value
+                      #'error)
+                     (#.other-pointer-lowtag
+                      (let ((widetag (logand (word 0) widetag-mask)))
+                        (cond ((= widetag simple-vector-widetag)
+                               (let* ((len (ash (word 1) (- n-fixnum-tag-bits)))
+                                      (new (memoize (make-array len))))
+                                 (dotimes (i len new)
+                                   (setf (aref new i)
+                                         (recurse (word (+ vector-data-offset i)))))))
+                              ((and (>= widetag #x80) (typep (translated-obj) 'simple-array))
+                               (memoize (translated-obj))) ; unboxed array is OK in place
+                              ((= widetag symbol-widetag)
+                               (let* ((sym (translated-obj))
+                                      (name (translate (symbol-name sym) spacemap))
+                                      (pkg-name (core-package-from-id (symbol-package-id sym)
+                                                                      core)))
+                                 (memoize (if (null pkg-name)
+                                              (make-symbol name)
+                                              (without-package-locks
+                                                  (intern name
+                                                          (or (find-package pkg-name)
+                                                              (make-package pkg-name))))))))
+                              ((< widetag symbol-widetag) ; a number of some kind
+                               (copy-number-to-heap (translated-obj)))
+                              (t
+                               (error "can't translate other fancy stuff yet"))))))))))
+      (recurse (sap-int sap)))))
+
 (defun compute-nil-symbol-sap (spacemap)
   (let ((space (get-space static-core-space-id spacemap)))
     ;; TODO: The core should store its address of NIL in the initial function entry
@@ -1730,7 +1722,7 @@
          ;;; for large objects. With gencgc we'd have to compute the scan-start
          ;;; on subsequent pages, and put the end-of-page free space in a list.
          ;;; It's not worth the hassle.
-         (largep #+gencgc (>= size sb-vm:gencgc-page-bytes)
+         (largep #+gencgc (>= size gencgc-page-bytes)
                  #-gencgc (>= size large-object-size))
          (page-type (pick-page-type descriptor sap largep old-spacemap))
          (newspace (get-space dynamic-core-space-id new-spacemap))
@@ -1937,3 +1929,26 @@
                      (cdr spacemap))
              spacemap card-mask-nbits initfun
              core-header core-dir-start output)))))))
+
+(defun test-some-objects (core-pathname addrlist-pathname)
+  (with-open-file (input core-pathname :element-type '(unsigned-byte 8))
+    (binding* ((core-header (make-array +backend-page-bytes+ :element-type '(unsigned-byte 8)))
+               (core-offset (read-core-header input core-header t))
+               ((npages space-list card-mask-nbits core-dir-start initfun)
+                (parse-core-header input core-header)))
+      (declare (ignorable card-mask-nbits core-dir-start initfun))
+      (with-mapped-core (sap core-offset npages input)
+        ;; FIXME: WITH-MAPPED-CORE should bind spacemap
+        (let* ((spacemap (cons sap (sort (copy-list space-list) #'> :key #'space-addr)))
+               (core (make-core spacemap (make-bounds 0 0) (make-bounds 0 0)))
+               (list (with-open-file (f addrlist-pathname) (read f))))
+          (dolist (x list)
+            (let* ((code-physaddr (translate-ptr x spacemap))
+                   (di (sb-sys:int-sap
+                        (get-lisp-obj-address
+                         (%code-debug-info
+                          (truly-the code-component
+                                     (%make-lisp-obj code-physaddr)))))))
+              (when (= (logand (sb-sys:sap-int di) lowtag-mask) instance-pointer-lowtag)
+                (let ((copy (extract-object-from-core di core)))
+                  (print copy))))))))))

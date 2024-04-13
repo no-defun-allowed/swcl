@@ -416,35 +416,37 @@
          (/ (log2/double-float number) (log2/rational base)))
         (t
          (/ (log number) (log base))))
-      (number-dispatch ((number number))
-        (((foreach fixnum bignum))
-         (if (minusp number)
-             (complex (log (- number)) (coerce pi 'single-float))
-             (coerce (/ (truly-the double-float (log2/nonnegative-integer number))
-                        (log (exp $1.0d0) $2.0d0)) 'single-float)))
-        ((ratio)
-         (if (minusp number)
-             (complex (log (- number)) (coerce pi 'single-float))
-             (let ((numerator (numerator number))
-                   (denominator (denominator number)))
-               (if (and (<= -1 (- (integer-length numerator) (integer-length denominator)) 1)
-                        (<= 3/4 number 5/4))
-                   (coerce (%log1p (coerce (- number 1) 'double-float))
-                           'single-float)
-                   (coerce (/ (- (truly-the double-float (log2/nonnegative-integer numerator))
-                                 (truly-the double-float (log2/nonnegative-integer denominator)))
-                              (log (exp $1.0d0) $2.0d0))
-                           'single-float)))))
-        (((foreach single-float double-float))
-         ;; Is (log -0) -infinity (libm.a) or -infinity + i*pi (Kahan)?
-         ;; Since this doesn't seem to be an implementation issue
-         ;; I (pw) take the Kahan result.
-         (if (float-sign-bit-set-p number)
-             (complex (log (- number)) (coerce pi '(dispatch-type number)))
-             (coerce (%log (coerce number 'double-float))
-                     '(dispatch-type number))))
-        ((complex)
-         (complex-log number)))))
+      (let ((log2e $1.4426950408889634d0))
+        (number-dispatch ((number number))
+          (((foreach fixnum bignum))
+           (if (minusp number)
+               (complex (log (- number)) (coerce pi 'single-float))
+               (coerce (/ (truly-the double-float (log2/nonnegative-integer number))
+                          log2e)
+                       'single-float)))
+          ((ratio)
+           (if (minusp number)
+               (complex (log (- number)) (coerce pi 'single-float))
+               (let ((numerator (numerator number))
+                     (denominator (denominator number)))
+                 (if (and (<= -1 (- (integer-length numerator) (integer-length denominator)) 1)
+                          (<= 3/4 number 5/4))
+                     (coerce (%log1p (coerce (- number 1) 'double-float))
+                             'single-float)
+                     (coerce (/ (- (truly-the double-float (log2/nonnegative-integer numerator))
+                                   (truly-the double-float (log2/nonnegative-integer denominator)))
+                                log2e)
+                             'single-float)))))
+          (((foreach single-float double-float))
+           ;; Is (log -0) -infinity (libm.a) or -infinity + i*pi (Kahan)?
+           ;; Since this doesn't seem to be an implementation issue
+           ;; I (pw) take the Kahan result.
+           (if (float-sign-bit-set-p number)
+               (complex (log (- number)) (coerce pi '(dispatch-type number)))
+               (coerce (%log (coerce number 'double-float))
+                       '(dispatch-type number))))
+          ((complex)
+           (complex-log number))))))
 (declaim (end-block))
 
 (defun sqrt (number)
@@ -919,10 +921,6 @@
   ;; implementation of log1p.
   (let ((t0 #-long-float (make-double-float #x3fe6a09e #x667f3bcd)
             #+long-float (error "(/ (sqrt 2l0) 2)"))
-        ;; KLUDGE: if repeatable fasls start failing under some weird
-        ;; xc host, this 1.2d0 might be a good place to examine: while
-        ;; it _should_ be the same in all vaguely-IEEE754 hosts, 1.2
-        ;; is not exactly representable, so something could go wrong.
         (t1 $1.2d0)
         (t2 $3d0)
         (ln2 #-long-float (make-double-float #x3fe62e42 #xfefa39ef)

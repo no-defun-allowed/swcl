@@ -328,10 +328,13 @@
                              (* #-round-float
                                 (coerce res ',rtype)
                                 #+round-float
-                                (,(ecase rtype
-                                    (double-float 'round-double)
-                                    (single-float 'round-single))
-                                 divided :truncate)
+                                (- (,(ecase rtype
+                                       (double-float 'round-double)
+                                       (single-float 'round-single))
+                                     divided :truncate)
+                                   ,(ecase rtype
+                                      (double-float $-0.0d0)
+                                      (single-float $-0.0f0)))
                                 float-div)))))
              (single-digit-bignum-p (x)
                #+(or x86-64 x86 ppc64)
@@ -574,7 +577,10 @@
         (((foreach fixnum bignum ratio) (or fixnum bignum ratio))
          (multiple-value-bind (q r)
              (truncate number divisor)
-           (values (float q) r)))
+           (if (and (zerop q) (or (and (minusp number) (not (minusp divisor)))
+                                  (and (not (minusp number)) (minusp divisor))))
+               (values $-0f0 r)
+               (values (float q) r))))
         (((foreach single-float double-float #+long-float long-float)
           (or rational single-float))
          (if (eql divisor 1)
@@ -617,14 +623,42 @@
           (values (+ tru 1) (- rem divisor))
           (values tru rem))))
 
-;;; FIXME: this probably needs treatment similar to the use of
-;;; %UNARY-FTRUNCATE for FTRUNCATE.
   (defun fround (number &optional (divisor 1))
     "Same as ROUND, but returns first value as a float."
     (declare (explicit-check))
-    (multiple-value-bind (res rem)
-        (round number divisor)
-      (values (float res (if (floatp rem) rem $1.0)) rem))))
+    (macrolet ((fround-float (rtype)
+                 `(let* ((float-div (coerce divisor ',rtype))
+                         (res (%unary-fround (/ number float-div))))
+                    (values res
+                            (- number
+                               (* (coerce res ',rtype) float-div))))))
+      (number-dispatch ((number real) (divisor real))
+        (((foreach fixnum bignum ratio) (or fixnum bignum ratio))
+         (multiple-value-bind (q r)
+             (round number divisor)
+           (if (and (zerop q) (or (and (minusp number) (not (minusp divisor)))
+                                  (and (not (minusp number)) (minusp divisor))))
+               (values $-0f0 r)
+               (values (float q) r))))
+        (((foreach single-float double-float #+long-float long-float)
+          (or rational single-float))
+         (if (eql divisor 1)
+             (let ((res (%unary-fround number)))
+               (values res (- number (coerce res '(dispatch-type number)))))
+             (fround-float (dispatch-type number))))
+        #+long-float
+        ((long-float (or single-float double-float long-float))
+         (fround-float long-float))
+        #+long-float
+        (((foreach double-float single-float) long-float)
+         (fround-float long-float))
+        ((double-float (or single-float double-float))
+         (fround-float double-float))
+        ((single-float double-float)
+         (fround-float double-float))
+        (((foreach fixnum bignum ratio)
+          (foreach single-float double-float #+long-float long-float))
+         (fround-float (dispatch-type divisor)))))))
 
 #+round-float
 (macrolet ((def (name mode docstring)
@@ -652,7 +686,10 @@
                     (((foreach fixnum bignum ratio) (or fixnum bignum ratio))
                      (multiple-value-bind (q r)
                          (,(find-symbol (string mode) :cl) number divisor)
-                       (values (float q) r)))
+                       (if (and (zerop q) (or (and (minusp number) (not (minusp divisor)))
+                                              (and (not (minusp number)) (minusp divisor))))
+                           (values $-0f0 r)
+                           (values (float q) r))))
                     (((foreach single-float double-float)
                       (or rational single-float))
                      (if (eql divisor 1)
@@ -1343,25 +1380,25 @@ and the number of 0 bits if INTEGER is negative."
   (declare (explicit-check))
   (etypecase integer
     (fixnum
-     (cond ((zerop integer)
-            0)
-           ((fixnump count)
-            (let ((length (integer-length (truly-the fixnum integer)))
-                  (count (truly-the fixnum count)))
-              (declare (fixnum length count))
-              (cond ((and (plusp count)
-                          (>= (+ length count)
-                              sb-vm:n-word-bits))
-                     (bignum-ashift-left-fixnum integer count))
-                    (t
-                     (truly-the sb-vm:signed-word
-                                (ash (truly-the fixnum integer) count))))))
-           ((minusp count)
+     (cond ((fixnump count)
+            (if (zerop integer)
+                0
+                (let ((length (integer-length (truly-the fixnum integer)))
+                      (count (truly-the fixnum count)))
+                  (declare (fixnum length count))
+                  (cond ((and (plusp count)
+                              (>= (+ length count)
+                                  sb-vm:n-word-bits))
+                         (bignum-ashift-left-fixnum integer count))
+                        (t
+                         (truly-the sb-vm:signed-word
+                                    (ash (truly-the fixnum integer) count)))))))
+           ((minusp (the integer count))
             (if (minusp integer) -1 0))
            (t
             (bignum-ashift-left (make-small-bignum integer) count))))
     (bignum
-     (if (plusp count)
+     (if (plusp (the integer count))
          (bignum-ashift-left integer count)
          (bignum-ashift-right integer (- count))))))
 

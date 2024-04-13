@@ -341,6 +341,16 @@
   (declare (type (member add sub) op))
   (multiple-value-setq (x y) (prepare-alu-operands x y vop const-tn-xform (eq op 'add)))
 
+  (when (and (typep y 'unsigned-byte)
+             (logbitp (1- n-word-bits) y))
+    ;; Turn unsigned constants into smaller negative constants
+    (case op
+      (add
+       (setf op 'sub
+             y (- (sb-c::mask-signed-field n-word-bits y))))
+      (sub
+       (setf op 'add
+             y (- (sb-c::mask-signed-field n-word-bits y))))))
   ;; FIXME: What is (ash -1 63) for ? this comment within doesn't match the test.
   (when (and (eq op 'sub) (and (integerp y) (not (eql y (ash -1 63)))))
     ;; If Y is -2147483648 then the negation is not (signed-byte 32).
@@ -740,6 +750,66 @@
     (inst jmp :no DONE)
     (zeroize twodigit)
     allocate
+    (inst sbb high high)
+    (wordpair-to-bignum r twodigit low high node)
+    DONE))
+
+(define-vop (%negate/unsigned=>integer)
+  (:translate %negate)
+  (:args (x :scs (unsigned-reg) :target low))
+  (:arg-types unsigned-num)
+  (:temporary (:sc unsigned-reg :from (:argument 0)) low)
+  (:temporary (:sc unsigned-reg :from :eval) high twodigit)
+  (:temporary (:sc complex-double-reg :offset 0) scratch)
+  (:ignore scratch)
+  (:results (r :scs (descriptor-reg)))
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:node-var node)
+  (:generator 8
+    (move low x)
+    (inst neg low)
+    (inst mov :byte twodigit 1)
+
+    (inst jmp :c negative)
+    (inst jmp :s allocate)
+    (inst jmp positive)
+    negative
+    (inst jmp :ns allocate)
+    positive
+
+    (move r low)
+    (inst shl r 1)
+    (inst jmp :no DONE)
+    (zeroize twodigit)
+    allocate
+    (inst sbb high high)
+    (wordpair-to-bignum r twodigit low high node)
+    DONE))
+
+(define-vop (%negate/signed=>integer)
+  (:translate %negate)
+  (:args (x :scs (signed-reg) :target low))
+  (:arg-types signed-num)
+  (:temporary (:sc signed-reg :from (:argument 0)) low)
+  (:temporary (:sc signed-reg :from :eval) high twodigit)
+  (:temporary (:sc complex-double-reg :offset 0) scratch)
+  (:ignore scratch)
+  (:results (r :scs (descriptor-reg)))
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:node-var node)
+  (:generator 7
+    (move low x)
+    (inst neg low)
+    (inst mov :byte twodigit 1)
+    (inst jmp :o allocate)
+    (move r low)
+    (inst shl r 1)
+    (inst jmp :no DONE)
+    (zeroize twodigit)
+    allocate
+    (inst cmc)
     (inst sbb high high)
     (wordpair-to-bignum r twodigit low high node)
     DONE))
@@ -3910,14 +3980,14 @@
 
   (def check-range<= nil nil t))
 
-(deftransform %dpb ((new size posn integer) (:or ((word
-                                                   (constant-arg integer)
+(deftransform %dpb ((new size posn integer) (:or (((constant-arg integer)
                                                    (constant-arg (integer 1 1))
-                                                   word) *)
-                                                 ((signed-word
-                                                   (constant-arg integer)
+                                                   word
+                                                   word) word)
+                                                 (((constant-arg integer)
                                                    (constant-arg (integer 1 1))
-                                                   signed-word) *)) *
+                                                   word
+                                                   signed-word) signed-word)) *
                     :vop t)
   (not (constant-lvar-p posn)))
 
@@ -3926,7 +3996,8 @@
   (:args (posn :scs (unsigned-reg) :target temp)
          (y :scs (any-reg) :target res))
   (:arg-types (:constant integer)
-              (:constant integer) unsigned-num
+              (:constant (integer 1 1))
+              unsigned-num
               tagged-num)
   (:info new size)
   (:ignore size)
@@ -3948,7 +4019,7 @@
   (:args (posn :scs (unsigned-reg))
          (y :scs (unsigned-reg) :target res))
   (:arg-types (:constant integer)
-              (:constant integer) unsigned-num
+              (:constant (integer 1 1)) unsigned-num
               unsigned-num)
   (:info new size)
   (:ignore size)
@@ -3966,7 +4037,8 @@
   (:args (posn :scs (unsigned-reg))
          (y :scs (signed-reg) :target res))
   (:arg-types (:constant integer)
-              (:constant integer) unsigned-num
+              (:constant (integer 1 1))
+              unsigned-num
               signed-num)
   (:info new size)
   (:ignore size)

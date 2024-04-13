@@ -218,14 +218,15 @@
     `(or (classoid-cell-classoid ',cell)
          (error "Class not yet defined: ~S" name))))
 
-(defoptimizer (%typep-wrapper constraint-propagate-if)
-    ((test-value variable type) node)
+(defoptimizer (%typep-wrapper constraint-propagate-if) ((test-value variable type) node)
   (aver (constant-lvar-p type))
-  (let ((type (lvar-value type)))
-    (values variable (if (ctype-p type)
-                         type
-                         (handler-case (careful-specifier-type type)
-                           (t () nil))))))
+  (let* ((type (lvar-value type))
+         (ctype (if (ctype-p type)
+                    type
+                    (handler-case (careful-specifier-type type)
+                      (t () nil)))))
+    (if (and ctype (type-for-constraints-p ctype))
+        (values variable ctype))))
 
 (deftransform %typep-wrapper ((test-value variable type) * * :node node)
   (aver (constant-lvar-p type))
@@ -1448,7 +1449,7 @@
                     (error "~a is not a subtype of VECTOR." type)))))
     (simplify type)))
 
-(defun strip-array-dimensions-and-complexity (type)
+(defun strip-array-dimensions-and-complexity (type &optional simple)
   (labels ((process-compound-type (types)
              (let (array-types)
                (dolist (type types)
@@ -1464,7 +1465,9 @@
                            dim
                            (make-list (length dim)
                                       :initial-element '*))
-                       :complexp :maybe
+                       :complexp (if simple
+                                     nil
+                                     :maybe)
                        :element-type (array-type-element-type type)
                        :specialized-element-type (array-type-specialized-element-type type))))
                    ((union-type-p type)

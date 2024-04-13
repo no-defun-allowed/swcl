@@ -838,6 +838,8 @@ with that condition (or with no condition) will be returned."
                type)))
     ((eql sb-c::ftype-context)
      "from the function type declaration.")
+    ((member map)
+     (format nil "for the result type of ~a." context))
     ((and symbol
           (not null))
      (format nil "when binding ~s" context))
@@ -1954,20 +1956,34 @@ the usual naming convention (names like *FOO*) for special variables"
    (description :initarg :description :reader proclamation-mismatch-description :initform nil)
    (name :initarg :name :reader proclamation-mismatch-name)
    (old :initarg :old :reader proclamation-mismatch-old)
-   (new :initarg :new :reader proclamation-mismatch-new))
+   (new :initarg :new :reader proclamation-mismatch-new)
+   (value :initarg :value))
   (:report
    (lambda (condition stream)
-     (format stream
-             "~@<The new ~A proclamation for~@[ ~A~] ~
+     (if (slot-boundp condition 'value)
+         (format stream
+                 "~@<The new ~A proclamation for~@[ ~A~] ~
+               ~/sb-ext:print-symbol-with-prefix/~
+               ~@:_~2@T~/sb-impl:print-type-specifier/~@:_~
+               does not match the current value ~S of type~
+               ~@:_~2@T~/sb-impl:print-type-specifier/~@:>"
+                 (proclamation-mismatch-kind condition)
+                 (proclamation-mismatch-description condition)
+                 (proclamation-mismatch-name condition)
+                 (proclamation-mismatch-new condition)
+                 (slot-value condition 'value)
+                 (proclamation-mismatch-old condition))
+         (format stream
+                 "~@<The new ~A proclamation for~@[ ~A~] ~
                ~/sb-ext:print-symbol-with-prefix/~
                ~@:_~2@T~/sb-impl:print-type-specifier/~@:_~
                does not match the old ~4:*~A~3* proclamation~
                ~@:_~2@T~/sb-impl:print-type-specifier/~@:>"
-             (proclamation-mismatch-kind condition)
-             (proclamation-mismatch-description condition)
-             (proclamation-mismatch-name condition)
-             (proclamation-mismatch-new condition)
-             (proclamation-mismatch-old condition)))))
+                 (proclamation-mismatch-kind condition)
+                 (proclamation-mismatch-description condition)
+                 (proclamation-mismatch-name condition)
+                 (proclamation-mismatch-new condition)
+                 (proclamation-mismatch-old condition))))))
 
 (define-condition type-proclamation-mismatch (proclamation-mismatch)
   ()

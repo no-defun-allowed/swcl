@@ -2867,12 +2867,6 @@ expansion happened."
              nil)))))
 
 ;;; Return a numeric type that is a supertype for both TYPE1 and TYPE2.
-;;;
-;;; Binding *APPROXIMATE-NUMERIC-UNIONS* to T allows merging non-adjacent
-;;; numeric types, eg (OR (INTEGER 0 12) (INTEGER 20 128)) => (INTEGER 0 128),
-;;; the compiler does this occasionally during type-derivation to avoid
-;;; creating absurdly complex unions of numeric types.
-(defvar *approximate-numeric-unions* nil)
 
 (defun rational-integer-union (rational integer)
   (let ((formatr (numeric-type-format rational))
@@ -2888,8 +2882,7 @@ expansion happened."
         ;; handle the special-case that a single integer expands the
         ;; rational interval.
         ((and (integerp lowi) (integerp highi) (= lowi highi)
-              (or *approximate-numeric-unions*
-                  (numeric-types-adjacent integer rational)
+              (or (numeric-types-adjacent integer rational)
                   (numeric-types-adjacent rational integer)))
          (make-numeric-type
           :class 'rational :format formatr :complexp complexpr
@@ -2912,8 +2905,7 @@ expansion happened."
                   :high (round-numeric-bound highr 'integer formatr nil)))
                 (new-integer
                  (and (numeric-type-p integers-of-rational)
-                      (or *approximate-numeric-unions*
-                          (numeric-types-intersect integers-of-rational integer)
+                      (or (numeric-types-intersect integers-of-rational integer)
                           (numeric-types-adjacent integers-of-rational integer)
                           (numeric-types-adjacent integer integers-of-rational))
                      (let ((new-lowi (numeric-bound-max
@@ -2971,8 +2963,7 @@ expansion happened."
              ((and (eq class1 class2)
                    (eq format1 format2)
                    (eq complexp1 complexp2)
-                   (or *approximate-numeric-unions*
-                       (numeric-types-intersect type1 type2)
+                   (or (numeric-types-intersect type1 type2)
                        (numeric-types-adjacent type1 type2)
                        (numeric-types-adjacent type2 type1)))
               (make-numeric-type
@@ -2992,6 +2983,36 @@ expansion happened."
               (rational-integer-union type2 type1))
              (t nil))))))
 
+;;; If it's longer than N
+(defun weaken-numeric-type-union (n type)
+  (if (and (union-type-p type)
+           (nthcdr n (union-type-types type)))
+      (let ((types (union-type-types type))
+            by-aspect
+            non-numeric
+            new-types)
+        (loop for type in types
+              do (if (numeric-type-p type)
+                     (push type (getf by-aspect (numeric-type-aspects type)))
+                     (push type non-numeric)))
+        (loop for (aspect types) on by-aspect by #'cddr
+              do (loop with min = (numeric-type-low (car types))
+                       with max = (numeric-type-high (car types))
+                       for type in (cdr types)
+                       do
+                       (setf min (numeric-bound-max min
+                                                    (numeric-type-low type)
+                                                    <= < t)
+                             max (numeric-bound-max max
+                                                    (numeric-type-high type)
+                                                    >= > t))
+                       finally
+                       (push (new-ctype numeric-type 0 aspect
+                                        min
+                                        max)
+                             new-types)))
+        (%type-union (append new-types non-numeric)))
+      type))
 
 (!cold-init-forms
   (setf (info :type :kind 'number) :primitive)
@@ -3494,6 +3515,14 @@ used for a COMPLEX component.~:@>"
                 ((and (eql low 0) (eql high (1- base-char-code-limit)))
                  (range 0 #.(1- base-char-code-limit)))))))
     (new-ctype character-set-type 0 pairs)))
+
+(defun character-set-type-from-characters (characters)
+  ;; Constructor asserts that pairs are properly sorted
+  (make-character-set-type (mapcar (lambda (x)
+                                     (let ((code (sb-xc:char-code x)))
+                                       (cons code code)))
+                                   (sort (delete-duplicates characters) #'<
+                                         :key #'sb-xc:char-code))))
 
 (declaim (ftype (sfunction (t &key (:complexp t)
                                    (:element-type t)
@@ -4116,7 +4145,7 @@ used for a COMPLEX component.~:@>"
   ;; "* may appear as an argument to a MEMBER type specifier, but it indicates the
   ;;  literal symbol *, and does not represent an unspecified value."
   (if members
-      (let ((xset (alloc-xset)) fp-zeros other-reals char-codes)
+      (let ((xset (alloc-xset)) fp-zeros other-reals characters)
         ;; Calling REMOVE-DUPLICATES up front as used to be done is wasteful because the XSET can't
         ;; have dups in it. Elements that don't go in the XSET have to be de-duplicated.
         ;; There are at most 4 fp-zeros, so calling PUSHNEW is fine. For the rest, we can suppose
@@ -4124,14 +4153,12 @@ used for a COMPLEX component.~:@>"
         ;; a cetain length input, but does not)
         (dolist (m members)
           (typecase m
-            (character (push (sb-xc:char-code m) char-codes))
+            (character (push m characters))
             (real (if (fp-zero-p m) (pushnew m fp-zeros) (push m other-reals)))
             (t (add-to-xset m xset))))
         (apply #'type-union
                (make-member-type xset fp-zeros)
-               ;; Constructor asserts that pairs are properly sorted
-               (make-character-set-type (mapcar (lambda (x) (cons x x))
-                                                (sort (delete-duplicates char-codes) #'<)))
+               (character-set-type-from-characters characters)
                (mapcar #'ctype-of-number (delete-duplicates other-reals))))
       *empty-type*))
 (defun make-eql-type (elt)

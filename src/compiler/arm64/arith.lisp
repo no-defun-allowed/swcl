@@ -187,7 +187,7 @@
                      (:constant (satisfies ,constant-test)))
        (:generator ,untagged-penalty
          (cond ,@(and negative-op
-                      `(((minusp y)
+                      `(((minusp (setf y (sb-c::mask-signed-field n-word-bits y)))
                          (inst ,negative-op r x (,constant-transform (- y))))))
                (t
                 (inst ,constant-op r x (,constant-transform y))))))
@@ -203,7 +203,7 @@
                    (:constant (satisfies ,constant-test)))
        (:generator ,untagged-penalty
          (cond ,@(and negative-op
-                      `(((minusp y)
+                      `(((minusp (setf y (sb-c::mask-signed-field n-word-bits y)))
                          (inst ,negative-op r x (,constant-transform (- y))))))
                (t
                 (inst ,constant-op r x (,constant-transform y))))))))
@@ -933,6 +933,20 @@
            (inst asr res x (1+ posn))
            (inst and res res (ash most-positive-word (- size sb-vm:n-word-bits)))))))
 
+(define-vop (ldb-c)
+  (:translate %ldb)
+  (:args (x :scs (unsigned-reg signed-reg)))
+  (:arg-types (:constant integer) (:constant integer) (:or unsigned-num signed-num))
+  (:info size posn)
+  (:results (res :scs (unsigned-reg)))
+  (:result-types unsigned-num)
+  (:policy :fast-safe)
+  (:generator 3
+    (if (and (>= (+ posn size) n-word-bits)
+             (= size 1))
+        (inst lsr res x (1- n-word-bits))
+        (inst ubfm res x posn (+ posn size -1)))))
+
 (deftransform %dpb ((new size posn integer) (:or ((word
                                                    (constant-arg (integer 1 #.(1- n-word-bits)))
                                                    (constant-arg (mod #.n-word-bits))
@@ -948,24 +962,10 @@
               (or (zerop new)
                   (= (logcount new) size))))))
 
-(define-vop (ldb-c)
-  (:translate %ldb)
-  (:args (x :scs (unsigned-reg signed-reg)))
-  (:arg-types (:constant integer) (:constant integer) (:or unsigned-num signed-num))
-  (:info size posn)
-  (:results (res :scs (unsigned-reg)))
-  (:result-types unsigned-num)
-  (:policy :fast-safe)
-  (:generator 3
-    (if (and (>= (+ posn size) n-word-bits)
-             (= size 1))
-        (inst lsr res x (1- n-word-bits))
-        (inst ubfm res x posn (+ posn size -1)))))
-
 (define-vop (dpb-c/fixnum)
   (:translate %dpb)
   (:args (x :scs (signed-reg) :to :save)
-         (y :scs (any-reg)))
+         (y :scs (any-reg) :target res))
   (:arg-types signed-num
               (:constant integer) (:constant integer)
               tagged-num)
@@ -975,12 +975,15 @@
   (:policy :fast-safe)
   (:generator 2
     (move res y)
-    (inst bfm res x (- (1- n-word-bits) posn) (1- size))))
+    (inst bfm res x (- (1- n-word-bits) posn) (1- (if (> (+ size posn)
+                                                         n-word-bits)
+                                                      (- (1- n-word-bits) posn)
+                                                      size)))))
 
 (define-vop (dpb-c/signed)
   (:translate %dpb)
   (:args (x :scs (signed-reg) :to :save)
-         (y :scs (signed-reg)))
+         (y :scs (signed-reg) :target res))
   (:arg-types signed-num
               (:constant integer) (:constant integer)
               signed-num)
@@ -992,12 +995,15 @@
     (move res y)
     (inst bfm res x (if (= posn 0)
                         0
-                        (- n-word-bits posn)) (1- size))))
+                        (- n-word-bits posn)) (1- (if (> (+ size posn)
+                                                         n-word-bits)
+                                                      (- n-word-bits posn)
+                                                      size)))))
 
 (define-vop (dpb-c/unsigned)
   (:translate %dpb)
   (:args (x :scs (unsigned-reg) :to :save)
-         (y :scs (unsigned-reg)))
+         (y :scs (unsigned-reg) :target res))
   (:arg-types unsigned-num
               (:constant integer) (:constant integer)
               unsigned-num)
@@ -1009,7 +1015,10 @@
     (move res y)
     (inst bfm res x (if (= posn 0)
                         0
-                        (- n-word-bits posn)) (1- size))))
+                        (- n-word-bits posn)) (1- (if (> (+ size posn)
+                                                         n-word-bits)
+                                                      (- n-word-bits posn)
+                                                      size)))))
 
 ;;; Modular functions
 (define-modular-fun lognot-mod64 (x) lognot :untagged nil 64)
@@ -1036,7 +1045,7 @@
   `(define-vop (,name ,prototype)
      (:args (x :scs (unsigned-reg signed-reg)))
      (:info y)
-     (:arg-types untagged-num (:constant (satisfies add-sub-immediate-p)))
+     (:arg-types untagged-num (:constant (satisfies abs-add-sub-immediate-p)))
      (:results (r :scs (unsigned-reg signed-reg) :from (:argument 0)))
      (:result-types unsigned-num)
      (:translate ,function)))
@@ -1823,6 +1832,61 @@
     negative
     (inst b :pl allocate)
     positive
+    (inst adds r low low)
+    (inst b :vc done)
+    (inst mov header (bignum-header-for-length 1))
+    allocate
+    (with-fixed-allocation
+        (r lr nil (+ 2 bignum-digits-offset))
+      (storew-pair header 0 low bignum-digits-offset tmp-tn)
+      (storew high tmp-tn 2))
+    DONE))
+
+(define-vop (%negate/unsigned=>integer)
+  (:translate %negate)
+  (:args (x :scs (unsigned-reg)))
+  (:arg-types unsigned-num)
+  (:temporary (:sc unsigned-reg) high low)
+  (:temporary (:sc unsigned-reg :from (:argument 2)) header)
+  (:temporary (:scs (non-descriptor-reg) :offset lr-offset) lr)
+  (:results (r :scs (descriptor-reg)))
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:generator 10
+    (inst negs low x)
+    (inst mov header (bignum-header-for-length 2))
+    (inst csetm high :cc)
+    (inst b :cc negative)
+    (inst b :mi allocate)
+    (inst b positive)
+    negative
+    (inst b :pl allocate)
+    positive
+    (inst adds r low low)
+    (inst b :vc done)
+    (inst mov header (bignum-header-for-length 1))
+    allocate
+    (with-fixed-allocation
+        (r lr nil (+ 2 bignum-digits-offset))
+      (storew-pair header 0 low bignum-digits-offset tmp-tn)
+      (storew high tmp-tn 2))
+    DONE))
+
+(define-vop (%negate/signed=>integer)
+  (:translate %negate)
+  (:args (x :scs (signed-reg)))
+  (:arg-types signed-num)
+  (:temporary (:sc signed-reg) high low)
+  (:temporary (:sc signed-reg :from (:argument 2)) header)
+  (:temporary (:scs (non-descriptor-reg) :offset lr-offset) lr)
+  (:results (r :scs (descriptor-reg)))
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:generator 10
+    (inst negs low x)
+    (inst csetm high :cs)
+    (inst mov header (bignum-header-for-length 2))
+    (inst b :vs allocate)
     (inst adds r low low)
     (inst b :vc done)
     (inst mov header (bignum-header-for-length 1))

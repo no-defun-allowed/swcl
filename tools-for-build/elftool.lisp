@@ -412,6 +412,54 @@
 (defun c-symbol-quote (name)
   (concatenate 'string '(#\") name '(#\")))
 
+(defun c-name (lispname core pp-state &optional (prefix ""))
+  (when (typep lispname '(string 0))
+    (setq lispname "anonymous"))
+  ;; Perform backslash escaping on the exploded string
+  ;; Strings were stringified without surrounding quotes,
+  ;; but there might be quotes embedded anywhere, so escape them,
+  ;; and also remove newlines and non-ASCII.
+  (let ((characters
+         (mapcan (lambda (char)
+                   (cond ((not (typep char 'base-char)) (list #\?))
+                         ((member char '(#\\ #\")) (list #\\ char))
+                         ((eql char #\newline) (list #\_))
+                         (t (list char))))
+                 (coerce (cond
+                           #+darwin
+                           ((and (stringp lispname)
+                                 ;; L denotes a symbol which can not be global on macOS.
+                                 (char= (char lispname 0) #\L))
+                            (concatenate 'string "_" lispname))
+                           (t
+                            (write-to-string lispname
+                              ;; Printing is a tad faster without a pretty stream
+                              :pretty (not (typep lispname 'core-sym))
+                              :pprint-dispatch *editcore-ppd*
+                              ;; FIXME: should be :level 1, however see
+                              ;; https://bugs.launchpad.net/sbcl/+bug/1733222
+                              :escape nil :level 2 :length 5
+                              :case :downcase :gensym nil
+                              :right-margin 10000)))
+                         'list))))
+    (let ((string (concatenate 'string prefix characters)))
+      ;; If the string appears in the linker symbols, then string-upcase it
+      ;; so that it looks like a conventional Lisp symbol.
+      (cond ((find-if (lambda (x) (string= string (if (consp x) (car x) x)))
+                      (core-linkage-symbols core))
+             (setq string (string-upcase string)))
+            ((string= string ".") ; can't use the program counter symbol either
+             (setq string "|.|")))
+      ;; If the symbol is still nonunique, add a random suffix.
+      ;; The secondary value is whether the symbol should be a linker global.
+      ;; For now, make nothing global, thereby avoiding potential conflicts.
+      (let ((occurs (incf (gethash string (car pp-state) 0))))
+        (if (> occurs 1)
+            (values (concatenate 'string  string "_" (write-to-string occurs))
+                    nil)
+            (values string
+                    nil))))))
+
 (defun emit-symbols (blobs core pp-state output &aux base-symbol)
   (dolist (blob blobs base-symbol)
     (destructuring-bind (name start . end) blob
@@ -423,7 +471,7 @@
 
 (defun emit-funs (code vaddr core dumpwords output base-symbol emit-cfi)
   (let* ((spacemap (core-spacemap core))
-         (ranges (get-text-ranges code spacemap))
+         (ranges (get-text-ranges code core))
          (text-sap (code-instructions code))
          (text (sap-int text-sap))
          ;; Like CODE-INSTRUCTIONS, but where the text virtually was
@@ -621,6 +669,34 @@
           (when (endp list) (return)))
         (format output "~%# end of lisp asm routines~2%")
         (+ skip obj-size)))))
+
+;;; Return a list of ((NAME START . END) ...)
+;;; for each C symbol that should be emitted for this code object.
+;;; Start and and are relative to the object's base address,
+;;; not the start of its instructions. Hence we add HEADER-BYTES
+;;; too all the PC offsets.
+(defun code-symbols (code core)
+  (let ((cdf (extract-fun-map code core))
+        (header-bytes (* (code-header-words code) n-word-bytes))
+        (start-pc 0)
+        (blobs))
+    (loop
+      (let* ((name (remove-name-junk (sb-c::compiled-debug-fun-name cdf)))
+             (next (sb-c::compiled-debug-fun-next cdf))
+             (end-pc (if next
+                         (+ header-bytes (sb-c::compiled-debug-fun-offset next))
+                         (code-object-size code))))
+        (unless (= end-pc start-pc)
+          ;; Collapse adjacent address ranges named the same.
+          ;; Use EQUALP instead of EQUAL to compare names
+          ;; because instances of CORE-SYMBOL are not interned objects.
+          (if (and blobs (equalp (caar blobs) name))
+              (setf (cddr (car blobs)) end-pc)
+              (push (list* name start-pc end-pc) blobs)))
+        (if next
+            (setq cdf next start-pc end-pc)
+            (return))))
+    (nreverse blobs)))
 
 ;;; Convert immobile text space to an assembly file in OUTPUT.
 (defun write-assembler-text
@@ -1514,7 +1590,7 @@
             "allocation_tracker_counted"
             "allocation_tracker_sized")))
 
-(defun patch-assembly-codeblob (spacemap)
+(defun patch-assembly-codeblob (core &aux (spacemap (core-spacemap core)))
   (binding* ((static-space (get-space static-core-space-id spacemap))
              (text-space (get-space immobile-text-core-space-id spacemap))
              ((new-code-vaddr new-code) (get-text-space-asm-code-replica text-space spacemap))
@@ -1550,7 +1626,7 @@
         (setf (aref c-linkage-vector item-index) (%vector-raw-bits inst-buffer 0))))
     ;; Produce a model of the instructions. It doesn't really matter whether we scan
     ;; OLD-CODE or NEW-CODE since we're supplying the proper virtual address either way.
-    (let ((insts (get-code-instruction-model old-code old-code-vaddr spacemap)))
+    (let ((insts (get-code-instruction-model old-code old-code-vaddr core)))
 ;;  (dovector (inst insts) (write inst :base 16 :pretty nil :escape nil) (terpri))
       (dovector (inst insts)
         ;; Look for any call to a linkage table entry.
@@ -1726,8 +1802,9 @@
 ;;; disassembling it at a random physical address is fine.
 #+x86-64
 (defun patch-lisp-codeblob
-    (code vaddr spacemap static-asm-code text-asm-code
-     &aux (insts (get-code-instruction-model code vaddr spacemap))
+    (code vaddr core static-asm-code text-asm-code
+     &aux (insts (get-code-instruction-model code vaddr core))
+            (spacemap (core-spacemap core))
           (fdefns (get-patchable-fdefns code spacemap)))
   (declare (simple-vector insts))
   (do ((i 0 (1+ i)))
@@ -1760,8 +1837,9 @@
                 (parse-core-header stream core-header)))
       (declare (ignore card-mask-nbits core-dir-start initfun))
       (with-mapped-core (sap core-offset npages stream)
-        (let ((spacemap (cons sap (sort (copy-list space-list) #'> :key #'space-addr))))
-          (patch-assembly-codeblob spacemap)
+        (let* ((spacemap (cons sap (sort (copy-list space-list) #'> :key #'space-addr)))
+               (core (make-core spacemap (make-bounds 0 0) (make-bounds 0 0))))
+          (patch-assembly-codeblob core)
           (let* ((text-space (get-space immobile-text-core-space-id spacemap))
                  (offsets-vector (%make-lisp-obj (logior (sap-int (space-physaddr text-space spacemap))
                                                          lowtag-mask)))
@@ -1786,7 +1864,7 @@
                              (sb-c::unpack-code-fixup-locs fixups)
                            (declare (ignore list1 list3))
                            (aver (null list2))))
-                       (patch-lisp-codeblob physobj vaddr spacemap
+                       (patch-lisp-codeblob physobj vaddr core
                                             static-space-asm-code text-space-asm-code))))
           (persist-to-file spacemap core-offset stream))))))
 

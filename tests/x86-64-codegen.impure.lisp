@@ -590,39 +590,6 @@
       (assert (= (count-assembly-lines instcombined)
                  (- (count-assembly-lines unoptimized) 2))))))
 
-(with-test (:name :array-subtype-dispatch-table)
-  (assert (eql (sb-kernel:code-jump-table-words
-                (sb-kernel:fun-code-header #'sb-kernel:vector-subseq*))
-               ;; n-widetags divided by 4, plus jump table count word.
-               65)))
-
-(defstruct a)
-(defstruct (achild (:include a)))
-(defstruct (agrandchild (:include achild)))
-(defstruct (achild2 (:include a)))
-(defstruct b)
-(defstruct c)
-(defstruct d)
-(defstruct e)
-(defstruct (echild (:include e)))
-(defstruct f)
-
-(declaim (freeze-type a b c d e f))
-(defun typecase-jump-table (x)
-  (typecase x
-    (a 'is-a)
-    (b 'is-b)
-    (c 'is-c)
-    ((or d e) 'is-d-or-e)
-    (f 'is-f)))
-(compile 'typecase-jump-table)
-
-(with-test (:name :typecase-jump-table)
-  (assert (eql (sb-kernel:code-jump-table-words
-                (sb-kernel:fun-code-header #'typecase-jump-table))
-               ;; 6 cases including NIL return, plus the size
-               7)))
-
 (defun assert-thereis-line (lambda expect)
   (let ((f (checked-compile lambda)))
     (assert
@@ -1405,3 +1372,14 @@
                   (declare (optimize (sb-c::verify-arg-count 0)))
                   (if (sb-kernel:non-null-symbol-p x) 'zook (foo)))))
              1)))
+
+(with-test (:name :disassemble-instance-type-test
+            :skipped-on (not :immobile-space))
+  (let ((lines
+          (disassembly-lines
+           (compile nil '(lambda (m) (the sb-thread:mutex m))))))
+    (assert
+     (loop for line in lines
+           thereis (and (search "CMP DWORD PTR" line)
+                        (search "#<LAYOUT" line)
+                        (search "for SB-THREAD:MUTEX" line))))))

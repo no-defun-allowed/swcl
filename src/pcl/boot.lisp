@@ -2831,8 +2831,12 @@ bootstrapping.
                          (sb-c::debug-info-source (sb-kernel:%code-debug-info code)))
                         (sb-c::compiled-debug-fun-tlf-number
                          (sb-di::compiled-debug-fun-compiler-debug-fun debug-fun))
-                        (sb-di::code-location-form-number
-                         (sb-di::debug-fun-start-location debug-fun)))))
+                        (handler-case (sb-di::code-location-form-number
+                                       (sb-di::debug-fun-start-location debug-fun))
+                          (sb-di::unknown-code-location (cond)
+                            (declare (ignore cond))
+                            (sb-c::compiled-debug-fun-blocks
+                             (sb-di::compiled-debug-fun-compiler-debug-fun debug-fun)))))))
                    (make-method (spec)
                      (destructuring-bind
                          (lambda-list specializers qualifiers fun-name) spec
