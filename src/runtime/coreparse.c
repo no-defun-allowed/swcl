@@ -42,7 +42,7 @@
 #include "code.h"
 #include "graphvisit.h"
 #include "genesis/instance.h"
-#include "genesis/fdefn.h"
+#include "genesis/symbol.h"
 
 #include <errno.h>
 
@@ -219,6 +219,7 @@ static void inflate_core_bytes(int fd, os_vm_offset_t offset,
     } while (ret != 0);
 
     ZSTD_freeDStream(stream);
+    free(buf);
 }
 #endif
 

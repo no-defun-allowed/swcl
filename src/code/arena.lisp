@@ -68,6 +68,8 @@
 ;;; There are one or more large blocks of memory associated with
 ;;; an arena, obtained via malloc(). Allocations within a block are
 ;;; contiguous but the blocks can be discontiguous.
+#+system-tlabs
+(declaim (ftype (sfunction (fixnum &optional fixnum fixnum) arena) new-arena))
 (defun new-arena (size &optional (growth-amount size) (max-extensions 7))
   (declare (ignorable growth-amount max-extensions))
   (assert (>= size 65536))
@@ -75,13 +77,15 @@
 one or more times, not to exceed MAX-EXTENSIONS times"
   #-system-tlabs :placeholder
   #+system-tlabs
-  (let ((layout (find-layout 'arena))
+  (let ((layout (load-time-value (find-layout 'arena) t))
         (index (with-system-mutex (*arena-lock*) (incf *arena-index-generator*)))
-        (arena (%make-lisp-obj
-                (alien-funcall (extern-alien "sbcl_new_arena" (function unsigned unsigned))
-                               size))))
+        (arena (truly-the instance
+                          (%make-lisp-obj
+                           (alien-funcall (extern-alien "sbcl_new_arena" (function unsigned unsigned))
+                                          size)))))
     (%set-instance-layout arena layout)
-    (setf (arena-size-limit arena) (+ size (* max-extensions growth-amount))
+    (setf (arena-size-limit (truly-the arena arena))
+          (+ size (the fixnum (* max-extensions growth-amount)))
           (arena-growth-amount arena) growth-amount
           (arena-index arena) index
           (arena-hidden arena) nil
@@ -113,7 +117,7 @@ one or more times, not to exceed MAX-EXTENSIONS times"
   #-system-tlabs `(progn ,@body)
   #+system-tlabs
   `(let ((a ,arena))
-     (assert (typep a 'arena))
+     (declare (arena a))
      ;; maybe allow switching from one arena to another?
      (switch-to-arena a)
      (unwind-protect (progn ,@body) (switch-to-arena 0))))

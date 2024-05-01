@@ -10,6 +10,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <signal.h>
 
 #include "genesis/sbcl.h"
@@ -24,7 +25,7 @@
 #include "breakpoint.h"
 #include "thread.h"
 #include "code.h"
-#include "genesis/fdefn.h"
+#include "genesis/symbol.h"
 
 #define REAL_LRA_SLOT 0
 

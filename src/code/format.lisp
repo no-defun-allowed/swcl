@@ -329,8 +329,9 @@
 (defun %formatter (control-string &optional (arg-count 0) (need-retval t)
                    &aux (lambda-name
                          (logically-readonlyize
-                          (possibly-base-stringize
-                           (concatenate 'string "fmt$" control-string)))))
+                          (format nil "fmt$~36R"
+                                  (#+sb-xc-host %sxhash-simple-string
+                                   #-sb-xc-host sxhash control-string)))))
   ;; ARG-COUNT is supplied only when the use of this formatter is in a literal
   ;; call to FORMAT, in which case we can possibly elide &optional parsing.
   ;; But we can't in general, because FORMATTER may be called by users
@@ -495,12 +496,18 @@
 
 ;;;; format directive machinery
 
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defun directive-handler-name (char suffix)
+    (package-symbolicate "SB-FORMAT"
+                         (if (char= char #\Newline) "NL" (string char))
+                         suffix)))
+
 (defmacro def-complex-format-directive (char lambda-list &body body)
   ;; Assert that it isn't lowercase
   (let ((code (sb-xc:char-code char)))
     (when (<= (sb-xc:char-code #\a) code (sb-xc:char-code #\z))
       (error "Come on, use uppercase why don't you?")))
-  (let ((defun-name (symbolicate char "-FORMAT-DIRECTIVE-EXPANDER"))
+  (let ((defun-name (directive-handler-name char "-COMPILER"))
         (directive (gensym "DIRECTIVE"))
         (directives (if lambda-list (car (last lambda-list)) (gensym "DIRECTIVES"))))
     `(progn

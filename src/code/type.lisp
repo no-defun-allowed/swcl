@@ -1126,7 +1126,10 @@
   If values are NIL and NIL, it couldn't be determined."
   (declare (type lexenv-designator environment) (ignore environment))
   (declare (explicit-check))
-  (if (equal type1 type2)
+  (if (and #-sb-xc-host
+           (sb-c:policy sb-c::*policy* (not (or (> debug 1)
+                                                (= safety 3))))
+           (equal type1 type2))
       (values t t)
       (csubtypep (specifier-type type1) (specifier-type type2))))
 

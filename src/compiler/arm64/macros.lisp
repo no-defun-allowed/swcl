@@ -180,10 +180,21 @@
   ;; Normal allocation to the heap.
   (if stack-allocate-p
       (assemble ()
-        (inst add tmp-tn csp-tn lowtag-mask)
-        (inst and tmp-tn tmp-tn (lognot lowtag-mask))
-        (inst add csp-tn tmp-tn (add-sub-immediate size result-tn))
-        (inst add result-tn tmp-tn lowtag))
+        (cond ((aligned-stack-p stack-allocate-p)
+               (assemble ()
+                 (inst tst csp-tn lowtag-mask)
+                 (inst b :eq skip)
+                 (inst add csp-tn csp-tn 8)
+                 (error-call nil 'sb-kernel::unreachable-error)
+                 skip)
+               (move tmp-tn csp-tn)
+               (inst add csp-tn csp-tn (add-sub-immediate size result-tn))
+               (inst add result-tn tmp-tn lowtag))
+              (t
+               (inst add tmp-tn csp-tn lowtag-mask)
+               (inst and tmp-tn tmp-tn (lognot lowtag-mask))
+               (inst add csp-tn tmp-tn (add-sub-immediate size result-tn))
+               (inst add result-tn tmp-tn lowtag))))
       (let ((alloc (gen-label))
             #+sb-thread (tlab (if systemp
                                   (if (eq type 'list) thread-sys-cons-tlab-slot thread-sys-mixed-tlab-slot)

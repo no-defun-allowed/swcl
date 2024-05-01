@@ -236,16 +236,14 @@
 
 ;; Dump a word-sized integer.
 (defun dump-word (num fasl-output)
-  (declare (type sb-vm:word num))
-  (declare (type fasl-output fasl-output))
+  (declare (type sb-vm:word num) (type fasl-output fasl-output))
   (let ((stream (fasl-output-stream fasl-output)))
     (dotimes (i sb-vm:n-word-bytes)
       (write-byte (ldb (byte 8 (* 8 i)) num) stream))))
 
 ;; Dump a 32-bit integer.
 (defun dump-unsigned-byte-32 (num fasl-output)
-  (declare (type sb-vm:word num))
-  (declare (type fasl-output fasl-output))
+  (declare (type (unsigned-byte 32) num) (type fasl-output fasl-output))
   (let ((stream (fasl-output-stream fasl-output)))
     (dotimes (i 4)
       (write-byte (ldb (byte 8 (* 8 i)) num) stream))))
@@ -926,15 +924,6 @@
             (t
              (sub-dump-object obj file))))))
 
-(macrolet (#+sb-xc-host
-           (%other-pointer-widetag (x)
-             `(if (bit-vector-p ,x)
-                  sb-vm:simple-bit-vector-widetag
-                  (sb-vm:saetp-typecode
-                   (find (sb-xc:array-element-type ,x)
-                         sb-vm:*specialized-array-element-type-properties*
-                         :key #'sb-vm:saetp-specifier :test #'equal)))))
-
 (defun dump-specialized-vector (vector file &key data-only)
   ;; The DATA-ONLY option was for the now-obsolete trace-table,
   ;; but it seems like a good option to keep around.
@@ -961,7 +950,7 @@
                             vector
                             0
                             (ceiling (* length bits-per-elt) sb-vm:n-byte-bits)
-                            #+sb-xc-host bits-per-elt))))
+                            #+sb-xc-host bits-per-elt)))
 
 ;;; Dump string-ish things.
 
@@ -1049,6 +1038,10 @@
     :layout-id)
   #'equalp)
 
+(defun encoded-fixup-flavor (flavor)
+  (or (position flavor +fixup-flavors+)
+      (error "Bad fixup flavor ~s" flavor)))
+
 ;;; Pack the aspects of a fixup into an integer.
 ;;; DATA is for asm routine fixups. The routine can be represented in 8 bits,
 ;;; so the fixup can be reduced to one word instead of an integer and a symbol.
@@ -1058,9 +1051,7 @@
           (the (mod 16) (or (position kind +fixup-kinds+)
                            (error "Bad fixup kind ~s" kind)))
           ;; 4 bits
-          (ash (the (mod 16) (or (position flavor +fixup-flavors+)
-                                 (error "Bad fixup flavor ~s" flavor)))
-               4)
+          (ash (the (mod 16) (encoded-fixup-flavor flavor)) 4)
           ;; 8 bits
           (ash (the (mod 256) data) 8)
           ;; whatever it needs
@@ -1068,10 +1059,10 @@
 
 ;;; Unpack an integer from DUMP-FIXUPs. Shared by genesis and target fasloader
 (declaim (inline !unpack-fixup-info))
-(defun !unpack-fixup-info (packed-info) ; Return (VALUES offset kind flavor data)
+(defun !unpack-fixup-info (packed-info) ; Return (VALUES offset kind flavor-id data)
   (values (ash packed-info -16)
           (aref +fixup-kinds+ (ldb (byte 4 0) packed-info))
-          (aref +fixup-flavors+ (ldb (byte 4 4) packed-info))
+          (ldb (byte 4 4) packed-info)
           (ldb (byte 8 8) packed-info)))
 
 #-(or x86 x86-64) ; these two architectures provide an overriding definition

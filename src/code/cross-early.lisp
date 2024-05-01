@@ -21,134 +21,79 @@
 
 (declaim (declaration explicit-check always-bound))
 
+(defmacro sb-xc:defconstant (&rest args)
+  `(eval-when (:compile-toplevel :load-toplevel :execute)
+     (cl:defconstant ,@args)))
+
 (defgeneric sb-xc:make-load-form (obj &optional env))
 
 ;;; Restore normalcy of MOD and RATIONAL as type specifiers.
 (deftype mod (n) `(integer 0 ,(1- n)))
 (deftype rational (&optional low high) `(cl:rational ,low ,high))
 
-;;; Target floating-point and COMPLEX number representation
-;;; is defined sufficiently early to avoid "undefined type" warnings.
+;;; To ensure that target numbers compare by EQL correctly under the
+;;; host's definition of EQL (so that we don't have to intercept it
+;;; and all else that uses EQL such as EQUAL, EQUALP and sequence
+;;; traversers etc), we enforce that EQL numbers are in fact EQ by
+;;; hash consing either on the bits for floats or on the real and
+;;; imaginary parts for complex numbers.
 (defstruct (target-num (:constructor nil)))
 (defstruct (float (:include target-num)
                   (:conc-name "FLONUM-")
                   (:constructor nil)
                   (:predicate floatp))
   ;; the bits are canonical as regards hash-consing
-  (%bits (error "unspecified %BITS") :type integer :read-only t)
-  ;; SHORT-FLOAT and LONG-FLOAT are not choices here,
-  ;; since we're trying to exactly model the supported target float formats.
-  (format nil :type (member single-float double-float) :read-only t))
+  (bits (error "unspecified BITS") :type integer :read-only t))
 (defstruct (single-float (:include float
-                                   (format 'single-float)
-                                   (%bits (error "unspecified %BITS") :type (signed-byte 32)))
-                         (:conc-name "%SINGLE-FLONUM-")
-                         (:constructor %make-single-flonum (%bits))
-                         (:predicate single-float-p)))
-(defun %single-bits-from (sign exponent mantissa)
-  (declare (type bit sign)
-           (type (unsigned-byte 8) exponent)
-           (type (unsigned-byte 23) mantissa))
-  (logior (ash (cl:- sign) 31) (ash exponent 23) mantissa))
-(defun %single-sign-bit (single)
-  (cl:ldb (cl:byte 1 31) (%single-flonum-%bits single)))
-(defun %single-exponent-bits (single)
-  (cl:ldb (cl:byte 8 23) (%single-flonum-%bits single)))
-(defun %single-mantissa-bits (single)
-  (cl:ldb (cl:byte 23 0) (%single-flonum-%bits single)))
+                          (bits (error "unspecified %BITS") :type (signed-byte 32)))
+                         (:constructor %%make-single-float (bits))))
+
+(defmethod print-object ((obj single-float) stream)
+  (format stream "#.(MAKE-SINGLE-FLOAT #x~x)" (single-float-bits obj)))
+
+(defmethod cl:make-load-form ((obj single-float) &optional env)
+  (declare (ignore env))
+  `(make-single-float ,(single-float-bits obj)))
+
+(defvar *interned-single-floats* (make-hash-table))
+
+(defun make-single-float (bits)
+  (declare (type (signed-byte 32) bits))
+  (let ((table *interned-single-floats*))
+    (or (gethash bits table)
+        (setf (gethash bits table) (%%make-single-float bits)))))
 
 (defstruct (double-float (:include float
-                                   (format 'double-float)
-                                   (%bits (error "unspecifier %BITS") :type (signed-byte 64)))
-                         (:conc-name "%DOUBLE-FLONUM-")
-                         (:constructor %make-double-flonum (%bits))
-                         (:predicate double-float-p)))
-(defun %double-bits-from (sign exponent mantissa)
-  (declare (type bit sign)
-           (type (unsigned-byte 11) exponent)
-           (type (unsigned-byte 52) mantissa))
-  (logior (ash (cl:- sign) 63) (ash exponent 52) mantissa))
-(defun %double-sign-bit (double)
-  (cl:ldb (cl:byte 1 63) (%double-flonum-%bits double)))
-(defun %double-exponent-bits (double)
-  (cl:ldb (cl:byte 11 52) (%double-flonum-%bits double)))
-(defun %double-mantissa-bits (double)
-  (cl:ldb (cl:byte 52 0) (%double-flonum-%bits double)))
+                          (bits (error "unspecifier %BITS") :type (signed-byte 64)))
+                         (:constructor %%make-double-float (bits))))
 
-(defun %make-flonum (bits format)
-  (ecase format
-    ((single-float) (%make-single-flonum bits))
-    ((double-float) (%make-double-flonum bits))))
+(defmethod print-object ((obj double-float) stream)
+  (format stream "#.(MAKE-DOUBLE-FLOAT #x~x #x~x)"
+          (double-float-high-bits obj)
+          (double-float-low-bits obj)))
 
-(macrolet ((def (name bits-fun n-exponent-bits n-mantissa-bits)
-             (let ((initial-exponent (1- (ash 1 (1- n-exponent-bits))))
-                   (max-exponent (1- (ash 1 n-exponent-bits))))
-             `(defun ,name (rational)
-                (declare (type cl:rational rational))
-                (let ((sign (if (cl:= (cl:signum rational) -1) 1 0))
-                      (magnitude (cl:abs rational)))
-                  (when (cl:= magnitude 0)
-                    (return-from ,name (,bits-fun 0 0 0)))
-                  (loop with dir = (if (cl:> magnitude 1) -1 1)
-                        for exponent = ,initial-exponent then (cl:- exponent dir)
-                        for mantissa = magnitude then (cl:* mantissa (cl:expt 2 dir))
-                        until (and (cl:<= 1 mantissa) (cl:< mantissa 2))
-                        ;; the calls to CL:ROUND in this FINALLY
-                        ;; clause are the representation of the FPU
-                        ;; rounding mode.
-                        finally (let ((%mantissa (cl:round (cl:* (cl:1- mantissa) (cl:expt 2 ,n-mantissa-bits)))))
-                                  (when (cl:= %mantissa (cl:expt 2 ,n-mantissa-bits))
-                                    (incf exponent)
-                                    (setf %mantissa 0))
-                                  (when (cl:>= exponent ,max-exponent)
-                                    (setf exponent ,max-exponent %mantissa 0))
-                                  (when (cl:<= exponent 0)
-                                    (setf %mantissa (cl:round (cl:* mantissa (cl:expt 2 (cl:+ -1 ,n-mantissa-bits exponent))))
-                                          exponent 0))
-                                  (return (,bits-fun sign exponent %mantissa)))))))))
-  (def %single-bits-from-rational %single-bits-from 8 23)
-  (def %double-bits-from-rational %double-bits-from 11 52))
+(defmethod cl:make-load-form ((obj double-float) &optional env)
+  (declare (ignore env))
+  `(%make-double-float ,(double-float-bits obj)))
 
-(defun flonum-sign (flonum)
-  (let ((bit (etypecase flonum
-               (single-float (%single-sign-bit flonum))
-               (double-float (%double-sign-bit flonum)))))
-    (cl:- 1 (cl:* 2 bit))))
-(defun flonum-exponent (flonum)
-  (etypecase flonum
-    (single-float
-     (let ((exponent-bits (%single-exponent-bits flonum)))
-       (when (cl:= exponent-bits 255)
-         (error "FLONUM-EXPONENT saturated: ~S" flonum))
-       (if (cl:= exponent-bits 0) -126 (cl:- exponent-bits 127))))
-    (double-float
-     (let ((exponent-bits (%double-exponent-bits flonum)))
-       (when (cl:= exponent-bits 2047)
-         (error "FLONUM-EXPONENT saturated: ~S" flonum))
-       (if (cl:= exponent-bits 0) -1022 (cl:- exponent-bits 1023))))))
-(defun flonum-mantissa (flonum)
-  (etypecase flonum
-    (single-float
-     (let ((scale (cl:expt 2 23))
-           (exponent-bits (%single-exponent-bits flonum)))
-       (if (cl:> exponent-bits 0)
-           (cl:1+ (cl:/ (%single-mantissa-bits flonum) scale))
-           (cl:/ (%single-mantissa-bits flonum) scale))))
-    (double-float
-     (let ((scale (cl:expt 2 52))
-           (exponent-bits (%double-exponent-bits flonum)))
-       (if (cl:> exponent-bits 0)
-           (cl:1+ (cl:/ (%double-mantissa-bits flonum) scale))
-           (cl:/ (%double-mantissa-bits flonum) scale))))))
+(defvar *interned-double-floats* (make-hash-table))
 
-(defun flonum-minus-zero-p (flonum)
-  (etypecase flonum
-    (single-float (and (cl:= (%single-sign-bit flonum) 1)
-                       (cl:= (%single-exponent-bits flonum) 0)
-                       (cl:= (%single-mantissa-bits flonum) 0)))
-    (double-float (and (cl:= (%double-sign-bit flonum) 1)
-                       (cl:= (%double-exponent-bits flonum) 0)
-                       (cl:= (%double-mantissa-bits flonum) 0)))))
+;;; This is the preferred constructor for 64-bit machines
+(defun %make-double-float (bits)
+  (declare (type (signed-byte 64) bits))
+  (let ((table *interned-double-floats*))
+    (or (gethash bits table)
+        (setf (gethash bits table) (%%make-double-float bits)))))
+
+(defun make-double-float (hi lo)
+  (declare (type (signed-byte 32) hi)
+           (type (unsigned-byte 32) lo))
+  (%make-double-float (logior (ash hi 32) lo)))
+
+(defun double-float-low-bits (x)
+  (logand (double-float-bits x) #xffffffff))
+(defun double-float-high-bits (x)
+  (ash (double-float-bits x) -32))
 
 (deftype real () '(or cl:rational float))
 (declaim (inline realp))
@@ -166,6 +111,33 @@
   (real nil :type real :read-only t)
   (imag nil :type real :read-only t))
 
+(defmethod print-object ((obj complexnum) stream)
+  (write-string "#.(COMPLEX " stream)
+  (prin1 (complexnum-real obj) stream)
+  (write-char #\Space stream)
+  (prin1 (complexnum-imag obj) stream)
+  (write-char #\) stream))
+
+(defmethod cl:make-load-form ((obj complexnum) &optional env)
+  (declare (ignore env))
+  `(complex ,(complexnum-real obj) ,(complexnum-imag obj)))
+
+(defvar *interned-complex-numbers* (make-hash-table :test #'equal))
+
+;;; REAL and IMAG are either host integers (therefore EQL-comparable)
+;;; or if not, have already been made EQ-comparable by hashing.
+(defun complex (re im)
+  (if (or (and (floatp re) (eq (type-of re) (type-of im)))
+          (and (rationalp re) (rationalp im)))
+      (if (eql im 0)
+          re
+          (let ((table *interned-complex-numbers*)
+                (key (cons re im)))
+            (or (gethash key table)
+                (setf (gethash key table)
+                      (%make-complexnum re im)))))
+      (error "Won't make complex number from ~s ~s" re im)))
+
 (defun complex-single-float-p (x)
   (and (complexp x) (single-float-p (complexnum-real x))))
 (defun complex-double-float-p (x)
@@ -176,9 +148,11 @@
 ;;; need not be as complete as (def-type-translator complex).
 ;;; It's just enough to handle all cases parsed by the host.
 (deftype complex (&optional spec)
-  (cond ((member spec '(* real)) 'complexnum)
+  (cond ((member spec '(* rational real)) 'complexnum)
         ((eq spec 'single-float) '(satisfies complex-single-float-p))
         ((eq spec 'double-float) '(satisfies complex-double-float-p))
+        #+long-float
+        ((eq spec 'long-float) '(satisfies complex-long-float-p))
         (t (error "complex type specifier too complicated: ~s" spec))))
 
 (deftype number () '(or real complex))
@@ -191,25 +165,107 @@
 (declaim (inline sequencep))
 (defun sequencep (x) (cl:typep x 'sequence))
 
-;;; ZEROP is needed sooner than the rest of the cross-float. (Not sure why exactly)
 (declaim (inline zerop))
-(defun zerop (x) (if (rationalp x) (= x 0) (xfloat-zerop x)))
+(defun zerop (x) (if (rationalp x) (= x 0) (sb-xc:= x 0)))
 
-(defmethod cl:make-load-form ((self target-num) &optional env)
-  (declare (ignore env))
-  (if (complexp self)
-      `(complex ,(complexnum-real self) ,(complexnum-imag self))
-      `(make-flonum ,(flonum-%bits self) ',(flonum-format self))))
+(declaim (inline minusp))
+(defun minusp (x) (if (rationalp x) (< x 0) (sb-xc:< x 0)))
 
-#+weak-vector-readbarrier
-(progn (deftype weak-vector () nil) ; nothing is a weak-vector
-       (defun sb-int:weak-vector-ref (v i)
-         (error "Called WEAK-VECTOR-REF on ~S ~S" v i))
-       (defun (setf sb-int:weak-vector-ref) (new v i)
-         (error "Called (SETF WEAK-VECTOR-REF) on ~S ~S ~S" new v i))
-       (defun sb-int:weak-vector-len (v)
-         (error "Called WEAK-VECTOR-LEN on ~S" v)))
+(declaim (inline expt))
+(defun expt (base power)
+  (if (and (rationalp base) (integerp power))
+      (cl:expt base power)
+      (xfloat-expt base power)))
 
-(defmacro sb-xc:defconstant (&rest args)
-  `(eval-when (:compile-toplevel :load-toplevel :execute)
-     (cl:defconstant ,@args)))
+(macrolet ((define (name)
+             `(defun ,name (numerator denominator)
+                (declare (integer numerator denominator))
+                (cl:/ numerator denominator))))
+  (define %make-ratio))
+
+(declaim (inline bignum-ashift-left-fixnum))
+(defun bignum-ashift-left-fixnum (fixnum count)
+  (ash fixnum count))
+
+(macrolet ((define (name type)
+             `(progn
+                (declaim (inline ,name))
+                (defun ,name (bignum)
+                  (coerce bignum ',type)))))
+  (define bignum-to-single-float single-float)
+  (define bignum-to-double-float double-float))
+
+(macrolet ((define (name)
+             `(defun ,name (x exp)
+                (declare (ignore x exp))
+                (error "Unimplemented."))))
+  (define sb-kernel::scale-single-float-maybe-underflow)
+  (define sb-kernel::scale-single-float-maybe-overflow)
+  (define sb-kernel::scale-double-float-maybe-underflow)
+  (define sb-kernel::scale-double-float-maybe-overflow))
+
+(macrolet ((define (name float-fun)
+             `(progn
+                (declaim (inline ,name))
+                (defun ,name (number &optional (divisor 1))
+                  (if (and (rationalp number) (rationalp divisor))
+                      (,(intern (string name) "CL") number divisor)
+                      (,float-fun number divisor))))))
+  (define floor xfloat-floor)
+  (define ceiling xfloat-ceiling)
+  (define truncate xfloat-truncate)
+  (define round xfloat-round))
+
+(macrolet ((define (name float-fun)
+             `(progn
+                (declaim (inline ,name))
+                (defun ,name (number divisor)
+                  (if (and (rationalp number) (rationalp divisor))
+                      (,(intern (string name) "CL") number divisor)
+                      (,float-fun number divisor))))))
+  (define mod xfloat-mod)
+  (define rem xfloat-rem))
+
+(macrolet ((define (name float-fun)
+             `(progn
+                (declaim (inline ,name))
+                (defun ,name (x)
+                  (if (rationalp x)
+                      (,(intern (string name) "CL") x)
+                      (,float-fun x))))))
+  (define abs xfloat-abs)
+  (define signum xfloat-signum))
+
+(defmacro validate-args (&rest args)
+  `(when (or ,@(mapcar (lambda (arg) `(typep ,arg '(or cl:float cl:complex))) args))
+     (error "Unexpectedly got host float/complex args")))
+
+(defun coerce (object type)
+  ;; OBJECT is validated prior to testing the quick bail out case,
+  ;; because supposing that we accidentally got a host complex number
+  ;; or float, and we accidentally got CL:FLOAT or something else in
+  ;; CL as the type, NUMBER would return NIL because host floats do
+  ;; NOT satisfy "our" NUMBERP. But we want this to fail, not succeed.
+  (validate-args object)
+  (cond ((numberp object)
+         (xfloat-coerce object type))
+        ((and (or (arrayp object) (listp object))
+              (not (or (member type '(list vector simple-vector
+                                      simple-string simple-base-string))
+                       (equal type '(simple-array character (*))))))
+         ;; specializable array
+         (sb-xc:make-array (length object) :initial-contents object
+                           :element-type
+                           (ecase (car type)
+                             (simple-array
+                              (destructuring-bind (et &optional dims)
+                                  (cdr type)
+                                (assert (or (eql dims 1)
+                                            (equal dims '(*))))
+                                et))
+                             (vector
+                              (destructuring-bind (et)
+                                  (cdr type)
+                                et)))))
+        (t
+         (cl:coerce object type))))

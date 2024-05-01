@@ -327,36 +327,38 @@
   "Return the element of SEQUENCE specified by INDEX."
   (declare (explicit-check sequence))
   (seq-dispatch-checking sequence
-                (do ((count index (1- count))
-                     (list sequence (cdr list)))
-                    ((= count 0)
-                     (if (endp list)
-                         (signal-index-too-large-error sequence index)
-                         (car list)))
-                  (declare (type index count)))
-                (locally
-                    (declare (optimize (sb-c:insert-array-bounds-checks 0)))
-                  (when (>= index (length sequence))
-                    (signal-index-too-large-error sequence index))
-                  (aref sequence index))
-                (sb-sequence:elt sequence index)))
+      (do ((count index (1- count))
+           (list sequence (cdr list)))
+          ((= count 0)
+           (if (atom list)
+               (signal-index-too-large-error sequence index)
+               (car list)))
+        (declare (type index count)))
+      (locally
+          (declare (optimize (sb-c:insert-array-bounds-checks 0)))
+        (when (>= index (length sequence))
+          (signal-index-too-large-error sequence index))
+        (aref sequence index))
+      (sb-sequence:elt sequence index)))
 
 (defun %setelt (sequence index newval)
   "Store NEWVAL as the component of SEQUENCE specified by INDEX."
   (declare (explicit-check sequence))
   (seq-dispatch-checking sequence
-                (do ((count index (1- count))
-                     (seq sequence))
-                    ((= count 0) (rplaca seq newval) newval)
-                  (declare (fixnum count))
-                  (if (atom (cdr seq))
-                      (signal-index-too-large-error sequence index)
-                      (setq seq (cdr seq))))
-                (progn
-                  (when (>= index (length sequence))
-                    (signal-index-too-large-error sequence index))
-                  (setf (aref sequence index) newval))
-                (setf (sb-sequence:elt sequence index) newval)))
+      (do ((count index (1- count))
+           (seq sequence))
+          ((= count 0) (rplaca seq newval) newval)
+        (declare (fixnum count))
+        (let ((cdr (cdr seq)))
+          (if (atom cdr)
+              (signal-index-too-large-error sequence index)
+              (setq seq cdr))))
+      (if (>= index (length sequence))
+          (signal-index-too-large-error sequence index)
+          (locally
+              (declare (optimize (sb-c:insert-array-bounds-checks 0)))
+            (setf (aref sequence index) newval)))
+      (setf (sb-sequence:elt sequence index) newval)))
 
 (defun length (sequence)
   "Return an integer that is the length of SEQUENCE."
@@ -626,8 +628,18 @@
     (if (simple-vector-p vector)
         (locally
             (declare (optimize (speed 3) (safety 0))) ; transform will kick in
-          (fill (truly-the simple-vector vector) item
-                :start start :end end))
+          (cond #+soft-card-marks
+                ((sb-c::unless-vop-existsp (:named sb-kernel:vector-fill/t)
+                   (typep item '(or fixnum boolean)))
+                 ;; No gc-card mark for these types
+                 ;; Omit character and single-float for better
+                 ;; type-checking, they are likely to go a
+                 ;; specialized array.
+                 (fill (truly-the simple-vector vector) item
+                       :start start :end end))
+                (t
+                 (fill (truly-the simple-vector vector) item
+                       :start start :end end))))
         (let* ((widetag (%other-pointer-widetag vector))
                (bashers (svref %%fill-bashers%% widetag)))
           (macrolet ((fill-float (type)

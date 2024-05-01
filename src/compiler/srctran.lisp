@@ -603,35 +603,36 @@
     (%make-interval (normalize-bound low)
                     (normalize-bound high))))
 
+;; Some backends have no float traps
+(declaim (inline bad-float-p))
+(defun bad-float-p (value)
+  (declare (ignorable value))
+  #+(and (or arm (and arm64 (not darwin)) riscv)
+         (not sb-xc-host))
+  (or (and (floatp value)
+           (float-infinity-or-nan-p value))
+      (and (complex-float-p value)
+           (or (float-infinity-or-nan-p (imagpart value))
+               (float-infinity-or-nan-p (realpart value))))))
+
 ;;; Apply the function F to a bound X. If X is an open bound and the
 ;;; function is declared strictly monotonic, then the result will be
 ;;; open. IF X is NIL, the result is NIL.
 (defun bound-func (f x strict)
   (declare (type function f))
-  (and x
-       (handler-case
-         (with-float-traps-masked (:underflow :overflow :inexact :divide-by-zero)
-           ;; With these traps masked, we might get things like infinity
-           ;; or negative infinity returned. Check for this and return
-           ;; NIL to indicate unbounded.
-           #+sb-xc-host
-           (when (and (eql f #'log)
-                      (zerop x))
-             (return-from bound-func))
-           (let ((y (funcall f (type-bound-number x))))
-             (if (or (and (floatp y)
-                          (float-infinity-p y))
-                     (and (typep y 'complex)
-                          (or (and (floatp (imagpart y))
-                                   (float-infinity-p (imagpart y)))
-                              (and (floatp (realpart y))
-                                   (float-infinity-p (realpart y))))))
-                 nil
-                 (set-bound y (and strict (consp x))))))
-         ;; Some numerical operations will signal an ERROR, e.g. in
-         ;; the course of converting a bignum to a float. Default to
-         ;; NIL in that case.
-         (arithmetic-error ()))))
+  (when x
+    #+sb-xc-host
+    (when (and (eql f #'log)
+               (zerop x))
+      (return-from bound-func))
+    (handler-case
+        (let ((bound (funcall f (type-bound-number x))))
+          (unless (bad-float-p bound)
+            (set-bound bound (and strict (consp x)))))
+      ;; Some numerical operations will signal an ERROR, e.g. in
+      ;; the course of converting a bignum to a float. Default to
+      ;; NIL in that case.
+      (arithmetic-error ()))))
 
 (defun safe-double-coercion-p (x)
   (or (typep x 'double-float)
@@ -703,36 +704,37 @@
 (defmacro bound-binop (op x y)
   (with-unique-names (xb yb res)
     `(and ,x ,y
-          (with-float-traps-masked (:underflow :overflow :inexact :divide-by-zero)
-            (let* ((,xb (type-bound-number ,x))
-                   (,yb (type-bound-number ,y))
-                   (,res (safely-binop ,op ,xb ,yb)))
-              (set-bound ,res
-                         (and (or (consp ,x) (consp ,y))
-                              ;; Open bounds can very easily be messed up
-                              ;; by FP rounding, so take care here.
-                              ,(ecase op
-                                 (sb-xc:*
-                                  ;; Multiplying a greater-than-zero with
-                                  ;; less than one can round to zero.
-                                  `(or (not (fp-zero-p ,res))
-                                       (cond ((and (consp ,x) (fp-zero-p ,xb))
-                                              (>= (abs ,yb) 1))
-                                             ((and (consp ,y) (fp-zero-p ,yb))
-                                              (>= (abs ,xb) 1)))))
-                                 (sb-xc:/
-                                  ;; Dividing a greater-than-zero with
-                                  ;; greater than one can round to zero.
-                                  `(or (not (fp-zero-p ,res))
-                                       (cond ((and (consp ,x) (fp-zero-p ,xb))
-                                              (<= (abs ,yb) 1))
-                                             ((and (consp ,y) (fp-zero-p ,yb))
-                                              (<= (abs ,xb) 1)))))
-                                 ((sb-xc:+ sb-xc:-)
-                                  ;; Adding or subtracting greater-than-zero
-                                  ;; can end up with identity.
-                                  `(and (not (fp-zero-p ,xb))
-                                        (not (fp-zero-p ,yb))))))))))))
+          (handler-case
+              (let* ((,xb (type-bound-number ,x))
+                     (,yb (type-bound-number ,y))
+                     (,res (safely-binop ,op ,xb ,yb)))
+                (set-bound ,res
+                           (and (or (consp ,x) (consp ,y))
+                                ;; Open bounds can very easily be messed up
+                                ;; by FP rounding, so take care here.
+                                ,(ecase op
+                                   (sb-xc:*
+                                    ;; Multiplying a greater-than-zero with
+                                    ;; less than one can round to zero.
+                                    `(or (not (fp-zero-p ,res))
+                                         (cond ((and (consp ,x) (fp-zero-p ,xb))
+                                                (>= (abs ,yb) 1))
+                                               ((and (consp ,y) (fp-zero-p ,yb))
+                                                (>= (abs ,xb) 1)))))
+                                   (sb-xc:/
+                                    ;; Dividing a greater-than-zero with
+                                    ;; greater than one can round to zero.
+                                    `(or (not (fp-zero-p ,res))
+                                         (cond ((and (consp ,x) (fp-zero-p ,xb))
+                                                (<= (abs ,yb) 1))
+                                               ((and (consp ,y) (fp-zero-p ,yb))
+                                                (<= (abs ,xb) 1)))))
+                                   ((sb-xc:+ sb-xc:-)
+                                    ;; Adding or subtracting greater-than-zero
+                                    ;; can end up with identity.
+                                    `(and (not (fp-zero-p ,xb))
+                                          (not (fp-zero-p ,yb))))))))
+            (arithmetic-error ())))))
 
 (defun coercion-loses-precision-p (val type)
   (typecase val
@@ -1525,11 +1527,11 @@
                  (cond
                    ((member-type-p x)
                     (if member-fun
-                        (with-float-traps-masked
-                            (:underflow :overflow :divide-by-zero)
-                          (specifier-type
-                           `(eql ,(funcall member-fun
-                                           (first (member-type-members x))))))
+                        (handler-case
+                            (specifier-type
+                             `(eql ,(funcall member-fun
+                                             (first (member-type-members x)))))
+                          (arithmetic-error () nil))
                         ;; Otherwise convert to a numeric type.
                         (funcall derive-fun (convert-member-type x))))
                    ((or (numeric-type-p x)
@@ -1580,10 +1582,7 @@
                     (let* ((x (first (member-type-members x)))
                            (y (first (member-type-members y)))
                            (result (ignore-errors
-                                    (with-float-traps-masked
-                                        (:underflow :overflow :divide-by-zero
-                                                    :invalid)
-                                      (funcall member-fun x y)))))
+                                    (funcall member-fun x y))))
                       (cond ((null result) *empty-type*)
                             ((and (floatp result) (float-nan-p result))
                              (make-numeric-type :class 'float
@@ -3360,8 +3359,7 @@
 (declaim (ftype (sfunction (integer) rational) reciprocate))
 (defun reciprocate (x)
   (declare (optimize (safety 0)))
-  #+sb-xc-host (error "Can't call reciprocate ~D" x)
-  #-sb-xc-host (%make-ratio 1 x))
+  (%make-ratio 1 x))
 
 (deftransform expt ((base power) ((constant-arg unsigned-byte) integer))
   (let ((base (lvar-value base)))
@@ -4249,17 +4247,17 @@
   'x)
 
 ;;; Fold (OP x +/-1)
-;;;
-;;; %NEGATE might not always signal correctly.
+;;; If a signaling nan somehow got here without signaling anything then
+;;; why signal now.
 (macrolet
-    ((def (name result minus-result)
+    ((def (name result minus-result type)
          `(deftransform ,name ((x y)
-                               (exact-number (constant-arg (member 1 -1))))
+                               (,type (constant-arg (member 1 -1))))
             "fold identity operations"
             (if (minusp (lvar-value y)) ',minus-result ',result))))
-  (def * x (%negate x))
-  (def / x (%negate x))
-  (def expt x (/ 1 x)))
+  (def * x (%negate x) number)
+  (def / x (%negate x) number)
+  (def expt x (/ 1 x) (or exact-number real))) ;; (expt #c(2d0 2d0) 1) doesn't return #c(2d0 2d0)
 
 (deftransform + ((x y) (number number))
   (cond ((splice-fun-args y '%negate 1 nil)
@@ -5339,14 +5337,7 @@
                     (arithmetic-error ()
                       (not-constants arg))
                     (:no-error (value)
-                      ;; Some backends have no float traps
-                      (cond #+(and (or arm arm64 riscv)
-                                   (not sb-xc-host))
-                            ((or (and (floatp value)
-                                      (float-infinity-or-nan-p value))
-                                 (and (complex-float-p value)
-                                      (or (float-infinity-or-nan-p (imagpart value))
-                                          (float-infinity-or-nan-p (realpart value)))))
+                      (cond ((bad-float-p value)
                              (not-constants arg))
                             (t
                              (setf reduced-value value
@@ -5699,10 +5690,16 @@
 
 ;;; VALUES-LIST -> %REST-VALUES
 (define-source-transform values-list (list)
-  (multiple-value-bind (context count) (possible-rest-arg-context list)
-    (if context
-        `(%rest-values ,list ,context ,count)
-        (values nil t))))
+  (let ((skip 0))
+    (when-vop-existsp (:named sb-vm::%more-arg-values-skip)
+      (when (typep list '(cons (member cdr rest) (cons t null)))
+        (setf skip 1)
+        (setf list (second list))))
+    (multiple-value-bind (context count )
+        (possible-rest-arg-context list)
+      (if context
+          `(%rest-values ,list ,context ,skip ,count)
+          (values nil t)))))
 
 ;;; NTH -> %REST-REF
 (define-source-transform nth (n list)
@@ -5776,10 +5773,10 @@
 (define-source-transform null (x) (source-transform-null x 'null))
 (define-source-transform endp (x) (source-transform-null x 'endp))
 
-(deftransform %rest-values ((list context count))
+(deftransform %rest-values ((list context skip count))
   (if (rest-var-more-context-ok list)
-      `(%more-arg-values context 0 count)
-      `(values-list list)))
+      `(%more-arg-values context skip count)
+      `(values-list (nthcdr skip list))))
 
 (deftransform %rest-ref ((n list context count &optional length-checked-p))
   (cond ((not (rest-var-more-context-ok list))
@@ -5997,14 +5994,12 @@
          always
          (or (stringp directive)
              (and (sb-format::format-directive-p directive)
-                  (let ((char (sb-format::directive-character directive))
-                        (params (sb-format::directive-params directive)))
-                     (and (char= char #\A)
-                          (null params)
-                          (pop args))))))
+                  (and (eql (sb-format::directive-bits directive) (char-code #\A))
+                       (null (sb-format::directive-params directive))
+                       (pop args)))))
    (null args)))
 
-(deftransform format ((stream control &rest args) (null (constant-arg string) &rest string))
+(deftransform format ((stream control &rest args) (null (constant-arg string) &rest t))
   (let ((tokenized
           (handler-case
               (sb-format::tokenize-control-string (coerce (lvar-value control) 'simple-string))
@@ -6012,21 +6007,37 @@
               (give-up-ir1-transform)))))
     (unless (concatenate-format-p tokenized args)
       (give-up-ir1-transform))
-    (let ((arg-names (make-gensym-list (length args))))
-      `(lambda (stream control ,@arg-names)
-         (declare (ignore stream control)
-                  (ignorable ,@arg-names))
-         (concatenate
-          'string
-          ,@(mapcar (lambda (directive)
-                      (if (stringp directive)
-                          directive
-                          (let ((arg (pop args))
-                                (arg-name (pop arg-names)))
-                            (if (constant-lvar-p arg)
-                                (lvar-value arg)
-                                arg-name))))
-                    tokenized))))))
+    (let* ((arg-names (make-gensym-list (length args)))
+           (stringsp t)
+           (args (let ((arg-names arg-names))
+                   (mapcar (lambda (directive)
+                             (if (stringp directive)
+                                 directive
+                                 (let ((arg (pop args))
+                                       (arg-name (pop arg-names)))
+                                   (unless (csubtypep (lvar-type arg) (specifier-type 'string))
+                                     (setf stringsp nil))
+                                   (if (constant-lvar-p arg)
+                                       `',(lvar-value arg)
+                                       arg-name))))
+                           tokenized))))
+      (if (= (length args) 1)
+          `(lambda (stream control ,@arg-names)
+             (declare (ignore stream control)
+                      (ignorable ,@arg-names))
+             (princ-to-string ,@args))
+          `(lambda (stream control ,@arg-names)
+             (declare (ignore stream control)
+                      (ignorable ,@arg-names))
+             (,@(if stringsp
+                    `(concatenate 'string)
+                    `(sb-format::princ-multiple-to-string))
+              ,@args))))))
+
+(deftransform sb-format::princ-multiple-to-string ((&rest args) (&rest string) * :important nil)
+  (let ((arg-names (make-gensym-list (length args))))
+    `(lambda ,arg-names
+       (concatenate 'string ,@arg-names))))
 
 (deftransform pathname ((pathspec) (pathname) *)
   'pathspec)
@@ -6625,6 +6636,9 @@
          'sb-impl::parse-integer10)
     string start end junk-allowed))
 
+(deftransform %coerce-to-policy ((thing) (policy))
+  'thing)
+
 
 (defun prev-node (node &key type (cast t))
   (let (ctran)
@@ -6930,6 +6944,8 @@
                          (let ((else (next-node (if-alternative if) :type :non-ref
                                                                     :single-predecessor t)))
                            (when (and (combination-p else)
+                                      (only-harmless-cleanups (node-block if)
+                                                              (if-alternative if))
                                       (eq (combination-kind else) :known)) ;; no notinline
                              (let ((op2 (combination-fun-debug-name else))
                                    after-else)
@@ -7083,6 +7099,11 @@
                                              '(char-code a)
                                              'a)))
                                  ,(cond ((< max sb-vm:n-word-bits)
+                                         (let ((interval (type-approximate-interval (lvar-type lvar) t)))
+                                           (when (and interval
+                                                      (interval-high interval)
+                                                      (< (interval-high interval) sb-vm:n-word-bits))
+                                             (setf max (interval-high interval))))
                                          `(and (,range-check 0 a ,max)
                                                (logbitp (truly-the (integer 0 ,max) a)
                                                         ,(reduce (lambda (x y) (logior x (ash 1 y)))

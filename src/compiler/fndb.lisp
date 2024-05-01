@@ -1590,6 +1590,7 @@
            (unsafely-flushable)))
 
 (defknown (prin1-to-string princ-to-string) (t) simple-string (unsafely-flushable))
+(defknown sb-format::princ-multiple-to-string (&rest t) simple-string (unsafely-flushable))
 (defknown sb-impl::stringify-object (t) simple-string (no-verify-arg-count))
 
 (defknown write-char (character &optional stream-designator) character ()
@@ -1924,7 +1925,7 @@
 
 ;;;; magical compiler frobs
 
-(defknown %rest-values (t t t) * (always-translatable))
+(defknown %rest-values (t t t t) * (always-translatable))
 (defknown %rest-ref (t t t t &optional boolean) * (always-translatable))
 (defknown %rest-length (t t t) * (always-translatable))
 (defknown %rest-null (t t t t) * (always-translatable))
@@ -2333,3 +2334,5 @@
   (integer t)
   integer
   (movable always-translatable))
+
+(defknown %coerce-to-policy (t) policy (flushable))

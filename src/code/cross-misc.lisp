@@ -24,6 +24,11 @@
         (remf args :hash-function)))
     (apply 'make-hash-table args)))
 
+(defun %hash-table-alist (hash-table &aux result)
+  (maphash (lambda (key value) (push (cons key value) result))
+           hash-table)
+  result)
+
 ;;; In correct code, TRULY-THE has only a performance impact and can
 ;;; be safely degraded to ordinary THE.
 (defmacro truly-the (type expr)
@@ -171,12 +176,6 @@
 
 (defun %negate (number)
   (sb-xc:- number))
-
-(defun %single-float (number)
-  (coerce number 'single-float))
-
-(defun %double-float (number)
-  (coerce number 'double-float))
 
 (defun %ldb (size posn integer)
   (ldb (byte size posn) integer))
@@ -358,6 +357,15 @@
 (in-package "SB-C")
 
 (defun allocate-weak-vector (n) (make-array (the integer n)))
+
+#+weak-vector-readbarrier
+(progn (deftype weak-vector () nil) ; nothing is a weak-vector
+       (defun sb-int:weak-vector-ref (v i)
+         (error "Called WEAK-VECTOR-REF on ~S ~S" v i))
+       (defun (setf sb-int:weak-vector-ref) (new v i)
+         (error "Called (SETF WEAK-VECTOR-REF) on ~S ~S ~S" new v i))
+       (defun sb-int:weak-vector-len (v)
+         (error "Called WEAK-VECTOR-LEN on ~S" v)))
 
 ;;; For macro lambdas that are processed by the host
 (declaim (declaration top-level-form))

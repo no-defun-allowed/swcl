@@ -43,7 +43,7 @@
 #include "genesis/gc-tables.h"
 #include "genesis/vector.h"
 #include "genesis/weak-pointer.h"
-#include "genesis/fdefn.h"
+#include "genesis/symbol.h"
 #include "genesis/hash-table.h"
 #include "genesis/instance.h"
 #include "hopscotch.h"
@@ -57,7 +57,7 @@ extern FILE *gc_activitylog();
 
 /* Largest allocation seen since last GC. */
 os_vm_size_t large_allocation = 0;
-int n_gcs;
+int n_lisp_gcs;
 
 
 /*
@@ -2843,6 +2843,38 @@ static void free_oldspace(void)
     generations[from_space].bytes_allocated -= bytes_freed;
     bytes_allocated -= bytes_freed;
 }
+void free_large_object(lispobj* where, lispobj* end)
+{
+    page_index_t first = find_page_index(where);
+    page_index_t last = find_page_index((char*)end - 1);
+    generation_index_t g = page_table[first].gen;
+    gc_assert(page_ends_contiguous_block_p(last, g));
+    uword_t bytes_freed = 0;
+    page_index_t page;
+    // Perform all assertions before clobbering anything
+    for (page = first ; page <= last ; ++page) {
+        gc_assert(page_single_obj_p(page)); // redundant for the first page
+        gc_assert(page_table[page].gen == g); // also redundant
+        gc_assert(page_scan_start(page) == where);
+#ifdef LISP_FEATURE_SOFT_CARD_MARKS
+        gc_dcheck(page_cards_all_marked_nonsticky(page));
+#else
+        /* Force page to be writable. As much as memory faults should not occur
+         * during GC, they are allowed, and this step will ensure writability. */
+        *page_address(page) = 0;
+#endif
+    }
+    // Copied from free_oldspace
+    for (page = first ; page <= last ; ++page) {
+        int used = page_words_used(page);
+        if (used) set_page_need_to_zero(page, 1);
+        set_page_bytes_used(page, 0);
+        reset_page_flags(page);
+        bytes_freed += used << WORD_SHIFT;
+    }
+    generations[g].bytes_allocated -= bytes_freed;
+    bytes_allocated -= bytes_freed;
+}
 
 /* Call 'proc' with pairs of addresses demarcating ranges in the
  * specified generation.
@@ -3734,7 +3766,7 @@ long tot_gc_nsec;
 void NO_SANITIZE_ADDRESS NO_SANITIZE_MEMORY
 collect_garbage(generation_index_t last_gen)
 {
-    ++n_gcs;
+    ++n_lisp_gcs;
     THREAD_JIT_WP(0);
     generation_index_t gen = 0, i;
     bool gc_mark_only = 0;
@@ -3777,7 +3809,7 @@ collect_garbage(generation_index_t last_gen)
     struct thread *th;
     for_each_thread(th) gc_close_thread_regions(th, 0);
     ensure_region_closed(code_region, PAGE_TYPE_CODE);
-    if (gencgc_verbose > 2) fprintf(stderr, "[%d] BEGIN gc(%d)\n", n_gcs, last_gen);
+    if (gencgc_verbose > 2) fprintf(stderr, "[%d] BEGIN gc(%d)\n", n_lisp_gcs, last_gen);
 
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
   if (ENABLE_PAGE_PROTECTION) {
@@ -4520,6 +4552,7 @@ verify_pointer(lispobj thing, lispobj *where, struct verify_state *state)
     // if (strict_containment && !gc_managed_heap_space_p(thing)) GC_WARN("non-Lisp memory");
     page_index_t source_page_index = find_page_index(where);
     page_index_t target_page_index = find_page_index((void*)thing);
+    int source_is_generational = source_page_index >= 0 || immobile_space_p((lispobj)where);
     if (!(target_page_index >= 0 || immobile_space_p(thing))) return 0; // can't do much with it
     if ((state->flags & VERIFY_TAGS) && target_page_index >= 0) {
         if (listp(thing)) {
@@ -4565,7 +4598,7 @@ verify_pointer(lispobj thing, lispobj *where, struct verify_state *state)
             lose("code @ %p (g%d). word @ %p -> %"OBJ_FMTX" (g%d)",
                  state->object_addr, state->object_gen, where, thing, to_gen);
     } else if ((state->flags & VERIFYING_GENERATIONAL) && to_gen < state->object_gen
-               && source_page_index >= 0) {
+               && source_is_generational) {
         /* The WP criteria are:
          *  - CONS marks the exact card since it can't span cards
          *  - SIMPLE-VECTOR marks the card containing the cell with the old->young pointer.
