@@ -106,6 +106,7 @@ unsigned char *line_bytemap;
 line_index_t line_count;
 uword_t mark_bitmap_size;
 page_words_t *small_object_words[HIGHEST_NORMAL_GENERATION + 1];
+page_words_t *small_object_lines;
 
 static void allocate_bitmaps() {
   page_index_t pages = dynamic_space_size / GENCGC_PAGE_BYTES;
@@ -115,7 +116,8 @@ static void allocate_bitmaps() {
   line_count = dynamic_space_size / LINE_SIZE;
   line_bytemap = allocate_bitmap(line_count, "line bytemap");
   for (generation_index_t g = 0; g <= HIGHEST_NORMAL_GENERATION; g++)
-    small_object_words[g] = allocate_bitmap(sizeof(page_words_t) * pages, "page usage table");
+    small_object_words[g] = allocate_bitmap(sizeof(page_words_t) * pages, "words-per-page used table");
+  small_object_lines = allocate_bitmap(sizeof(page_words_t) * pages, "lines-per-page used table");
 }
 
 uword_t lines_used() {
@@ -262,12 +264,18 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       start->page = where + 1;
       /* Update residency statistics. mr_update_closed_region will
        * enliven all lines on this page, so it's correct to set the
-       * page bytes used like this. */
-      page_bytes_t used = page_bytes_used(where), claimed = GENCGC_PAGE_BYTES - used;
+       * page bytes used like this. GENCGC_PAGE_BYTES - used_lines
+       * is closer to what we'll allocate than 
+       * GENCGC_PAGE_BYTES - used_bytes; the latter would essentially
+       * count free space in used lines as reusable, when such space
+       * is not reusable. */
+      page_bytes_t used_bytes = page_bytes_used(where),
+                   used_lines = LINE_SIZE * small_object_lines[where],
+                   claimed = GENCGC_PAGE_BYTES - used_lines;
       bytes_allocated += claimed;
       generations[gen].bytes_allocated += claimed;
       small_object_words[gen][where] += claimed / N_WORD_BYTES;
-      set_page_bytes_used(where, GENCGC_PAGE_BYTES);
+      set_page_bytes_used(where, used_bytes + claimed);
       if (where + 1 > next_free_page) next_free_page = where + 1;
       return true;
     }
@@ -833,6 +841,9 @@ static void sweep_small_page(page_index_t p) {
     unsigned char line = UNFRESHEN_GEN(lines[l]);
     lines[l] = (line == unmarked) ? 0 : (line == marked) ? unmarked : line;
   }
+  page_words_t lines_used = 0;
+  for_lines_in_page(l, p) if (lines[l]) lines_used++;
+  small_object_lines[p] = lines_used;
   for_lines_in_page(l, p)
     marks[l] = 0;
 }

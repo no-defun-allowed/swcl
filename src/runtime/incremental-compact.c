@@ -266,14 +266,17 @@ static void resweep_moved_lines() {
   for (page_index_t p = 0; p < page_table_pages; p++) {
     if (target_pages[p] && !page_single_obj_p(p)) {
       /* Free all lines we just copied from. */
-      char *allocation = (char*)allocation_bitmap;
-      for_lines_in_page (l, p)
+      short remaining_lines = 0;
+      for_lines_in_page (l, p) {
         if (DECODE_GEN(line_bytemap[l]) == target_generation) {
           line_bytemap[l] = 0;
           allocation[l] = 0;
         }
+        if (line_bytemap[l]) remaining_lines++;
+      }
       uword_t decrement = N_WORD_BYTES * small_object_words[target_generation][p];
       small_object_words[target_generation][p] = 0;
+      small_object_lines[p] = remaining_lines;
       set_page_bytes_used(p, page_bytes_used(p) - decrement);
       generations[target_generation].bytes_allocated -= decrement;
       bytes_allocated -= decrement;

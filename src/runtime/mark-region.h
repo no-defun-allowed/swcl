@@ -12,6 +12,7 @@ extern uword_t *allocation_bitmap;
 extern _Atomic(uword_t) *mark_bitmap;
 extern unsigned char *line_bytemap;
 extern page_words_t *small_object_words[HIGHEST_NORMAL_GENERATION + 1];
+extern page_words_t *small_object_lines;
 typedef intptr_t line_index_t;
 
 /* Line arithmetic */
