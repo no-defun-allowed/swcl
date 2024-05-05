@@ -62,6 +62,7 @@ static struct {
   uword_t compacts;
 } meters = { 0 };
 static unsigned int collection = 0;
+static generation_index_t generation_to_collect = 0;
 #define METER(name, action) \
   { uword_t before = get_time(); \
   action; \
@@ -194,6 +195,10 @@ void pre_search_for_small_space(sword_t nbytes, int page_type,
   }
 }
 
+
+static unsigned char allocation_line_metadata;
+extern generation_index_t get_alloc_generation();
+
 /* Try to find space to fit a new object in the lines between `start`
  * and `end`. Updates `region` and returns true if we succeed, keeps
  * `region` untouched and returns false if we fail. The caller must
@@ -217,7 +222,19 @@ bool try_allocate_small(sword_t nbytes, struct alloc_region *region,
        * bytes used here for each chunk; we have exclusive access
        * to the page and its state in the page table.. */
       for (line_index_t c = chunk_start; c < chunk_end; c++)
-        line_bytemap[c] = gc_active_p ? 0 : FRESHEN_GEN(0);
+        line_bytemap[c] = gc_active_p ? allocation_line_metadata : FRESHEN_GEN(0);
+      /* TODO: Whyn't do this all the time, stomaching some imprecision
+       * for bytes_allocated? */
+      if (gc_active_p) {
+        page_bytes_t claimed = (chunk_end - chunk_start) * LINE_SIZE;
+        page_index_t page = find_page_index(line_address(chunk_start));
+        generation_index_t gen = get_alloc_generation();
+        bytes_allocated += claimed;
+        generations[gen].bytes_allocated += claimed;
+        small_object_words[gen][page] += claimed / N_WORD_BYTES;
+        small_object_lines[page] += claimed / LINE_SIZE;
+        set_page_bytes_used(page, page_bytes_used(page) + claimed);
+      }
       return true;
     }
     if (chunk_end == end) return false;
@@ -234,8 +251,6 @@ bool try_allocate_small_after_region(sword_t nbytes, struct alloc_region *region
   line_index_t end = address_line(PTR_ALIGN_UP(region->end_addr, GENCGC_PAGE_BYTES));
   return try_allocate_small(nbytes, region, address_line(region->end_addr), end);
 }
-
-extern generation_index_t get_alloc_generation();
 
 /* try_allocate_small_from_pages updates the start pointer to after the
  * claimed page. */
@@ -272,10 +287,15 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       page_bytes_t used_bytes = page_bytes_used(where),
                    used_lines = LINE_SIZE * small_object_lines[where],
                    claimed = GENCGC_PAGE_BYTES - used_lines;
-      bytes_allocated += claimed;
-      generations[gen].bytes_allocated += claimed;
-      small_object_words[gen][where] += claimed / N_WORD_BYTES;
-      set_page_bytes_used(where, used_bytes + claimed);
+      if (used_bytes + claimed > GENCGC_PAGE_BYTES)
+        lose("alloc page %ld, %d + %d\n", where, used_bytes, claimed);
+      if (!gc_active_p) {
+        bytes_allocated += claimed;
+        generations[gen].bytes_allocated += claimed;
+        small_object_words[gen][where] += claimed / N_WORD_BYTES;
+        small_object_lines[where] = GENCGC_PAGE_BYTES / LINE_SIZE;
+        set_page_bytes_used(where, used_bytes + claimed);
+      }
       if (where + 1 > next_free_page) next_free_page = where + 1;
       return true;
     }
@@ -357,13 +377,12 @@ void mr_update_closed_region(struct alloc_region *region, generation_index_t gen
     unsigned char copied = COPY_MARK(lines[l], ENCODE_GEN(gen));
     lines[l] = UNMARK_GEN(lines[l]) ? lines[l] : copied;
   }
+  
   page_table[the_page].type &= ~(OPEN_REGION_PAGE_FLAG);
   gc_set_region_empty(region);
 }
 
 /* Marking */
-
-static generation_index_t generation_to_collect = 0;
 
 #define ANY(x) ((x) != 0)
 static bool object_marked_p(lispobj object) {
@@ -1216,6 +1235,7 @@ void mr_pre_gc(generation_index_t generation) {
 }
 
 void mr_collect_garbage(bool raise) {
+  allocation_line_metadata = MARK_GEN(ENCODE_GEN(get_alloc_generation()));
   extern void reset_alloc_start_pages(bool allow_free_pages);
   if (generation_to_collect != PSEUDO_STATIC_GENERATION) {
     METER(scavenge, mr_scavenge_root_gens());
@@ -1223,6 +1243,7 @@ void mr_collect_garbage(bool raise) {
   trace_static_roots();
   METER(trace, trace_everything());
   METER(sweep, sweep());
+  allocation_line_metadata = ENCODE_GEN(get_alloc_generation());
 #if ENABLE_COMPACTION
   if (compacting) {
     meters.compacts++;
@@ -1299,6 +1320,7 @@ void prepare_lines_for_final_gc() {
         }
       }
       small_object_words[0][p] = new_size / N_WORD_BYTES;
+      small_object_lines[p] = new_size / LINE_SIZE;
       generations[0].bytes_allocated += new_size;
       set_page_bytes_used(p, new_size);
     }
@@ -1354,6 +1376,14 @@ void draw_line_bytemap() {
     fprintf(f, "%d %d %d ", r * m, g * m, b * m);
   }
   fclose(f);
+}
+
+void draw_page_lines(page_index_t p) {
+  fprintf(stderr, "Page %ld:\n", p);
+  for_lines_in_page (l, p) {
+    fprintf(stderr, "%2x ", line_bytemap[l]);
+    if (l % 16 == 15) fprintf(stderr, "\n");
+  }
 }
 
 void count_line_values(char *why) {

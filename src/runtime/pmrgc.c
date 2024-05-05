@@ -1923,11 +1923,19 @@ static void check_free_pages()
 
 static void check_weird_pages() {
   bool fail = 0;
-  for (page_index_t p = 0; p < page_table_pages; p++)
+  for (page_index_t p = 0; p < page_table_pages; p++) {
     if (page_words_used(p) > GENCGC_PAGE_WORDS) {
       fprintf(stderr, "Page #%ld has %d words used\n", p, page_words_used(p));
       fail = 1;
     }
+    if (!page_single_obj_p(p) &&
+        page_table[p].gen != PSEUDO_STATIC_GENERATION &&
+        page_bytes_used(p) > LINE_SIZE * small_object_lines[p]) {
+      fprintf(stderr, "Page #%ld has %d bytes used and %d worth of lines\n",
+              p, page_bytes_used(p), LINE_SIZE * small_object_lines[p]);
+      fail = 1;
+    }
+  }
   if (fail) lose("Page usage doesn't make sense");
 }
 
@@ -2015,7 +2023,8 @@ int verify_heap(__attribute__((unused)) lispobj* cur_thread_approx_stackptr,
 void gc_show_pte(lispobj obj)
 {
     char marks[1+CARDS_PER_PAGE];
-    page_index_t page = find_page_index((void*)obj);
+    page_index_t page = (page_index_t)obj;
+    if ((page_index_t)obj > page_table_pages) find_page_index((void*)obj);
     if (page>=0) {
         printf("page %"PAGE_INDEX_FMT" base %p gen %d type %x ss %p used %x",
                page, page_address(page), page_table[page].gen, page_table[page].type,
@@ -2023,6 +2032,10 @@ void gc_show_pte(lispobj obj)
         if (page_starts_contiguous_block_p(page)) printf(" startsblock");
         if (page_ends_contiguous_block_p(page, page_table[page].gen)) printf(" endsblock");
         printf(" (%s)\n", page_card_mark_string(page, marks));
+        printf("small-object lines %d words ", small_object_lines[page]);
+        for (generation_index_t g = 0; g < PSEUDO_STATIC_GENERATION; g++)
+          printf("%d ", small_object_words[g][page]);
+        printf("\n");
         return;
     }
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
