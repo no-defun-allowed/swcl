@@ -594,10 +594,7 @@
 (def-format-directive #\C (colonp atsignp params string end)
   (expand-bind-defaults () params
     (let ((n-arg (gensym "ARG")))
-      `(let ((,n-arg ,(expand-next-arg)))
-         (unless (typep ,n-arg 'character)
-           (format-error-at ,string ,(1- end)
-                            "~S is not of type CHARACTER." ,n-arg))
+      `(let ((,n-arg (the* (character :context (format ,string ,(1- end))) ,(expand-next-arg))))
          ,(cond (colonp
                  `(format-print-named-character ,n-arg stream))
                 (atsignp
@@ -626,9 +623,7 @@
         `(format-print-integer stream ,(expand-next-arg) ,colonp ,atsignp
                                ,base ,mincol ,padchar ,commachar
                                ,commainterval))
-      `(let ((*print-base* ,base)
-             (*print-radix* nil))
-         (princ ,(expand-next-arg) stream))))
+      `(format-integer ,(expand-next-arg) ,base stream)))
 
 (def-format-directive #\D (colonp atsignp params)
   (expand-format-integer 10 colonp atsignp params))
@@ -647,11 +642,16 @@
       ((base nil) (mincol 0) (padchar #\space) (commachar #\,)
        (commainterval 3))
       params
-    (let ((n-arg (gensym "ARG")))
-      `(let ((,n-arg ,(expand-next-arg)))
-         (unless (or ,base
-                     (integerp ,n-arg))
-           (format-error-at ,string ,(1- end) "~S is not of type INTEGER." ,n-arg))
+
+    (let ((n-arg (gensym "ARG"))
+          (expanded-arg (expand-next-arg)))
+      `(let ((,n-arg ,(if (car params)
+                          expanded-arg
+                          `(the* (integer :context (format ,string ,(1- end))) ,expanded-arg))))
+         ,@(if (car params)
+               `((unless (or ,base
+                             (integerp ,n-arg))
+                   (format-error-at ,string ,(1- end) "~S is not of type INTEGER." ,n-arg))))
          (if ,base
              (format-print-integer stream ,n-arg ,colonp ,atsignp
                                    ,base ,mincol

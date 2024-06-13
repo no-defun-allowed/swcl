@@ -430,6 +430,21 @@
                 (code-location nil)
                 (debug-fun (breakpoint-kind obj)))))))
 
+(defmacro with-weak-cache ((temp global) &body body)
+  `(let ((,temp (or ,global
+                    (let ((new
+                           (sb-vm:without-arena
+                               (make-hash-table :test 'eq
+                                                :weakness :key
+                                                :synchronized t))))
+                      ;; double-checked idiom has to ensure that no other CPU
+                      ;; can see a just-made hash-table until all the slots of
+                      ;; the instance are definitely published before the
+                      ;; global var points to it.
+                      (sb-thread:barrier (:write))
+                      (or (cas ,global nil new) new)))))
+     ,@body))
+
 (defstruct (compiled-debug-fun
             (:include debug-fun)
             (:constructor %make-compiled-debug-fun
@@ -444,19 +459,20 @@
   ;; function end breakpoints
   (end-starter nil :type (or null breakpoint)))
 
-;;; This maps SB!C::COMPILED-DEBUG-FUNs to COMPILED-DEBUG-FUNs, so we
+;;; This maps SB-C::COMPILED-DEBUG-FUNs to SB-DI::COMPILED-DEBUG-FUNs, so we
 ;;; can get at cached stuff and not duplicate COMPILED-DEBUG-FUN
 ;;; structures.
-(defvar *compiled-debug-funs* (make-hash-table :test 'eq :weakness :key))
+(define-load-time-global *compiled-debug-funs* nil)
 
-;;; Make a COMPILED-DEBUG-FUN for a SB!C::COMPILER-DEBUG-FUN and its
+;;; Make a SB-DI::COMPILED-DEBUG-FUN for a SB-C::COMPILED-DEBUG-FUN and its
 ;;; component. This maps the latter to the former in
 ;;; *COMPILED-DEBUG-FUNS*. If there already is a COMPILED-DEBUG-FUN,
 ;;; then this returns it from *COMPILED-DEBUG-FUNS*.
 (defun make-compiled-debug-fun (compiler-debug-fun component)
-  (or (gethash compiler-debug-fun *compiled-debug-funs*)
-      (setf (gethash compiler-debug-fun *compiled-debug-funs*)
-            (%make-compiled-debug-fun compiler-debug-fun component))))
+  (with-weak-cache (ht *compiled-debug-funs*)
+    (or (gethash compiler-debug-fun ht)
+        (setf (gethash compiler-debug-fun ht)
+              (%make-compiled-debug-fun compiler-debug-fun component)))))
 
 
 ;;;; CODE-LOCATIONs
@@ -1643,26 +1659,6 @@ register."
            (debug-signal 'lambda-list-unavailable
                          :debug-fun debug-fun)))))
 
-;;; COMPILED-DEBUG-FUN-LAMBDA-LIST calls this when a
-;;; COMPILED-DEBUG-FUN has no lambda list information cached. It
-;;; returns the lambda list as the first value and whether there was
-;;; any argument information as the second value. Therefore,
-;;; (VALUES NIL T) means there were no arguments, but (VALUES NIL NIL)
-;;; means there was no argument information.
-(defun parse-compiled-debug-fun-lambda-list (debug-fun)
-  (let ((args (sb-c::compiled-debug-fun-arguments
-               (compiled-debug-fun-compiler-debug-fun debug-fun))))
-    (cond
-      ((not args)
-       (values nil nil))
-      ((eq args :minimal)
-       (values (ensure-heap-list (coerce (debug-fun-debug-vars debug-fun) 'list))
-               t))
-      (t
-       (values (parse-compiled-debug-fun-lambda-list/args-available
-                (debug-fun-debug-vars debug-fun) args)
-               t)))))
-
 ;;; A compact "vector" is either the element itself or a vector
 (defun compact-vector-ref (vector index)
   (declare (index index))
@@ -1875,21 +1871,6 @@ register."
            (setf last-pc pc))))
       (coerce (nreverse result-blocks) 'simple-vector))))
 
-;;; The argument is a debug internals structure. This returns NIL if
-;;; there is no variable information. It returns an empty
-;;; simple-vector if there were no locals in the function. Otherwise
-;;; it returns a SIMPLE-VECTOR of DEBUG-VARs.
-(defun debug-fun-debug-vars (debug-fun)
-  (let ((vars (debug-fun-%debug-vars debug-fun)))
-    (if (eq vars :unparsed)
-        (let* ((new (etypecase debug-fun
-                      (compiled-debug-fun
-                       (parse-compiled-debug-vars debug-fun))
-                      (bogus-debug-fun nil)))
-               (old (cas (debug-fun-%debug-vars debug-fun) :unparsed new)))
-          (if (eq old :unparsed) new old))
-        vars)))
-
 ;;; VARS is the parsed variables for a minimal debug function. We need
 ;;; to assign names of the form ARG-NNN. We must pad with leading
 ;;; zeros, since the arguments must be in alphabetical order.
@@ -1970,6 +1951,44 @@ register."
         (when args-minimal
           (assign-minimal-var-names result))
         result))))
+
+;;; The argument is a debug internals structure. This returns NIL if
+;;; there is no variable information. It returns an empty
+;;; simple-vector if there were no locals in the function. Otherwise
+;;; it returns a SIMPLE-VECTOR of DEBUG-VARs.
+(defun debug-fun-debug-vars (debug-fun)
+  (let ((vars (debug-fun-%debug-vars debug-fun)))
+    (if (eq vars :unparsed)
+        (let* ((new (etypecase debug-fun
+                      (compiled-debug-fun
+                       (parse-compiled-debug-vars debug-fun))
+                      (bogus-debug-fun nil)))
+               (old (cas (debug-fun-%debug-vars debug-fun) :unparsed new)))
+          (if (eq old :unparsed) new old))
+        vars)))
+
+;;; COMPILED-DEBUG-FUN-LAMBDA-LIST calls this when a
+;;; COMPILED-DEBUG-FUN has no lambda list information cached. It
+;;; returns the lambda list as the first value and whether there was
+;;; any argument information as the second value. Therefore,
+;;; (VALUES NIL T) means there were no arguments, but (VALUES NIL NIL)
+;;; means there was no argument information.
+(defun parse-compiled-debug-fun-lambda-list (debug-fun)
+  ;; This file could not be slammed if COERCE is inlined because it thinks :UNPARSED
+  ;; (i.e. not a sequence) can be returned as the DEBUG-VARS. But it can't, and a running
+  ;; image was able to recompile the function with no decl and no warning. What's up with that?
+  (let ((args (sb-c::compiled-debug-fun-arguments
+               (compiled-debug-fun-compiler-debug-fun debug-fun))))
+    (cond
+      ((not args)
+       (values nil nil))
+      ((eq args :minimal)
+       (values (ensure-heap-list (coerce (debug-fun-debug-vars debug-fun) 'list))
+               t))
+      (t
+       (values (parse-compiled-debug-fun-lambda-list/args-available
+                (debug-fun-debug-vars debug-fun) args)
+               t)))))
 
 ;;;; unpacking packed debug functions
 
@@ -2097,15 +2116,15 @@ register."
 
 ;;; a map from packed DEBUG-INFO function maps to unpacked
 ;;; versions thereof
-(defvar *uncompacted-fun-maps* (make-hash-table :test 'eq :weakness :key))
+(define-load-time-global *uncompacted-fun-maps* nil)
 
 ;;; Return a FUN-MAP for a given COMPILED-DEBUG-INFO object. If the
 ;;; info is packed, and has not been parsed, then parse it.
 (defun get-debug-info-fun-map (info)
   (declare (type sb-c::compiled-debug-info info))
-  (or (gethash info *uncompacted-fun-maps*)
-      (setf (gethash info *uncompacted-fun-maps*)
-            (uncompact-fun-map info))))
+  (with-weak-cache (ht *uncompacted-fun-maps*)
+    (or (gethash info ht)
+        (setf (gethash info ht) (uncompact-fun-map info)))))
 
 ;;;; CODE-LOCATIONs
 

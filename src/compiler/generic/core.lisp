@@ -53,22 +53,8 @@
            #-(or x86 x86-64 arm64) fun))
      (setf (sb-vm::%simple-fun-self fun) self)))
 
-(define-load-time-global sb-fasl::*asm-routine-index-to-name* #())
-(declaim (simple-vector sb-fasl::*asm-routine-index-to-name*))
-
-;;; Fasl files encode <flavor,kind> in a packed integer. Dispatching on the integer
-;;; is simple, but the case keys still want to be symbols.
-(defmacro fixup-flavor-case (flavor-id &rest clauses)
-  (declare (notinline position))
-  `(ecase ,flavor-id
-     ,@(mapcar (lambda (clause)
-                 (cons (mapcar (lambda (kwd) (sb-fasl::encoded-fixup-flavor kwd))
-                               (ensure-list (car clause)))
-                       (cdr clause)))
-               clauses)))
-
 (flet ((fixup (code-obj offset name kind flavor-id preserved-lists statically-link-p
-               real-code-obj &aux (flavor (aref sb-fasl::+fixup-flavors+ flavor-id)))
+               real-code-obj &aux (flavor (aref +fixup-flavors+ flavor-id)))
          (declare (ignorable statically-link-p preserved-lists))
          ;; NAME depends on the kind and flavor of fixup.
          ;; PRESERVED-LISTS is a vector of lists of locations (by kind)
@@ -79,9 +65,14 @@
          (sb-vm:fixup-code-object
                  code-obj offset
                  (fixup-flavor-case flavor-id
-                   ((:assembly-routine :assembly-routine*)
-                    (or (get-asm-routine name (eq flavor :assembly-routine*))
-                        (error "undefined assembler routine: ~S" name)))
+                   (:assembly-routine
+                    (let* ((asm-code *assembler-routines*)
+                           (index (if (fixnump name)
+                                      name
+                                      (or (cddr (gethash name (sb-fasl::%asm-routine-table asm-code)))
+                                          (error "Unknown asm routine ~S" name)))))
+                      (sap-int (sap+ (code-instructions asm-code)
+                                     (aref *asm-routine-offsets* index)))))
                    (:alien-code-linkage-index (sb-impl::ensure-alien-linkage-index name nil))
                    (:alien-data-linkage-index (sb-impl::ensure-alien-linkage-index name t))
                    (:foreign (foreign-symbol-address name))
@@ -127,7 +118,8 @@
          ;; Return fixups amenable to static linking
          (aref preserved-lists 0)))
 
-  (defun apply-fasl-fixups (code-obj fixups index count real-code-obj &aux (end (1- (+ index count))))
+  (defun apply-fasl-fixups (code-obj fixups index count real-code-obj
+                            &aux (end (1- (+ index count))))
     (dx-let ((preserved (make-array 5 :initial-element nil)))
       (let ((retained-fixups (svref fixups index)))
         (incf index)
@@ -139,13 +131,7 @@
         (when (>= index end) (return))
         (binding* (((offset kind flavor-id data)
                     (sb-fasl::!unpack-fixup-info (svref fixups (incf index))))
-                   (flavor (aref sb-fasl::+fixup-flavors+ flavor-id))
-                   (name
-                    (cond ((member flavor '(:code-object :card-table-index-mask)) nil)
-                          ((and (plusp data)
-                                (member flavor '(:assembly-routine :assembly-routine*)))
-                           (aref sb-fasl::*asm-routine-index-to-name* data))
-                          (t (svref fixups (incf index))))))
+                   (name (if (eql 0 data) (svref fixups (incf index)) data)))
           (fixup code-obj offset name kind flavor-id preserved nil real-code-obj)))
       (finish-fixups code-obj preserved)))
 
@@ -160,7 +146,7 @@
           (fixup code-obj offset
                  (fixup-name fixup)
                  (fixup-note-kind note)
-                 (sb-fasl::encoded-fixup-flavor (fixup-flavor fixup))
+                 (encoded-fixup-flavor (fixup-flavor fixup))
                  preserved t
                  real-code-obj)))
       (finish-fixups code-obj preserved))))
@@ -197,7 +183,7 @@
             (when (typep const '(cons (eql :fdefinition)))
               (incf count)
               (setf (second const) (find-or-create-fdefn (second const)))))))
-       (retained-fixups (sb-fasl::pack-fixups-for-reapplication fixup-notes))
+       (retained-fixups (sb-c::pack-fixups-for-reapplication fixup-notes))
        ((code-obj total-nwords)
         (allocate-code-object (component-mem-space component)
                               (align-up n-boxed-words code-boxed-words-align)

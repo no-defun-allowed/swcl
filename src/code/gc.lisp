@@ -317,6 +317,7 @@ used to specify the oldest generation guaranteed to be collected."
         ((eql 1 gen)
          (sb-format::tokenize-control-string-cache-clear))
         (t
+         (setq sb-di::*uncompacted-fun-maps* nil sb-di::*compiled-debug-funs* nil)
          (drop-all-hash-caches))))
 
 ;;;; auxiliary functions

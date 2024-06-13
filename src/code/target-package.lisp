@@ -374,6 +374,40 @@ of :INHERITED :EXTERNAL :INTERNAL."
   (expand-pkg-iterator '((list-all-packages) :internal :external)
                        var body-decls result-form))
 
+;;; Utility iteration macros for detecting name conflicts
+(defmacro do-symbol-name-groups (((name syms) symbols) &body body)
+  (sb-int:with-unique-names (table sym next entryp k v)
+    `(let ((,table (make-hash-table :test 'equal)))
+       (dolist (,sym ,symbols)
+         (pushnew ,sym (gethash (symbol-name ,sym) ,table)))
+       (block nil
+         (with-hash-table-iterator (,next ,table)
+           (loop
+             (multiple-value-bind (,entryp ,k ,v)
+                 (,next)
+               (unless ,entryp
+                 (return))
+               (let ((,name ,k)
+                     (,syms (nreverse ,v)))
+                 ,@body))))))))
+
+(defmacro do-external-symbol-name-groups (((name syms) packages) &body body)
+  (sb-int:with-unique-names (table pkg sym next entryp k v)
+    `(let ((,table (make-hash-table :test 'equal)))
+       (dolist (,pkg ,packages)
+         (do-external-symbols (,sym ,pkg)
+           (pushnew ,sym (gethash (symbol-name ,sym) ,table))))
+       (block nil
+         (with-hash-table-iterator (,next ,table)
+           (loop
+             (multiple-value-bind (,entryp ,k ,v)
+                 (,next)
+               (unless ,entryp
+                 (return))
+               (let ((,name ,k)
+                     (,syms (nreverse ,v)))
+                 ,@body))))))))
+
 ;;;; SYMBOL-TABLE stuff
 
 (declaim (inline symtbl-cells))
@@ -1485,20 +1519,28 @@ Experimental: interface subject to change."
              (name-conflict-symbols c)))))
 
 (defun name-conflict (package function datum &rest symbols)
-  (flet ((importp (c)
+  (flet ((import1p (c)
            (declare (ignore c))
-           (eq 'import function))
-         (use-or-export-p (c)
+           (and (eq 'import function)
+                ;; exactly two symbols are involved in the conflict
+                (null (cddr symbols)) (null (cdr datum))
+                ;; one of the symbols is already accessible in the package
+                (nth-value 1 (find-symbol (symbol-name (car datum)) package))))
+         (use1-or-export-p (c)
            (declare (ignore c))
-           (or (eq 'use-package function)
+           (or (and (eq 'use-package function)
+                    (null (cddr symbols)) (null (cdr datum))
+                    (nth-value 1 (find-symbol (symbol-name (car datum)) package)))
                (eq 'export function)))
          (old-symbol ()
-           (car (remove datum symbols))))
+           (ecase function
+             ((export) (car (remove datum symbols)))
+             ((use-package import) (find-symbol (symbol-name (car datum)) package)))))
     (let ((pname (package-name package)))
       (restart-case
           (error 'name-conflict :package package :symbols symbols
                                 :function function :datum datum)
-        ;; USE-PACKAGE and EXPORT
+        ;; USE-PACKAGE with a pair of symbols conflicting, and EXPORT
         (keep-old ()
           :report (lambda (s)
                     (ecase function
@@ -1506,9 +1548,9 @@ Experimental: interface subject to change."
                        (format s "Keep ~S accessible in ~A (shadowing ~S)."
                                (old-symbol) pname datum))
                       (use-package
-                       (format s "Keep symbols already accessible in ~A (shadowing others)."
-                               pname))))
-          :test use-or-export-p
+                       (format s "Keep ~S accessible in ~A (shadowing ~S)."
+                               (old-symbol) pname (car datum)))))
+          :test use1-or-export-p
           (dolist (s (remove-duplicates symbols :test #'string=))
             (shadow (symbol-name s) package)))
         (take-new ()
@@ -1518,26 +1560,24 @@ Experimental: interface subject to change."
                        (format s "Make ~S accessible in ~A (uninterning ~S)."
                                datum pname (old-symbol)))
                       (use-package
-                       (format s "Make newly exposed symbols accessible in ~A, ~
-                                  uninterning old ones."
-                               pname))))
-          :test use-or-export-p
+                       (format s "Make ~S accessible in ~A (uninterning ~S)."
+                               (car datum) pname (old-symbol)))))
+          :test use1-or-export-p
           (dolist (s symbols)
             (when (eq s (find-symbol (symbol-name s) package))
               (unintern s package))))
-        ;; IMPORT
+        ;; IMPORT with a pair of symbols conflicting.
         (shadowing-import-it ()
           :report (lambda (s)
                     (format s "Shadowing-import ~S, uninterning ~S."
-                            datum (old-symbol)))
-          :test importp
+                            (car datum) (old-symbol)))
+          :test import1p
           (shadowing-import datum package))
         (dont-import-it ()
           :report (lambda (s)
                     (format s "Don't import ~S, keeping ~S."
-                            datum
-                            (car (remove datum symbols))))
-          :test importp)
+                            (car datum) (old-symbol)))
+          :test import1p)
         ;; General case. This is exposed via SB-EXT.
         (resolve-conflict (chosen-symbol)
           :report "Resolve conflict."
@@ -1562,7 +1602,7 @@ Experimental: interface subject to change."
                     (return (list (nth (1- i) symbols))))))))
           (multiple-value-bind (package-symbol status)
               (find-symbol (symbol-name chosen-symbol) package)
-            (let* ((accessiblep status)     ; never NIL here
+            (let* ((accessiblep status)
                    (presentp (and accessiblep
                                   (not (eq :inherited status)))))
               (ecase function
@@ -1585,7 +1625,7 @@ Experimental: interface subject to change."
                      (if (eq package-symbol chosen-symbol)
                          nil                ; re-importing the same symbol
                          (shadowing-import (list chosen-symbol) package))
-                     (shadowing-import (list chosen-symbol) package)))))))))))
+                     (import (list chosen-symbol) package)))))))))))
 
 ;;; If we are uninterning a shadowing symbol, then a name conflict can
 ;;; result, otherwise just nuke the symbol.
@@ -1697,8 +1737,13 @@ uninterned."
         (let ((internal (package-internal-symbols package))
               (external (package-external-symbols package)))
           (dolist (sym syms)
-            (add-symbol external sym)
-            (nuke-symbol internal sym t))))
+            ;; no error if this condition is false: inaccessibility
+            ;; and subsequent conflicts handled above by IMPORT can
+            ;; mean that some symbols in the original export list are
+            ;; not exportable.
+            (when (eql (find-symbol (symbol-name sym) package) sym)
+              (add-symbol external sym)
+              (nuke-symbol internal sym t)))))
       t)))
 
 ;;; Check that all symbols are accessible, then move from external to internal.
@@ -1755,18 +1800,16 @@ the importation, then a correctable error is signalled."
            (homeless (remove-if #'sb-xc:symbol-package symbols))
            (syms ()))
       (with-single-package-locked-error ()
-        (dolist (sym symbols)
-          (multiple-value-bind (s w) (find-symbol (symbol-name sym) package)
+        (do-symbol-name-groups ((n ss) symbols)
+          (multiple-value-bind (s w) (find-symbol n package)
             (cond ((not w)
-                   (let ((found (member sym syms :test #'string=)))
-                     (if found
-                         (when (not (eq (car found) sym))
-                           (setf syms (remove (car found) syms))
-                           (name-conflict package 'import sym sym (car found)))
-                         (push sym syms))))
-                  ((not (eq s sym))
-                   (name-conflict package 'import sym sym s))
-                  ((eq w :inherited) (push sym syms)))))
+                   (if (not (null (cdr ss)))
+                       (apply #'name-conflict package 'import ss ss)
+                       (push (car ss) syms)))
+                  ((and (eql (car ss) s) (null (cdr ss)))
+                   (if (eq w :inherited) (push s syms)))
+                  (t
+                   (apply #'name-conflict package 'import ss (adjoin s ss))))))
         (when (or homeless syms)
           (let ((union (delete-duplicates (append homeless syms))))
             (assert-package-unlocked package "importing symbol~P ~{~A~^, ~}"
@@ -1848,67 +1891,45 @@ PACKAGE."
   ;; If user code further affects the name -> package mapping while concurrently
   ;; doing a USE-PACKAGE, that not our problem)
   (let ((package
-         (let ((pkg (find-undeleted-package-or-lose package)))
-           ;; "package [...] cannot be the KEYWORD package."
-           (when (eq pkg *keyword-package*)
-             (error "~S can't use packages" pkg))
-           pkg))
-        (packages (package-listify packages-to-use)))
+          (let ((pkg (find-undeleted-package-or-lose package)))
+            ;; "package [...] cannot be the KEYWORD package."
+            (when (eq pkg *keyword-package*)
+              (error "~S can't use packages" pkg))
+            pkg))
+        (deduped-packages (remove-duplicates (package-listify packages-to-use) :from-end t))
+        (packages))
     ;; "packages-to-use ... The KEYWORD package may not be supplied."
     (when (memq *keyword-package* packages)
       (error "Can not USE-PACKAGE ~S" *keyword-package*))
     (with-package-graph ()
-      ;; Loop over each package, USE'ing one at a time...
       (with-single-package-locked-error ()
-        (dolist (pkg packages)
+        (dolist (pkg deduped-packages)
+          ;; Loop over each package, checking for lock and for
+          ;; already-used one at a time...
           (unless (find (package-external-symbols pkg) (package-tables package))
             (assert-package-unlocked package "using package~P ~{~A~^, ~}"
                                      (length packages) packages)
-            (let ((shadowing-symbols (package-%shadowing-symbols package))
-                  (use-list (package-%use-list package)))
+            (push pkg packages)))
+        (setq packages (nreverse packages)))
+      ;; ... but USE all the packages in one go (after resolving any
+      ;; name conflicts)
+      (let ((shadowing-symbols (package-%shadowing-symbols package)))
+        (do-external-symbol-name-groups ((n ss) packages)
+          (multiple-value-bind (s w) (find-symbol n package)
+            (cond
+              ((not w)
+               (when (not (null (cdr ss)))
+                 (apply #'name-conflict package 'use-package ss ss)))
+              ((and (eql s (car ss)) (null (cdr ss))))
+              ((member s shadowing-symbols))
+              (t (apply #'name-conflict package 'use-package ss (adjoin s ss)))))))
 
-              ;; If the number of symbols already accessible is less
-              ;; than the number to be inherited then it is faster to
-              ;; run the test the other way. This is particularly
-              ;; valuable in the case of a new package USEing
-              ;; COMMON-LISP.
-              (cond
-                ((< (+ (package-internal-symbol-count package)
-                       (package-external-symbol-count package)
-                       (let ((res 0))
-                         (dolist (p use-list res)
-                           (incf res (package-external-symbol-count p)))))
-                    (package-external-symbol-count pkg))
-                 (do-symbols (sym package)
-                   (let ((s (find-external-symbol (symbol-name sym) pkg)))
-                     (when (and (not (eql s 0))
-                                (not (eq s sym))
-                                (not (member sym shadowing-symbols)))
-                       (name-conflict package 'use-package pkg sym s))))
-                 (dolist (p use-list)
-                   (do-external-symbols (sym p)
-                     (let ((s (find-external-symbol (symbol-name sym) pkg)))
-                       (when (and (not (eql s 0))
-                                  (not (eq s sym))
-                                  (not (member
-                                        (find-symbol (symbol-name sym) package)
-                                        shadowing-symbols)))
-                         (name-conflict package 'use-package pkg sym s))))))
-                (t
-                 (do-external-symbols (sym pkg)
-                   (multiple-value-bind (s w)
-                       (find-symbol (symbol-name sym) package)
-                     (when (and w
-                                (not (eq s sym))
-                                (not (member s shadowing-symbols)))
-                       (name-conflict package 'use-package pkg sym s)))))))
-
-            (setf (package-tables package)
-                  (let ((tbls (package-tables package)))
-                    (replace (make-array (1+ (length tbls))
-                              :initial-element (package-external-symbols pkg))
-                             tbls)))
-            (setf (package-%used-by pkg) nil)))))) ; recomputed on demand
+      (let ((tbls (package-tables package))
+            (added-tbls (mapcar #'package-external-symbols packages)))
+        (setf (package-tables package)
+              (concatenate 'vector tbls added-tbls)))
+      (dolist (pkg packages)
+        (setf (package-%used-by pkg) nil)))) ; recomputed on demand
   t)
 
 (defun unuse-package (packages-to-unuse &optional (package (sane-package)))

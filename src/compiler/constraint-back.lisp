@@ -129,9 +129,22 @@
                                                                    ,(or (interval-high int) '*))
                                                         'rational))))))
                     (cond ((or y-rationalp x-rationalp)
-                           (let ((interval (type-approximate-interval constraint t)))
-                             (int interval y x)
-                             (int interval x y)))
+                           (let ((interval (type-approximate-interval constraint t))
+                                 (x-zerop (types-equal-or-intersect (lvar-type x) (specifier-type '(eql 0))))
+                                 (y-zerop (types-equal-or-intersect (lvar-type y) (specifier-type '(eql 0)))))
+                             (cond ((not interval))
+                                   ((and (interval-contains-p 0 interval)
+                                         (or x-zerop y-zerop))
+                                    ;; If one is not zero the other must include a zero
+                                    (if x-zerop
+                                        (add y (specifier-type 'rational))
+                                        (int interval y x))
+                                    (if y-zerop
+                                        (add x (specifier-type 'rational))
+                                        (int interval x y)))
+                                   (t
+                                    (int interval y x)
+                                    (int interval x y)))))
                           ((or (csubtypep (lvar-type x) real-type)
                                (csubtypep (lvar-type y) real-type))
                            (add x (specifier-type 'rational))

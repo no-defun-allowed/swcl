@@ -1182,6 +1182,27 @@
                      nil))
              0)))
 
+(with-test (:name :read-sequence-bounds)
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     `(lambda (string stream)
+                        (declare (simple-string string))
+                        (loop for i below (read-sequence string stream)
+                              count (char= (char string i) #\a)))
+                     nil))
+             0))
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     `(lambda (string stream)
+                        (declare (simple-string string))
+                        (loop for p = (read-sequence string stream)
+                              while (plusp p)
+                              sum
+                              (loop for i below p
+                                    count (char= (char string i) #\a))))
+                     nil))
+             0)))
+
 (with-test (:name :map-equality-constraints)
   (checked-compile-and-assert
    ()
@@ -1348,3 +1369,23 @@
      (the (unsigned-byte 8) (* x 1))
      x)
    (unsigned-byte 8)))
+
+(with-test (:name :multiply-by-zero)
+  (assert-type
+   (lambda (b c)
+     (declare ((integer 0 2) b)
+              ((integer 1 10) c))
+     (if (typep (* b c) '(integer * 0))
+         (values b c)
+         (values nil nil)))
+   (values (or null (integer 0 0))
+           (or null (integer 1 10)) &optional))
+  (assert-type
+   (lambda (b c)
+     (declare ((integer 0 2) b)
+              ((integer -10 -2) c))
+     (if (typep (* b c) '(integer 0 1))
+         (values b c)
+         (values nil nil)))
+   (values (or null (integer 0 0))
+           (or null (integer -10 -2)) &optional)))

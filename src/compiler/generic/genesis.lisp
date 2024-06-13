@@ -1675,11 +1675,9 @@ core and return a descriptor to it."
                    (error "host-constant-to-core: can't convert ~S"
                           value))))))))
 
-;; Look up the target's descriptor for #'FUN where FUN is a host symbol.
+;; Look up the target's descriptor for #'FUN where FUN is a host or cold symbol.
 (defun cold-symbol-function (symbol &optional (errorp t))
-  (let* ((symbol (if (symbolp symbol)
-                     symbol
-                     (warm-symbol symbol)))
+  (let* ((symbol (if (symbolp symbol) symbol (warm-symbol symbol)))
          (f (cold-fdefn-fun (ensure-cold-fdefn symbol))))
     (cond ((not (cold-null f)) f)
           (errorp (error "Expected a definition for ~S in cold load" symbol))
@@ -1706,11 +1704,6 @@ core and return a descriptor to it."
          (bug "~S in bad package for target: ~A" symbol package)))
 
   (or (get symbol 'cold-intern-info)
-      ;; KLUDGE: there is no way to automatically know which macros are handled
-      ;; by sb-fasteval as special forms. An extra slot should be created in
-      ;; any symbol naming such a macro, though things still work if the slot
-      ;; doesn't exist, as long as only a deferred interpreter processor is used
-      ;; and not an immediate processor.
       (let* ((pkg-info
               (when core-file-name (cold-find-package-info (sb-xc:package-name package))))
              (handle (allocate-symbol sb-vm:symbol-size
@@ -2052,6 +2045,11 @@ core and return a descriptor to it."
   ;; (IF (BOUNDP '*PACKAGE*)) test which the compiler elides.
   (cold-set '*package* (cdr (cold-find-package-info "COMMON-LISP-USER")))
 
+  (loop with ud-tramp = (lookup-assembler-reference 'sb-vm::undefined-tramp)
+        for fdefn being each hash-value of *cold-fdefn-objects*
+        when (cold-null (cold-fdefn-fun fdefn))
+        do (write-wordindexed/raw fdefn sb-vm:fdefn-raw-addr-slot ud-tramp))
+
   (dump-symbol-infos
    (attach-fdefinitions-to-symbols
     (attach-classoid-cells-to-symbols (make-hash-table :test #'eq))))
@@ -2071,10 +2069,10 @@ core and return a descriptor to it."
 
   #+x86
   (progn
-    (cold-set 'sb-vm::*fp-constant-0d0* (number-to-core $0d0))
-    (cold-set 'sb-vm::*fp-constant-1d0* (number-to-core $1d0))
-    (cold-set 'sb-vm::*fp-constant-0f0* (number-to-core $0f0))
-    (cold-set 'sb-vm::*fp-constant-1f0* (number-to-core $1f0))))
+    (cold-set 'sb-vm::*fp-constant-0d0* (number-to-core 0d0))
+    (cold-set 'sb-vm::*fp-constant-1d0* (number-to-core 1d0))
+    (cold-set 'sb-vm::*fp-constant-0f0* (number-to-core 0f0))
+    (cold-set 'sb-vm::*fp-constant-1f0* (number-to-core 1f0))))
 
 ;;;; functions and fdefinition objects
 
@@ -2129,15 +2127,7 @@ core and return a descriptor to it."
     (legal-fun-name-or-type-error result)
     result))
 
-(defvar *cold-assembler-obj*) ; a single code component
-;;; Writing the address of the undefined trampoline into static fdefns
-;;; has to occur after the asm routines are loaded, which occurs after
-;;; the static fdefns are initialized.
-(defvar *deferred-undefined-tramp-refs*)
-(defun fdefn-makunbound (fdefn)
-  (write-wordindexed fdefn sb-vm:fdefn-fun-slot *nil-descriptor*)
-  (write-wordindexed/raw fdefn sb-vm:fdefn-raw-addr-slot
-                         (lookup-assembler-reference 'sb-vm::undefined-tramp :direct)))
+(defvar *assembler-routines*) ; descriptor
 (defun ensure-cold-fdefn (cold-name &optional
                                           (gspace #+immobile-space *immobile-fixedobj*
                                                   #-immobile-space *dynamic*))
@@ -2145,24 +2135,16 @@ core and return a descriptor to it."
   (let ((warm-name (warm-fun-name cold-name)))
     (or (gethash warm-name *cold-fdefn-objects*)
         (let ((fdefn (allocate-otherptr gspace sb-vm:fdefn-size sb-vm:fdefn-widetag)))
-          (setf (gethash warm-name *cold-fdefn-objects*) fdefn)
-          #+x86-64
-          (write-wordindexed/raw ; write an INT instruction into the header
-           fdefn 0 (logior (ash sb-vm::undefined-fdefn-header 16)
-                           (read-bits-wordindexed fdefn 0)))
-          (write-wordindexed fdefn sb-vm:fdefn-name-slot cold-name)
           (when core-file-name
+            (write-wordindexed fdefn sb-vm:fdefn-name-slot cold-name)
+            (write-wordindexed fdefn sb-vm:fdefn-fun-slot *nil-descriptor*)
+            #+x86-64
+            (write-wordindexed/raw ; write an INT instruction into the header
+             fdefn 0 (logior (ash sb-vm::undefined-fdefn-header 16)
+                             (read-bits-wordindexed fdefn 0)))
             (when (typep warm-name '(and symbol (not null)))
-              (write-wordindexed (cold-intern warm-name) sb-vm:symbol-fdefn-slot fdefn))
-            (if *cold-assembler-obj*
-                (fdefn-makunbound fdefn)
-                (push (lambda ()
-                        (when (zerop (read-bits-wordindexed fdefn sb-vm:fdefn-fun-slot))
-                          ;; This is probably irrelevant - it only occurs for static fdefns,
-                          ;; but every static fdefn will eventually get a definition.
-                          (fdefn-makunbound fdefn)))
-                      *deferred-undefined-tramp-refs*)))
-          fdefn))))
+              (write-wordindexed (cold-intern warm-name) sb-vm:symbol-fdefn-slot fdefn)))
+          (setf (gethash warm-name *cold-fdefn-objects*) fdefn)))))
 
 (defun cold-fun-entry-addr (fun)
   (aver (= (descriptor-lowtag fun) sb-vm:fun-pointer-lowtag))
@@ -2174,9 +2156,7 @@ core and return a descriptor to it."
   (aver (= (descriptor-widetag function) sb-vm:simple-fun-widetag))
   (let ((fdefn (ensure-cold-fdefn
                 ;; (SETF f) was descriptorized when dumped, symbols were not.
-                (if (symbolp name)
-                    (cold-intern name)
-                    name))))
+                (if (symbolp name) (cold-intern name) name))))
     (let ((existing (read-wordindexed fdefn sb-vm:fdefn-fun-slot)))
       (unless (or (cold-null existing) (descriptor= existing function))
         (error "Function multiply defined: ~S. Was ~x is ~x" name
@@ -2276,7 +2256,7 @@ core and return a descriptor to it."
 (defvar *cold-foreign-symbol-table*)
 (declaim (type hash-table *cold-foreign-symbol-table*))
 
-(defvar *cold-assembler-routines*)
+(defvar *asm-routine-alist*)
 (defvar *cold-static-call-fixups*)
 
 ;;: See picture in 'objdef'
@@ -2323,25 +2303,19 @@ Legal values for OFFSET are -4, -8, -12, ..."
   ;; the offset to the 0th simple-fun, -12 is the next, etc...
   (code-trailer-ref code (* -4 (+ fun-index 2))))
 
-(defun lookup-assembler-reference (symbol &optional (mode :direct))
-  (let* ((code-component *cold-assembler-obj*)
-         (list *cold-assembler-routines*)
-         (insts (+ (logandc2 (descriptor-bits code-component) sb-vm:lowtag-mask)
-                   (code-header-bytes code-component)))
-         (offset (or (cdr (assq symbol list))
-                     (error "Assembler routine ~S not defined." symbol)))
-         (addr (+ insts offset)))
-    (ecase mode
-      (:direct addr)
-      #+(or ppc ppc64) (:indirect (- addr sb-vm:nil-value))
-      #+(or x86 x86-64)
-      (:indirect
-       (let ((index (count-if (lambda (x) (< (cdr x) offset)) list)))
-         #-immobile-space
-         (+ insts (ash (1+ index) sb-vm:word-shift)) ; add 1 for the jump table count
-         #+immobile-space
-         (+ (logandc2 (descriptor-bits *asm-routine-vector*) sb-vm:lowtag-mask)
-            (ash (+ sb-vm:vector-data-offset index) sb-vm:word-shift)))))))
+(defun assembler-code-insts-start ()
+  (let ((code-component *assembler-routines*))
+    (+ (logandc2 (descriptor-bits code-component) sb-vm:lowtag-mask)
+       (code-header-bytes code-component))))
+
+(defun lookup-assembler-reference (symbol)
+  (let ((cell (or (assq symbol *asm-routine-alist*)
+                  (error "Unknown asm routine ~S" symbol))))
+    (+ (assembler-code-insts-start) (cdr cell)))) ; compute the starting address
+
+(defun asm-routine-index-from-addr (address)
+  (let ((relative-start (- address (assembler-code-insts-start))))
+    (1+ (position relative-start *asm-routine-alist* :key #'cdr))))
 
 ;;; Unlike in the target, FOP-KNOWN-FUN sometimes has to backpatch.
 (defvar *deferred-known-fun-refs*)
@@ -2382,8 +2356,8 @@ Legal values for OFFSET are -4, -8, -12, ..."
                                       (if (listp key) (car key) key))))
                (if (listp key) (cold-list sym) sym))
              'sb-vm::+required-foreign-symbols+)
-    (cold-set (cold-intern '*assembler-routines*) *cold-assembler-obj*)
-    (to-core *cold-assembler-routines*
+    (cold-set (cold-intern '*assembler-routines*) *assembler-routines*)
+    (to-core *asm-routine-alist*
              (lambda (rtn)
                (cold-cons (cold-intern (first rtn)) (make-fixnum-descriptor (cdr rtn))))
              '*!initial-assembler-routines*)))
@@ -2851,7 +2825,7 @@ Legal values for OFFSET are -4, -8, -12, ..."
     (make-descriptor (logior fun sb-vm:fun-pointer-lowtag))))
 
 (define-cold-fop (fop-assembler-code)
-  (aver (not *cold-assembler-obj*))
+  (aver (not *assembler-routines*))
   (let* ((n-routines (read-word-arg (fasl-input-stream)))
          (length (read-word-arg (fasl-input-stream)))
          (n-fixup-elts (read-word-arg (fasl-input-stream)))
@@ -2870,7 +2844,7 @@ Legal values for OFFSET are -4, -8, -12, ..."
                   space
                   (+ (ash header-n-words sb-vm:word-shift) rounded-length)
                   sb-vm:other-pointer-lowtag)))
-    (setf *cold-assembler-obj* asm-code)
+    (setf *assembler-routines* asm-code)
     (write-code-header-words asm-code header-n-words rounded-length 0)
     (let ((start (+ (descriptor-byte-offset asm-code)
                     (ash header-n-words sb-vm:word-shift))))
@@ -2890,13 +2864,13 @@ Legal values for OFFSET are -4, -8, -12, ..."
       ;; Now that we combine all assembler routines into a single code object
       ;; at assembly time, they can all be sorted at this point.
       ;; We used to combine them with some magic in genesis.
-      (setq *cold-assembler-routines* (sort table #'< :key #'cdr)))
+      (setq *asm-routine-alist* (sort table #'< :key #'cdr)))
     (let ((stack (%fasl-input-stack (fasl-input))))
       (apply-fixups asm-code stack (fop-stack-pop-n stack n-fixup-elts) n-fixup-elts))
     #+(or x86 x86-64) ; fill in the indirect call table
     (let ((base (code-header-words asm-code))
           (index 0))
-      (dolist (item *cold-assembler-routines*)
+      (dolist (item *asm-routine-alist*)
         ;; Word 0 of code-instructions is the jump table count (the asm routine entrypoints
         ;; look to GC exactly like a jump table in any other codeblob)
         (let ((entrypoint (lookup-assembler-reference (car item))))
@@ -2933,7 +2907,7 @@ Legal values for OFFSET are -4, -8, -12, ..."
     (when (>= index end) (return))
     (binding* (((offset kind flavor-id)
                 (!unpack-fixup-info (descriptor-integer (svref fixups (incf index)))))
-               (flavor (aref +fixup-flavors+ flavor-id))
+               (flavor (aref sb-c::+fixup-flavors+ flavor-id))
                (name (cond ((member flavor '(:code-object :card-table-index-mask)) nil)
                            (t (svref fixups (incf index)))))
                (string
@@ -2946,7 +2920,6 @@ Legal values for OFFSET are -4, -8, -12, ..."
            code-obj offset
            (ecase flavor
              (:assembly-routine (lookup-assembler-reference name))
-             (:assembly-routine* (lookup-assembler-reference name :indirect))
              (:foreign (alien-linkage-table-note-symbol string nil))
              (:foreign-dataref (alien-linkage-table-note-symbol string t))
              (:code-object (descriptor-bits code-obj))
@@ -3001,8 +2974,8 @@ Legal values for OFFSET are -4, -8, -12, ..."
       #+cheneygc
       (check sb-vm:dynamic-0-space-start sb-vm:dynamic-0-space-end :dynamic-0)
       #-immobile-space
-      (let ((end (+ sb-vm:alien-linkage-table-space-start sb-vm:alien-linkage-table-space-size)))
-        (check sb-vm:alien-linkage-table-space-start end :linkage-table)))))
+      (let ((end (+ sb-vm:alien-linkage-space-start sb-vm:alien-linkage-space-size)))
+        (check sb-vm:alien-linkage-space-start end :linkage-table)))))
 
 ;;;; emitting C header file
 
@@ -3131,7 +3104,7 @@ Legal values for OFFSET are -4, -8, -12, ..."
                    sb-impl::symbol-name-bits))
         (record (c-symbol-name c) 3/2 #| arb |# c ""))
       ;; Other constants that aren't necessarily grouped into families.
-      (dolist (c '(sb-kernel:maximum-bignum-length
+      (dolist (c '(sb-bignum:maximum-bignum-length
                    sb-vm:n-word-bits sb-vm:n-word-bytes
                    sb-vm:n-lowtag-bits sb-vm:lowtag-mask
                    sb-vm:n-widetag-bits sb-vm:widetag-mask
@@ -3222,7 +3195,7 @@ Legal values for OFFSET are -4, -8, -12, ..."
   #+(and sb-safepoint (not x86-64))
   (progn
   (format t "#define GC_SAFEPOINT_PAGE_ADDR (void*)((char*)STATIC_SPACE_START - ~d)~%"
-          +backend-page-bytes+)
+          sb-c:+backend-page-bytes+)
   (format t "#define GC_SAFEPOINT_TRAP_ADDR (void*)((char*)STATIC_SPACE_START - ~d)~%"
           sb-vm:gc-safepoint-trap-offset))
 
@@ -3754,8 +3727,8 @@ as is fairly common for structure accessors.)")
   (format t "=================~2%")
 
   (format t "I. assembler routines defined in core image: (base=~x)~2%"
-          (descriptor-bits *cold-assembler-obj*))
-  (dolist (routine *cold-assembler-routines*)
+          (descriptor-bits *assembler-routines*))
+  (dolist (routine *asm-routine-alist*)
     (let ((name (car routine)))
       (format t "~8,'0X: ~S~%" (lookup-assembler-reference name) name)))
 
@@ -4130,9 +4103,8 @@ III. initially undefined function references (alphabetically):
            (*cold-methods* nil)
            (*!cold-toplevels* nil)
            *cold-static-call-fixups*
-           *cold-assembler-routines*
-           *cold-assembler-obj*
-           *deferred-undefined-tramp-refs*
+           *asm-routine-alist*
+           *assembler-routines*
            (*deferred-known-fun-refs* nil))
 
       (make-nil-descriptor)
@@ -4157,15 +4129,13 @@ III. initially undefined function references (alphabetically):
             (aver (singleton-p files))
             (cold-load (car files) verbose nil)))
         (setf object-file-names (remove-if #'assembler-file-p object-file-names)))
-      (mapc 'funcall *deferred-undefined-tramp-refs*)
-      (makunbound '*deferred-undefined-tramp-refs*)
 
-      (when *cold-assembler-obj*
+      (when *assembler-routines*
         ;; code-debug-info stores the name->addr hashtable.
         ;; It's wrapped in a cons so that read-only space points to static-space
         ;; and not to dynamic space. #-darwin-jit doesn't need this hack.
         #+darwin-jit
-        (write-wordindexed *cold-assembler-obj* sb-vm:code-debug-info-slot
+        (write-wordindexed *assembler-routines* sb-vm:code-debug-info-slot
                            (let ((z (make-fixnum-descriptor 0)))
                              (cold-cons z z *static*)))
         (init-runtime-routines))
@@ -4201,13 +4171,13 @@ III. initially undefined function references (alphabetically):
       (makunbound '*!cold-toplevels*) ; so no further PUSHes can be done
 
       ;; Tidy up loose ends left by cold loading. ("Postpare from cold load?")
-      (sort-initial-methods)
-      (resolve-deferred-known-funs)
-      (resolve-static-call-fixups)
-      (foreign-symbols-to-core)
       (when core-file-name
-        (finish-symbols))
-      (finalize-load-time-value-noise)
+        (sort-initial-methods)
+        (resolve-deferred-known-funs)
+        (resolve-static-call-fixups)
+        (foreign-symbols-to-core)
+        (finish-symbols)
+        (finalize-load-time-value-noise))
 
       ;; Write results to files.
       (when map-file-name

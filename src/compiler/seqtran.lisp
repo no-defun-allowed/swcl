@@ -467,7 +467,7 @@
       ;; if list is not a proper list." This optimization can't do that.
       ;; TRY-mumble will figure out based on what function it is trying to transform
       ;; whether all keys are acceptable.
-      (when (proper-list-p items)
+      (when (and (slow-findhash-allowed node) (proper-list-p items))
         (let* ((conditional (if-p (node-dest node)))
                (expr (try-perfect-find/position-map
                       name
@@ -542,7 +542,11 @@
                  (abort-ir1-transform "Argument to ~a is not a proper list." name))
                 ((and cp c-list (member name '(assoc rassoc member))
                       (policy node (>= speed space))
-                      (not (nthcdr *list-open-code-limit* c-list)))
+                      (not (nthcdr *list-open-code-limit* c-list))
+                      (not (and (producing-fasl-file)
+                                (handler-case (maybe-emit-make-load-forms c-list)
+                                  ((or compiler-error error) ()
+                                    t)))))
                  `(let ,(mapcar (lambda (fun) `(,(second fun) ,(ensure-fun fun))) funs)
                     ,(open-code c-list)))
                 ((and cp (not c-list))
@@ -2780,7 +2784,7 @@
                (values nil nil))))))
 
 (deftransform %find-position ((item sequence from-end start end key test)
-                              (character string t t t function function)
+                              (t string t t t function function)
                               *
                               :policy (> speed space))
   (if (eq '* (upgraded-element-type-specifier sequence))
@@ -3038,7 +3042,8 @@
              `(deftransform ,fun-name ((item sequence &key
                                              from-end (start 0) end
                                              key test test-not)
-                                       (t (or list vector) &rest t))
+                                       (t (or list vector) &rest t)
+                                       * :node node)
                 (when (and (constant-lvar-p sequence)
                            (or (proper-sequence-p (lvar-value sequence))
                                (give-up-ir1-transform))
@@ -3076,6 +3081,7 @@
                                                    (or-eq-transform-p items))))
                       (awhen (and (memq effective-test '(eql eq))
                                   (not or-eq-transform-p)
+                                  (slow-findhash-allowed node)
                                   (try-perfect-find/position-map
                                    ',fun-name nil (lvar-type item) items reversedp nil))
                         (return-from ,fun-name
@@ -3577,3 +3583,8 @@
 
 (setf (fun-info-constraint-propagate-if (fun-info-or-lose 'cdr))
       #'car-constraint-propagate-if-optimizer)
+
+(defoptimizer (read-sequence derive-type) ((sequence stream &key start end))
+  (multiple-value-bind (min max)
+      (index-into-sequence-derive-type sequence start end)
+    (specifier-type `(integer ,min ,max))))

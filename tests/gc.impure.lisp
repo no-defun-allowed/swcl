@@ -302,7 +302,7 @@
   (assert (not (sb-kernel:immobile-space-addr-p
                 (+ sb-vm:fixedobj-space-start
                    sb-vm:fixedobj-space-size
-                   sb-vm:alien-linkage-table-space-size
+                   sb-vm:alien-linkage-space-size
                    sb-vm:text-space-size)))))
 
 (with-test (:name :unique-code-serialno :skipped-on :interpreter)
@@ -531,3 +531,8 @@
                (sb-sys:memory-fault-error (c)
                  (write-to-string c :escape nil)))))
     (assert (search "modify a read-only object" err))))
+
+(with-test (:name :time-measures
+                  :skipped-on (:not (:and (:or :linux :darwin) :sb-thread)))
+  (assert (plusp (sb-thread::thread-sum-stw-pause sb-thread:*current-thread*)))
+  (assert (plusp (sb-thread::thread-gc-virtual-time sb-thread:*current-thread*))))

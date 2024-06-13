@@ -21,10 +21,10 @@
 ;;; so accounting for the fixnum tag and 1 bit for the sign,
 ;;; this leaves 30 bits. Of course this number is ridiculous
 ;;; as a call with that many args would consume 8 GB of stack,
-;;; but it's surely not as ridiculous as MOST-POSITIVE-FIXNUM.
+;;; but it's surely not as ridiculous as ARRAY-DIMENSION-LIMIT.
 (defconstant call-arguments-limit
   #+x86-64 (ash 1 30)
-  #-x86-64 most-positive-fixnum
+  #-x86-64 array-dimension-limit
   "The exclusive upper bound on the number of arguments which may be passed
   to a function, including &REST args.")
 (defconstant lambda-parameters-limit call-arguments-limit
@@ -71,7 +71,7 @@
   ;; constants. This coalescing is distinct from the coalescing done
   ;; in the dumper, since the effect here is to reduce the number of
   ;; boxed constants appearing in a code component.
-  (similar-constants (sb-fasl::make-similarity-table) :read-only t :type hash-table))
+  (similar-constants (make-similarity-table) :read-only t :type hash-table))
 (declaim (freeze-type ir1-namespace))
 
 (sb-impl::define-thread-local *ir1-namespace*)
@@ -184,27 +184,6 @@
 ;;; The allocation quantum for boxed code header words.
 ;;; 2 implies an even length boxed header; 1 implies no restriction.
 (defconstant code-boxed-words-align (+ 2 #+(or x86 x86-64) -1))
-
-;;; Used as the CDR of the code coverage instrumentation records
-;;; (instead of NIL) to ensure that any well-behaving user code will
-;;; not have constants EQUAL to that record. This avoids problems with
-;;; the records getting coalesced with non-record conses, which then
-;;; get mutated when the instrumentation runs. Note that it's
-;;; important for multiple records for the same location to be
-;;; coalesced. -- JES, 2008-01-02
-(defconstant +code-coverage-unmarked+ '%code-coverage-unmarked%)
-
-;;; Stores the code coverage instrumentation results.
-;;; The CAR is a hashtable. The CDR is a list of weak pointers to code objects
-;;; having coverage marks embedded in the unboxed constants.
-;;; Keys in the hashtable are namestrings, the
-;;; value is a list of (CONS PATH STATE), where STATE is +CODE-COVERAGE-UNMARKED+
-;;; for a path that has not been visited, and T for one that has.
-#-sb-xc-host
-(progn
-  (define-load-time-global *code-coverage-info*
-    (list (make-hash-table :test 'equal :synchronized t)))
-  (declaim (type (cons hash-table) *code-coverage-info*)))
 
 ;;; Unique number assigned into high 4 bytes of 64-bit code size slot
 ;;; so that we can sort the contents of text space in a more-or-less
@@ -322,3 +301,7 @@
                            (logand status #b11))  ; new flag bits
                         (logand existing -4)      ; old count
                         (logand status -4))))))   ; new count
+
+(declaim (type (simple-array (unsigned-byte 16) 1) *asm-routine-offsets*))
+(define-load-time-global *asm-routine-offsets*
+  (make-array 0 :element-type '(unsigned-byte 16)))

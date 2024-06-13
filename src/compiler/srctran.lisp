@@ -603,12 +603,11 @@
     (%make-interval (normalize-bound low)
                     (normalize-bound high))))
 
-;; Some backends have no float traps
+;; Some backends (and the host) have no float traps
 (declaim (inline bad-float-p))
 (defun bad-float-p (value)
   (declare (ignorable value))
-  #+(and (or arm (and arm64 (not darwin)) riscv)
-         (not sb-xc-host))
+  #+(or arm (and arm64 (not darwin)) riscv sb-xc-host)
   (or (and (floatp value)
            (float-infinity-or-nan-p value))
       (and (complex-float-p value)
@@ -621,10 +620,6 @@
 (defun bound-func (f x strict)
   (declare (type function f))
   (when x
-    #+sb-xc-host
-    (when (and (eql f #'log)
-               (zerop x))
-      (return-from bound-func))
     (handler-case
         (let ((bound (funcall f (type-bound-number x))))
           (unless (bad-float-p bound)
@@ -1183,8 +1178,8 @@
                              ;; to watch out for positive or negative infinity.
                              (cond ((floatp (type-bound-number x))
                                     (if y-low-p
-                                        (sb-xc:- (float-sign (type-bound-number x) $0.0))
-                                        (float-sign (type-bound-number x) $0.0)))
+                                        (sb-xc:- (float-sign (type-bound-number x) 0.0))
+                                        (float-sign (type-bound-number x) 0.0)))
                                    ((and integer
                                          (not (interval-contains-p 0 top)))
                                     '(0))
@@ -3726,7 +3721,7 @@
 (deftransform floor ((number divisor) ((real (0) (1)) (integer (0) *)) * :important nil)
   `(values 0 number))
 
-(deftransform truncate ((number divisor) ((and (real (-1) (1)) (not (eql $-0d0)) (not (eql $-0f0)))
+(deftransform truncate ((number divisor) ((and (real (-1) (1)) (not (eql -0d0)) (not (eql -0f0)))
                                           (and integer (not (eql 0))))
                         * :important nil)
   `(values 0 number))
@@ -4303,7 +4298,7 @@
           ((= val -1/2) '(/ (sqrt x)))
           (t (give-up-ir1-transform)))))
 
-(deftransform expt ((x y) ((constant-arg (member -1 $-1.0 $-1.0d0)) integer) *)
+(deftransform expt ((x y) ((constant-arg (member -1 -1.0 -1.0d0)) integer) *)
   "recode as an ODDP check"
   (let ((val (lvar-value x)))
     (if (eql -1 val)
@@ -6039,6 +6034,15 @@
     `(lambda ,arg-names
        (concatenate 'string ,@arg-names))))
 
+(deftransform sb-format::format-integer ((object base stream) * * :node node)
+  (delay-ir1-transform node :ir1-phases)
+  `(let ((*print-base* base)
+         (*print-radix* nil))
+     (princ object stream)))
+
+(deftransform sb-format::format-integer ((object base stream) (integer t t))
+  `(sb-impl::%output-integer-in-base object base stream))
+
 (deftransform pathname ((pathspec) (pathname) *)
   'pathspec)
 
@@ -6300,6 +6304,22 @@
   `(sb-impl::stable-sort-list list
                               (%coerce-callable-to-fun predicate)
                               (if key (%coerce-callable-to-fun key) #'identity)))
+
+(deftransform sort ((vector predicate &key key)
+                      (vector t &rest t) *
+                      :policy (= space 0))
+  (when (eq (array-type-upgraded-element-type (lvar-type vector)) *wild-type*)
+    (give-up-ir1-transform))
+  `(progn
+     (with-array-data ((vector vector)
+                       (start)
+                       (end)
+                       :check-fill-pointer t)
+       (sb-impl::sort-vector vector
+                             start end
+                             (%coerce-callable-to-fun predicate)
+                             (if key (%coerce-callable-to-fun key) #'identity)))
+     vector))
 
 (deftransform stable-sort ((sequence predicate &key key)
                            ((or vector list) t))
@@ -7189,6 +7209,11 @@
                                                                   ,(lognot (- max min)))))))
                                         'or-eq-transform)))))))))))
 
+;;; Prevent slow perfect hash finder from hogging time if time spent compiling
+;;; is strictly more important than execution speed
+(defun slow-findhash-allowed (node)
+  (policy node (>= speed compilation-speed)))
+
 (defun or-eq-to-aref (keys key-lists targets last-if chains otherwise)
   (let (constant-targets
         constant-refs
@@ -7218,9 +7243,10 @@
                      (push ref constant-refs))
                    (push (constant-value constant) constant-targets)))))
     (when constant-targets
-      (let ((code (expand-hash-case-for-jump-table keys key-lists nil
+      (let ((code (and (slow-findhash-allowed last-if)
+                       (expand-hash-case-for-jump-table keys key-lists nil
                                                    (coerce (nreverse constant-targets) 'vector)
-                                                   otherwise)))
+                                                   otherwise))))
         (when code
           (replace-chain (reduce #'append chains)
                          `(lambda (key b)
@@ -7301,11 +7327,12 @@
           ((or-eq-to-aref keys key-lists targets last-if chains otherwise))
           (t
            (multiple-value-bind (code new-targets)
-               (expand-hash-case-for-jump-table keys key-lists
+               (and (slow-findhash-allowed node)
+                    (expand-hash-case-for-jump-table keys key-lists
                                                 (append targets
                                                         (and otherwise
                                                              (list (cons 'otherwise
-                                                                         otherwise)))))
+                                                                         otherwise))))))
              (when code
                (replace-chain (reduce #'append chains)
                               `(lambda (key b)
@@ -7455,3 +7482,63 @@
 (defun key-lists-for-or-eq-transform-p (key-lists)
   (and (= (length key-lists) 1)
        (or-eq-transform-p (first key-lists))))
+
+(defun ensure-lvar-fun-form (lvar lvar-name &key (coercer '%coerce-callable-to-fun)
+                                                 give-up)
+  (aver (and lvar-name (symbolp lvar-name)))
+  (if (csubtypep (lvar-type lvar) (specifier-type 'function))
+      lvar-name
+      (let ((cname (lvar-constant-global-fun-name lvar)))
+        (cond (cname
+               (if (lvar-annotations lvar)
+                   `(with-annotations ,(lvar-annotations lvar)
+                      (global-function ,cname))
+                   `(global-function ,cname)))
+              (give-up
+               (give-up-ir1-transform
+                ;; No ~S here because if fallback is shown, it wants no quotes.
+                "~A is not known to be a function"
+                ;; LVAR-NAME is not what to show - if only it were that easy.
+                (source-variable-or-else lvar "callable expression")))
+              (t
+               `(,coercer ,lvar-name))))))
+
+(deftransform %coerce-callable-to-fun ((thing) * * :node node)
+  "optimize away possible call to FDEFINITION at runtime"
+  (ensure-lvar-fun-form thing 'thing :give-up t))
+
+;;; Behaves just like %COERCE-CALLABLE-TO-FUN but has an ir2-convert optimizer.
+(deftransform %coerce-callable-for-call ((thing) * * :node node)
+  "optimize away possible call to FDEFINITION at runtime"
+  (ensure-lvar-fun-form thing 'thing :give-up t :coercer '%coerce-callable-for-call))
+
+(define-source-transform %coerce-callable-to-fun (thing &environment env)
+  (ensure-source-fun-form thing env :give-up t))
+
+;;; Change 'f to #'f
+(defoptimizer (%coerce-callable-for-call optimizer) ((fun) node)
+  (let ((uses (lvar-uses fun)))
+    (when (consp uses)
+      (loop for use in uses
+            when (ref-p use)
+            do (let ((leaf (ref-leaf use)))
+                 (when (and (constant-p leaf)
+                            (or (internal-name-p (constant-value leaf))
+                                (almost-immediately-used-p fun use)))
+                   (change-ref-leaf use (find-global-fun (constant-value leaf) t) :recklessly t))))))
+  nil)
+
+(defoptimizer (open derive-type) ((filename
+                                   &key
+                                   direction
+                                   if-exists
+                                   if-does-not-exist
+                                   &allow-other-keys))
+  (when (and (or (not if-exists)
+                 (not (types-equal-or-intersect (lvar-type if-exists) (specifier-type 'null))))
+             (or (not if-does-not-exist)
+                 (not (types-equal-or-intersect (lvar-type if-does-not-exist) (specifier-type 'null))))
+             (or (not direction)
+                 if-does-not-exist
+                 (not (types-equal-or-intersect (lvar-type direction) (specifier-type '(eql :probe))))))
+    (specifier-type 'stream)))

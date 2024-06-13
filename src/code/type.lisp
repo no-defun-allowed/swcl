@@ -471,6 +471,7 @@
                         (make-fun-type :required (fun-type-required ftype)
                                        :optional (fun-type-optional ftype)
                                        :keyp (fun-type-keyp ftype)
+                                       :rest (fun-type-rest ftype)
                                        :keywords (fun-type-keywords ftype)
                                        :allowp (fun-type-allowp ftype)
                                        :returns rtype
@@ -2026,6 +2027,8 @@ expansion happened."
                   (classoid-inherits-from type1 'function))
              (values t t)
              (values nil t)))
+        ((and (eq type2 *instance-type*) (alien-type-type-p type1))
+         (values t t))
         (t
          ;; FIXME: This seems to rely on there only being 4 or 5
          ;; NAMED-TYPE values, and the exclusion of various
@@ -2068,6 +2071,7 @@ expansion happened."
          (classoid (when (or (classoid-non-instance-p type1)
                              (classoid-is-or-inherits type1 'function))
                      *empty-type*))
+         (alien-type-type type1)
          (t (empty-unless-hairy type1))))
       ((eq type2 *funcallable-instance-type*)
        (typecase type1
@@ -2599,23 +2603,23 @@ expansion happened."
              (rational
               (cond ((and (floatp thing) (float-infinity-p thing))
                      (return-from coerce-numeric-bound nil))
-                    ((or (eql thing $-0d0)
-                         (eql thing $-0f0))
+                    ((or (eql thing -0d0)
+                         (eql thing -0f0))
                      0)
                     (t
                      (rational thing))))
              ((float single-float)
-              (cond ((or (eql thing $-0d0)
-                         (eql thing $-0f0))
-                     $0f0)
+              (cond ((or (eql thing -0d0)
+                         (eql thing -0f0))
+                     0f0)
                     ((sb-xc:<= most-negative-single-float thing most-positive-single-float)
                      (coerce thing 'single-float))
                     (t
                      (return-from coerce-numeric-bound nil))))
              (double-float
-              (cond ((or (eql thing $-0d0)
-                         (eql thing $-0f0))
-                     $0d0)
+              (cond ((or (eql thing -0d0)
+                         (eql thing -0f0))
+                     0d0)
                     ((sb-xc:<= most-negative-double-float thing most-positive-double-float)
                      (coerce thing 'double-float))
                     (t
@@ -2714,10 +2718,10 @@ expansion happened."
       (setf class 'integer))
     (flet ((normalize-zero (x)
              (cond
-               ((eql x $-0d0) $0d0)
-               ((eql x $-0f0) $0f0)
-               ((equal x '($-0d0)) '($0d0))
-               ((equal x '($-0f0)) '($0f0))
+               ((eql x -0d0) 0d0)
+               ((eql x -0f0) 0f0)
+               ((equal x '(-0d0)) '(0d0))
+               ((equal x '(-0f0)) '(0f0))
                (t x))))
       (declare (inline normalize-zero))
      (new-ctype numeric-type 0 (get-numtype-aspects complexp class format)
@@ -4473,6 +4477,23 @@ used for a COMPLEX component.~:@>"
                    (mapcar #'ctype-of (member-type-members type)))))))
       (determine type))
     types))
+
+(defun ctype-array-any-specialization-p (type)
+  (labels ((process-compound-type (types)
+             (loop for type in types
+                   unless (or (hairy-type-p type)
+                              (negation-type-p type))
+                   do (determine type)))
+           (determine (type)
+             (typecase type
+               (array-type
+                (unless (eq (array-type-element-type type) *wild-type*)
+                  (return-from ctype-array-any-specialization-p t)))
+               (union-type
+                (process-compound-type (union-type-types type)))
+               (intersection-type
+                (process-compound-type (intersection-type-types type))))))
+    (determine type)))
 
 ;;; Union unparsing involves looking for certain important type atoms in our
 ;;; internal representation - a/k/a "interned types" - those which have a unique

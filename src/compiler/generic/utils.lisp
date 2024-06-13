@@ -47,22 +47,18 @@
            (- list-pointer-lowtag)))
       0))
 
-(symbol-macrolet ((alien-linkage-table-space-end
-                   (+ alien-linkage-table-space-start alien-linkage-table-space-size)))
+(symbol-macrolet ((space-end (+ alien-linkage-space-start alien-linkage-space-size)))
 ;;; the address of the linkage table entry for table index I.
 (defun alien-linkage-table-entry-address (i)
   (ecase alien-linkage-table-growth-direction
-    (:up   (+ (* i alien-linkage-table-entry-size) alien-linkage-table-space-start))
-    (:down (- alien-linkage-table-space-end (* (1+ i) alien-linkage-table-entry-size)))))
+    (:up   (+ (* i alien-linkage-table-entry-size) alien-linkage-space-start))
+    (:down (- space-end (* (1+ i) alien-linkage-table-entry-size)))))
 
 #-sb-xc-host
 (defun alien-linkage-table-index-from-address (addr)
   (ecase alien-linkage-table-growth-direction
-    (:up
-     (floor (- addr alien-linkage-table-space-start) alien-linkage-table-entry-size))
-    (:down
-     (1- (floor (- alien-linkage-table-space-end addr) alien-linkage-table-space-end)))))
-)
+    (:up   (floor (- addr alien-linkage-space-start) alien-linkage-table-entry-size))
+    (:down (1- (floor (- space-end addr) space-end))))))
 
 ;;; Return absolute address of the 'fun' slot in static fdefn NAME.
 (defun static-fdefn-fun-addr (name)
@@ -264,8 +260,8 @@
         (s character-widetag character)
         (s other-pointer-lowtag
            (if permit-nil
-               (specifier-type '(not (or cons . #1=(#+64-bit fixnum single-float function cons instance character))))
-               (specifier-type '(not (or list . #1#)))))
+               (specifier-type '(or null sb-c::other-pointer))
+               (specifier-type 'sb-c::other-pointer)))
         (let ((set-bit (logand lowtag-mask (logandc2 lowtag set)))
               (clear-bit (logandc2 lowtag-mask (logior lowtag clear))))
           (cond ((plusp set-bit)
@@ -441,7 +437,7 @@
 
 ;;; Convert # of "big digits" (= words, sometimes called "limbs") to a header value.
 (defmacro bignum-header-for-length (n)
-  (logior (ash n n-widetag-bits) bignum-widetag))
+  `(logior (ash ,n n-widetag-bits) bignum-widetag))
 
 (defmacro id-bits-offset ()
   (let ((slot (get-dsd-index layout sb-kernel::id-word0)))

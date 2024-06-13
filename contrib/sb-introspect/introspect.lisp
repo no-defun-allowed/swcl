@@ -181,8 +181,10 @@ constant pool."
                               vop
                               (gethash (sb-c::vop-info-name vop)
                                        sb-c::*backend-parsed-vops*))
-          for name = (sb-c::vop-parse-name vop-parse)
-          for loc = (sb-c::vop-parse-source-location vop-parse)
+          for name = (and vop-parse
+                          (sb-c::vop-parse-name vop-parse))
+          for loc = (and vop-parse
+                         (sb-c::vop-parse-source-location vop-parse))
           when loc
           collect (let ((source (translate-source-location loc)))
                     (setf (definition-source-description source)
@@ -455,8 +457,8 @@ If an unsupported TYPE is requested, the function will return NIL.
                (sb-di::compiled-debug-fun-compiler-debug-fun debug-fun))))
     (make-definition-source
      :pathname
-     (when (stringp (debug-source-namestring debug-source))
-       (parse-namestring (debug-source-namestring debug-source)))
+     (when (stringp (sb-c::debug-source-namestring debug-source))
+       (parse-namestring (sb-c::debug-source-namestring debug-source)))
      :character-offset
      (if tlf
          (elt (sb-c::debug-source-start-positions debug-source) tlf))
@@ -467,7 +469,7 @@ If an unsupported TYPE is requested, the function will return NIL.
                       (declare (ignore cond))
                       (sb-c::compiled-debug-fun-blocks
                        (sb-di::compiled-debug-fun-compiler-debug-fun debug-fun))))
-     :file-write-date (debug-source-created debug-source)
+     :file-write-date (sb-c::debug-source-created debug-source)
      :plist (sb-c::debug-source-plist debug-source))))
 
 (defun translate-source-location (location)
@@ -608,37 +610,81 @@ or a method combination name."
 ;;; XREF facility
 
 #-(and system-tlabs (not mark-region-gc))
-(defun collect-xref (wanted-kind wanted-name)
-  (let ((result '()))
-    (sb-c:map-simple-funs
-     (lambda (name fun)
-       (binding* ((xrefs (%simple-fun-xrefs fun) :exit-if-null))
-         (sb-c:map-packed-xref-data
-          (lambda (xref-kind xref-name xref-form-number)
-            (when (and (eq xref-kind wanted-kind)
-                       (equal xref-name wanted-name))
-              (let ((source-location (find-function-definition-source fun)))
-                ;; Use the more accurate source path from the xref
-                ;; entry.
-                (setf (definition-source-form-number source-location)
-                      xref-form-number)
-                (let ((name (cond ((sb-c::transform-p name)
-                                   (let ((fun-name (%fun-name fun)))
-                                     (append (if (consp fun-name)
-                                                 fun-name
-                                                 (list fun-name))
-                                             (let* ((type (sb-c::transform-type name))
-                                                    (type-spec (type-specifier type)))
-                                               (and (sb-kernel:fun-type-p type)
-                                                    (list (second type-spec)))))))
-                                  ((sb-c::vop-info-p name)
-                                   (list 'sb-c:define-vop
-                                         (sb-c::vop-info-name name)))
-                                  (t
-                                   name))))
-                  (push (cons name source-location) result)))))
-          xrefs))))
-    result))
+(progn
+  (labels ((functoid-simple-fun (functoid)
+             ;; looks like this is supposed to ignore INTERPRETED-FUNCTION ?
+             (typecase functoid
+               (simple-fun functoid)
+               (closure
+                (let ((fun (%closure-fun functoid)))
+                  (if (and (eq (%fun-name fun) 'sb-impl::encapsulation))
+                      (functoid-simple-fun
+                       (sb-impl::encapsulation-info-definition
+                        (sb-impl::encapsulation-info functoid)))
+                      fun))))))
+    (defun map-simple-funs (function)
+      (let ((function (%coerce-callable-to-fun function)))
+        (labels ((process (name value)
+                   (awhen (functoid-simple-fun value)
+                     (funcall function name it))))
+          (call-with-each-globaldb-name
+           (lambda (name)
+             ;; Methods are processed with their generic function
+             (unless (typep name '(cons (member sb-pcl::slow-method sb-pcl::fast-method)))
+               (let ((f (or (and (symbolp name) (macro-function name))
+                            (and (legal-fun-name-p name) (fboundp name)))))
+                 (typecase f
+                   (generic-function
+                    (loop for method in (sb-mop:generic-function-methods f)
+                          for fun = (sb-pcl::safe-method-fast-function method)
+                          when fun do (process (sb-kernel:%fun-name fun) fun)))
+                   (function
+                    (process name f)))))
+             #+sb-xref-for-internals
+             (let ((info (info :function :info name)))
+               (when info
+                 (loop for transform in (sb-c::fun-info-transforms info)
+                       for fun = (sb-c::transform-function transform)
+                       ;; Defined using :defun-only and a later %deftransform.
+                       unless (symbolp fun)
+                       do (process transform fun))))))
+          #+sb-xref-for-internals
+          (sb-int:dohash ((name vop) sb-c::*backend-template-names*)
+            (declare (ignore name))
+            (let ((fun (sb-c::vop-info-generator-function vop)))
+              (when fun
+                (process vop fun))))))))
+  (defun collect-xref (wanted-kind wanted-name)
+    (let ((result '()))
+      (map-simple-funs
+       (lambda (name fun)
+         (binding* ((xrefs (%simple-fun-xrefs fun) :exit-if-null))
+           (sb-c:map-packed-xref-data
+            (lambda (xref-kind xref-name xref-form-number)
+              (when (and (eq xref-kind wanted-kind)
+                         (equal xref-name wanted-name))
+                (let ((source-location (find-function-definition-source fun)))
+                  ;; Use the more accurate source path from the xref
+                  ;; entry.
+                  (setf (definition-source-form-number source-location)
+                        xref-form-number)
+                  (let ((name (cond ((sb-c::transform-p name)
+                                     (let ((fun-name (%fun-name fun)))
+                                       (append (if (consp fun-name)
+                                                   fun-name
+                                                   (list fun-name))
+                                               (let* ((type (sb-c::transform-type name))
+                                                      (type-spec (type-specifier type)))
+                                                 (and (sb-kernel:fun-type-p type)
+                                                      (list (second type-spec)))))))
+                                    ((sb-c::vop-info-p name)
+                                     (list 'sb-c:define-vop
+                                           (sb-c::vop-info-name name)))
+                                    (t
+                                     name))))
+                    (push (cons name source-location) result)))))
+            xrefs))))
+      result)))
 
 #+(and system-tlabs (not mark-region-gc))
 (progn

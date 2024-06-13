@@ -133,7 +133,7 @@
          (lambda-var-p (ref-leaf ref))
          (ref-leaf ref))))
 
-;;; Look through casts and variables
+;;; Look through casts and variables, m-v-bind+values
 (defun map-all-uses (function lvar)
   (declare (dynamic-extent function))
   (labels ((recurse-lvar (lvar)
@@ -142,9 +142,31 @@
            (recurse (use)
              (cond ((ref-p use)
                     (let ((lvar (lambda-var-ref-lvar use)))
-                      (if lvar
-                          (recurse-lvar lvar)
-                          (funcall function use))))
+                      (cond (lvar
+                             (recurse-lvar lvar))
+                            ((let ((var (ref-leaf use)))
+                               (when (and (lambda-var-p var)
+                                          (not (lambda-var-sets var)))
+                                 (let ((fun (lambda-var-home var)))
+                                   (when (functional-kind-eq fun mv-let)
+                                     (let* ((fun (lambda-var-home var))
+                                            (n-value (position-or-lose var (lambda-vars fun)))
+                                            (args (basic-combination-args (let-combination fun))))
+                                       (when (singleton-p args)
+                                         (let ((all-processed t))
+                                           (do-uses (use (car args))
+                                             (unless (when (and (combination-p use)
+                                                                (eq (lvar-fun-name (combination-fun use))
+                                                                    'values))
+                                                       (let ((lvar (nth n-value (combination-args use))))
+                                                         (when lvar
+                                                           (recurse-lvar lvar)
+                                                           t)))
+                                               (setf all-processed nil)))
+                                           all-processed))))))))
+                            (t
+                             (funcall function use)))))
+
                    ((cast-p use)
                     (recurse-lvar (cast-value use)))
                    (t
@@ -3055,6 +3077,41 @@ is :ANY, the function name is not checked."
                   when (eq v lambda-var)
                   do (funcall function combination arg))))))))
 
+(defun map-leaf-refs (function leaf)
+  (let ((seen-calls))
+    (labels ((recur (leaf)
+               (dolist (ref (leaf-refs leaf))
+                 (let* ((lvar (node-lvar ref))
+                        (dest (and lvar
+                                   (lvar-dest lvar))))
+                   (cond ((and (combination-p dest)
+                               (eq (combination-kind dest) :local))
+                          (let ((lambda (combination-lambda dest)))
+                            (when (cond ((functional-kind-eq lambda let))
+                                        ((memq dest seen-calls)
+                                         nil)
+                                        (t
+                                         (push dest seen-calls)))
+                              (loop for v in (lambda-vars lambda)
+                                    for arg in (combination-args dest)
+                                    when (eq arg lvar)
+                                    do (recur v)))))
+                         ((and (combination-p dest)
+                               (lvar-fun-is (combination-fun dest) '(values))
+                               (let ((mv (node-dest dest)))
+                                 (when (and (mv-combination-p mv)
+                                            (eq (basic-combination-kind mv) :local))
+                                   (let ((fun (combination-lambda mv)))
+                                     (when (and (functional-p fun)
+                                                (functional-kind-eq fun mv-let))
+                                       (let* ((arg (position lvar (combination-args dest)))
+                                              (var (and arg (nth arg (lambda-vars fun)))))
+                                         (recur var)
+                                         t)))))))
+                         (t
+                          (funcall function dest)))))))
+      (recur leaf))))
+
 (defun propagate-lvar-annotations-to-refs (lvar var)
   (when (lvar-annotations lvar)
     (dolist (ref (leaf-refs var))
@@ -3231,42 +3288,60 @@ is :ANY, the function name is not checked."
 
 (defun process-lvar-type-annotation (lvar annotation)
   (let* ((uses (lvar-uses lvar))
-         (condition (case (lvar-type-annotation-context annotation)
-                      (:initform
+         (context (lvar-type-annotation-context annotation))
+         (condition (typecase context
+                      (defstruct-slot-description
                        (if (policy (if (consp uses)
                                        (car uses)
                                        uses)
                                (zerop type-check))
                            'slot-initform-type-style-warning
-                           (return-from process-lvar-type-annotation)))
+                           context))
                       (t
                        'type-warning)))
-         (type (lvar-type-annotation-type annotation))
-         (dest (lvar-dest lvar)))
+         (type (lvar-type-annotation-type annotation)))
     (cond ((not (types-equal-or-intersect (lvar-type lvar) type))
-           (%compile-time-type-error-warn annotation (type-specifier type)
-                                          (type-specifier (lvar-type lvar))
-                                          (let ((path (lvar-annotation-source-path annotation)))
-                                            (if (eq (car path) 'detail)
-                                                (second path)
-                                                (list
-                                                 (if (eq (car path) 'original-source-start)
-                                                     (find-original-source path)
-                                                     (car path)))))
-                                          :condition condition))
+           (if (symbolp condition)
+               (%compile-time-type-error-warn annotation (type-specifier type)
+                                              (type-specifier (lvar-type lvar))
+                                              (let ((path (lvar-annotation-source-path annotation)))
+                                                (if (eq (car path) 'detail)
+                                                    (second path)
+                                                    (list
+                                                     (if (eq (car path) 'original-source-start)
+                                                         (find-original-source path)
+                                                         (car path)))))
+                                              :condition condition)
+               (setf (sb-kernel::dsd-bits condition)
+                     (logior sb-kernel::dsd-default-error
+                             (sb-kernel::dsd-bits condition)))))
           ((consp uses)
            (let ((condition (case condition
                               (type-warning 'type-style-warning)
-                              (t condition))))
+                              (t condition)))
+                 bad)
              (loop for use in uses
                    for dtype = (node-derived-type use)
-                   unless (or (cast-mismatch-from-inlined-p dest use)
-                              (values-types-equal-or-intersect dtype type))
-                   do (%compile-time-type-error-warn use
-                                                     (type-specifier type)
-                                                     (type-specifier dtype)
-                                                     (list (node-source-form use))
-                                                     :condition condition)))))))
+                   unless (values-types-equal-or-intersect dtype type)
+                   do (push use bad))
+             (when bad
+               (loop for bad-use in bad
+                     for path = (source-path-before-transforms bad-use)
+                     ;; Are all uses from the same transform bad?
+                     when (or (not path)
+                              (loop for use in uses
+                                    always (or (memq use bad)
+                                               (neq path (source-path-before-transforms use)))))
+                     do
+                     (if (symbolp condition)
+                         (%compile-time-type-error-warn bad-use
+                                                        (type-specifier type)
+                                                        (type-specifier (node-derived-type bad-use))
+                                                        (list (node-source-form bad-use))
+                                                        :condition condition)
+                         (setf (sb-kernel::dsd-bits condition)
+                               (logior sb-kernel::dsd-default-error
+                                       (sb-kernel::dsd-bits condition)))))))))))
 
 (defun process-lvar-sequence-bounds-annotation (lvar annotation)
   (destructuring-bind (start end) (lvar-dependent-annotation-deps annotation)
@@ -3338,14 +3413,54 @@ is :ANY, the function name is not checked."
 ;;;
 ;;; Or if there's a binding around NODE.
 (defun sb-vm::symbol-always-has-tls-value-p (symbol node)
-  (or (typep (info :variable :wired-tls symbol)
-             '(or (eql :always-thread-local) fixnum))
-      (when node
-        (do-nested-cleanups (cleanup node)
-          (when (eq (cleanup-kind cleanup) :special-bind)
-            (let* ((node (cleanup-mess-up cleanup))
-                   (args (when (basic-combination-p node)
-                           (basic-combination-args node))))
-              (when (and args
-                         (eq (leaf-source-name (lvar-value (car args))) symbol))
-                (return t))))))))
+  (let ((symbol (if (symbolp symbol)
+                    symbol
+                    (let ((tn (if (tn-p symbol)
+                                  symbol
+                                  (tn-ref-tn symbol))))
+                      (sc-case tn
+                        ((constant sb-vm::immediate)
+                         (tn-value tn))
+                        (t
+                         (return-from sb-vm::symbol-always-has-tls-value-p)))))))
+    (or (typep (info :variable :wired-tls symbol)
+               '(or (eql :always-thread-local) fixnum))
+        (when node
+          (do-nested-cleanups (cleanup node)
+            (when (eq (cleanup-kind cleanup) :special-bind)
+              (let* ((node (cleanup-mess-up cleanup))
+                     (args (when (basic-combination-p node)
+                             (basic-combination-args node))))
+                (when (and args
+                           (eq (leaf-source-name (lvar-value (car args))) symbol))
+                  (return t)))))))))
+
+(defun internal-name-p (name)
+  (and #-sb-xc-host (fboundp name)
+       (named-let internal-p ((what name))
+         (typecase what
+           (list (every #'internal-p what))
+           (symbol
+            (let ((pkg (sb-xc:symbol-package what)))
+              (or (and pkg (system-package-p pkg))
+                  (eq pkg *cl-package*))))
+           (t t)))))
+
+(defun cast-mismatch-from-inlined-p (cast node)
+  (let* ((path (node-source-path node))
+         (transformed (memq 'transformed path))
+         (inlined))
+    (cond ((and transformed
+                (not (eq (memq 'transformed (node-source-path cast))
+                         transformed))))
+          ((setf inlined
+                 (memq 'inlined path))
+           (not (eq (memq 'inlined (node-source-path cast))
+                    inlined))))))
+
+(defun source-path-before-transforms (node)
+  (let* ((path (node-source-path node))
+         (first (position-if (lambda (x) (memq x '(transformed inlined)))
+                             path :from-end t)))
+    (if first
+        (nthcdr (+ first 2) path))))

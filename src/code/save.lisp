@@ -338,8 +338,8 @@ sufficiently motivated to do lengthy fixes."
     ;; recreate it so that we don't preserve an empty vector taking up 16KB
     (setq sb-kernel::*forward-referenced-layouts* (make-hash-table :test 'equal)))
   ;; Clean up the simulated weak list of covered code components.
-  (rplacd sb-c:*code-coverage-info*
-          (delete-if-not #'weak-pointer-value (cdr sb-c:*code-coverage-info*)))
+  (rplacd *code-coverage-info*
+          (delete-if-not #'weak-pointer-value (cdr *code-coverage-info*)))
   (sb-kernel::rebuild-ctype-hashsets)
   (drop-all-hash-caches)
   (os-deinit)
@@ -363,9 +363,9 @@ sufficiently motivated to do lengthy fixes."
 
 (defun coalesce-debug-info ()
   ;; Discard the uncompacted fun map cache.
-  (clrhash sb-di::*uncompacted-fun-maps*)
+  (setq sb-di::*uncompacted-fun-maps* nil)
   ;; Discard the debugger's cached mapping of debug functions.
-  (clrhash sb-di::*compiled-debug-funs*)
+  (setq sb-di::*compiled-debug-funs* nil)
   (flet ((debug-source= (a b)
            (and (equalp a b)
                 ;; Case sensitive
@@ -520,7 +520,7 @@ sufficiently motivated to do lengthy fixes."
                           (and (typep di 'sb-c::compiled-debug-info)
                                (let ((src (sb-c::compiled-debug-info-source di)))
                                  (and (typep src 'sb-c::debug-source)
-                                      (let ((str (debug-source-namestring src)))
+                                      (let ((str (sb-c::debug-source-namestring src)))
                                         (if (= (mismatch str "SYS:") 4) 1))))))
                         0))
                    ;; cap the popularity index to 255 and negate so that higher

@@ -202,10 +202,10 @@
            (let ((res (sb-bignum:%allocate-bignum 2)))
              (setf (sb-bignum:%bignum-ref res 1) 529
                    (sb-bignum:%bignum-ref res 0) 9223372036854775807)
-             (sb-bignum:%bignum-set-length res 1)
+             (sb-kernel:set-header-data res 1)
              (unwind-protect
                   (< res d)
-               (sb-bignum:%bignum-set-length res 2)))))
+               (sb-kernel:set-header-data res 2)))))
     ((-9.223372036854776d18) nil)
     ((9.223372036854776d18) t)))
 
@@ -533,7 +533,14 @@
       (declare ((unsigned-byte 8) a))
       (dpb a (byte 63 8)
            81))
-   ((90) 23121)))
+   ((90) 23121))
+  (checked-compile-and-assert
+   ()
+   `(lambda (a)
+      (declare ((unsigned-byte 8) a))
+      (dpb a (byte 32 32)
+           1))
+   ((1) 4294967297)))
 
 (with-test (:name :mask-field-size-overflow)
   (checked-compile-and-assert

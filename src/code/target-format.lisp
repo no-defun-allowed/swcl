@@ -344,6 +344,12 @@
           (format-write-field stream signed mincol 1 0 padchar t))
         (princ number stream))))
 
+;;; Interpreter stub
+(defun format-integer (object base stream)
+  (let ((*print-base* base)
+        (*print-radix* nil))
+    (princ object stream)))
+
 (defun format-add-commas (string commachar commainterval)
   (let ((length (length string)))
     (multiple-value-bind (commas extra) (truncate (1- length) commainterval)
@@ -681,7 +687,7 @@
           (float-nan-p number))
       (prin1 number stream)
       (multiple-value-bind (num expt) (sb-impl::scale-exponent (abs number))
-        (let* ((k (if (= num $1.0) (1- k) k))
+        (let* ((k (if (= num 1.0) (1- k) k))
                (expt (- expt k))
                (estr (decimal-string (abs expt)))
                (elen (if e (max (length estr) e) (length estr)))

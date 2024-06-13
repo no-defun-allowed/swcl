@@ -132,6 +132,9 @@
                (unless (fgen-system old)
                  (setf (fgen-system old) system)))
               (t
+               (unless (eql (sb-vm:thread-current-arena) 0)
+                 (setq generator-lambda (sb-vm:without-arena (copy-tree generator-lambda))
+                       gensyms (ensure-heap-list gensyms)))
                (setf (gethash test table)
                      (make-fgen gensyms generator generator-lambda system))))))))
 
@@ -148,7 +151,8 @@
 (defun get-new-fun-generator (lambda test code-converter)
   (multiple-value-bind (code gensyms) (compute-code lambda code-converter)
     (let ((generator-lambda `(lambda ,gensyms
-                               (declare (optimize (sb-c:store-source-form 0)))
+                               (declare (optimize (sb-c:store-source-form 0)
+                                                  (sb-c::store-xref-data 0)))
                                (function ,code))))
       (let ((generator (pcl-compile generator-lambda :safe)))
         (ensure-fgen test gensyms generator generator-lambda nil)

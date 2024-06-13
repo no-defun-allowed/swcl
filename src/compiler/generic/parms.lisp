@@ -38,7 +38,7 @@
   #-sb-xc-host (symbol-value 'default-dynamic-space-size))
 
 ;; By happenstance this is the same as small-space-size.
-(defconstant alien-linkage-table-space-size #x100000)
+(defconstant alien-linkage-space-size #x100000)
 
 ;; Define START/END constants for GC spaces.
 ;; Assumptions:
@@ -85,7 +85,7 @@
         ((spaces (append `((read-only ,ro-space-size)
                            #+(and win32 x86-64)
                            (seh-data ,(symbol-value '+backend-page-bytes+) win64-seh-data-addr)
-                           #-immobile-space (alien-linkage-table ,alien-linkage-table-space-size)
+                           #-immobile-space (alien-linkage ,alien-linkage-space-size)
                            ;; safepoint on 64-bit uses a relocatable trap page just below the card mark
                            ;; table, which works nicely assuming a register is wired to the card table
                            #+(and sb-safepoint (not x86-64))
@@ -97,7 +97,7 @@
                            (static-code ,small-space-size))
                          #+immobile-space
                          `((fixedobj ,fixedobj-space-size*)
-                           (alien-linkage-table ,alien-linkage-table-space-size)
+                           (alien-linkage ,alien-linkage-space-size)
                            (text ,text-space-size*))))
          (ptr small-spaces-start)
          (small-space-forms
@@ -107,7 +107,7 @@
                           (member space '(fixedobj text permgen
                                           #+relocatable-static-space safepoint
                                           #+relocatable-static-space static
-                                          #+immobile-space alien-linkage-table
+                                          #+immobile-space alien-linkage
                                           read-only)))
                         (start ptr)
                         (end (+ ptr size)))
@@ -303,7 +303,7 @@
 |#
 
 (defconstant-eqx common-static-fdefns
-    '(;; This the standard set of assembly routines that need to call into lisp.
+    '(;; This is the standard set of assembly routines that need to call into lisp.
       ;; A few backends add TWO-ARG-/= and others to this, in their {arch}/parms
       two-arg-+
       two-arg--
@@ -337,7 +337,7 @@
       vector-hairy-data-vector-set/check-bounds
       vector-hairy-data-vector-ref/check-bounds
       %ldb
-      sb-kernel:vector-unsigned-byte-8-p)
+      vector-unsigned-byte-8-p)
   #'equalp)
 
 ;;; Refer to the lengthy comment in 'src/runtime/interrupt.h' about
@@ -422,6 +422,8 @@
 ;;; Reserve some bits of SYMBOL-HASH slot for future use
 #+64-bit
 (progn (defconstant n-symbol-hash-prng-bits 10) ; how many to randomize
+       ;; If changing this constant, then see the test in pathnames.pure
+       ;; named :PATHNAME-HASH-NOT-RANDOM and adjust it as needed.
        (defconstant n-symbol-hash-discard-bits
          (let ((precision (+ 32 n-symbol-hash-prng-bits))) ; total N bits
            (- 64 precision)))

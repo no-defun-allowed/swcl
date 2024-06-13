@@ -71,7 +71,7 @@
 (defconstant most-positive-word (1- (expt 2 n-word-bits))
   "The most positive integer that is of type SB-EXT:WORD.")
 
-(defconstant maximum-bignum-length
+(defconstant sb-bignum:maximum-bignum-length
   ;; 32-bit: leave one bit for a GC mark bit
   #-64-bit (ldb (byte (- n-word-bits n-widetag-bits 1) 0) -1)
   ;; 64-bit: restrict to a reasonably large theoretical size of 32GiB per bignum.
@@ -148,7 +148,7 @@
     (let ((stop (1- (ash 1 n-word-bits)))
           (start dynamic-space-start))
       (dolist (other-start (list read-only-space-start static-space-start
-                                 alien-linkage-table-space-start))
+                                 alien-linkage-space-start))
         (declare (notinline <)) ; avoid dead code note
         (when (< start other-start)
           (setf stop (min stop other-start))))

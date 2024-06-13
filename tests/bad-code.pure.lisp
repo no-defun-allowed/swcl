@@ -772,3 +772,38 @@
                      (checked-compile
                       `(lambda () (declare (sb-ext:muffle-conditions foo)) nil)
                       :allow-style-warnings t))))
+
+(with-test (:name :format-char)
+  (assert (nth-value 2
+                     (checked-compile
+                      `(lambda ()
+                         (format t "~c" 1))
+                      :allow-warnings t))))
+
+(with-test (:name :format-r)
+  (assert (nth-value 2
+                     (checked-compile
+                      `(lambda ()
+                         (format t "~r" t))
+                      :allow-warnings t))))
+
+(with-test (:name :multiple-uses-funargs)
+  (assert (nth-value 3
+                     (checked-compile
+                      `(lambda (x f)
+                         (sort x
+                               (or f
+                                   (lambda (x)
+                                     (< x 0)))))
+                      :allow-style-warnings t))))
+
+(with-test (:name :see-through-mv-let+values)
+  (assert (nth-value 3
+                     (checked-compile
+                      `(lambda (x f)
+                         (multiple-value-bind (f key)
+                             (if f
+                                 (values f #'car)
+                                 (values #'1+ #'cdr))
+                           (sort x f :key key)))
+                      :allow-style-warnings t))))

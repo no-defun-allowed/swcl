@@ -70,6 +70,8 @@
            function-with-layout-p
            non-null-symbol-p)
     (t) boolean (movable foldable flushable))
+(defknown unsigned-byte-x-p
+    (t (integer 1)) boolean (movable foldable flushable))
 
 (defknown car-eq-if-listp (t t) boolean (movable foldable flushable))
 
@@ -102,8 +104,7 @@
   boolean
   (foldable flushable no-verify-arg-count))
 
-(defknown (sb-impl::instance-sxhash sb-impl::%instance-sxhash)
-    (instance) hash-code (flushable))
+(defknown sb-impl::instance-sxhash (instance) hash-code (flushable))
 ;;; SXHASH values on numbers and strings are predictable, therefore the next batch
 ;;; of functions are flushable. Perhaps not entirely obviously, symbol hashes are
 ;;; predictable because we hash by name.
@@ -680,6 +681,9 @@
 (defknown (setf fdefn-fun) (function fdefn) function ())
 (defknown fdefn-makunbound (fdefn) (values) ())
 ;;; FDEFN -> FUNCTION, trapping if not FBOUNDP
+;;; For the most part this simple-fun is not needed, as ir2 conversion directly selects
+;;; the vop of this name; however, the expansion of handler-bind puts in a call to it
+;;; to trap unbound handlers in safe code, and we want that to work in the interpreter.
 (defknown safe-fdefn-fun (fdefn) function ())
 
 (defknown %simple-fun-type (function) t (flushable))
@@ -758,7 +762,7 @@
   (movable foldable flushable))
 
 (defknown (%sin %cos %tanh %sin-quick %cos-quick)
-  (double-float) (double-float $-1.0d0 $1.0d0)
+  (double-float) (double-float -1.0d0 1.0d0)
   (movable foldable flushable))
 
 (defknown (%asin %atan)
@@ -768,23 +772,23 @@
   (movable foldable flushable))
 
 (defknown (%acos)
-  (double-float) (double-float $0.0d0 #.(coerce pi 'double-float))
+  (double-float) (double-float 0.0d0 #.(coerce pi 'double-float))
   (movable foldable flushable))
 
 (defknown (%cosh)
-  (double-float) (double-float $1.0d0)
+  (double-float) (double-float 1.0d0)
   (movable foldable flushable))
 
 (defknown (%acosh %exp %sqrt)
-  (double-float) (double-float $0.0d0)
+  (double-float) (double-float 0.0d0)
   (movable foldable flushable))
 
 (defknown %expm1
-  (double-float) (double-float $-1d0)
+  (double-float) (double-float -1d0)
   (movable foldable flushable))
 
 (defknown (%hypot)
-  (double-float double-float) (double-float $0d0)
+  (double-float double-float) (double-float 0d0)
   (movable foldable flushable))
 
 (defknown (%pow)

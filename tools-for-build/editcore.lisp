@@ -310,7 +310,7 @@
           (let ((text-space (get-space immobile-text-core-space-id spacemap)))
             (if text-space
                 (let ((text-addr (space-addr text-space)))
-                  (make-bounds (- text-addr alien-linkage-table-space-size) text-addr))
+                  (make-bounds (- text-addr alien-linkage-space-size) text-addr))
                 (make-bounds 0 0))))
          (linkage-entry-size
           (symbol-global-value
@@ -503,26 +503,38 @@
              ((= ,index-var (+ ,start-index (* n-entries words-per-dirent))))
            ,@body)))))
 
+#+win32
+(defun win32-binary-open (pathname)
+  (alien-funcall (extern-alien "_open" (function int c-string int &optional int))
+                 (native-namestring pathname)
+                 #x8000 ; _O_BINARY
+                 0))
+
 (defmacro with-mapped-core ((sap-var start npages stream) &body body)
-  `(let (,sap-var)
-     (unwind-protect
-          (progn
-            (setq ,sap-var
-                  (alien-funcall
-                   (extern-alien "load_core_bytes"
-                                 (function system-area-pointer
-                                           int int unsigned unsigned int))
-                   (sb-sys:fd-stream-fd ,stream)
-                   (+ ,start +backend-page-bytes+) ; Skip the core header
-                   0 ; place it anywhere
-                   (* ,npages +backend-page-bytes+) ; len
-                   0))
-            ,@body)
-       (when ,sap-var
-         (alien-funcall
-          (extern-alien "os_deallocate"
-                        (function void system-area-pointer unsigned))
-          ,sap-var (* ,npages +backend-page-bytes+))))))
+  (let ((fd (gensym "FD")))
+    `(let (,sap-var
+           (,fd #-win32 (sb-sys:fd-stream-fd ,stream)
+                ;; on Windows, FD-STREAM-FD is a HANDLE rather than an FD.
+                #+win32 (win32-binary-open (sb-int:file-name ,stream))))
+       (unwind-protect
+            (progn
+              (setq ,sap-var
+                    (alien-funcall
+                     (extern-alien "load_core_bytes"
+                                   (function system-area-pointer
+                                             int int unsigned unsigned int))
+                     ,fd
+                     (+ ,start +backend-page-bytes+)  ; Skip the core header
+                     0                                ; place it anywhere
+                     (* ,npages +backend-page-bytes+) ; len
+                     0))
+              ,@body)
+         #+win32 (sb-win32::crt-close ,fd)
+         (when ,sap-var
+           (alien-funcall
+            (extern-alien "os_deallocate"
+                          (function void system-area-pointer unsigned))
+            ,sap-var (* ,npages +backend-page-bytes+)))))))
 
 (defun core-header-nwords (core-header &aux (sum 2))
   ;; SUM starts as 2, as the core's magic number occupies 1 word
@@ -565,7 +577,7 @@
 (defun read-page-table (stream n-ptes nbytes data-page &optional (print nil))
   (declare (ignore nbytes))
   (let ((table (make-array n-ptes)))
-    (file-position stream (* (1+ data-page) sb-c:+backend-page-bytes+))
+    (file-position stream (* (1+ data-page) +backend-page-bytes+))
     (dotimes (i n-ptes)
       (let* ((bitmap (make-array *bitmap-bits-per-page* :element-type 'bit))
              (temp (make-array *bitmap-bytes-per-page* :element-type '(unsigned-byte 8))))
@@ -932,7 +944,7 @@
          (setq initfun (%vector-raw-bits core-header ptr)))))
     (values total-npages (reverse space-list) card-mask-nbits core-dir-start initfun)))
 
-(defconstant +lispwords-per-corefile-page+ (/ sb-c:+backend-page-bytes+ n-word-bytes))
+(defconstant +lispwords-per-corefile-page+ (/ +backend-page-bytes+ n-word-bytes))
 
 (defun rewrite-core (directory spacemap card-mask-nbits initfun core-header offset output
                      &aux (dynamic-space (get-space dynamic-core-space-id spacemap)))
@@ -967,13 +979,13 @@
     (dolist (dir-entry directory)
       (destructuring-bind (page id paddr vaddr nwords) dir-entry
         (declare (ignore id vaddr))
-        (aver (= (file-position output) (* sb-c:+backend-page-bytes+ (1+ page))))
+        (aver (= (file-position output) (* +backend-page-bytes+ (1+ page))))
         (let* ((npages (ceiling nwords +lispwords-per-corefile-page+))
-               (nbytes (* npages sb-c:+backend-page-bytes+))
+               (nbytes (* npages +backend-page-bytes+))
                (wrote
                 (sb-unix:unix-write (sb-impl::fd-stream-fd output) paddr 0 nbytes)))
           (aver (= wrote nbytes)))))
-    (aver (= (file-position output) (* sb-c:+backend-page-bytes+ (1+ page-count))))
+    (aver (= (file-position output) (* +backend-page-bytes+ (1+ page-count))))
     #+mark-region-gc ; write the bitmap
     (dovector (pte (space-page-table dynamic-space))
       (let ((bitmap (page-bitmap pte)))
@@ -1104,7 +1116,7 @@
                        fwdmap)
               (incf freeptr reserved-amount)
               (format nil "~&Code: ~D objects, ~D bytes~%" (length codeblobs) freeptr))
-            (let* ((new-space-nbytes (align-up freeptr sb-c:+backend-page-bytes+))
+            (let* ((new-space-nbytes (align-up freeptr +backend-page-bytes+))
                    (new-space (sb-sys:allocate-system-memory new-space-nbytes)))
               ;; Write header of "vector 1"
               (setf (sap-ref-word new-space 0) simple-array-unsigned-byte-32-widetag

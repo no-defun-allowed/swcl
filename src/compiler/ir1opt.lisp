@@ -1169,20 +1169,36 @@
                 (let* ((fun (basic-combination-fun node))
                        (uses (lvar-uses fun))
                        (leaf (when (ref-p uses) (ref-leaf uses))))
-                  (multiple-value-bind (type defined-type)
-                      (cond ((global-var-p leaf)
-                             (values (leaf-type leaf) (leaf-defined-type leaf)))
-                            ((eq kind :unknown-keys)
-                             (values (lvar-fun-type fun t t) nil))
-                            (t
-                             (values nil nil)))
-                    (when (or (and (eq kind :unknown-keys)
-                                   (fun-type-p type))
-                              (and (fun-type-p defined-type)
-                                   (not (fun-type-p type))))
-                      (validate-call-type node type leaf)))
-                  (unless (eq (basic-combination-kind node) kind)
-                    (ir1-optimize-combination node))))))
+                  (cond ((consp uses)
+                         (loop with union
+                               for use in uses
+                               do
+                               (if (ref-p use)
+                                   (let ((type (node-fun-type use)))
+                                     (if (fun-type-p type)
+                                         (let ((return (fun-type-returns type)))
+                                           (setf union
+                                                 (if union
+                                                     (values-type-union union return)
+                                                     return)))
+                                         (return)))
+                                   (return))
+                               finally (derive-node-type node union)))
+                        (t
+                         (multiple-value-bind (type defined-type)
+                             (cond ((global-var-p leaf)
+                                    (values (leaf-type leaf) (leaf-defined-type leaf)))
+                                   ((eq kind :unknown-keys)
+                                    (values (lvar-fun-type fun t t) nil))
+                                   (t
+                                    (values nil nil)))
+                           (when (or (and (eq kind :unknown-keys)
+                                          (fun-type-p type))
+                                     (and (fun-type-p defined-type)
+                                          (not (fun-type-p type))))
+                             (validate-call-type node type leaf)))
+                         (unless (eq (basic-combination-kind node) kind)
+                           (ir1-optimize-combination node))))))))
         (:known
          (aver info)
          (clear-reoptimize-args)
@@ -1846,8 +1862,7 @@
                        (list #'compiler-style-warn "Lisp error during constant folding:~%~A" values))
                  t))
               ((and (proper-list-of-length-p values 1))
-               (replace-combination-with-constant (first values) call)
-               t)
+               (replace-combination-with-constant (first values) call))
               (t
                (let ((dummies (make-gensym-list (length args))))
                  (transform-call
@@ -2844,18 +2859,6 @@
 (defun compile-time-type-error-context (context)
   #+sb-xc-host context
   #-sb-xc-host (source-to-string context))
-
-(defun cast-mismatch-from-inlined-p (cast node)
-  (let* ((path (node-source-path node))
-         (transformed (memq 'transformed path))
-         (inlined))
-    (cond ((and transformed
-                (not (eq (memq 'transformed (node-source-path cast))
-                         transformed))))
-          ((setf inlined
-                 (memq 'inlined path))
-           (not (eq (memq 'inlined (node-source-path cast))
-                    inlined))))))
 
 ;;; Delete or move around casts when possible
 (defun maybe-delete-cast (cast)

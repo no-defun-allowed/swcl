@@ -52,7 +52,7 @@
 (define-load-time-global *available-buffers* ()
   "List of available buffers.")
 
-(defconstant +bytes-per-buffer+ (* 8 1024)
+(defconstant +bytes-per-buffer+ (* 32 1024)
   "Default number of bytes per buffer.")
 
 (defun alloc-buffer (&optional (size +bytes-per-buffer+))
@@ -854,7 +854,8 @@
                        :start start :end end))))
       (if (and (typep thing 'base-string)
                (let ((external-format (fd-stream-external-format stream)))
-                 (and (eq (external-format-keyword external-format) :latin-1)
+                 (and (memq (external-format-keyword external-format)
+                            '(#+sb-unicode :utf-8 :latin-1))
                       (or (null last-newline)
                           (eq (external-format-newline-variant external-format) :lf)))))
           (ecase (fd-stream-buffering stream)
@@ -1378,34 +1379,77 @@
   (declare (type index start requested total-copied))
   (declare (ignore sbuffer))
   (aver (= (length (fd-stream-instead stream)) 0))
-  (do ()
-      (nil)
-    (let* ((remaining-request (- requested total-copied))
-           (ibuf (fd-stream-ibuf stream))
-           (head (buffer-head ibuf))
-           (tail (buffer-tail ibuf))
-           (available (- tail head))
-           (n-this-copy (min remaining-request available))
-           (this-start (+ start total-copied))
-           (sap (buffer-sap ibuf)))
-      (declare (type index remaining-request head tail available))
-      (declare (type index n-this-copy))
-      ;; Copy data from stream buffer into user's buffer.
-      (%byte-blt sap head buffer this-start n-this-copy)
-      (incf (buffer-head ibuf) n-this-copy)
-      (incf total-copied n-this-copy)
-      ;; Maybe we need to refill the stream buffer.
-      (cond (;; If there were enough data in the stream buffer, we're done.
-             (eql total-copied requested)
-             (return total-copied))
-            (;; If EOF, we're done in another way.
-             (null (catch 'eof-input-catcher (refill-input-buffer stream)))
-             (if eof-error-p
-                 (error 'end-of-file :stream stream)
-                 (return total-copied)))
-            ;; Otherwise we refilled the stream buffer, so fall
-            ;; through into another pass of the loop.
-            ))))
+  (let* ((ibuf (fd-stream-ibuf stream))
+         (sap (buffer-sap ibuf)))
+    (cond #+soft-card-marks ; read(2) doesn't like write-protected buffers
+          ((and (typep buffer '(simple-array (unsigned-byte 8) (*)))
+                (>= requested 256)
+                (eq (fd-stream-fd-type stream) :regular)
+                ;; TODO: handle non-empty initial buffers
+                (= (buffer-head ibuf) (buffer-tail ibuf)))
+           (prog ((fd (fd-stream-fd stream))
+                  (offset start)
+                  (errno 0)
+                  (count 0))
+              (declare ((or null index) count offset))
+              (go :read)
+            :read-error
+              (simple-stream-perror "couldn't read from ~S" stream errno)
+            :eof
+              (if eof-error-p
+                  (error 'end-of-file :stream stream)
+                  (return total-copied))
+            :read
+              (without-interrupts
+                (tagbody
+                 :read
+                   (with-pinned-objects (buffer)
+                     (let ((sap (vector-sap buffer)))
+                       (declare (inline sb-unix:unix-read))
+                       (setf (fd-stream-listen stream) nil)
+                       (setf (values count errno)
+                             (sb-unix:unix-read fd (sap+ sap offset) (- requested total-copied)))
+                       (cond ((null count)
+                              (cond #-win32 ((eql errno sb-unix:eintr)
+                                             (go :read))
+                                    (t
+                                     (go :read-error))))
+                             ((zerop count)
+                              (setf (fd-stream-listen stream) :eof)
+                              (go :eof))
+                             (t
+                              (setf offset (truly-the index (+ offset count)))
+                              (setf total-copied (truly-the index (+ total-copied count)))))
+                       (when (= requested total-copied)
+                         (return total-copied))
+                       (go :read)))))))
+          (t
+           (do ()
+               (nil)
+             (let* ((remaining-request (- requested total-copied))
+                    (head (buffer-head ibuf))
+                    (tail (buffer-tail ibuf))
+                    (available (- tail head))
+                    (n-this-copy (min remaining-request available))
+                    (this-start (+ start total-copied)))
+               (declare (type index remaining-request head tail available))
+               (declare (type index n-this-copy))
+               ;; Copy data from stream buffer into user's buffer.
+               (%byte-blt sap head buffer this-start n-this-copy)
+               (incf (buffer-head ibuf) n-this-copy)
+               (incf total-copied n-this-copy)
+               ;; Maybe we need to refill the stream buffer.
+               (cond (;; If there were enough data in the stream buffer, we're done.
+                      (eql total-copied requested)
+                      (return total-copied))
+                     (;; If EOF, we're done in another way.
+                      (null (catch 'eof-input-catcher (refill-input-buffer stream)))
+                      (if eof-error-p
+                          (error 'end-of-file :stream stream)
+                          (return total-copied)))
+                     ;; Otherwise we refilled the stream buffer, so fall
+                     ;; through into another pass of the loop.
+                     )))))))
 
 (defun fd-stream-advance (stream unit)
   (let* ((buffer (fd-stream-ibuf stream))
@@ -1936,7 +1980,7 @@
               (fd-stream-char-size fd-stream) char-size
               (fd-stream-replacement fd-stream) replacement))
       (when (= (or cin-size 1) (or bin-size 1) 1)
-        (setf (fd-stream-n-bin fd-stream) ;XXX
+        (setf (fd-stream-n-bin fd-stream)
               (if (and character-stream-p (not bivalent-stream-p))
                   read-n-characters
                   #'fd-stream-read-n-bytes))
@@ -2492,11 +2536,11 @@
               (sb-kernel::%file-error
                pathname
                "~@<The path ~2I~_~S ~I~_does not exist.~:>" pathname))
-             (t '(:return nil))))
+             (t '(:return t))))
           (#-win32 #.sb-unix:eexist
            #+win32 #.sb-win32::error_file_exists
            (if (null if-exists)
-               '(:return nil)
+               '(:return t)
                (restart-case
                    (signal-it 'file-exists)
                  (supersede ()
@@ -2714,13 +2758,13 @@
                                                   :element-type element-type)))
                             (close stream)
                             stream)))))
-             (destructuring-bind (&key (return nil returnp)
+             (destructuring-bind (&key return
                                        new-filename
                                        new-if-exists
                                        new-if-does-not-exist)
                  (%open-error pathname errno if-exists if-does-not-exist)
-               (when returnp
-                 (return return))
+               (when return
+                 (return))
                (when new-filename
                  (setf filename new-filename))
                (when new-if-exists

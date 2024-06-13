@@ -94,14 +94,12 @@
                         sb-vm:n-word-bytes)))))
 
 (defun patch-code (code locs enable &aux (n 0) (n-patched 0))
-  (let ((enable-counted (sb-fasl:get-asm-routine 'sb-vm::enable-alloc-counter))
-        (enable-sized (sb-fasl:get-asm-routine 'sb-vm::enable-sized-alloc-counter))
-        (enable-counted-indirect
-         (sb-fasl:get-asm-routine 'sb-vm::enable-alloc-counter t))
-        (enable-sized-indirect
-         (sb-fasl:get-asm-routine 'sb-vm::enable-sized-alloc-counter t))
-        (stack (make-array 1 :element-type 'sb-vm:word))
-        (insts (code-instructions code)))
+  (let* ((enable-counted (sb-fasl:get-asm-routine 'sb-vm::enable-alloc-counter))
+         (enable-sized (sb-fasl:get-asm-routine 'sb-vm::enable-sized-alloc-counter))
+         (enable-counted-indirect (sb-vm::asm-routine-indirect-address enable-counted))
+         (enable-sized-indirect (sb-vm::asm-routine-indirect-address enable-sized))
+         (stack (make-array 1 :element-type 'sb-vm:word))
+         (insts (code-instructions code)))
     (declare (dynamic-extent stack))
     (with-alien ((allocation-tracker-counted (function void system-area-pointer) :extern)
                  (allocation-tracker-sized (function void system-area-pointer) :extern))
@@ -587,7 +585,7 @@
 ;;; Return a name for PC-OFFSET in CODE. PC-OFFSET is relative to
 ;;; CODE-INSTRUCTIONS.
 (defun pc-offset-to-fun-name (pc-offset code)
-  (if (eq sb-vm::*assembler-routines* code)
+  (if (eq sb-fasl:*assembler-routines* code)
       (block nil
         (maphash (lambda (k v) ; FIXME: OAOO violation, at least twice over
                    (when (<= (car v) pc-offset (cadr v))

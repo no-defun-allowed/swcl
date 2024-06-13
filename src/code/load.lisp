@@ -1162,6 +1162,14 @@
           (format *trace-output* fmt (code-object-size object) reason object))))
   object)
 
+;;; Unpack an integer from DUMP-FIXUPs.
+(declaim (inline !unpack-fixup-info))
+(defun !unpack-fixup-info (packed-info) ; Return (VALUES offset kind flavor-id data)
+  (values (ash packed-info -16)
+          (aref +fixup-kinds+ (ldb (byte 4 0) packed-info))
+          (ldb (byte 4 4) packed-info)
+          (ldb (byte 8 8) packed-info)))
+
 (define-fop 17 :not-host (fop-load-code ((:operands header n-code-bytes n-fixup-elts)))
   ;; The stack looks like:
   ;; ... | constant0 constant1 ... constantN | DEBUG-INFO | FIXUPS-ITEMS ....   ||
@@ -1191,6 +1199,14 @@
         ;; Don't need the code pinned from here on
         (setf (sb-c::debug-info-source (%code-debug-info code))
               (%fasl-input-partial-source-info (fasl-input)))
+        (let ((stack-index (+ ptr (* n-simple-funs sb-vm:code-slots-per-simple-fun))))
+          ;; This is the moral equivalent of a warning from /usr/bin/ld
+          ;; that "gets() is dangerous." You're informed by both the compiler and linker.
+          (dotimes (i n-fdefns)
+            (let ((name (fdefn-name (svref stack (+ stack-index i)))))
+              (when (deprecated-thing-p 'function name)
+                (format *error-output* "~&; While loading ~S:" (sb-c::debug-info-name debug-info))
+                (check-deprecated-thing 'function name)))))
         ;; Boxed constants can be assigned only after figuring out where the range
         ;; of implicitly tagged words is, which requires knowing how many functions
         ;; are in the code component, which requires reading the code trailer.
@@ -1220,11 +1236,6 @@
 ;; this gets you an #<fdefn> object, not the result of (FDEFINITION x)
 ;; cold-loader uses COLD-FDEFINITION-OBJECT instead.
 (define-fop 18 :not-host (fop-fdefn (name))
-  (when (deprecated-thing-p 'function name)
-    ;; This is the moral equivalent of a warning from /usr/bin/ld
-    ;; that "gets() is dangerous." You're informed by both the
-    ;; compiler and linker.
-    (check-deprecated-thing 'function name))
   (find-or-create-fdefn name))
 
 (define-fop 19 :not-host (fop-known-fun (name))
@@ -1299,8 +1310,11 @@
 
 ;;;; fops for code coverage
 
-(define-fop 120 :not-host (fop-record-code-coverage (namestring cc) nil)
-  (setf (gethash namestring (car *code-coverage-info*)) cc)
+(define-fop 120 :not-host (fop-record-code-coverage (paths) nil)
+  (setf (gethash (sb-c::debug-source-namestring
+                  (%fasl-input-partial-source-info (fasl-input)))
+                 (car *code-coverage-info*))
+        (mapcar #'list paths))
   (values))
 
 ;;; Primordial layouts.
@@ -1319,7 +1333,7 @@
   (frob (#x68 t)
         (#x69 structure-object)
         (#x6a condition)
-        (#x6b definition-source-location)
+        (#x6b sb-c::definition-source-location)
         (#x6c sb-c::debug-info)
         (#x6d sb-c::compiled-debug-info)
         (#x6e sb-c::debug-source)

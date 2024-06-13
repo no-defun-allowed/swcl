@@ -43,44 +43,53 @@
 (defun call-with-block-external-functionals (block fun)
   (let* ((functional (block-home-lambda block))
          (seen nil))
-    (labels ((local-function-name-p (name)
-               (and (consp name)
-                    (member (car name)
-                            '(flet labels lambda))))
-             (handle-refs (functional)
-               ;; Recurse only if we haven't already seen the
-               ;; functional.
-               (unless (memq functional seen)
-                 (push functional seen)
-                 (loop for ref in (functional-refs functional)
-                       thereis (handle-functional (node-home-lambda ref)))))
-             (handle-functional (functional)
-               ;; If a functional looks like a global function (has a
-               ;; XEP, isn't a local function or a lambda) record xref
-               ;; information for it. Otherwise recurse on the
-               ;; home-lambdas of all references to the functional.
-               (when (functional-kind-eq functional external)
-                 (let ((entry (functional-entry-fun functional)))
-                   (when entry
-                     (let ((name (functional-debug-name entry)))
-                       ;; Is it a lambda inside another function?
-                       (when (or (not (local-function-name-p name))
-                                 (not (handle-refs functional)))
-                         (funcall fun entry)
-                         (return-from handle-functional t))))))
-               (handle-refs functional)))
-      (unless (or (functional-kind-eq functional deleted)
-                  ;; If the block came from an inlined global
-                  ;; function, ignore it.
-                  (and (functional-inline-expanded functional)
-                       (symbolp (functional-debug-name functional))))
-        (handle-functional functional)))))
+    (when (policy functional (plusp store-xref-data))
+      (labels ((local-function-name-p (name)
+                 (and (consp name)
+                      (member (car name)
+                              '(flet labels lambda))))
+               (handle-refs (functional)
+                 ;; Recurse only if we haven't already seen the
+                 ;; functional.
+                 (unless (memq functional seen)
+                   (push functional seen)
+                   (loop for ref in (functional-refs functional)
+                         thereis (handle-functional (node-home-lambda ref)))))
+               (handle-functional (functional)
+                 ;; If a functional looks like a global function (has a
+                 ;; XEP, isn't a local function or a lambda) record xref
+                 ;; information for it. Otherwise recurse on the
+                 ;; home-lambdas of all references to the functional.
+                 (when (functional-kind-eq functional external)
+                   (let ((entry (functional-entry-fun functional)))
+                     (when entry
+                       (let ((name (functional-debug-name entry)))
+                         ;; Is it a lambda inside another function?
+                         (when (or (not (local-function-name-p name))
+                                   (not (handle-refs functional)))
+                           (funcall fun entry)
+                           (return-from handle-functional t))))))
+                 (handle-refs functional)))
+        (unless (or (functional-kind-eq functional deleted)
+                    ;; If the block came from an inlined global
+                    ;; function, ignore it.
+                    (and (functional-inline-expanded functional)
+                         (symbolp (functional-debug-name functional))))
+          (handle-functional functional))))))
 
 (defun record-node-xrefs (node context)
   (declare (type node node))
   (etypecase node
-    ((or creturn cif entry combination mv-combination cast exit
-         enclose combination cdynamic-extent jump-table))
+    ((or creturn cif entry mv-combination cast exit
+         enclose cdynamic-extent jump-table))
+    (combination
+     (let ((name (combination-fun-debug-name node)))
+       (when (equal name '(cas symbol-value))
+         (let ((symbol (third (combination-args node))))
+           (when (constant-lvar-p symbol)
+             ;; It also references the symbol, but it's probably not
+             ;; the primary reason for doing CAS.
+             (record-xref :sets (lvar-value symbol) context node nil))))))
     (ref
      (let ((leaf (ref-leaf node)))
        (typecase leaf
@@ -124,14 +133,14 @@
                         node
                         nil)))))))
 
-(defun internal-name-p (what)
+(defun xref-internal-name-p (what)
   ;; Unless we're building with SB-XREF-FOR-INTERNALS, don't store
   ;; XREF information for internals. We define anything with a symbol
   ;; from either an implementation package or from COMMON-LISP as
   ;; internal
   (typecase what
     (list
-     (every #'internal-name-p what))
+     (every #'xref-internal-name-p what))
     (symbol
      (or (eq '.anonymous. what)
          #-sb-xref-for-internals
@@ -141,18 +150,18 @@
     (t t)))
 
 (defun record-xref (kind what context node path)
-  (unless (internal-name-p what)
+  (unless (xref-internal-name-p what)
     (push (cons what
                 (source-path-form-number (or path
                                              (node-source-path node))))
           (getf (functional-xref context) kind))))
 
 (defun record-macroexpansion (what block path)
-  (unless (internal-name-p what)
+  (unless (xref-internal-name-p what)
     (push (list :macroexpands what path) (block-xrefs block))))
 
 (defun record-call (what block path)
-  (unless (internal-name-p what)
+  (unless (xref-internal-name-p what)
     (push (list :calls what path) (block-xrefs block))))
 
 

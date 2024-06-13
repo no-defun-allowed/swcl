@@ -906,7 +906,7 @@
       (setf arg res))
     (inst fmov v arg)
     (inst cnt v v :8b)
-    ;; GCC uses (inst addv v :b v :8b)
+    ;; GCC uses (inst addv v v :8b)
     ;; but clang uses:
     (inst uaddlv v :h v :8b)
     (inst fmov res v)))
@@ -993,8 +993,8 @@
   (:policy :fast-safe)
   (:generator 2
     (move res y)
-    (inst bfm res x (- (1- n-word-bits) posn) (1- (if (> (+ size posn)
-                                                         n-word-bits)
+    (inst bfm res x (- (1- n-word-bits) posn) (1- (if (>= (+ size posn)
+                                                          n-word-bits)
                                                       (- (1- n-word-bits) posn)
                                                       size)))))
 
@@ -1013,8 +1013,8 @@
     (move res y)
     (inst bfm res x (if (= posn 0)
                         0
-                        (- n-word-bits posn)) (1- (if (> (+ size posn)
-                                                         n-word-bits)
+                        (- n-word-bits posn)) (1- (if (>= (+ size posn)
+                                                          n-word-bits)
                                                       (- n-word-bits posn)
                                                       size)))))
 
@@ -1033,8 +1033,8 @@
     (move res y)
     (inst bfm res x (if (= posn 0)
                         0
-                        (- n-word-bits posn)) (1- (if (> (+ size posn)
-                                                         n-word-bits)
+                        (- n-word-bits posn)) (1- (if (>= (+ size posn)
+                                                          n-word-bits)
                                                       (- n-word-bits posn)
                                                       size)))))
 
@@ -1499,6 +1499,148 @@
 
     (unless (eq (tn-kind borrow) :unused)
       (inst cset borrow :cs))))
+
+(define-vop (bignum-add-loop)
+  (:args (a* :scs (descriptor-reg))
+         (b* :scs (descriptor-reg))
+         (la :scs (unsigned-reg))
+         (lb :scs (unsigned-reg))
+         (r* :scs (descriptor-reg)))
+  (:arg-types bignum bignum unsigned-num bignum unsigned-num)
+  (:temporary (:sc unsigned-reg) length)
+  (:temporary (:sc unsigned-reg) n index digit-a digit-b a b r)
+  (:generator 10
+    (inst add-sub a a* #1=(- (* bignum-digits-offset n-word-bytes) other-pointer-lowtag))
+    (inst add-sub b b* #1#)
+    (inst add-sub r r* #1#)
+    (move length lb)
+
+    (inst adds index zr-tn zr-tn) ;; clear the carry flag
+
+    LOOP-B
+    (inst ldr digit-b (@ b (extend index :lsl 3)))
+    (inst ldr digit-a (@ a (extend index :lsl 3)))
+    (inst adcs n digit-a digit-b)
+    (inst str n (@ r (extend index :lsl 3)))
+    (inst add index index 1)
+    (inst sub length length 1)
+    (inst cbnz length LOOP-B)
+
+    (inst asr digit-b digit-b 63) ;; has the last digit of B
+    (inst sub length la lb)
+    (inst cbz length DONE)
+
+    ;; Add the sign digit with carry to the remaining digits of the longest bignum
+    LOOP-A
+    (inst ldr digit-a (@ a (extend index :lsl 3)))
+    (inst adcs n digit-a digit-b)
+    (inst str n (@ r (extend index :lsl 3)))
+
+    (inst add index index 1)
+    (inst sub length length 1)
+    (inst cbnz length LOOP-A)
+
+    DONE
+    (inst asr digit-a digit-a 63) ;; has the last digit of A
+    (inst adc n digit-a digit-b)
+    (inst str n (@ r (extend index :lsl 3)))))
+
+(define-vop (bignum-add-word-loop)
+  (:args (a* :scs (descriptor-reg))
+         (b :scs (unsigned-reg))
+         (la :scs (unsigned-reg))
+         (r* :scs (descriptor-reg)))
+  (:arg-types bignum unsigned-num unsigned-num bignum)
+  (:temporary (:sc unsigned-reg) length)
+  (:temporary (:sc unsigned-reg) n index digit-a digit-b a r)
+  (:generator 10
+    (inst add-sub a a* #1=(- (* bignum-digits-offset n-word-bytes) other-pointer-lowtag))
+    (inst add-sub r r* #1#)
+
+    (inst ldr digit-a (@ a))
+    (inst adds n digit-a b)
+    (inst str n (@ r))
+    (inst mov index 1)
+    (inst sub length la 1)
+
+    (inst asr digit-b b 63)
+    (inst cbz length DONE)
+
+    ;; Add the sign digit with carry to the remaining digits of the longest bignum
+    LOOP-A
+    (inst ldr digit-a (@ a (extend index :lsl 3)))
+    (inst adcs n digit-a digit-b)
+    (inst str n (@ r (extend index :lsl 3)))
+
+    (inst add index index 1)
+    (inst sub length length 1)
+    (inst cbnz length LOOP-A)
+
+    DONE
+    (inst asr digit-a digit-a 63) ;; has the last digit of A
+    (inst adc n digit-a digit-b)
+    (inst str n (@ r (extend index :lsl 3)))))
+
+(define-vop (bignum-negate-loop)
+  (:args (a* :scs (descriptor-reg) :to :save)
+         (l :scs (unsigned-reg) :target length)
+         (r* :scs (descriptor-reg) :to :save))
+  (:arg-types bignum unsigned-num bignum)
+  (:temporary (:sc unsigned-reg :from (:argument 1)) length)
+  (:temporary (:sc unsigned-reg) index a r)
+  (:results (last1 :scs (unsigned-reg))
+            (last2 :scs (unsigned-reg)))
+  (:result-types unsigned-num unsigned-num)
+  (:generator 10
+    (inst add-sub a a* #1=(- (* bignum-digits-offset n-word-bytes) other-pointer-lowtag))
+    (inst add-sub r r* #1#)
+    (inst mov last2 0)
+    (inst subs index zr-tn zr-tn) ;; set carry
+    (move length l)
+    LOOP
+    (move last1 last2)
+    (inst ldr last2 (@ a (extend index :lsl 3)))
+    (inst sbcs last2 zr-tn last2)
+    (inst str last2 (@ r (extend index :lsl 3)))
+    (inst add index index 1)
+    (inst sub length length 1)
+    (inst cbnz length LOOP)))
+
+(define-vop (bignum-negate-in-place-loop)
+  (:args (a* :scs (descriptor-reg) :to :save)
+         (l :scs (unsigned-reg) :target length))
+  (:arg-types bignum unsigned-num)
+  (:temporary (:sc unsigned-reg :from (:argument 1)) length)
+  (:temporary (:sc unsigned-reg) a)
+  (:generator 10
+    (inst subs a a* (- other-pointer-lowtag (* bignum-digits-offset n-word-bytes))) ;; set carry
+    (move length l)
+    LOOP
+    (inst ldr tmp-tn (@ a))
+    (inst sbcs tmp-tn zr-tn tmp-tn)
+    (inst str tmp-tn (@ a n-word-bytes :post-index))
+    (inst sub length length 1)
+    (inst cbnz length LOOP)))
+
+(define-vop (bignum-negate-last-two-loop)
+  (:args (a* :scs (descriptor-reg) :to :save)
+         (l :scs (unsigned-reg) :target length))
+  (:arg-types bignum unsigned-num)
+  (:temporary (:sc unsigned-reg :from (:argument 1)) length)
+  (:temporary (:sc unsigned-reg) a)
+  (:results (last1 :scs (unsigned-reg))
+            (last2 :scs (unsigned-reg)))
+  (:result-types unsigned-num unsigned-num)
+  (:generator 10
+    (inst subs a a* (- other-pointer-lowtag (* bignum-digits-offset n-word-bytes))) ;; set carry
+    (move length l)
+    (inst mov last2 0)
+    LOOP
+    (move last1 last2)
+    (inst ldr last2 (@ a n-word-bytes :post-index))
+    (inst sbcs last2 zr-tn last2)
+    (inst sub length length 1)
+    (inst cbnz length LOOP)))
 
 (define-vop (bignum-mult-and-add-3-arg)
   (:translate sb-bignum:%multiply-and-add)
@@ -2131,7 +2273,7 @@
       (inst asr temp2 y 63)
       (inst adds r x y)
       (inst adc temp1 temp1 temp2)
-      (inst tbnz temp1 0 error))))
+      (inst tbnz* temp1 0 error))))
 
 (define-vop (overflow+unsigned)
   (:translate overflow+)
@@ -2574,7 +2716,7 @@
            (fits (csubtypep (tn-ref-type amount-ref)
                             (specifier-type `(integer -63 63)))))
       (when signed
-        (inst tbnz number 63 error))
+        (inst tbnz* number 63 error))
       (cond ((numberp amount)
              (cond ((< amount -63)
                     (inst mov r 0))
@@ -2671,7 +2813,7 @@
                                  type))
            (error (generate-error-code vop 'sb-kernel::add-overflow2-error x y)))
       (unless (csubtypep (tn-ref-type x-ref) (specifier-type 'fixnum))
-        (inst tbnz x 0 error))
+        (inst tbnz* x 0 error))
       (inst adds r x (if (sc-is y any-reg)
                          y
                          (lsl y n-fixnum-tag-bits)))
@@ -2693,7 +2835,7 @@
                                  type))
            (error (generate-error-code vop 'sb-kernel::sub-overflow2-error x y)))
       (unless (csubtypep (tn-ref-type x-ref) (specifier-type 'fixnum))
-        (inst tbnz x 0 error))
+        (inst tbnz* x 0 error))
       (inst subs r x (if (sc-is y any-reg)
                          y
                          (lsl y n-fixnum-tag-bits)))
@@ -2715,7 +2857,7 @@
                                  type))
            (error (generate-error-code vop 'sb-kernel::sub-overflow2-error x y)))
       (unless (csubtypep (tn-ref-type y-ref) (specifier-type 'fixnum))
-        (inst tbnz y 0 error))
+        (inst tbnz* y 0 error))
       (inst subs r x y)
       (inst b :vs error))))
 
@@ -2756,7 +2898,7 @@
                                         vop
                                         'sb-kernel::mul-overflow2-error x y)))
       (unless (csubtypep (tn-ref-type x-ref) (specifier-type 'fixnum))
-        (inst tbnz x 0 error))
+        (inst tbnz* x 0 error))
       (cond ((eql shift 0)
              (move r x))
             (shift

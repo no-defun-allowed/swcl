@@ -176,8 +176,29 @@
   (print-reg/mem-with-width
    value (inst-operand-size-default-qword dstate) t stream dstate))
 
+(defun print-rel32-disp (value stream dstate)
+  (cond ((not stream) (operand value dstate))
+        (t
+         (or (when (and (typep value 'word)
+                        (not (logtest value lowtag-mask))
+                        (< text-space-start value (sap-int *text-space-free-pointer*)))
+               (multiple-value-bind (fun ok)
+                   (make-lisp-obj (+ value -16 fun-pointer-lowtag) nil)
+                 (when ok
+                   (let ((name (%fun-name fun)))
+                     (note (if (and (symbolp name) (eq (fboundp name) fun))
+                               (lambda (stream) (format stream "#'~A" name))
+                               (lambda (stream) (princ fun stream)))
+                           dstate)))))
+             #+immobile-space
+             (when (integerp value)
+               (maybe-note-static-lispobj value dstate))
+             (maybe-note-assembler-routine value nil dstate))
+         (print-label value stream dstate))))
+
 (defun print-jmp-ea (value stream dstate)
-  (cond ((typep value 'machine-ea)
+  (cond ((null stream) (operand value dstate))
+        ((typep value 'machine-ea)
          (print-mem-ref :ref value :qword stream dstate)
          #+immobile-space
          (when (and (null (machine-ea-base value))
@@ -194,7 +215,6 @@
                (when (<= a (machine-ea-disp value) (1- (+ a (primitive-object-size v))))
                  (let ((target (sap-ref-word (int-sap (machine-ea-disp value)) 0)))
                    (maybe-note-assembler-routine target t dstate)))))))
-        ((null stream) (operand value dstate))
         (t (write value :stream stream :escape nil))))
 
 (defun print-sized-byte-reg/mem (value stream dstate)
@@ -384,9 +404,8 @@
            (type (or null stream) stream)
            (type disassem-state dstate))
   ;; If disassembling into the dstate, print nothing; just stash the operand.
-  (when (null stream)
-    (return-from print-mem-ref
-      (operand (cons value width) dstate)))
+  (unless stream
+    (return-from print-mem-ref (operand (cons value width) dstate)))
 
   ;; Unpack and print the pieces of the machine EA.
   (let ((base-reg (machine-ea-base value))
@@ -456,9 +475,9 @@
          ;; compilation to memory says it is all associated with
          ;; the symbol "lisp_jit_code" which is not useful.
          (when (plusp addr)
-           (or (when (<= sb-vm:alien-linkage-table-space-start addr
-                         (+ sb-vm:alien-linkage-table-space-start
-                            (1- sb-vm:alien-linkage-table-space-size)))
+           (or (when (<= sb-vm:alien-linkage-space-start addr
+                         (+ sb-vm:alien-linkage-space-start
+                            (1- sb-vm:alien-linkage-space-size)))
                  (let* ((index (sb-vm::alien-linkage-table-index-from-address addr))
                         (name (sb-impl::alien-linkage-index-to-name index)))
                    (note (lambda (s) (format s "&~A" name)) dstate)))
@@ -499,7 +518,6 @@
             (note (lambda (stream) (prin1 it stream)) dstate)
             (return-from print-mem-ref))))
       ;; Try to reverse-engineer which thread-local binding this is
-      #+sb-thread
       (cond ((and disp ; Test whether disp looks aligned to an object header
                   (not (logtest (- disp 4) sb-vm:lowtag-mask))
                   (not base-reg) (not index-reg))
@@ -534,6 +552,7 @@
                  (return-from print-mem-ref
                    (note (lambda (stream) (format stream "thread.~(~A~)" symbol))
                          dstate))))
+             #+sb-thread
              (let ((symbol (or (guess-symbol
                                 (lambda (s) (= (symbol-tls-index s) disp)))
                                ;; static symbols aren't in the code header
@@ -543,8 +562,7 @@
                  (return-from print-mem-ref
                    ;; "tls:" refers to the current value of the symbol in TLS
                    (note (lambda (stream) (format stream "tls: ~S" symbol))
-                         dstate)))))
-            ))))
+                         dstate)))))))))
 
 (defun lea-compute-label (value dstate)
   ;; If VALUE should be regarded as a label, return the address.
@@ -558,10 +576,12 @@
 
 ;; Figure out whether LEA should print its EA with just the stuff in brackets,
 ;; or additionally show the EA as either a label or a hex literal.
-(defun lea-print-ea (value stream dstate)
+(defun lea-print-ea (value stream dstate &aux (width (inst-operand-size dstate)))
+  ;; If disassembling into the dstate, print nothing; just stash the operand.
+  (unless stream
+    (return-from lea-print-ea (operand (cons value width) dstate)))
   (let*
-      ((width (inst-operand-size dstate))
-       (ea)
+      ((ea)
        (addr
          (etypecase value
            (machine-ea
@@ -581,8 +601,7 @@
             ;; EA calculation. DCHUNK-ZERO is a meaningless value - any would do -
             ;; because the EA was computed in a prefilter.
             ;; (the instruction format is known because LEA has exactly one format)
-            (print-mem-ref :compute (setf ea
-                                          (regrm-inst-r/m dchunk-zero dstate))
+            (print-mem-ref :compute (setf ea (regrm-inst-r/m dchunk-zero dstate))
                            width stream dstate)
             value)
 
@@ -592,27 +611,26 @@
            (reg
             (print-reg-with-width value width stream dstate)
             nil))))
-    (when stream
-      (cond ((stringp addr)             ; label
-             (note (lambda (s) (format s "= ~A" addr)) dstate))
-            ;; Local function
-            ((and ea
-                  (= (logand (+ (dstate-next-addr dstate) (machine-ea-disp ea))
-                             lowtag-mask)
-                      fun-pointer-lowtag)
-                  (let* ((seg (dstate-segment dstate))
-                         (code (seg-code seg))
-                         (offset (+ (sb-disassem::seg-initial-offset seg)
-                                    (dstate-next-offs dstate)
-                                    (- (machine-ea-disp ea)
-                                       fun-pointer-lowtag))))
-                    (loop for n below (code-n-entries code)
-                          do (when (= (%code-fun-offset code n) offset)
-                               (let ((fun (%code-entry-point code n)))
-                                 (note (lambda (stream) (prin1-quoted-short fun stream)) dstate))
-                               (return t))))))
-            (addr
-             (note (lambda (s) (format s "= #x~x" addr)) dstate))))))
+    (cond ((stringp addr)             ; label
+           (note (lambda (s) (format s "= ~A" addr)) dstate))
+          ;; Local function
+          ((and ea
+                (= (logand (+ (dstate-next-addr dstate) (machine-ea-disp ea))
+                           lowtag-mask)
+                   fun-pointer-lowtag)
+                (let* ((seg (dstate-segment dstate))
+                       (code (seg-code seg))
+                       (offset (+ (sb-disassem::seg-initial-offset seg)
+                                  (dstate-next-offs dstate)
+                                  (- (machine-ea-disp ea)
+                                     fun-pointer-lowtag))))
+                  (loop for n below (code-n-entries code)
+                        do (when (= (%code-fun-offset code n) offset)
+                             (let ((fun (%code-entry-point code n)))
+                               (note (lambda (stream) (prin1-quoted-short fun stream)) dstate))
+                             (return t))))))
+          (addr
+           (note (lambda (s) (format s "= #x~x" addr)) dstate)))))
 
 ;;;; interrupt instructions
 

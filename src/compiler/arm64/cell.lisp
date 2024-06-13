@@ -98,8 +98,7 @@
              (inst b (if set :eq :ne) target)))))
   (define-vop (set)
     (:args (object :scs (descriptor-reg)
-                   :load-if (not (and (sc-is object constant)
-                                      (symbol-always-has-tls-value-p (tn-value object) node))))
+                   :load-if (not (symbol-always-has-tls-value-p object node)))
            (value :scs (descriptor-reg any-reg zero)))
     (:temporary (:sc any-reg) tls-index)
     (:node-var node)
@@ -138,24 +137,20 @@
              (fixup (and known-symbol
                          (make-fixup known-symbol :symbol-tls-index))))
         (cond
-          ((symbol-always-has-tls-value-p known-symbol node)
+          (known-symbol                 ; e.g. CL:*PRINT-BASE*
+           ;; Known nonzero TLS index, but possibly no per-thread value.
+           ;; The TLS value and global value can be loaded independently.
            (inst ldr value (@ thread-tn fixup)))
           (t
-           (cond
-             (known-symbol              ; e.g. CL:*PRINT-BASE*
-              ;; Known nonzero TLS index, but possibly no per-thread value.
-              ;; The TLS value and global value can be loaded independently.
-              (inst ldr value (@ thread-tn fixup)))
-             (t
-              (inst ldr (32-bit-reg tls-index) (tls-index-of symbol))
-              (inst ldr value (@ thread-tn tls-index))))
-
-           (assemble ()
-             (no-tls-marker value symbol nil LOCAL)
-             (when known-symbol
-               (load-constant vop symbol (setf symbol (tn-ref-load-tn symbol-tn-ref))))
-             (loadw value symbol symbol-value-slot other-pointer-lowtag)
-             LOCAL))))
+           (inst ldr (32-bit-reg tls-index) (tls-index-of symbol))
+           (inst ldr value (@ thread-tn tls-index))))
+        (unless (symbol-always-has-tls-value-p symbol-tn-ref node)
+          (assemble ()
+            (no-tls-marker value symbol nil LOCAL)
+            (when known-symbol
+              (load-constant vop symbol (setf symbol (tn-ref-load-tn symbol-tn-ref))))
+            (loadw value symbol symbol-value-slot other-pointer-lowtag)
+            LOCAL)))
 
       (when check-boundp
         (assemble ()
@@ -432,10 +427,11 @@
                                    (ir2-component-constants component)))
            word-shift)))
 
-  (defun bind (bsp symbol tls-index tls-value)
-    (load-binding-stack-pointer bsp)
-    (inst add bsp bsp (* binding-size n-word-bytes))
-    (store-binding-stack-pointer bsp)
+  (defun bind (bsp symbol tls-index tls-value &optional bsp-loaded)
+    (unless bsp-loaded
+      (load-binding-stack-pointer bsp)
+      (inst add tls-index bsp (* binding-size n-word-bytes))
+      (store-binding-stack-pointer tls-index))
     (let* ((pkg (sb-xc:symbol-package symbol))
            ;; These symbols should have a small enough index to be
            ;; immediately encoded.
@@ -451,9 +447,10 @@
              ;; TODO: a fixup could replace this with an immediate
              (inst load-constant tls-index (load-time-tls-index symbol))))
       (inst ldr tls-value (@ thread-tn tls-index))
-      (inst stp tls-value tls-index-reg
-            (@ bsp (* (- binding-value-slot binding-size)
-                      n-word-bytes)))
+      (inst stp tls-value tls-index-reg (if (and bsp-loaded
+                                                 (neq bsp-loaded :last))
+                                            (@ bsp (* binding-size n-word-bytes) :post-index)
+                                            (@ bsp)))
       tls-index-reg))
 
   (define-vop (bind)
@@ -481,6 +478,25 @@
             (loadw value value symbol-value-slot other-pointer-lowtag)
             (inst str value (@ thread-tn tls-index))
             DONE)))))
+
+  (define-vop (bind-n)
+    (:args (values :more t :scs (descriptor-reg any-reg control-stack constant immediate)))
+    (:temporary (:sc non-descriptor-reg) tls-index)
+    (:temporary (:sc descriptor-reg) tls-value temp)
+    (:info symbols)
+    (:temporary (:scs (any-reg)) bsp)
+    (:vop-var vop)
+    (:generator 5
+      (load-binding-stack-pointer bsp)
+      (inst add tls-value bsp (add-sub-immediate (* binding-size n-word-bytes (length symbols))))
+      (store-binding-stack-pointer tls-value)
+      (let (prev-constant)
+        (loop for (symbol . next) on symbols
+              do
+              (inst str (maybe-load (tn-ref-tn values))
+                    (@ thread-tn (bind bsp symbol tls-index tls-value (or next
+                                                                          :last))))
+              (setf values (tn-ref-across values))))))
 
   (define-vop (unbind-n)
     (:info symbols)

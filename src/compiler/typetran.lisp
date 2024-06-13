@@ -67,14 +67,17 @@
         (abort-ir1-transform)
         expansion)))
 
-(progn
-  (defun type-other-pointer-p (type)
-    (csubtypep type (specifier-type '(not #1=(or fixnum #+64-bit single-float
-                                                 list function instance character
-                                                 extended-sequence)))))
+(sb-xc:deftype other-pointer ()
+  '(or array
+    (and number (not (or fixnum #+64-bit single-float)))
+    fdefn (and symbol (not null))
+    weak-pointer system-area-pointer code-component))
 
-  (defun type-not-other-pointer-p (type)
-    (csubtypep type (specifier-type '#1#))))
+(defun type-other-pointer-p (type)
+  (csubtypep type (specifier-type 'other-pointer)))
+
+(defun type-not-other-pointer-p (type)
+  (csubtypep type (specifier-type '(not other-pointer))))
 
 ;;; If the lvar OBJECT definitely is or isn't of the specified
 ;;; type, then return T or NIL as appropriate. Otherwise quietly
@@ -183,7 +186,7 @@
                              (cond ((and (type-not-other-pointer-p diff)
                                          (type-other-pointer-p type))
                                     `(%other-pointer-p object))
-                                   ((and (type-other-pointer-p type)
+                                   ((and (type-other-pointer-p diff)
                                          (type-not-other-pointer-p type))
                                     `(not (%other-pointer-p object)))))))))
               (t
@@ -396,6 +399,13 @@
              ((type= type (specifier-type '(or word sb-vm:signed-word)))
               `(or (typep ,object 'sb-vm:signed-word)
                    (typep ,object 'word)))
+             ((and (vop-existsp :translate unsigned-byte-x-p)
+                   (eql (numeric-type-class type) 'integer)
+                   (eql low 0)
+                   (integerp high)
+                   (= (logcount (1+ high)) 1)
+                   (zerop (rem (integer-length high) sb-vm:n-word-bits)))
+              `(unsigned-byte-x-p ,object ,(integer-length high)))
              (t
               `(and (typep ,object ',base)
                     ,(transform-numeric-bound-test object type base)))))
@@ -424,20 +434,6 @@
            ;; as soon as any unknown is present.
            `(classoid-cell-typep ,(find-classoid-cell spec :create t) ,object))
           ((unknown-type-p type)
-           #+(and sb-xc-host (not sb-devel))
-           (warn "can't open-code test of unknown type ~S"
-                 (type-specifier type))
-           ;; This is not a policy-based decision to notify here,
-           ;; because it is _ALWAYS_ questionable style imho to refer to unknown types.
-           ;; Unfortunately, people love to suppress COMPILER-NOTE because SBCL produces
-           ;; far too many of those for low-level things like untagged-SAP-to-tagged-SAP.
-           ;; So we could opt to STYLE-WARN, which is, in this case, perhaps more severe
-           ;; than we'd like?
-           ;; I guess we're just going to have to say that if you've muffled too may
-           ;; kinds of NOTEs, that's on you.
-           #-sb-xc-host (compiler-notify 'unknown-typep-note
-                                         :format-control "can't open-code test of unknown type ~S"
-                                         :format-arguments (list (type-specifier type)))
            `(let ((object ,object)
                   (cache (load-time-value (cons #'sb-kernel::cached-typep ',spec)
                                           t)))
@@ -1127,11 +1123,6 @@
                 `(and (%instancep object)
                       (logtest (,get-flags (%instance-layout object)) ,flag)))))
 
-          ;; TODO: remove after April 2021 release.
-          ((eq name 'sb-kernel::random-class)
-           (style-warn "~S should not appear in a TYPEP test" name)
-           nil)
-
           ;; Next easiest: Sealed and no subtypes. Typically for DEFSTRUCT only.
           ;; Even if you don't seal a DEFCLASS, we're allowed to assume that things
           ;; won't change, as per CLHS 3.2.2.3 on Semantic Constraints:
@@ -1638,17 +1629,24 @@
   ((value) (sb-vm:signed-word) * :important nil)
   `(>= value 0))
 
+(when-vop-existsp (:translate unsigned-byte-x-p)
+  (deftransform unsigned-byte-x-p
+      ((value x) (t t) * :important nil :node node)
+    (ir1-transform-type-predicate value (specifier-type `(unsigned-byte ,(lvar-value x))) node))
+
+  (deftransform unsigned-byte-x-p
+      ((value x) ((integer * #.most-positive-word) t) * :important nil)
+    `(#+64-bit unsigned-byte-64-p #-64-bit unsigned-byte-32-p x)))
+
 (deftransform %other-pointer-p ((object))
-  (let ((this-type
-          (specifier-type '(or fixnum
-                            #+64-bit single-float
-                            function
-                            list
-                            instance
-                            character))))
-    (cond ((not (types-equal-or-intersect this-type (lvar-type object))))
-          ((csubtypep (lvar-type object) this-type)
+  (let ((type (lvar-type object)))
+    (cond ((not (types-equal-or-intersect type (specifier-type 'other-pointer)))
            nil)
+          ((or (csubtypep type (specifier-type 'other-pointer))
+               ;; It doesn't negate to this type, so check both
+               (csubtypep type (specifier-type '(not (or fixnum #+64-bit single-float
+                                                                list function instance character)))))
+           t)
           ((give-up-ir1-transform)))))
 
 ;;; BIGNUMP is simpler than INTEGERP, so if we can rule out FIXNUM then ...

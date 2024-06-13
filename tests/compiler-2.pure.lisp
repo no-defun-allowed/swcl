@@ -4404,3 +4404,104 @@
       (declare ((function (fixnum &rest t)) j))
       (apply j l r))
    ((#'+ 1 '(2)) 3)))
+
+(with-test (:name :disabling-arg-count-checking)
+  (checked-compile-and-assert
+      (:optimize :safe)
+      `(lambda (x d)
+         (let ((f (lambda (x y)
+                    (< x y))))
+           (funcall d f)
+           (sort x f)))
+    ((nil #'funcall) (condition 'program-error))
+    ((nil #'list) nil))
+  (checked-compile-and-assert
+      (:optimize :default)
+      `(lambda (x d f)
+         (multiple-value-bind (f key)
+             (if f
+                 (values f #'car)
+                 (values (lambda (x y)
+                           (< x y))
+                         #'cdr))
+           (funcall d f)
+           (sort x f :key key)))
+    ((nil #'funcall nil) (condition 'program-error))
+    ((nil #'list nil) nil)))
+
+(with-test (:name :dont-rebind)
+  (let ((* :dont-rebind))
+   (checked-compile-and-assert
+    ()
+    `(lambda ()
+       (let* ((x *)
+              (* x))
+         x))
+    (() :dont-rebind))))
+
+(with-test (:name :multiple-uses-type-derivation)
+  (assert-type
+   (lambda (x a b)
+     (funcall (ecase x
+                (0 #'+)
+                (1 (lambda (x y) (- x y)))
+                (2 'logand))
+              a b))
+   number)
+  (assert-type
+   (lambda (x a b)
+     (let ((f (ecase x
+                (0 '+)
+                (2 'logand))))
+       (when a
+         (funcall f a b))))
+   (or null number)))
+
+(with-test (:name :multiple-uses-to-fdefn)
+  (checked-compile-and-assert
+      (:optimize :safe)
+      `(lambda (x a b)
+         (let ((fun (ecase x
+                      (0 'a)
+                      (1 'b))))
+           (when a
+             (funcall fun a b))))
+    ((0 nil 2) nil)
+    ((0 1 2) (condition 'undefined-function))))
+
+(with-test (:name :undefined-system-fun)
+  (checked-compile-and-assert
+      (:optimize :safe :allow-warnings t)
+      `(lambda ()
+         #'nil)
+    (() (condition 'undefined-function)))
+  (checked-compile-and-assert
+      (:optimize :safe :allow-warnings t)
+      `(lambda ()
+         #'(setf *standard-output*))
+    (() (condition 'undefined-function)))
+  (checked-compile-and-assert
+      (:optimize :safe :allow-warnings t)
+      `(lambda ()
+         (nil))
+    (() (condition 'undefined-function))))
+
+(with-test (:name :multiple-uses-type-mismatch-from-transforms)
+  (assert (nth-value 3
+                     (checked-compile
+                      `(lambda (m)
+                         (sb-kernel:the* (fixnum :use-annotations t) (or m (make-array 10))))
+                      :allow-style-warnings t)))
+  (checked-compile
+   `(lambda (m s)
+      (declare (optimize speed))
+      (sb-kernel:the* (fixnum :use-annotations t) (or m (position 10 (the list s))))))
+  (assert (nth-value 3
+                     (checked-compile
+                      `(lambda (m)
+                         (the fixnum (or m (make-array 10))))
+                      :allow-style-warnings t)))
+  (checked-compile
+   `(lambda (m s)
+      (declare (optimize speed))
+      (the fixnum (or m (position 10 (the list s)))))))

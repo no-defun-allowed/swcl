@@ -188,17 +188,7 @@
                (if (sb-disassem::dstate-absolutize-jumps dstate)
                    (+ (dstate-next-addr dstate) value)
                    value))
-  :printer (lambda (value stream dstate)
-             (cond (stream
-                    ;; This use of MAYBE-NOTE-STATIC-LISPOBJ gets us the
-                    ;; code blob called using canonical 'CALL rel32' form.
-                    (or #+immobile-space
-                        (and (integerp value)
-                             (maybe-note-static-lispobj value dstate))
-                        (maybe-note-assembler-routine value nil dstate))
-                    (print-label value stream dstate))
-                   (t
-                    (operand value dstate)))))
+  :printer #'print-rel32-disp)
 
 (define-arg-type accum
   :printer (lambda (value stream dstate)
@@ -1172,7 +1162,7 @@
                      (values (label+addend-label disp) (label+addend-addend disp))
                      (values disp 0))
                (when (eq addend :code)
-                 (setq addend (- sb-vm:other-pointer-lowtag (component-header-length))))
+                 (setq addend (- other-pointer-lowtag (component-header-length))))
                ;; To point at ADDEND bytes beyond the label, pretend that the PC
                ;; at which the EA occurs is _smaller_ by that amount.
                (emit-dword-displacement-backpatch
@@ -1211,9 +1201,13 @@
        (cond ((= mod #b01)
               (emit-byte segment disp))
              ((or (= mod #b10) (null base))
-              (if (fixup-p disp)
-                  (emit-absolute-fixup segment disp)
-                  (emit-signed-dword segment disp))))))))
+              (cond ((not (fixup-p disp))
+                     (emit-signed-dword segment disp))
+                    ((eq (fixup-flavor disp) :assembly-routine)
+                     (note-fixup segment :*abs32 disp)
+                     (emit-signed-dword segment 0))
+                    (t
+                     (emit-absolute-fixup segment disp)))))))))
 
 ;;;; utilities
 
@@ -2269,7 +2263,7 @@
   (:printer byte-imm ((op #xCE)) :default :print-name 'into :control #'break-control)
   (:emitter
    #+sw-int-avoidance ; emit CALL [EA] to skip over the trap instruction
-   (let ((where (ea (make-fixup 'sb-vm::synchronous-trap :assembly-routine*))))
+   (let ((where (ea (make-fixup 'sb-vm::synchronous-trap :assembly-routine))))
      (emit-prefixes segment where nil :do-not-set)
      (emit-byte segment #xFF)
      (emit-ea segment where #b010))
@@ -3343,12 +3337,30 @@
                                 collect (prog1 (ldb (byte 8 0) val)
                                           (setf val (ash val -8))))))))))
 
+;;; Return an address which when _dereferenced_ will return ADDR
+(defun sb-vm::asm-routine-indirect-address (addr)
+  (let ((i (sb-fasl::asm-routine-index-from-addr addr)))
+    (declare (ignorable i))
+    #-immobile-space (sap-int (sap+ (code-instructions sb-fasl:*assembler-routines*)
+                                    (ash i word-shift)))
+    ;; When asm routines are in relocatable text space, the vector of indirections
+    ;; is stored externally in static space. It's unfortunately overly complicated
+    ;; to get the address of that vector in genesis. But it doesn't matter.
+    #+immobile-space
+    (or
+     ;; Accounting for the jump-table-count as the first unboxed word in
+     ;; code-instructions, subtract 1 from I to get the correct vector element.
+     #-sb-xc-host (sap-int (sap+ (vector-sap sb-fasl::*asm-routine-vector*)
+                                 (ash (1- i) word-shift)))
+     (error "unreachable"))))
+
 ;;; This gets called by LOAD to resolve newly positioned objects
 ;;; with things (like code instructions) that have to refer to them.
-;;; Return KIND if the fixup needs to be recorded in %CODE-FIXUPS.
 ;;; The code object we're fixing up is pinned whenever this is called.
 (defun fixup-code-object (code offset value kind flavor)
   (declare (type index offset))
+  (when (and (eq flavor :assembly-routine) (eq kind :*abs32))
+    (setq value (sb-vm::asm-routine-indirect-address value)))
   (let ((sap (code-instructions code)))
     (case flavor
       (:card-table-index-mask ; the VALUE is nbits, so convert it to an AND mask
@@ -3368,7 +3380,7 @@
                        (signed-sap-ref-64 sap offset)
                        (signed-sap-ref-32 sap offset)))
        (ecase kind
-         (:abs32 ; 32 unsigned bits
+         ((:abs32 :*abs32) ; 32 unsigned bits
           (setf (sap-ref-32 sap offset) value))
          (:rel32
           ;; Replace word with the difference between VALUE and current pc.
@@ -3386,7 +3398,7 @@
           (setf (sap-ref-64 sap offset) value))))))
   nil)
 
-(defun sb-fasl::pack-fixups-for-reapplication (fixup-notes &aux abs32-fixups imm-fixups)
+(defun sb-c::pack-fixups-for-reapplication (fixup-notes &aux abs32-fixups imm-fixups)
   ;; An absolute fixup is stored in the code header's %FIXUPS slot if it
   ;; references an immobile-space (but not static-space) object.
   ;; Note that call fixups occur in both :REL32 and :ABS32 kinds. We can ignore the :REL32 kind.
@@ -3516,9 +3528,9 @@
     (when (and (gpr-tn-p dst1)
                (location= dst2 dst1)
                (eq size1 :qword)
-               (eql src1 (lognot sb-vm:fixnum-tag-mask))
+               (eql src1 (lognot fixnum-tag-mask))
                (member size2 '(:dword :qword))
-               (typep src2 `(integer ,sb-vm:n-fixnum-tag-bits 63)))
+               (typep src2 `(integer ,n-fixnum-tag-bits 63)))
       (add-stmt-labels next (stmt-labels stmt))
       (delete-stmt stmt)
       next)))
