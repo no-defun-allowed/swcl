@@ -602,8 +602,7 @@
                          sizebuf
                          +ansi-stream-in-buffer-extra+
                          (- +ansi-stream-in-buffer-length+
-                            +ansi-stream-in-buffer-extra+)
-                         nil))
+                            +ansi-stream-in-buffer-extra+)))
          (start (- +ansi-stream-in-buffer-length+ count)))
     (declare (type index start count))
     (cond ((zerop count)
@@ -2429,13 +2428,13 @@ benefit of the function GET-OUTPUT-STREAM-STRING."
                      ((typep seq 'simple-base-string)
                       (cond
                         ((eq (ansi-stream-n-bin stream) #'fd-stream-read-n-characters/utf-8)
-                         (fd-stream-read-n-characters/utf-8-to-base-string stream seq start needed))
+                         (fd-stream-read-sequence/utf-8-to-base-string stream seq start needed))
                         ((eq (ansi-stream-n-bin stream) #'fd-stream-read-n-characters/utf-8/crlf)
-                         (fd-stream-read-n-characters/utf-8-crlf-to-base-string stream seq start needed))))
+                         (fd-stream-read-sequence/utf-8-crlf-to-base-string stream seq start needed))))
                      ((eq (ansi-stream-n-bin stream) #'fd-stream-read-n-characters/utf-8)
-                      (fd-stream-read-n-characters/utf-8-to-string stream seq start needed))
+                      (fd-stream-read-sequence/utf-8-to-string stream seq start needed))
                      ((eq (ansi-stream-n-bin stream) #'fd-stream-read-n-characters/utf-8/crlf)
-                      (fd-stream-read-n-characters/utf-8-crlf-to-character-string stream seq start needed))))
+                      (fd-stream-read-sequence/utf-8-crlf-to-character-string stream seq start needed))))
           (labels ((refill-buffer ()
                      (prog1 (fast-read-char-refill stream nil)
                        (setf %frc-index% (ansi-stream-in-index %frc-stream%))))

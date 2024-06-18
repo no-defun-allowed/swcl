@@ -129,9 +129,8 @@
   (buffering :full :type (member :full :line :none))
   ;; controls whether the input buffer must be cleared before output
   ;; (must be done for files, not for sockets, pipes and other data
-  ;; sources where input and output aren't related).  non-NIL means
-  ;; don't clear input buffer.
-  (dual-channel-p nil)
+  ;; sources where input and output aren't related).
+  (synchronize-output nil)
   ;; character position if known -- this may run into bignums, but
   ;; we probably should flip it into null then for efficiency's sake...
   (output-column nil :type (or (and unsigned-byte
@@ -309,7 +308,8 @@
                ;; Try a non-blocking write, if SERVE-EVENT is allowed, queue
                ;; whatever is left over. Otherwise wait until we can write.
                (aver (< head tail))
-               (synchronize-stream-output stream)
+               (when (fd-stream-synchronize-output stream)
+                 (synchronize-stream-output stream))
                (loop
                  (let ((length (- tail head)))
                    (multiple-value-bind (count errno)
@@ -345,7 +345,8 @@
                                                      stream errno)))))))))))))
 
 (defun finish-writing-sequence (sequence stream start end)
-  (synchronize-stream-output stream)
+  (when (fd-stream-synchronize-output stream)
+    (synchronize-stream-output stream))
   (loop
    (let ((length (- end start)))
      (multiple-value-bind (count errno)
@@ -400,7 +401,8 @@
 ;;; possible.
 (defun write-output-from-queue (stream)
   (aver (fd-stream-serve-events stream))
-  (synchronize-stream-output stream)
+  (when (fd-stream-synchronize-output stream)
+    (synchronize-stream-output stream))
   (let (not-first-p)
     (tagbody
      :pop-buffer
@@ -455,7 +457,8 @@
          (error ":END before :START!"))
         ((> end start)
          (let ((length (- end start)))
-           (synchronize-stream-output stream)
+           (when (fd-stream-synchronize-output stream)
+             (synchronize-stream-output stream))
            (multiple-value-bind (count errno)
                (sb-unix:unix-write (fd-stream-fd stream) thing start length)
              (cond ((eql count length)
@@ -647,10 +650,7 @@
 (defun synchronize-stream-output (stream)
   ;; If we're reading and writing on the same file, flush buffered
   ;; input and rewind file position accordingly.
-  (unless (or (fd-stream-dual-channel-p stream)
-              (and
-               (eq (fd-stream-in stream) #'ill-in)
-               (eq (fd-stream-bin stream) #'ill-bin)))
+  (when (fd-stream-synchronize-output stream)
     (let ((adjust (nth-value 1 (flush-input-buffer stream))))
       (unless (eql 0 adjust)
         (sb-unix:unix-lseek (fd-stream-fd stream) (- adjust) sb-unix:l_incr)))))
@@ -674,7 +674,8 @@
                   tail (buffer-tail obuf)))))
       ,@(unless (eq (car buffering) :none)
          ;; FIXME: Why this here? Doesn't seem necessary.
-         `((synchronize-stream-output ,stream-var)))
+         `((when (fd-stream-synchronize-output ,stream-var)
+             (synchronize-stream-output ,stream-var))))
       ,(if restart
            `(block output-nothing
               ,@body
@@ -699,7 +700,8 @@
                    tail (buffer-tail obuf)))))
        ;; FIXME: Why this here? Doesn't seem necessary.
        ,@(unless (eq (car buffering) :none)
-          `((synchronize-stream-output ,stream-var)))
+          `((when (fd-stream-synchronize-output ,stream-var)
+              (synchronize-stream-output ,stream-var))))
        ,(if restart
             `(block output-nothing
                ,@body
@@ -1565,7 +1567,8 @@
          (let ((start (or start 0))
                (end (or end (length string))))
            (declare (type index start end))
-           (synchronize-stream-output stream)
+           (when (fd-stream-synchronize-output stream)
+             (synchronize-stream-output stream))
            (unless (<= 0 start end (length string))
              (sequence-bounding-indices-bad-error string start end))
            (do ()
@@ -1619,8 +1622,7 @@
                (tail (buffer-tail obuf)))
            ,out-expr))
        ,@(unless fd-stream-read-n-characters
-           `((defun ,in-function (stream buffer sbuffer start requested eof-error-p
-                                  &aux (total-copied 0))
+           `((defun ,in-function (stream buffer sbuffer start requested &aux (total-copied 0))
                (declare (type fd-stream stream)
                         (type index start requested total-copied)
                         (type ansi-stream-cin-buffer buffer)
@@ -1708,32 +1710,24 @@
                        ;; (where this check will be false). This allows establishing
                        ;; high-level handlers for decode errors (for example
                        ;; automatically resyncing in Lisp comments).
-                       (when (plusp total-copied)
-                         (return-from ,in-function total-copied))
-                       (when (stream-decoding-error-and-handle
-                              stream decode-break-reason unit)
-                         (if eof-error-p
-                             (error 'end-of-file :stream stream)
-                             (return-from ,in-function total-copied)))
+                       (unless (plusp total-copied)
+                         (stream-decoding-error-and-handle stream decode-break-reason unit))
                        ;; we might have been given stuff to use instead, so
                        ;; we have to return (and trust our caller to know
                        ;; what to do about TOTAL-COPIED being 0).
                        (return-from ,in-function total-copied)))
                    (setf (buffer-head ibuf) head)
                    ;; Maybe we need to refill the stream buffer.
-                   (cond (;; If was data in the stream buffer, we're done.
+                   (when (or
+                          ;; If there was data in the stream buffer, we're done.
                           (plusp total-copied)
-                          (return total-copied))
-                         (;; If EOF, we're done in another way.
-                          (or (eq decode-break-reason 'eof)
-                              (null (catch 'eof-input-catcher
-                                      (refill-input-buffer stream))))
-                          (if eof-error-p
-                              (error 'end-of-file :stream stream)
-                              (return total-copied)))
-                         ;; Otherwise we refilled the stream buffer, so fall
-                         ;; through into another pass of the loop.
-                         ))))))
+                          ;; If EOF, we're also done
+                          (null (catch 'eof-input-catcher
+                                  (refill-input-buffer stream))))
+                     (return total-copied))
+                   ;; Otherwise we refilled the stream buffer, so fall
+                   ;; through into another pass of the loop.
+                   )))))
        (def-input-routine/variable-width ,in-char-function (character
                                                             ,external-format
                                                             ,in-size-expr
@@ -1900,7 +1894,8 @@
 ;;; OUTPUT-P indicate what slots to fill. The buffering slot must be
 ;;; set prior to calling this routine.
 (defun set-fd-stream-routines (fd-stream element-type canonized-external-format external-format-entry
-                               input-p output-p buffer-p)
+                               input-p output-p buffer-p
+                               dual-channel-p)
   (let* ((target-type (case element-type
                         (unsigned-byte '(unsigned-byte 8))
                         (signed-byte '(signed-byte 8))
@@ -2042,7 +2037,10 @@
             (fd-stream-sout fd-stream) (if (eql cout-size 1)
                                            #'fd-sout #'ill-out))
       (setf output-size (or cout-size bout-size))
-      (setf output-type (or cout-type bout-type)))
+      (setf output-type (or cout-type bout-type))
+      (when (and input-p
+                 (not dual-channel-p))
+        (setf (fd-stream-synchronize-output fd-stream) t)))
 
     (when (and input-size output-size
                (not (eq input-size output-size)))
@@ -2478,7 +2476,6 @@
                             :delete-original delete-original
                             :pathname pathname
                             :buffering buffering
-                            :dual-channel-p dual-channel-p
                             :element-mode element-mode
                             :serve-events serve-events
                             :timeout
@@ -2486,7 +2483,7 @@
                                 (coerce timeout 'single-float)
                                 nil))))
       (set-fd-stream-routines stream element-type canonized-external-format external-format-entry
-                              input output input-buffer-p)
+                              input output input-buffer-p dual-channel-p)
       (when auto-close
         (finalize stream
                   (lambda ()

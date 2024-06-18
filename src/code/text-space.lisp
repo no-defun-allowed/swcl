@@ -19,8 +19,8 @@
           (mov-ea (find-inst #x8B (get-inst-space)))
           (mov-imm-acc (find-inst #xB8 (get-inst-space)))
           (dstate (make-dstate nil))
-          (sap (int-sap 0))
-          (seg (sb-disassem::%make-segment :sap-maker (lambda () sap))))
+          (code-sap (int-sap 0))
+          (seg (sb-disassem::%make-segment :sap-maker (lambda () code-sap))))
      (declare (ignorable mov-ea mov-imm-acc))
      (macrolet ((do-functions ((fun-var addr-var) &body body)
                   ;; Loop over all embedded functions
@@ -29,8 +29,8 @@
                             (,addr-var (+ (get-lisp-obj-address ,fun-var)
                                           (- fun-pointer-lowtag)
                                           (ash simple-fun-insts-offset word-shift))))
-                       (with-pinned-objects (sap) ; Mutate SAP to point to fun
-                         (setf (sap-ref-word (int-sap (get-lisp-obj-address sap))
+                       (with-pinned-objects (code-sap) ; Mutate SAP to point to fun
+                         (setf (sap-ref-word (int-sap (get-lisp-obj-address code-sap))
                                              (- n-word-bytes other-pointer-lowtag))
                                ,addr-var))
                        (setf (seg-virtual-location seg) ,addr-var
@@ -47,10 +47,8 @@
 
 #+immobile-code
 (defun sb-vm::collect-immobile-code-relocs ()
-  (let ((code-components
-         (make-array 20000 :element-type 'sb-vm:word :fill-pointer 0 :adjustable t))
-        (relocs
-         (make-array 100000 :element-type 'sb-vm:word :fill-pointer 0 :adjustable t))
+  (let ((code-components (make-array 20000 :element-type 'word :fill-pointer 0 :adjustable t))
+        (relocs (make-array 100000 :element-type 'word :fill-pointer 0 :adjustable t))
         (seg (sb-disassem::%make-segment
               :sap-maker (lambda () (error "Bad sap maker")) :virtual-location 0))
         (dstate (make-dstate nil)))
@@ -92,7 +90,7 @@
 
       ;; Immobile space - code components can jump to immobile space,
       ;; read-only space, and C runtime routines.
-      (sb-vm:map-allocated-objects
+      (map-allocated-objects
        (lambda (code type size)
          (declare (ignore size))
          (when (and (= type code-header-widetag) (plusp (code-n-entries code)))
@@ -152,15 +150,15 @@
                         ((and (eq inst mov-imm-acc)
                               ;; ensure not a 64-bit move
                               (eql (sb-disassem::dstate-inst-properties dstate) 0))
-                         (let ((value (sap-ref-32 sap (1+ (dstate-cur-offs dstate)))))
+                         (let ((value (sap-ref-32 code-sap (1+ (dstate-cur-offs dstate)))))
                            (dolist (fdefn all-fdefns)
                              (when (eql (get-lisp-obj-address fdefn) value)
                                (pushnew fdefn observable-fdefns)))))
                         ;; find FDEFNs in code header as the source of MOV EA to register
                         ((and (eq inst mov-ea)
-                              (eql (sap-ref-8 sap (dstate-cur-offs dstate)) #x8B)
-                              (rip-relative-p (sap-ref-8 sap (1+ (dstate-cur-offs dstate)))))
-                         (let ((addr (+ (signed-sap-ref-32 sap (+ (dstate-cur-offs dstate) 2))
+                              (eql (sap-ref-8 code-sap (dstate-cur-offs dstate)) #x8B)
+                              (rip-relative-p (sap-ref-8 code-sap (1+ (dstate-cur-offs dstate)))))
+                         (let ((addr (+ (signed-sap-ref-32 code-sap (+ (dstate-cur-offs dstate) 2))
                                         (dstate-next-addr dstate))))
                            (when (and (not (logtest addr (ash sb-vm:lowtag-mask -1))) ; aligned
                                       (<= boxed-begin addr) (< addr boxed-end))
@@ -180,7 +178,7 @@
                                               (return fdefn)))))
                                (when (and fdefn (neq (info :function :inlinep (fdefn-name fdefn))
                                                      'notinline))
-                                 (push (cons (+ (sap- sap code-insts)
+                                 (push (cons (+ (sap- code-sap code-insts)
                                                 (1+ (sb-disassem:dstate-cur-offs dstate)))
                                              fdefn)
                                        fixups)))))))))

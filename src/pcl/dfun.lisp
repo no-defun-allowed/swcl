@@ -1113,10 +1113,17 @@ Except see also BREAK-VICIOUS-METACIRCLE.  -- CSR, 2003-05-28
               (index (standard-slot-value/eslotd slotd 'location))
               (type (gf-info-simple-accessor-type arg-info)))
           (when (and method
-                     (subtypep (ecase accessor-type
-                                 ((reader) (car classes))
-                                 ((writer) (cadr classes)))
-                               class))
+                     (let ((method-class (ecase accessor-type
+                                           ((reader) (car classes))
+                                           ((writer) (cadr classes)))))
+                       (or (eq method-class class)
+                           ;; SUBTYPEP doesn't work because it calls the CLASS-WRAPPER GF.
+                           (block nil
+                             (sb-kernel::do-subclassoids ((subclassoid layout)
+                                                          (layout-classoid (standard-slot-value/class class 'wrapper)))
+                               (declare (ignore layout))
+                               (when (eq method-class (classoid-pcl-class subclassoid))
+                                 (return t)))))))
             (return-from break-vicious-metacircle
               (values index (list method) type index)))))))
   (error "~@<vicious metacircle:  The computation of an ~
