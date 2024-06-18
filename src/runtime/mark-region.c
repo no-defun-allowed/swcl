@@ -312,11 +312,11 @@ page_index_t scan_for_single_line_page(int page_type, generation_index_t gen,
   gc_assert(gen != SCRATCH_GENERATION);
  again:
   for (page_index_t where = start->page; where < end; where++) {
-    if (!target_pages[where] &&
+    if (small_object_lines[where] < GENCGC_PAGE_BYTES / LINE_SIZE &&
+        !target_pages[where] &&
         ((start->allow_free_pages && page_free_p(where)) ||
          (page_table[where].type == page_type &&
-          page_table[where].gen != PSEUDO_STATIC_GENERATION)) &&
-        small_object_lines[where] < GENCGC_PAGE_BYTES / LINE_SIZE) {
+          page_table[where].gen != PSEUDO_STATIC_GENERATION))) {
       if (!page_table[where].type)
           prepare_pages(1, where, where, page_type==PAGE_TYPE_CODE?page_type:0,
                         get_alloc_generation());
@@ -342,8 +342,8 @@ page_index_t scan_for_single_line_page(int page_type, generation_index_t gen,
   return -1;
 }
 
-void allocate_into_single_line_page(page_index_t page, struct alloc_region *region) {
-  bool result = try_allocate_small(LINE_SIZE, region,
+void allocate_into_single_line_page(uword_t nbytes, page_index_t page, struct alloc_region *region) {
+  bool result = try_allocate_small(nbytes, region,
                                    address_line(page_address(page)),
                                    address_line(page_address(page + 1)));
   if (!result) {

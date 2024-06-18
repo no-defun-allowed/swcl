@@ -1278,7 +1278,7 @@ long gc_card_table_mask;
  * region is full, so in most cases it's not needed. */
 
 /* Make this easy for Lisp to read. */
-int small_allocation_count = 0;
+int tiny_allocation_count = 0, small_allocation_count = 0;
 
 int gencgc_alloc_profiler;
 
@@ -1397,13 +1397,14 @@ lisp_alloc(__attribute__((unused)) int flags,
     } else if (nbytes <= LINE_SIZE) {
       int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
       gc_assert(ret);
-      if (!gc_active_p) small_allocation_count++;
+      if (!gc_active_p) tiny_allocation_count++;
       page_index_t new_page = scan_for_single_line_page(page_type, gc_alloc_generation,
                                                         &alloc_start, page_table_pages);
       if (new_page == -1) gc_heap_exhausted_error_or_lose(0, nbytes);
+      set_alloc_start_page(page_type, alloc_start);
       ret = mutex_release(&free_pages_lock);
       gc_assert(ret);
-      allocate_into_single_line_page(new_page, region);
+      allocate_into_single_line_page(nbytes, new_page, region);
       new_obj = region->start_addr;
       gc_memclear(page_type, new_obj, addr_diff(region->end_addr, new_obj));
     } else {

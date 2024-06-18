@@ -73,7 +73,7 @@ extern bool try_allocate_small_after_region(sword_t nbytes,
                                             struct alloc_region *region);
 extern page_index_t scan_for_single_line_page(int page_type, generation_index_t gen,
                                               struct allocator_state *start, page_index_t end);
-extern void allocate_into_single_line_page(page_index_t page, struct alloc_region *region);
+extern void allocate_into_single_line_page(uword_t nbytes, page_index_t page, struct alloc_region *region);
 extern page_index_t try_allocate_large(uword_t nbytes,
                                        int page_type, generation_index_t gen,
                                        struct allocator_state *start, page_index_t end,
