@@ -195,6 +195,14 @@ void pre_search_for_small_space(sword_t nbytes, int page_type,
   }
 }
 
+static void claim_page(page_index_t page, generation_index_t gen,
+                       uword_t bytes) {
+  bytes_allocated += bytes;
+  generations[gen].bytes_allocated += bytes;
+  small_object_words[gen][page] += bytes / N_WORD_BYTES;
+  small_object_lines[page] += bytes / LINE_SIZE;
+  set_page_bytes_used(page, page_bytes_used(page) + bytes);
+}
 
 static unsigned char allocation_line_metadata;
 extern generation_index_t get_alloc_generation();
@@ -229,11 +237,7 @@ bool try_allocate_small(sword_t nbytes, struct alloc_region *region,
         page_bytes_t claimed = (chunk_end - chunk_start) * LINE_SIZE;
         page_index_t page = find_page_index(line_address(chunk_start));
         generation_index_t gen = get_alloc_generation();
-        bytes_allocated += claimed;
-        generations[gen].bytes_allocated += claimed;
-        small_object_words[gen][page] += claimed / N_WORD_BYTES;
-        small_object_lines[page] += claimed / LINE_SIZE;
-        set_page_bytes_used(page, page_bytes_used(page) + claimed);
+        claim_page(page, gen, claimed);
       }
       return true;
     }
@@ -280,7 +284,7 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       /* Update residency statistics. mr_update_closed_region will
        * enliven all lines on this page, so it's correct to set the
        * page bytes used like this. GENCGC_PAGE_BYTES - used_lines
-       * is closer to what we'll allocate than 
+       * is closer to what we'll allocate than
        * GENCGC_PAGE_BYTES - used_bytes; the latter would essentially
        * count free space in used lines as reusable, when such space
        * is not reusable. */
@@ -289,13 +293,8 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
                    claimed = GENCGC_PAGE_BYTES - used_lines;
       if (used_bytes + claimed > GENCGC_PAGE_BYTES)
         lose("alloc page %ld, %d + %d\n", where, used_bytes, claimed);
-      if (!gc_active_p) {
-        bytes_allocated += claimed;
-        generations[gen].bytes_allocated += claimed;
-        small_object_words[gen][where] += claimed / N_WORD_BYTES;
-        small_object_lines[where] = GENCGC_PAGE_BYTES / LINE_SIZE;
-        set_page_bytes_used(where, used_bytes + claimed);
-      }
+      if (!gc_active_p)
+        claim_page(where, gen, claimed);
       if (where + 1 > next_free_page) next_free_page = where + 1;
       return true;
     }
@@ -377,7 +376,7 @@ void mr_update_closed_region(struct alloc_region *region, generation_index_t gen
     unsigned char copied = COPY_MARK(lines[l], ENCODE_GEN(gen));
     lines[l] = UNMARK_GEN(lines[l]) ? lines[l] : copied;
   }
-  
+
   page_table[the_page].type &= ~(OPEN_REGION_PAGE_FLAG);
   gc_set_region_empty(region);
 }
