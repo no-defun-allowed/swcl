@@ -211,8 +211,8 @@ extern generation_index_t get_alloc_generation();
  * and `end`. Updates `region` and returns true if we succeed, keeps
  * `region` untouched and returns false if we fail. The caller must
  * zero memory itself, if it wants zeroed memory. */
-bool try_allocate_small(sword_t nbytes, struct alloc_region *region,
-                        line_index_t start, line_index_t end) {
+static bool try_allocate_small(sword_t nbytes, struct alloc_region *region,
+                               line_index_t start, line_index_t end) {
   sword_t nlines = ALIGN_UP(nbytes, LINE_SIZE) / LINE_SIZE;
   line_index_t where = start;
   while (1) {
@@ -306,6 +306,51 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
   return false;
 }
 
+/* Find a page which can fit at least one line. */
+page_index_t scan_for_single_line_page(int page_type, generation_index_t gen,
+                                       struct allocator_state *start, page_index_t end) {
+  gc_assert(gen != SCRATCH_GENERATION);
+ again:
+  for (page_index_t where = start->page; where < end; where++) {
+    if (!target_pages[where] &&
+        ((start->allow_free_pages && page_free_p(where)) ||
+         (page_table[where].type == page_type &&
+          page_table[where].gen != PSEUDO_STATIC_GENERATION)) &&
+        small_object_lines[where] < GENCGC_PAGE_BYTES / LINE_SIZE) {
+      if (!page_table[where].type)
+          prepare_pages(1, where, where, page_type==PAGE_TYPE_CODE?page_type:0,
+                        get_alloc_generation());
+      set_page_type(page_table[where], page_type | OPEN_REGION_PAGE_FLAG);
+      page_table[where].gen = 0;
+      set_page_scan_start_offset(where, 0);
+      start->page = where + 1;
+      page_bytes_t used_bytes = page_bytes_used(where),
+                   used_lines = LINE_SIZE * small_object_lines[where],
+                   claimed = GENCGC_PAGE_BYTES - used_lines;
+      if (used_bytes + claimed > GENCGC_PAGE_BYTES)
+        lose("alloc page %ld, %d + %d\n", where, used_bytes, claimed);
+      if (!gc_active_p)
+        claim_page(where, gen, claimed);
+      if (where + 1 > next_free_page) next_free_page = where + 1;
+      return where;
+    }
+  }
+  if (!start->allow_free_pages) {
+    *start = (struct allocator_state){0, true};
+    goto again;
+  }
+  return -1;
+}
+
+void allocate_into_single_line_page(page_index_t page, struct alloc_region *region) {
+  bool result = try_allocate_small(LINE_SIZE, region,
+                                   address_line(page_address(page)),
+                                   address_line(page_address(page + 1)));
+  if (!result) {
+    lose("scan_for_single_line_page promised we'd at least have one free line on page #%ld", page);
+  }
+}
+
 /* Large object allocation */
 
 DEF_FINDER(find_free_page, page_index_t, page_free_p(where), -1);
@@ -376,6 +421,8 @@ void mr_update_closed_region(struct alloc_region *region, generation_index_t gen
     unsigned char copied = COPY_MARK(lines[l], ENCODE_GEN(gen));
     lines[l] = UNMARK_GEN(lines[l]) ? lines[l] : copied;
   }
+  /* Allocating in GC sets small_object_lines too low. */
+  if (gc_active_p) small_object_lines[the_page] = GENCGC_PAGE_BYTES / LINE_SIZE;
 
   page_table[the_page].type &= ~(OPEN_REGION_PAGE_FLAG);
   gc_set_region_empty(region);
@@ -1378,7 +1425,9 @@ void draw_line_bytemap() {
 }
 
 void draw_page_lines(page_index_t p) {
-  fprintf(stderr, "Page %ld:\n", p);
+  fprintf(stderr, "Page %ld, %d lines used, GC %s:\n",
+          p, small_object_lines[p],
+          gc_active_p ? "active" : "inactive");
   for_lines_in_page (l, p) {
     fprintf(stderr, "%2x ", line_bytemap[l]);
     if (l % 16 == 15) fprintf(stderr, "\n");

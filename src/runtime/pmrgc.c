@@ -1394,6 +1394,18 @@ lisp_alloc(__attribute__((unused)) int flags,
         new_obj = page_address(new_page);
         set_allocation_bit_mark(new_obj);
         gc_memclear(page_type, new_obj, nbytes);
+    } else if (nbytes <= LINE_SIZE) {
+      int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
+      gc_assert(ret);
+      if (!gc_active_p) small_allocation_count++;
+      page_index_t new_page = scan_for_single_line_page(page_type, gc_alloc_generation,
+                                                        &alloc_start, page_table_pages);
+      if (new_page == -1) gc_heap_exhausted_error_or_lose(0, nbytes);
+      ret = mutex_release(&free_pages_lock);
+      gc_assert(ret);
+      allocate_into_single_line_page(new_page, region);
+      new_obj = region->start_addr;
+      gc_memclear(page_type, new_obj, addr_diff(region->end_addr, new_obj));
     } else {
         /* Try to find a page before acquiring free_pages_lock. */
         pre_search_for_small_space(nbytes, page_type, &alloc_start, page_table_pages);

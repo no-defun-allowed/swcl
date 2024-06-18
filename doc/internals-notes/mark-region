@@ -1,4 +1,4 @@
-A mark-region collector is being developed for SBCL. The intention is
+There's now a parallel mark-region collector in SBCL. The intention is
 that avoiding compaction/copying should allow for better performance,
 should lead to a simpler parallel implementation, and should
 make implementing concurrent collection easier.
