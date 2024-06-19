@@ -207,8 +207,9 @@ static void fix_slot(lispobj *slot, lispobj *source, enum source source_type) {
        * hurt much. */
       /* TODO: should "rehash a hash table" be part of the source type? */
       struct vector* kv_vector = (struct vector*)source;
-      // Is it possible that this needs to be sync_fetch_and_or, or are we
-      // definitely single-threaded here?
+      /* A KV vector should only get traced and thus logged by one thread,
+       * but this is the only update to it, so I'm not too fussed that it could
+       * race were it logged by multiple threads. */
       KV_PAIRS_REHASH(kv_vector->data) |= make_fixnum(1);
     }
     break;
@@ -244,19 +245,15 @@ static void fix_slot(lispobj *slot, lispobj *source, enum source source_type) {
 }
 
 static void fix_slots() {
-  __attribute__((unused)) int c = 0;
-  for (uword_t thread = 0; thread < gc_threads; thread++) {
-    struct Qblock *remset = collector_tlses[thread].remset;
-    for (; remset; remset = remset->next) {
-      for (int n = 0; n < remset->count; n += 2) {
-        lispobj *slot = slot_from_tagged(remset->elements[n]),
-                *source = (lispobj*)remset->elements[n + 1];
-        enum source source_type = source_from_tagged(remset->elements[n]);
-        fix_slot(slot, source, source_type);
-        if (n + FIX_PREFETCH_DISTANCE < remset->count)
-          __builtin_prefetch(slot_from_tagged(remset->elements[n]));
-        c++;
-      }
+  struct Qblock *remset = collector_tls->remset;
+  for (; remset; remset = remset->next) {
+    for (int n = 0; n < remset->count; n += 2) {
+      lispobj *slot = slot_from_tagged(remset->elements[n]),
+        *source = (lispobj*)remset->elements[n + 1];
+      enum source source_type = source_from_tagged(remset->elements[n]);
+      fix_slot(slot, source, source_type);
+      if (n + FIX_PREFETCH_DISTANCE < remset->count)
+        __builtin_prefetch(slot_from_tagged(remset->elements[n]));
     }
   }
 }
@@ -303,7 +300,7 @@ void run_compaction(_Atomic(uword_t) *copy_meter,
       apply_pins();
       METER(copy_meter, move_objects());
       gc_close_collector_regions(0);
-      METER(fix_meter, fix_slots());
+      METER(fix_meter, run_on_thread_pool(fix_slots));
       METER(resweep_meter, resweep_moved_lines());
       should_compact("I just moved, but still");
       extern int check_hash_tables;
