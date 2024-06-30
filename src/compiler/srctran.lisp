@@ -265,6 +265,14 @@
          (append-args (make-gensym-list (length args))))
     `(lambda (,@list-args ,@append-args) (list* ,@list-args (append ,@append-args)))))
 
+(defoptimizer (append externally-checkable-type) ((&rest lists) node lvar)
+  (if (eq lvar (car (last lists)))
+      (specifier-type t)
+      (specifier-type 'list)))
+
+(setf (fun-info-externally-checkable-type (fun-info-or-lose 'nconc))
+      #'append-externally-checkable-type-optimizer)
+
 (flet ((remove-nil (fun args)
          (let ((remove
                  (loop for (arg . rest) on args
@@ -2100,17 +2108,17 @@
 (defoptimizer (%unary-truncate derive-type) ((number))
   (one-arg-derive-type number
                        #'%unary-truncate-derive-type-aux
-                       #'%unary-truncate))
+                       #'truncate))
 
 (defoptimizer (%unary-truncate/single-float derive-type) ((number))
   (one-arg-derive-type number
                        #'%unary-truncate-derive-type-aux
-                       #'%unary-truncate))
+                       #'truncate))
 
 (defoptimizer (%unary-truncate/double-float derive-type) ((number))
   (one-arg-derive-type number
                        #'%unary-truncate-derive-type-aux
-                       #'%unary-truncate))
+                       #'truncate))
 
 (defoptimizer (unary-truncate derive-type) ((number))
   (let* ((one (specifier-type '(integer 1 1)))
@@ -2120,7 +2128,7 @@
                                     #'truncate))
          (rem (one-arg-derive-type number
                                    (lambda (x) (truncate-derive-type-rem-aux x one nil))
-                                   #'rem)))
+                                   (lambda (x) (nth-value 1 (truncate x 1))))))
     (when (and quot rem)
       (make-values-type (list quot rem)))))
 
@@ -2163,7 +2171,7 @@
       (one-arg-derive-type number
                            #'(lambda (n)
                                (ftruncate-derive-type-quot-aux n divisor nil))
-                           #'%unary-ftruncate))))
+                           #'ftruncate))))
 
 #+round-float
 (macrolet ((derive (type)
@@ -2211,7 +2219,7 @@
                                         ,(if high
                                              (round high)
                                              '*))))))
-                       #'%unary-round))
+                       #'round))
 
 ;;; Define optimizers for FLOOR and CEILING.
 (macrolet
@@ -7484,12 +7492,15 @@
        (or-eq-transform-p (first key-lists))))
 
 (defun ensure-lvar-fun-form (lvar lvar-name &key (coercer '%coerce-callable-to-fun)
-                                                 give-up)
+                                                 give-up
+                                                 node)
   (aver (and lvar-name (symbolp lvar-name)))
   (if (csubtypep (lvar-type lvar) (specifier-type 'function))
       lvar-name
       (let ((cname (lvar-constant-global-fun-name lvar)))
         (cond (cname
+               (when node
+                 (record-late-xref :calls cname node))
                (if (lvar-annotations lvar)
                    `(with-annotations ,(lvar-annotations lvar)
                       (global-function ,cname))
@@ -7505,12 +7516,12 @@
 
 (deftransform %coerce-callable-to-fun ((thing) * * :node node)
   "optimize away possible call to FDEFINITION at runtime"
-  (ensure-lvar-fun-form thing 'thing :give-up t))
+  (ensure-lvar-fun-form thing 'thing :give-up t :node node))
 
 ;;; Behaves just like %COERCE-CALLABLE-TO-FUN but has an ir2-convert optimizer.
 (deftransform %coerce-callable-for-call ((thing) * * :node node)
   "optimize away possible call to FDEFINITION at runtime"
-  (ensure-lvar-fun-form thing 'thing :give-up t :coercer '%coerce-callable-for-call))
+  (ensure-lvar-fun-form thing 'thing :give-up t :coercer '%coerce-callable-for-call :node node))
 
 (define-source-transform %coerce-callable-to-fun (thing &environment env)
   (ensure-source-fun-form thing env :give-up t))
@@ -7525,7 +7536,9 @@
                  (when (and (constant-p leaf)
                             (or (internal-name-p (constant-value leaf))
                                 (almost-immediately-used-p fun use)))
-                   (change-ref-leaf use (find-global-fun (constant-value leaf) t) :recklessly t))))))
+                   (let ((name (constant-value leaf)))
+                     (record-late-xref :calls name use)
+                     (change-ref-leaf use (find-global-fun name t) :recklessly t)))))))
   nil)
 
 (defoptimizer (open derive-type) ((filename

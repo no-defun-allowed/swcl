@@ -1057,11 +1057,12 @@
 ;;; Note we must assume that a type including 0.0 may also include
 ;;; -0.0 and thus the result may be complex -infinity + i*pi.
 (defun log-derive-type-aux-1 (x)
-  (elfun-derive-type-simple x #'log 0d0 nil
+  (elfun-derive-type-simple x #'log
+                            (if (integer-type-p x) 0 0d0)
+                            nil
                             ;; (log 0) is an error
                             ;; and there's nothing between 0 and 1 for integers.
-                            (and (integer-type-p x)
-                                 0f0)
+                            (and (integer-type-p x) 0f0)
                             nil))
 
 (defun log-derive-type-aux-2 (x y same-arg)
@@ -1263,15 +1264,15 @@
         (cond
           (real-result-p re-type)
           (maybe-rat-result-p
-           (type-union element-type
-                       (specifier-type
-                        `(complex ,(numeric-type-class element-type)))))
+           (let ((complex (specifier-type
+                           `(complex ,(numeric-type-class element-type)))))
+             (if (types-equal-or-intersect im-type (specifier-type '(eql 0)))
+                 (type-union element-type complex)
+                 complex)))
           (t
            (make-numeric-type :class (numeric-type-class element-type)
                               :format (numeric-type-format element-type)
-                              :complexp (if definitely-rat-result-p
-                                            :real
-                                            :complex)))))
+                              :complexp :complex))))
       (specifier-type 'complex)))
 
 (defoptimizer (complex derive-type) ((re &optional im))
@@ -1482,6 +1483,18 @@
          (%deftransform op nil '(function (real (complex double-float)) (complex double-float))
                         #'real-double-float-contagion nil)))
   (dolist (op '(+ * / -))
+    (def op)))
+
+(flet ((def (op)
+           (%deftransform op nil '(function (single-float real) (values t single-float))
+                          #'single-float-real-contagion nil)
+           (%deftransform op nil '(function (real single-float) (values t single-float))
+                          #'real-single-float-contagion nil)
+           (%deftransform op nil '(function (double-float real))
+                          #'double-float-real-contagion nil)
+           (%deftransform op nil '(function (real double-float))
+                          #'real-double-float-contagion nil)))
+  (dolist (op '(floor ceiling round truncate ffloor fceiling fround ftruncate))
     (def op)))
 
 (flet ((def (op)
@@ -1819,41 +1832,66 @@
                `(deftransform truncate ((x &optional y)
                                         (,type
                                          &optional (or ,type ,@other-float-arg-types integer))
-                                        * :result result)
+                                        * :result result :node node)
                   (let* ((result-type (and result
                                            (lvar-derived-type result)))
                          (compute-all (and (or (eq result-type *wild-type*)
                                                (values-type-p result-type))
-                                           (not (type-single-value-p result-type)))))
-                    (if (or (not y)
-                            (and (constant-lvar-p y) (sb-xc:= 1 (lvar-value y))))
-                        (if compute-all
-                            `(unary-truncate x)
-                            `(let ((res (,',unary x)))
-                               ;; Dummy secondary value!
-                               (values res x)))
-                        (if compute-all
-                            `(let* ((f (,',coerce y))
-                                    (div (/ x f))
-                                    (res (,',unary div)))
-                               (values res
-                                       (- x (* f
-                                               #+round-float
-                                               (- (,',(ecase type
+                                           (not (type-single-value-p result-type))))
+                         (one-p (or (not y)
+                                    (and (constant-lvar-p y) (sb-xc:= 1 (lvar-value y))))))
+                    (cond
+                      ;; Compute only the remainder
+                      #+round-float
+                      ((mv-bind-unused-p result 0)
+                       (setf (node-derived-type node)
+                             (values-specifier-type '(values integer ,type &optional)))
+                       (erase-lvar-type result)
+                       `(let* ,(if one-p
+                                   `((div x))
+                                   `((f-divisor (,',coerce y))
+                                     (div (/ x f-divisor))))
+                          (values 0
+                                  (- x (* ,@(unless one-p
+                                                   '(f-divisor))
+                                               (+ (,',(ecase type
                                                         (double-float 'round-double)
                                                         (single-float 'round-single))
-                                                      div :truncate)
+                                                   div :truncate)
+                                                  ;; Turn -0 into 0
                                                   ,,(ecase type
-                                                      (double-float -0.0d0)
-                                                      (single-float -0.0f0)))
-                                               #-round-float
-                                               (locally
-                                                   (declare (flushable ,',coerce))
-                                                 (,',coerce res))))))
-                            `(let* ((f (,',coerce y))
-                                    (res (,',unary (/ x f))))
-                               ;; Dummy secondary value!
-                               (values res x)))))))))
+                                                      (double-float 0.0d0)
+                                                      (single-float 0.0f0))))))))
+                      (t
+                       (if one-p
+                           (if compute-all
+                               `(unary-truncate x)
+                               `(let ((res (,',unary x)))
+                                  ;; Dummy secondary value!
+                                  (values res x)))
+                           (if compute-all
+                               `(let* ((f (,',coerce y))
+                                       (div (/ x f))
+                                       (res (,',unary div)))
+                                  (values res
+                                          (- x (* f
+                                                  #+round-float
+                                                  (+ (,',(ecase type
+                                                           (double-float 'round-double)
+                                                           (single-float 'round-single))
+                                                      div :truncate)
+                                                     ;; Turn -0 into 0
+                                                     ,,(ecase type
+                                                         (double-float 0.0d0)
+                                                         (single-float 0.0f0)))
+                                                  #-round-float
+                                                  (locally
+                                                      (declare (flushable ,',coerce))
+                                                    (,',coerce res))))))
+                               `(let* ((f (,',coerce y))
+                                       (res (,',unary (/ x f))))
+                                  ;; Dummy secondary value!
+                                  (values res x)))))))))))
   (def single-float ())
   (def double-float (single-float)))
 
@@ -1868,10 +1906,33 @@
                `(deftransform ,name ((number &optional divisor)
                                      (,type
                                       &optional (or ,type ,@other-float-arg-types integer))
-                                     *)
+                                     * :result result :node node)
+                  (declare (ignorable result node))
                   (block nil
                     (let ((one-p (or (not divisor)
                                      (and (constant-lvar-p divisor) (sb-xc:= (lvar-value divisor) 1)))))
+                      ;; Compute only the remainder
+                      #+round-float
+                      (when (mv-bind-unused-p result 0)
+                        (setf (node-derived-type node)
+                              (values-specifier-type '(values integer ,type &optional)))
+                        (erase-lvar-type result)
+                        (return
+                          `(let* ,(if one-p
+                                      `((div number))
+                                      `((f-divisor (,',coerce divisor))
+                                        (div (/ number f-divisor))))
+                             (values 0
+                                     (- number (* ,@(unless one-p
+                                                      '(f-divisor))
+                                                  (+ (,',(ecase type
+                                                           (double-float 'round-double)
+                                                           (single-float 'round-single))
+                                                      div ,,(keywordicate name))
+                                                     ;; Turn -0 into 0
+                                                     ,,(ecase type
+                                                         (double-float 0.0d0)
+                                                         (single-float 0.0f0)))))))))
                       #+round-float
                       (when-vop-existsp (:translate %unary-ceiling)
                         (when one-p
@@ -1900,13 +1961,14 @@
                                     (rem (- number (* ,@(unless one-p
                                                           '(f-divisor))
                                                       #+round-float
-                                                      (- (,',(ecase type
+                                                      (+ (,',(ecase type
                                                                (double-float 'round-double)
                                                                (single-float 'round-single))
                                                              div :truncate)
+                                                         ;; Turn -0 into 0
                                                          ,,(ecase type
-                                                             (double-float -0.0d0)
-                                                             (single-float -0.0f0)))
+                                                             (double-float 0.0d0)
+                                                             (single-float 0.0f0)))
                                                       #-round-float
                                                       (locally
                                                           (declare (flushable ,',coerce))
@@ -1968,8 +2030,7 @@
     (movable foldable flushable))
 
   (deftransform %unary-ftruncate ((x) (single-float))
-    `(cond ((or (typep x '(single-float (-1f0) (0f0)))
-                (eql x -0f0))
+    `(cond ((typep x '(or (single-float (-1f0) (0f0)) (eql -0f0)))
             -0f0)
            ((typep x '(single-float ,(float (- (expt 2 sb-vm:single-float-digits)) 1f0)
                        ,(float (1- (expt 2 sb-vm:single-float-digits)) 1f0)))
@@ -1978,8 +2039,7 @@
             x)))
 
   (deftransform %unary-fround ((x) (single-float))
-    `(cond ((or (typep x '(single-float -0.5f0 (0f0)))
-                (eql x -0f0))
+    `(cond ((typep x '(or (single-float -0.5f0 (0f0)) (eql -0f0)))
             -0f0)
            ((typep x '(single-float ,(float (- (expt 2 sb-vm:single-float-digits)) 1f0)
                        ,(float (1- (expt 2 sb-vm:single-float-digits)) 1f0)))
@@ -1990,8 +2050,7 @@
   #+64-bit
   (progn
     (deftransform %unary-ftruncate ((x) (double-float))
-      `(cond ((or (typep x '(double-float (-1d0) (0d0)))
-                  (eql x -0d0))
+      `(cond ((typep x '(or (double-float (-1d0) (0d0)) (eql -0d0)))
               -0d0)
              ((typep x '(double-float ,(float (- (expt 2 sb-vm:double-float-digits)) 1d0)
                          ,(float (1- (expt 2 sb-vm:double-float-digits)) 1d0)))
@@ -2000,8 +2059,7 @@
               x)))
 
     (deftransform %unary-fround ((x) (double-float))
-      `(cond ((or (typep x '(double-float -0.5d0 (0d0)))
-                  (eql x -0d0))
+      `(cond ((typep x '(or (double-float -0.5d0 (0d0)) (eql -0d0)))
               -0d0)
              ((typep x '(double-float ,(float (- (expt 2 sb-vm:double-float-digits)) 1d0)
                          ,(float (1- (expt 2 sb-vm:double-float-digits)) 1d0)))
@@ -2181,3 +2239,13 @@
   (def >)
   (def <=)
   (def >=))
+
+(deftransform phase ((n))
+  (splice-fun-args n 'complex 2)
+  `(lambda (x y)
+     (atan y x)))
+
+(defoptimizer (atan externally-checkable-type) ((y &rest x) node)
+  (if x
+      (specifier-type 'real)
+      (specifier-type 'number)))

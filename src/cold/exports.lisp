@@ -499,8 +499,10 @@ possibly temporarily, because it might be used internally.")
    "HASHSET-INSERT-IF-ABSENT" "HASHSET-COUNT"
    "HASHSET-MUTEX" "MAP-HASHSET"
    ;; useful for DX keys that should persist to the heap
-   "SYS-COPY-STRUCT"
    "ENSURE-HEAP-LIST"
+   "SYS-COPY-STRUCT"
+   "SYS-TLAB-ADJOIN-EQ"
+   "SYS-TLAB-APPEND"
 
    ;; communication between the runtime and Lisp
 
@@ -621,6 +623,7 @@ possibly temporarily, because it might be used internally.")
    "C-STRING-ENCODING-ERROR"
    "C-STRING-DECODING-ERROR"
    "ATTEMPT-RESYNC" "FORCE-END-OF-FILE"
+   "FORM-SOURCE-BOUNDS"
 
    ;; not potential SB-EXT exports
    "GET-EXTERNAL-FORMAT" "GET-EXTERNAL-FORMAT-OR-LOSE"
