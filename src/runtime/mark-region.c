@@ -1192,6 +1192,10 @@ void mrgc_init() {
   compactor_init();
 }
 
+void dirty_card(uword_t index) {
+  gc_card_mark[index] = CARD_MARKED;
+}
+
 void mr_pre_gc(generation_index_t generation) {
   collection++;
 #ifdef LOG_COLLECTIONS

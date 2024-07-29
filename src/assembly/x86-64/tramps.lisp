@@ -90,6 +90,10 @@
       #-system-tlabs (inst break halt-trap)
       #+system-tlabs (call-c "switch_to_arena" #+win32 rdi-tn #+win32 rsi-tn))))
 
+(define-assembly-routine (dirty-card-tramp) ()
+  (with-registers-preserved (c)
+    (call-c "dirty_card" (ea 16 rbp-tn))))
+
 (macrolet ((def-routine-pair (name&options vars &body code)
              `(progn
                 (symbol-macrolet ((system-tlab-p 0))

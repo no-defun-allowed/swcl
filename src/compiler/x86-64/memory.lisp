@@ -55,7 +55,19 @@
            ;; I'd like to measure to see if using a register is actually better.
            ;; If all threads store 0, it might be easier on the CPU's store buffer.
            ;; Otherwise, it has to remember who "wins". 0 makes it indifferent.
-           (inst mov :byte (ea gc-card-table-reg-tn scratch-reg) CARD-MARKED))
+           #-log-card-marks
+           (inst mov :byte (ea gc-card-table-reg-tn scratch-reg) CARD-MARKED)
+           #+log-card-marks
+          (let ((CLEAN (gen-label)) (BACK (gen-label)))
+            ;; Slow-path if the card is clean and needs to be dirtied.
+            (inst cmp :byte (ea gc-card-table-reg-tn scratch-reg) CARD-MARKED)
+            (inst jmp :ne CLEAN)
+            (emit-label BACK)
+            (assemble (:elsewhere)
+              (emit-label CLEAN)
+              (inst push scratch-reg)
+              (inst call (ea (make-fixup 'dirty-card-tramp :assembly-routine*)))
+              (inst jmp BACK))))
           #+debug-gc-barriers
           (t
            (flet ((encode (x)
