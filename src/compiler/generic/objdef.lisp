@@ -579,6 +579,12 @@ during backtrace.
   ;; Kept here so that when the thread dies we can release the whole
   ;; memory we reserved.
   (os-address :c-type "void *" :pointer t)
+  #+mark-region-gc
+  (mixed-medium-tlab :c-type "struct alloc_region" :length 3)
+  ;; Cons cells themselves are always small, but some functions like LIST
+  ;; will allocate multiple cons cells in the one bump.
+  #+mark-region-gc
+  (cons-medium-tlab :c-type "struct alloc_region" :length 3)
   ;; Technically this slot violates our requirement that the size of the thread
   ;; primitive object be computable by assuming one word per slot. POSIX says
   ;; "IEEE Std 1003.1-2001/Cor 2-2004, item XBD/TC2/D6/26 is applied,

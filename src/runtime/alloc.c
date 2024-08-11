@@ -207,10 +207,14 @@ void gc_close_thread_regions(__attribute__((unused)) struct thread* th,
       { &th->mixed_tlab, PAGE_TYPE_MIXED },
       { &th->cons_tlab, PAGE_TYPE_CONS },
       { &th->sys_mixed_tlab, PAGE_TYPE_MIXED },
-      { &th->sys_cons_tlab, PAGE_TYPE_CONS }
+      { &th->sys_cons_tlab, PAGE_TYPE_CONS },
 #else
       { main_thread_mixed_region, PAGE_TYPE_MIXED },
       { main_thread_cons_region, PAGE_TYPE_CONS },
+#endif
+#ifdef LISP_FEATURE_MARK_REGION_GC
+      { &th->mixed_medium_tlab, PAGE_TYPE_MIXED },
+      { &th->cons_medium_tlab, PAGE_TYPE_CONS },
 #endif
     };
     sync_close_regions(0, locking, argv, N_THREAD_TLABS(argv));

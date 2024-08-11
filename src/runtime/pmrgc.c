@@ -193,7 +193,8 @@ generation_index_t get_alloc_generation() { return gc_alloc_generation; }
 /* We use five regions for the current newspace generation. */
 struct alloc_region gc_alloc_region[6];
 
-static _Atomic struct allocator_state alloc_start_states[8]; // one for each value of PAGE_TYPE_x
+static _Atomic struct allocator_state alloc_start_states[8];
+static page_index_t medium_start_page;
 static page_index_t max_alloc_start_page; // the largest of any array element
 page_index_t gencgc_alloc_start_page; // initializer for the preceding array
 
@@ -209,6 +210,7 @@ page_index_t gencgc_alloc_start_page; // initializer for the preceding array
 void reset_alloc_start_pages(bool allow_free_pages) {
   for (int i = 0; i < 8; i++)
     alloc_start_states[i] = (struct allocator_state){gencgc_alloc_start_page, allow_free_pages};
+  medium_start_page = gencgc_alloc_start_page;
   max_alloc_start_page = gencgc_alloc_start_page;
 }
 
@@ -1390,10 +1392,8 @@ lisp_alloc(__attribute__((unused)) int flags,
         allocator_record_backtrace(__builtin_frame_address(0), thread);
 #endif
 
-    ensure_region_closed(region, page_type);
     struct allocator_state alloc_start = get_alloc_start_page(page_type);
-    bool largep = nbytes >= LARGE_OBJECT_SIZE && page_type != PAGE_TYPE_CONS;
-    if (largep) {
+    if (nbytes >= LARGE_OBJECT_SIZE && page_type != PAGE_TYPE_CONS) {
         int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
         gc_assert(ret);
         uword_t largest_hole;
@@ -1406,7 +1406,33 @@ lisp_alloc(__attribute__((unused)) int flags,
         new_obj = page_address(new_page);
         set_allocation_bit_mark(new_obj);
         gc_memclear(page_type, new_obj, nbytes);
+    } else if (nbytes >= LINE_SIZE && page_type != PAGE_TYPE_CODE) {
+        /* alloc_code_object is going to make this fun. */
+        switch (page_type) {
+        case PAGE_TYPE_CONS:  region = &thread->cons_medium_tlab;  break;
+        case PAGE_TYPE_MIXED: region = &thread->mixed_medium_tlab; break;
+        default: lose("Not expecting lisp_alloc to give page type %d", page_type);
+        }
+        /* Try to bump-allocate into the medium region first. */
+        if ((char*)region->free_pointer + nbytes <= (char*)region->end_addr) {
+            new_obj = region->free_pointer;
+            region->free_pointer = (char*)region->free_pointer + nbytes;
+        } else {
+            ensure_region_closed(region, page_type);
+            int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
+            gc_assert(ret);
+            bool success = try_allocate_one_page(region, page_type,
+                                                 gc_alloc_generation,
+                                                 &medium_start_page, page_table_pages);
+            if (!success) gc_heap_exhausted_error_or_lose(0, nbytes);
+            ret = mutex_release(&free_pages_lock);
+            gc_assert(ret);
+            new_obj = region->start_addr;
+            region->free_pointer = (char*)region->start_addr + nbytes;
+            gc_memclear(page_type, new_obj, addr_diff(region->end_addr, new_obj));
+        }
     } else {
+        ensure_region_closed(region, page_type);
         /* Try to find a page before acquiring free_pages_lock. */
         pre_search_for_small_space(nbytes, page_type, &alloc_start, page_table_pages);
         int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);

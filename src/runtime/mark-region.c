@@ -272,6 +272,30 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
   return false;
 }
 
+/* Medium object allocation */
+
+bool try_allocate_one_page(struct alloc_region *region,
+                           int page_type, generation_index_t gen,
+                           page_index_t *start, page_index_t end) {
+  gc_assert(gen != SCRATCH_GENERATION);
+  for (page_index_t p = *start; p < end; p++)
+    if (page_free_p(p)) {
+      set_page_type(page_table[p], page_type | OPEN_REGION_PAGE_FLAG);
+      page_table[p].gen = gen;
+      set_page_scan_start_offset(p, 0);
+      bytes_allocated += GENCGC_PAGE_BYTES;
+            set_page_bytes_used(p, GENCGC_PAGE_BYTES);
+      generations[gen].bytes_allocated += GENCGC_PAGE_BYTES;
+      *start = p + 1;
+      for_lines_in_page (l, p)
+        line_bytemap[l] = gc_active_p ? 0 : FRESHEN_GEN(0);
+      region->start_addr = region->free_pointer = page_address(p);
+      region->end_addr = page_address(p + 1);
+      return true;
+    }
+  return false;
+}
+
 /* Large object allocation */
 
 DEF_FINDER(find_free_page, page_index_t, page_free_p(where), -1);
