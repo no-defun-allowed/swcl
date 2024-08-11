@@ -66,7 +66,7 @@
             (assemble (:elsewhere)
               (emit-label CLEAN)
               (inst push scratch-reg)
-              (inst call (ea (make-fixup 'dirty-card-tramp :assembly-routine*)))
+              (inst call (ea (make-fixup 'dirty-card-tramp :assembly-routine)))
               (inst jmp BACK))))
           #+debug-gc-barriers
           (t

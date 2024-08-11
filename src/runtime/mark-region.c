@@ -159,34 +159,6 @@ static line_index_t find_free_line(line_index_t start, line_index_t end) {
 }
 DEF_FINDER(find_used_line, line_index_t, line_bytemap[where], end);
 
-/* Try to find a page which could fit a new object. This should be
- * be called before the caller locks and calls
- * try_allocate_small_from_pages, to minimise the time spent locking. */
-void pre_search_for_small_space(sword_t nbytes, int page_type,
-                                struct allocator_state *state, page_index_t end) {
-  sword_t nlines = ALIGN_UP(nbytes, LINE_SIZE) / LINE_SIZE;
-  for (page_index_t page = state->page; page < end; page++) {
-    if (page_bytes_used(page) <= GENCGC_PAGE_BYTES - nbytes &&
-        !target_pages[page] &&
-        ((state->allow_free_pages && page_free_p(page)) ||
-         (page_table[page].type == page_type &&
-          page_table[page].gen != PSEUDO_STATIC_GENERATION))) {
-      line_index_t where = page_to_line(page);
-      line_index_t last_line = where + LINES_PER_PAGE;
-      while (where < last_line) {
-        line_index_t chunk_start = find_free_line(where, last_line);
-        if (chunk_start == -1) break;
-        line_index_t chunk_end = find_used_line(chunk_start, last_line);
-        if (chunk_end - chunk_start >= nlines) {
-          state->page = page;
-          return;
-        }
-        where = chunk_end + 1;
-      }
-    }
-  }
-}
-
 /* Try to find space to fit a new object in the lines between `start`
  * and `end`. Updates `region` and returns true if we succeed, keeps
  * `region` untouched and returns false if we fail. The caller must
@@ -262,6 +234,47 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       generations[gen].bytes_allocated += claimed;
       set_page_bytes_used(where, GENCGC_PAGE_BYTES);
       if (where + 1 > next_free_page) next_free_page = where + 1;
+      return true;
+    }
+  }
+  if (!start->allow_free_pages) {;
+    *start = (struct allocator_state){0, true};
+    goto again;
+  }
+  return false;
+}
+
+/* try_allocate_small_from_pages updates the start pointer to after the
+ * claimed page. */
+bool try_allocate_one_line(struct alloc_region *region,
+                           int page_type, generation_index_t gen,
+                           struct allocator_state *start, page_index_t end) {
+  gc_assert(gen != SCRATCH_GENERATION);
+ again:
+  for (page_index_t where = start->page; where < end; where++) {
+    if (page_bytes_used(where) < GENCGC_PAGE_BYTES &&
+        !target_pages[where] &&
+        ((start->allow_free_pages && page_free_p(where)) ||
+         (page_table[where].type == page_type &&
+          page_table[where].gen != PSEUDO_STATIC_GENERATION))) {
+      // mark-region has a different way of zeroing, so just tell prepare_pages
+      // that the page is unboxed if it's boxed, so that it doesn't try to zero.
+      if (!page_table[where].type)
+          prepare_pages(1, where, where, page_type==PAGE_TYPE_CODE?page_type:0,
+                        get_alloc_generation());
+      set_page_type(page_table[where], page_type | OPEN_REGION_PAGE_FLAG);
+      page_table[where].gen = 0;
+      set_page_scan_start_offset(where, 0);
+      start->page = where + 1;
+      /* Update residency statistics. mr_update_closed_region will
+       * enliven all lines on this page, so it's correct to set the
+       * page bytes used like this. */
+      page_bytes_t used = page_bytes_used(where), claimed = GENCGC_PAGE_BYTES - used;
+      bytes_allocated += claimed;
+      generations[gen].bytes_allocated += claimed;
+      set_page_bytes_used(where, GENCGC_PAGE_BYTES);
+      if (where + 1 > next_free_page) next_free_page = where + 1;
+      region->start_addr = region->free_pointer = region->end_addr = page_address(where);
       return true;
     }
   }

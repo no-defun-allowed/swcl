@@ -64,8 +64,6 @@ struct allocator_state {
   bool allow_free_pages;
 };
 
-extern void pre_search_for_small_space(sword_t nbytes, int page_type,
-                                       struct allocator_state *state, page_index_t end);
 extern bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
                                           int page_type, generation_index_t gen,
                                           struct allocator_state *start, page_index_t end);
@@ -74,6 +72,9 @@ extern bool try_allocate_small_after_region(sword_t nbytes,
 extern bool try_allocate_one_page(struct alloc_region *region,
                                   int page_type, generation_index_t gen,
                                   page_index_t *start, page_index_t end);
+extern bool try_allocate_one_line(struct alloc_region *region,
+                                  int page_type, generation_index_t gen,
+                                  struct allocator_state *start, page_index_t end);
 extern page_index_t try_allocate_large(uword_t nbytes,
                                        int page_type, generation_index_t gen,
                                        struct allocator_state *start, page_index_t end,

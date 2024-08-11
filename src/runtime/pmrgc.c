@@ -1406,8 +1406,24 @@ lisp_alloc(__attribute__((unused)) int flags,
         new_obj = page_address(new_page);
         set_allocation_bit_mark(new_obj);
         gc_memclear(page_type, new_obj, nbytes);
-    } else if (nbytes >= LINE_SIZE && page_type != PAGE_TYPE_CODE) {
-        /* alloc_code_object is going to make this fun. */
+    } else if (page_type == PAGE_TYPE_CODE) {
+        /* There is just the one allocation region for code with a lock,
+         * so there's no point in being clever about locking. */
+        ensure_region_closed(region, page_type);
+        int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
+        gc_assert(ret);
+        if (!gc_active_p) small_allocation_count++;
+        bool success =
+            try_allocate_small_from_pages(nbytes, region, page_type,
+                                          gc_alloc_generation,
+                                          &alloc_start, page_table_pages);
+        if (!success) gc_heap_exhausted_error_or_lose(0, nbytes);
+        set_alloc_start_page(page_type, alloc_start);
+        ret = mutex_release(&free_pages_lock);
+        gc_assert(ret);
+        new_obj = region->start_addr;
+        gc_memclear(page_type, new_obj, addr_diff(region->end_addr, new_obj));
+    } else if (nbytes > LINE_SIZE) {
         switch (page_type) {
         case PAGE_TYPE_CONS:  region = &thread->cons_medium_tlab;  break;
         case PAGE_TYPE_MIXED: region = &thread->mixed_medium_tlab; break;
@@ -1433,21 +1449,23 @@ lisp_alloc(__attribute__((unused)) int flags,
         }
     } else {
         ensure_region_closed(region, page_type);
-        /* Try to find a page before acquiring free_pages_lock. */
-        pre_search_for_small_space(nbytes, page_type, &alloc_start, page_table_pages);
+        /* Just find a page with one line free with the lock held... */
         int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
         gc_assert(ret);
         if (!gc_active_p) small_allocation_count++;
-        /* This search will only re-visit the page found by pre_search_for_small_space
-         * if no one else claimed the page since acquiring free_pages_lock. */
         bool success =
-            try_allocate_small_from_pages(nbytes, region, page_type,
-                                          gc_alloc_generation,
-                                          &alloc_start, page_table_pages);
+            try_allocate_one_line(region, page_type,
+                                  gc_alloc_generation,
+                                  &alloc_start, page_table_pages);
         if (!success) gc_heap_exhausted_error_or_lose(0, nbytes);
         set_alloc_start_page(page_type, alloc_start);
         ret = mutex_release(&free_pages_lock);
         gc_assert(ret);
+        /* and find that line without holding the lock. */
+        if (!try_allocate_small(nbytes, region,
+                                address_line(region->start_addr),
+                                address_line(region->start_addr) + LINES_PER_PAGE))
+            lose("Page #%d did not actually have a free line", find_page_index(region->start_addr));
         new_obj = region->start_addr;
         gc_memclear(page_type, new_obj, addr_diff(region->end_addr, new_obj));
     }
