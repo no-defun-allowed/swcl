@@ -159,6 +159,19 @@ static line_index_t find_free_line(line_index_t start, line_index_t end) {
 }
 DEF_FINDER(find_used_line, line_index_t, line_bytemap[where], end);
 
+/* Dirty cards so that the write barrier does not run the slow path
+ * on young objects which we don't care about. */
+static void pre_dirty_cards(void *start, void *end) {
+#ifdef LISP_FEATURE_LOG_CARD_MARKS
+  for (unsigned int card = addr_to_card_index(start);
+       card < addr_to_card_index(end);
+       card++)
+    gc_card_mark[card] = CARD_MARKED;
+#else
+  (void)start; (void)end;
+#endif
+}
+
 /* Try to find space to fit a new object in the lines between `start`
  * and `end`. Updates `region` and returns true if we succeed, keeps
  * `region` untouched and returns false if we fail. The caller must
@@ -183,6 +196,8 @@ bool try_allocate_small(sword_t nbytes, struct alloc_region *region,
        * to the page and its state in the page table.. */
       for (line_index_t c = chunk_start; c < chunk_end; c++)
         line_bytemap[c] = gc_active_p ? 0 : FRESHEN_GEN(0);
+      if (!gc_active_p)
+        pre_dirty_cards(region->start_addr, region->end_addr);
       return true;
     }
     if (chunk_end == end) return false;
@@ -304,6 +319,8 @@ bool try_allocate_one_page(struct alloc_region *region,
         line_bytemap[l] = gc_active_p ? 0 : FRESHEN_GEN(0);
       region->start_addr = region->free_pointer = page_address(p);
       region->end_addr = page_address(p + 1);
+      if (!gc_active_p)
+        pre_dirty_cards(region->start_addr, region->end_addr);
       return true;
     }
   return false;
