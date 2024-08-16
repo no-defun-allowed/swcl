@@ -52,31 +52,34 @@ static inline uword_t bitmap_size(uword_t n_ptes) {
     const int bitmap_bytes_per_page = GENCGC_PAGE_BYTES / (CONS_SIZE*N_WORD_BYTES) / 8;
     return n_ptes * bitmap_bytes_per_page;
 }
+extern void rebuild_free_arrays();
 
 /* Allocation */
 struct allocator_state {
-  /* This is an int and not page_index_t to make struct allocator_state
-   * be 8 bytes large, avoiding needing libatomic for 16-byte atomic loads. */
-  int page;
+  /* An index into a free array for small objects. */
+  int index;
+  /* (Medium objects share one medium_start_page; free pages are 
+   * interchangeable.) A page index for large objects. */
+  page_index_t large_page;
   /* We try not to allocate small objects from free pages in order to
    * reduce fragmentation, and to keep more free pages for large
    * objects. */
-  bool allow_free_pages;
+  bool use_free_pages;
 };
 
 extern bool try_allocate_small(sword_t nbytes, struct alloc_region *region,
                                line_index_t start, line_index_t end);
 extern bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
                                           int page_type, generation_index_t gen,
-                                          struct allocator_state *start, page_index_t end);
+                                          struct allocator_state *start);
 extern bool try_allocate_small_after_region(sword_t nbytes,
                                             struct alloc_region *region);
 extern bool try_allocate_one_page(struct alloc_region *region,
                                   int page_type, generation_index_t gen,
-                                  page_index_t *start, page_index_t end);
+                                  page_index_t *start);
 extern bool try_allocate_one_line(struct alloc_region *region,
                                   int page_type, generation_index_t gen,
-                                  struct allocator_state *start, page_index_t end);
+                                  struct allocator_state *start);
 extern page_index_t try_allocate_large(uword_t nbytes,
                                        int page_type, generation_index_t gen,
                                        struct allocator_state *start, page_index_t end,

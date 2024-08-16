@@ -193,9 +193,8 @@ generation_index_t get_alloc_generation() { return gc_alloc_generation; }
 /* We use five regions for the current newspace generation. */
 struct alloc_region gc_alloc_region[6];
 
-static _Atomic struct allocator_state alloc_start_states[8];
+static struct allocator_state alloc_start_states[8];
 static page_index_t medium_start_page;
-static page_index_t max_alloc_start_page; // the largest of any array element
 page_index_t gencgc_alloc_start_page; // initializer for the preceding array
 
 /* Each 'start_page' informs the region-opening logic where it should
@@ -209,13 +208,12 @@ page_index_t gencgc_alloc_start_page; // initializer for the preceding array
  * on a partially full page during GC */
 void reset_alloc_start_pages(bool allow_free_pages) {
   for (int i = 0; i < 8; i++)
-    alloc_start_states[i] = (struct allocator_state){gencgc_alloc_start_page, allow_free_pages};
+    alloc_start_states[i] = (struct allocator_state){0, gencgc_alloc_start_page, allow_free_pages};
   medium_start_page = gencgc_alloc_start_page;
-  max_alloc_start_page = gencgc_alloc_start_page;
 }
 
 static struct allocator_state
-get_alloc_start_page(unsigned int page_type)
+get_alloc_state(unsigned int page_type)
 {
     if (page_type > 7) lose("bad page_type: %d", page_type);
     struct thread* th = get_sb_vm_thread();
@@ -223,15 +221,15 @@ get_alloc_start_page(unsigned int page_type)
     page_index_t hint;
     switch (page_type) {
     case PAGE_TYPE_MIXED:
-        if ((hint = thread_extra_data(th)->mixed_page_hint) > 0 && hint <= global_start.page) {
+        if ((hint = thread_extra_data(th)->mixed_page_hint) > 0 && hint <= global_start.index) {
             thread_extra_data(th)->mixed_page_hint = - 1;
-            return (struct allocator_state){hint, global_start.allow_free_pages};
+            return (struct allocator_state){hint, global_start.large_page, global_start.use_free_pages};
         }
         break;
     case PAGE_TYPE_CONS:
-        if ((hint = thread_extra_data(th)->cons_page_hint) > 0 && hint <= global_start.page) {
+        if ((hint = thread_extra_data(th)->cons_page_hint) > 0 && hint <= global_start.index) {
             thread_extra_data(th)->cons_page_hint = - 1;
-            return (struct allocator_state){hint, global_start.allow_free_pages};
+            return (struct allocator_state){hint, global_start.large_page, global_start.use_free_pages};
         }
         break;
     }
@@ -239,10 +237,9 @@ get_alloc_start_page(unsigned int page_type)
 }
 
 static void
-set_alloc_start_page(unsigned int page_type, struct allocator_state state)
+set_alloc_state(unsigned int page_type, struct allocator_state state)
 {
     if (page_type > 7) lose("bad page_type: %d", page_type);
-    if (state.page > max_alloc_start_page) max_alloc_start_page = state.page;
     alloc_start_states[page_type] = state;
 }
 #include "private-cons.inc"
@@ -257,7 +254,7 @@ void gc_close_region(struct alloc_region *alloc_region,
  * when it can't fit in the open region.
  * This entry point is only for use within the GC itself. */
 void *collector_alloc_fallback(struct alloc_region* region, sword_t nbytes, int page_type) {
-    struct allocator_state alloc_start = get_alloc_start_page(page_type);
+    struct allocator_state alloc_start = get_alloc_state(page_type);
     void *new_obj;
     if ((uword_t)nbytes >= (GENCGC_PAGE_BYTES / 4 * 3)) {
         uword_t largest_hole;
@@ -271,11 +268,11 @@ void *collector_alloc_fallback(struct alloc_region* region, sword_t nbytes, int 
         bool success =
             try_allocate_small_from_pages(nbytes, region, page_type,
                                           gc_alloc_generation,
-                                          &alloc_start, page_table_pages);
+                                          &alloc_start);
         if (!success) gc_heap_exhausted_error_or_lose(0, nbytes);
         new_obj = region->start_addr;
     }
-    set_alloc_start_page(page_type, alloc_start);
+    set_alloc_state(page_type, alloc_start);
     return new_obj;
 }
 
@@ -1291,7 +1288,8 @@ long gc_card_table_mask;
  * The check for a GC trigger is only performed when the current
  * region is full, so in most cases it's not needed. */
 
-/* Make this easy for Lisp to read. */
+/* Make these easy for Lisp to read. */
+int medium_allocation_count = 0;
 int small_allocation_count = 0;
 
 int gencgc_alloc_profiler;
@@ -1392,7 +1390,7 @@ lisp_alloc(__attribute__((unused)) int flags,
         allocator_record_backtrace(__builtin_frame_address(0), thread);
 #endif
 
-    struct allocator_state alloc_start = get_alloc_start_page(page_type);
+    struct allocator_state alloc_start = get_alloc_state(page_type);
     if (nbytes >= LARGE_OBJECT_SIZE && page_type != PAGE_TYPE_CONS) {
         int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
         gc_assert(ret);
@@ -1400,7 +1398,7 @@ lisp_alloc(__attribute__((unused)) int flags,
         page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,
                                                    &alloc_start, page_table_pages, &largest_hole);
         if (new_page == -1) gc_heap_exhausted_error_or_lose(largest_hole, nbytes);
-        set_alloc_start_page(page_type, alloc_start);
+        set_alloc_state(page_type, alloc_start);
         ret = mutex_release(&free_pages_lock);
         gc_assert(ret);
         new_obj = page_address(new_page);
@@ -1412,13 +1410,13 @@ lisp_alloc(__attribute__((unused)) int flags,
         ensure_region_closed(region, page_type);
         int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
         gc_assert(ret);
-        if (!gc_active_p) small_allocation_count++;
+        if (!gc_active_p) medium_allocation_count++;
         bool success =
             try_allocate_small_from_pages(nbytes, region, page_type,
                                           gc_alloc_generation,
-                                          &alloc_start, page_table_pages);
+                                          &alloc_start);
         if (!success) gc_heap_exhausted_error_or_lose(0, nbytes);
-        set_alloc_start_page(page_type, alloc_start);
+        set_alloc_state(page_type, alloc_start);
         ret = mutex_release(&free_pages_lock);
         gc_assert(ret);
         new_obj = region->start_addr;
@@ -1437,9 +1435,10 @@ lisp_alloc(__attribute__((unused)) int flags,
             ensure_region_closed(region, page_type);
             int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
             gc_assert(ret);
+            if (!gc_active_p) medium_allocation_count++;
             bool success = try_allocate_one_page(region, page_type,
                                                  gc_alloc_generation,
-                                                 &medium_start_page, page_table_pages);
+                                                 &medium_start_page);
             if (!success) gc_heap_exhausted_error_or_lose(0, nbytes);
             ret = mutex_release(&free_pages_lock);
             gc_assert(ret);
@@ -1456,9 +1455,9 @@ lisp_alloc(__attribute__((unused)) int flags,
         bool success =
             try_allocate_one_line(region, page_type,
                                   gc_alloc_generation,
-                                  &alloc_start, page_table_pages);
+                                  &alloc_start);
         if (!success) gc_heap_exhausted_error_or_lose(0, nbytes);
-        set_alloc_start_page(page_type, alloc_start);
+        set_alloc_state(page_type, alloc_start);
         ret = mutex_release(&free_pages_lock);
         gc_assert(ret);
         /* and find that line without holding the lock. */

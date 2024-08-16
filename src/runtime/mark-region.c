@@ -57,8 +57,7 @@ static struct {
   _Atomic(uword_t) trace, trace_alive, trace_running;
   _Atomic(uword_t) sweep, weak, sweep_lines, sweep_pages;
   _Atomic(uword_t) compact, copy, fix, compact_resweep, raise;
-  uword_t fresh_pointers; uword_t pinned_pages;
-  uword_t compacts;
+  uword_t fresh_pointers; uword_t pinned_pages; uword_t compacts;
 } meters = { 0 };
 static unsigned int collection = 0;
 #define METER(name, action) \
@@ -104,13 +103,22 @@ _Atomic(uword_t) *mark_bitmap;
 unsigned char *line_bytemap;
 line_index_t line_count;
 uword_t mark_bitmap_size;
+static struct free_pages_t {
+  int count;
+  page_index_t *indices;
+} free_pages_by_type[8];
 
 static void allocate_bitmaps() {
-  mark_bitmap_size = bitmap_size(dynamic_space_size / GENCGC_PAGE_BYTES);
+  uword_t pages = dynamic_space_size / GENCGC_PAGE_BYTES;
+  mark_bitmap_size = bitmap_size(pages);
   allocate_bitmap(&allocation_bitmap, mark_bitmap_size, "allocation bitmap");
   allocate_bitmap((uword_t**)&mark_bitmap, mark_bitmap_size, "mark bitmap");
   line_count = dynamic_space_size / LINE_SIZE;
   allocate_bitmap((uword_t**)&line_bytemap, line_count, "line bytemap");
+  for (int i = 0; i < 8; i++)
+    allocate_bitmap((uword_t**)&free_pages_by_type[i].indices,
+                    pages * sizeof(page_index_t),
+                    "free page array");
 }
 
 uword_t lines_used() {
@@ -122,6 +130,18 @@ uword_t lines_used() {
 
 bool line_marked(void *pointer) {
   return line_bytemap[address_line(pointer)];
+}
+
+/* Pages are allocated by consulting arrays of free pages. */
+
+void rebuild_free_arrays() {
+  for (int i = 0; i < 8; i++) free_pages_by_type[i].count = 0;
+  for (page_index_t p = 0; p < page_table_pages; p++) {
+    if (page_bytes_used(p) < GENCGC_PAGE_BYTES && !page_single_obj_p(p)) {
+      unsigned char ty = page_table[p].type;
+      free_pages_by_type[ty].indices[free_pages_by_type[ty].count++] = p;
+    }
+  }
 }
 
 /* Allocation slow-path */
@@ -221,15 +241,16 @@ extern generation_index_t get_alloc_generation();
  * claimed page. */
 bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
                                    int page_type, generation_index_t gen,
-                                   struct allocator_state *start, page_index_t end) {
+                                   struct allocator_state *start) {
   gc_assert(gen != SCRATCH_GENERATION);
  again:
-  for (page_index_t where = start->page; where < end; where++) {
+  int search_type = start->use_free_pages ? FREE_PAGE_FLAG : page_type;
+  for (int i = start->index; i < free_pages_by_type[search_type].count; i++) {
+    page_index_t where = free_pages_by_type[search_type].indices[i];
     if (page_bytes_used(where) <= GENCGC_PAGE_BYTES - nbytes &&
         !target_pages[where] &&
-        ((start->allow_free_pages && page_free_p(where)) ||
-         (page_table[where].type == page_type &&
-          page_table[where].gen != PSEUDO_STATIC_GENERATION)) &&
+        (page_table[where].type == page_type || page_free_p(where)) &&
+        page_table[where].gen != PSEUDO_STATIC_GENERATION &&
         try_allocate_small(nbytes, region,
                            page_to_line(where), page_to_line(where + 1))) {
       // mark-region has a different way of zeroing, so just tell prepare_pages
@@ -240,7 +261,7 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       set_page_type(page_table[where], page_type | OPEN_REGION_PAGE_FLAG);
       page_table[where].gen = 0;
       set_page_scan_start_offset(where, 0);
-      start->page = where + 1;
+      start->index = i + 1;
       /* Update residency statistics. mr_update_closed_region will
        * enliven all lines on this page, so it's correct to set the
        * page bytes used like this. */
@@ -252,8 +273,9 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       return true;
     }
   }
-  if (!start->allow_free_pages) {;
-    *start = (struct allocator_state){0, true};
+  if (!start->use_free_pages) {
+    start->use_free_pages = true;
+    start->index = 0;
     goto again;
   }
   return false;
@@ -263,15 +285,16 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
  * claimed page. */
 bool try_allocate_one_line(struct alloc_region *region,
                            int page_type, generation_index_t gen,
-                           struct allocator_state *start, page_index_t end) {
+                           struct allocator_state *start) {
   gc_assert(gen != SCRATCH_GENERATION);
  again:
-  for (page_index_t where = start->page; where < end; where++) {
+  int search_type = start->use_free_pages ? FREE_PAGE_FLAG : page_type;
+  for (int i = start->index; i < free_pages_by_type[search_type].count; i++) {
+    page_index_t where = free_pages_by_type[search_type].indices[i];
     if (page_bytes_used(where) < GENCGC_PAGE_BYTES &&
         !target_pages[where] &&
-        ((start->allow_free_pages && page_free_p(where)) ||
-         (page_table[where].type == page_type &&
-          page_table[where].gen != PSEUDO_STATIC_GENERATION))) {
+        (page_table[where].type == page_type || page_free_p(where)) &&
+        page_table[where].gen != PSEUDO_STATIC_GENERATION) {
       // mark-region has a different way of zeroing, so just tell prepare_pages
       // that the page is unboxed if it's boxed, so that it doesn't try to zero.
       if (!page_table[where].type)
@@ -280,7 +303,7 @@ bool try_allocate_one_line(struct alloc_region *region,
       set_page_type(page_table[where], page_type | OPEN_REGION_PAGE_FLAG);
       page_table[where].gen = 0;
       set_page_scan_start_offset(where, 0);
-      start->page = where + 1;
+      start->index = i + 1;
       /* Update residency statistics. mr_update_closed_region will
        * enliven all lines on this page, so it's correct to set the
        * page bytes used like this. */
@@ -293,8 +316,9 @@ bool try_allocate_one_line(struct alloc_region *region,
       return true;
     }
   }
-  if (!start->allow_free_pages) {;
-    *start = (struct allocator_state){0, true};
+  if (!start->use_free_pages) {
+    start->use_free_pages = true;
+    start->index = 0;
     goto again;
   }
   return false;
@@ -304,9 +328,11 @@ bool try_allocate_one_line(struct alloc_region *region,
 
 bool try_allocate_one_page(struct alloc_region *region,
                            int page_type, generation_index_t gen,
-                           page_index_t *start, page_index_t end) {
+                           page_index_t *start) {
   gc_assert(gen != SCRATCH_GENERATION);
-  for (page_index_t p = *start; p < end; p++)
+  struct free_pages_t fully_free_pages = free_pages_by_type[FREE_PAGE_FLAG];
+  for (int i = *start; i < fully_free_pages.count; i++) {
+    page_index_t p = fully_free_pages.indices[i];
     if (page_free_p(p)) {
       set_page_type(page_table[p], page_type | OPEN_REGION_PAGE_FLAG);
       page_table[p].gen = gen;
@@ -314,7 +340,7 @@ bool try_allocate_one_page(struct alloc_region *region,
       bytes_allocated += GENCGC_PAGE_BYTES;
             set_page_bytes_used(p, GENCGC_PAGE_BYTES);
       generations[gen].bytes_allocated += GENCGC_PAGE_BYTES;
-      *start = p + 1;
+      *start = i + 1;
       for_lines_in_page (l, p)
         line_bytemap[l] = gc_active_p ? 0 : FRESHEN_GEN(0);
       region->start_addr = region->free_pointer = page_address(p);
@@ -323,6 +349,7 @@ bool try_allocate_one_page(struct alloc_region *region,
         pre_dirty_cards(region->start_addr, region->end_addr);
       return true;
     }
+  }
   return false;
 }
 
@@ -338,7 +365,7 @@ page_index_t try_allocate_large(uword_t nbytes,
   gc_assert(gen != SCRATCH_GENERATION);
   uword_t pages_needed = ALIGN_UP(nbytes, GENCGC_PAGE_BYTES) / GENCGC_PAGE_BYTES;
   uword_t remainder = nbytes % GENCGC_PAGE_BYTES;
-  page_index_t where = start->page;
+  page_index_t where = start->large_page;
   uword_t largest_hole_seen = 0;
   while (1) {
     page_index_t chunk_start = find_free_page(where, end);
@@ -364,7 +391,7 @@ page_index_t try_allocate_large(uword_t nbytes,
         set_page_scan_start_offset(p,
                                    GENCGC_PAGE_BYTES * (p - chunk_start));
       }
-      start->page = chunk_start + pages_needed;
+      start->large_page = chunk_start + pages_needed;
       bytes_allocated += nbytes;
       generations[gen].bytes_allocated += nbytes;
       if (last_page + 1 > next_free_page) next_free_page = last_page + 1;
@@ -916,6 +943,7 @@ static void __attribute__((noinline)) sweep_pages() {
   /* next_free_page is only maintained for page walking - we
    * reuse partially filled pages, so it's not useful for allocation */
   next_free_page = page_table_pages;
+  for (int i = 0; i < 8; i++) free_pages_by_type[i].count = 0;
   for (page_index_t p = 0; p < page_table_pages; p++) {
     /* Rather than clearing marks for every page, we only clear marks for
      * pages which were live before, as a dead page cannot have any marks
@@ -942,6 +970,13 @@ static void __attribute__((noinline)) sweep_pages() {
           (page_table[p].gen == generation_to_collect || generation_to_collect == PSEUDO_STATIC_GENERATION))
         generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
       next_free_page = p + 1;
+    }
+    /* Add the page to a free array */
+    if (!page_single_obj_p(p) &&
+        page_table[p].gen != PSEUDO_STATIC_GENERATION &&
+        page_bytes_used(p) < GENCGC_PAGE_BYTES) {
+      unsigned char ty = page_table[p].type;
+      free_pages_by_type[ty].indices[free_pages_by_type[ty].count++] = p;
     }
   }
 }
