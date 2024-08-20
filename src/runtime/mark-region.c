@@ -347,6 +347,7 @@ bool try_allocate_one_page(struct alloc_region *region,
       region->end_addr = page_address(p + 1);
       if (!gc_active_p)
         pre_dirty_cards(region->start_addr, region->end_addr);
+      if (p + 1 > next_free_page) next_free_page = p + 1;
       return true;
     }
   }

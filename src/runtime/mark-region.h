@@ -58,7 +58,7 @@ extern void rebuild_free_arrays();
 struct allocator_state {
   /* An index into a free array for small objects. */
   int index;
-  /* (Medium objects share one medium_start_page; free pages are 
+  /* (Medium objects share one medium_start_page; free pages are
    * interchangeable.) A page index for large objects. */
   page_index_t large_page;
   /* We try not to allocate small objects from free pages in order to
