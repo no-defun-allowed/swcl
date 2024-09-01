@@ -2853,7 +2853,7 @@ uword_t primitive_object_size(lispobj ptr) {
 generation_index_t verify_gens = HIGHEST_NORMAL_GENERATION + 2;
 
 /* Should we do a pre-scan of the heap before it's GCed? */
-int pre_verify_gen_0 = 1;
+int pre_verify_gen_0 = 0;
 
 int hexdump_enabled = 0;
 static int hexdump_counter;
