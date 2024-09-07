@@ -3,6 +3,7 @@
 #ifdef LISP_FEATURE_MARK_REGION_GC
 #include "lispobj.h"
 #include "core.h"
+#include "thread.h"
 
 /* Set line size so that every line byte corresponds to one mark
  * bitmap byte. */
@@ -98,7 +99,10 @@ extern void mr_preserve_range(lispobj *from, sword_t nwords);
 extern void mr_preserve_leaf(lispobj obj);
 extern void mr_preserve_object(lispobj obj);
 extern void mr_trace_bump_range(lispobj* start, lispobj *end);
-//extern bool pointer_survived_gc_yet(lispobj object);
+
+#ifdef LISP_FEATURE_LOG_CARD_MARKS
+extern void commit_card_log(struct thread *thread);
+#endif
 
 /* Running the GC */
 extern void mr_pre_gc(generation_index_t generation);

@@ -68,7 +68,9 @@ static struct Qblock *suballoc_allocate(struct suballocator *s) {
       uword_t size = INITIAL_SIZE << s->current_chunk;
       uword_t address = (uword_t)os_allocate(size);
       if (!address) lose("Failed to allocate suballocator chunk with %ld bytes.", size);
-      // fprintf(stderr, "alloc #%d: %ld at %ld\n", current_chunk, size, address);
+#if 0
+      fprintf(stderr, "%s alloc #%d: %ld at %ld\n", s->name, s->current_chunk, size, address);
+#endif
       chunk->start = chunk->free = address;
       chunk->size = size;
     }

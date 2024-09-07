@@ -53,7 +53,7 @@
 
 /* Metering */
 static struct {
-  _Atomic(uword_t) consider, scavenge, prefix;
+  _Atomic(uword_t) consider, scavenge, cards, prefix;
   _Atomic(uword_t) trace, trace_alive, trace_running;
   _Atomic(uword_t) sweep, weak, sweep_lines, sweep_pages;
   _Atomic(uword_t) compact, copy, fix, compact_resweep, raise;
@@ -70,12 +70,12 @@ void mr_print_meters() {
   fprintf(stderr,
           "collection %d (%.0f%% compacting):\n"
           "  %ldus consider\n"
-          "  %ld scavenge (%ld prefixes) %ld trace (%ld alive %ld running)\n"
+          "  %ld scavenge (%ld prefixes, %ld cards) %ld trace (%ld alive %ld running)\n"
           "  %ld sweep (%ld lines %ld pages) %ld compact (%ld copy %ld fix %ld resweep)\n"
           "  %ld raise; %ldB fresh %ldpg pinned\n",
           collection,
           collection ? 100.0 *  (float)meters.compacts / collection : 0.0,
-          NORM(consider), NORM(scavenge), NORM(prefix),
+          NORM(consider), NORM(scavenge), NORM(prefix), NORM(cards),
           NORM(trace), NORM(trace_alive), NORM(trace_running),
           NORM(sweep), NORM(sweep_lines), NORM(sweep_pages),
           NORM(compact), NORM(copy), NORM(fix), NORM(compact_resweep),
@@ -1099,9 +1099,60 @@ void mr_preserve_object(lispobj obj) {
 
 /* Scavenging older generations */
 
+#ifdef LISP_FEATURE_LOG_CARD_MARKS
+/* Card indices are 32-bit, lispobjs are 64-bit on 64-bit, so this wastes 
+ * space to reuse the Qblock machinery. */
+static struct suballocator current_log_suballocator = SUBALLOCATOR_INITIALIZER("Log A");
+static struct suballocator next_log_suballocator = SUBALLOCATOR_INITIALIZER("Log B");
+static struct Qblock *_Atomic current_log = NULL, *next_log = NULL;
+
+static void swap_logs() {
+  /* There's no logic to actually process the log yet. */
+  //gc_assert(!current_log);
+  current_log = next_log;
+  next_log = NULL;
+  suballoc_release(&current_log_suballocator);
+  /* Swap suballocators */
+  struct suballocator temp = current_log_suballocator;
+  current_log_suballocator = next_log_suballocator;
+  next_log_suballocator = temp;
+}
+
+#define CARD_LOG(thread) ((struct Qblock*)(thread->card_log))
+
+void commit_card_log(struct thread *thread) {
+  struct Qblock *log = CARD_LOG(thread);
+  if (log) {
+    struct Qblock *prior;
+    do {
+      prior = current_log;
+      log->next = prior;
+    } while (!atomic_compare_exchange_strong(&current_log, &prior, log));
+    thread->card_log = NULL;
+  }
+}
+
+void dirty_card(uword_t index) {
+  gc_card_mark[index] = CARD_MARKED;
+  struct thread *me = get_sb_vm_thread();
+  struct Qblock *log = CARD_LOG(me);
+  if (!log || log->count == QBLOCK_CAPACITY) {
+    commit_card_log(me);
+    struct Qblock *next = suballoc_allocate(&current_log_suballocator);
+    me->card_log = log = next;
+  }
+  log->elements[log->count++] = index;
+}
+#else
+static void swap_logs() { }
+#endif
+
 static void update_card_mark(int card, bool dirty) {
   if (gc_card_mark[card] != STICKY_MARK)
     gc_card_mark[card] = dirty ? CARD_MARKED : CARD_UNMARKED;
+  if (gc_card_mark[card] == STICKY_MARK || gc_card_mark[card] == CARD_MARKED) {
+    /* write into next_log */
+  }
 }
 
 /* Check if an object is dirty in some way that tracing wouldn't uncover.
@@ -1131,10 +1182,9 @@ static void scavenge_root_object(generation_index_t gen, lispobj *where) {
 }
 
 #define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
-static _Atomic(uword_t) root_objects_checked = 0, dirty_root_objects = 0;
 static void CPU_SPLIT scavenge_root_gens_worker(void) {
   page_index_t claim, limit;
-  uword_t local_root_objects_checked = 0, local_dirty_root_objects = 0, prefixes_checked = 0;
+  uword_t cards_checked = 0, prefixes_checked = 0;
   for_each_claim (claim, limit) {
     for (page_index_t i = claim; i < limit; i++) {
       unsigned char page_type = page_table[i].type & PAGE_TYPE_MASK;
@@ -1157,6 +1207,7 @@ static void CPU_SPLIT scavenge_root_gens_worker(void) {
                  j < CARDS_PER_PAGE;
                  j++, card++, start += WORDS_PER_CARD) {
               if (card_dirtyp(card)) {
+                cards_checked++;
                 lispobj *card_end = start + WORDS_PER_CARD;
                 lispobj *end = (limit < card_end) ? limit : card_end;
                 dirty = 0;
@@ -1170,6 +1221,7 @@ static void CPU_SPLIT scavenge_root_gens_worker(void) {
           case CODE_HEADER_WIDETAG: {
             int card = addr_to_card_index(page_address(i));
             if (page_starts_contiguous_block_p(i) && card_dirtyp(card)) {
+              cards_checked++;
               source_object = (lispobj*)page_address(i);
               dirty_generation_source = page_table[i].gen, dirty = 0;
               trace_other_object((lispobj*)page_address(i));
@@ -1206,6 +1258,7 @@ static void CPU_SPLIT scavenge_root_gens_worker(void) {
         line_index_t last_seen = -1;
         for (unsigned int n = 0; n < CARDS_PER_PAGE; n++)
           if (mask[n]) {
+            cards_checked++;
             line_index_t this_line = address_line(start) + n;
             unsigned char a = allocations[this_line], this_gen = DECODE_GEN(line_bytemap[this_line]);
             bool worked = 0;
@@ -1248,12 +1301,10 @@ static void CPU_SPLIT scavenge_root_gens_worker(void) {
   }
   dirty_generation_source = 0;
   atomic_fetch_add(&meters.prefix, prefixes_checked);
-  atomic_fetch_add(&root_objects_checked, local_root_objects_checked);
-  atomic_fetch_add(&dirty_root_objects, local_dirty_root_objects);
+  atomic_fetch_add(&meters.cards, cards_checked);
 }
 
 static void __attribute__((noinline)) mr_scavenge_root_gens() {
-  root_objects_checked = 0; dirty_root_objects = 0;
   last_page_processed = 0;
   run_on_thread_pool(scavenge_root_gens_worker);
 }
@@ -1282,10 +1333,6 @@ void mrgc_init() {
   compactor_init();
 }
 
-void dirty_card(uword_t index) {
-  gc_card_mark[index] = CARD_MARKED;
-}
-
 void mr_pre_gc(generation_index_t generation) {
   collection++;
 #ifdef LOG_COLLECTIONS
@@ -1304,6 +1351,8 @@ void mr_pre_gc(generation_index_t generation) {
 void mr_collect_garbage(bool raise) {
   extern void reset_alloc_start_pages(bool allow_free_pages);
   if (generation_to_collect != PSEUDO_STATIC_GENERATION) {
+    struct thread *th;
+    for_each_thread(th) commit_card_log(th);
     METER(scavenge, mr_scavenge_root_gens());
   }
   trace_static_roots();
@@ -1336,6 +1385,7 @@ void mr_collect_garbage(bool raise) {
   if (gencgc_verbose>1) mr_print_meters();
   reset_alloc_start_pages(false);
   reset_pinned_pages();
+  swap_logs();
 }
 
 void zero_all_free_ranges() {

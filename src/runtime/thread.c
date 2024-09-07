@@ -485,6 +485,9 @@ unregister_thread(struct thread *th,
         th->remset = 0;
     }
 #endif
+#ifdef LISP_FEATURE_LOG_CARD_MARKS
+    commit_card_log(th);
+#endif
     gc_close_thread_regions(th, LOCK_PAGE_TABLE|CONSUME_REMAINDER);
 #ifdef LISP_FEATURE_SB_SAFEPOINT
     pop_gcing_safety(&scribble->safety);

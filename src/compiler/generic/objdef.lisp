@@ -658,6 +658,8 @@ during backtrace.
                        ;; large bins store a count and size
                        :length #.(+ (* 2 n-histogram-bins-large)
                                     n-histogram-bins-small))
+  ;; This is void* as to not require more headers.
+  #+log-card-marks (card-log :c-type "void *")
 
   ;; The *current-thread* MUST be the last slot in the C thread structure.
   ;; It it the only slot that needs to be noticed by the garbage collector.
