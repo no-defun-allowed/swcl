@@ -245,7 +245,15 @@
       (inst mov rax object)
       (inst shr rax gencgc-card-shift)
       (inst and :dword rax card-index-mask)
+      #-log-card-marks
       (inst mov :byte (ea gc-card-table-reg-tn rax) CARD-MARKED)
+      #+log-card-marks
+      (progn
+        ;; Slow-path if the card is clean and needs to be dirtied.
+        (inst cmp :byte (ea gc-card-table-reg-tn rax) CARD-MARKED)
+        (inst jmp :e STORE)
+        (inst push rax)
+        (inst call (ea (make-fixup 'dirty-card-tramp :assembly-routine))))
       STORE
       (inst mov rdi object)
       (inst mov rdx word-index)

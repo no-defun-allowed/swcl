@@ -187,16 +187,16 @@ DEF_FINDER(find_used_line, line_index_t, line_bytemap[where], end);
 
 /* Dirty cards so that the write barrier does not run the slow path
  * on young objects which we don't care about. */
-static void pre_dirty_cards(void *start, void *end) {
 #ifdef LISP_FEATURE_LOG_CARD_MARKS
+static void pre_dirty_cards(void *start, void *end) {
   for (unsigned int card = addr_to_card_index(start);
        card < addr_to_card_index(end);
        card++)
     gc_card_mark[card] = CARD_MARKED;
-#else
-  (void)start; (void)end;
-#endif
 }
+#else
+#define pre_dirty_cards(start, end)
+#endif
 
 /* Try to find space to fit a new object in the lines between `start`
  * and `end`. Updates `region` and returns true if we succeed, keeps
@@ -1106,7 +1106,7 @@ void mr_preserve_object(lispobj obj) {
 /* Scavenging older generations */
 
 #ifdef LISP_FEATURE_LOG_CARD_MARKS
-/* Card indices are 32-bit, lispobjs are 64-bit on 64-bit, so this wastes 
+/* Card indices are 32-bit, lispobjs are 64-bit on 64-bit, so this wastes
  * space to reuse the Qblock machinery. */
 static struct suballocator current_log_suballocator = SUBALLOCATOR_INITIALIZER("Log A");
 static struct suballocator next_log_suballocator = SUBALLOCATOR_INITIALIZER("Log B");
@@ -1198,6 +1198,7 @@ static void watch_deferred(lispobj *where, uword_t start, uword_t end) {
 
 #define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
 static void scavenge_root_object(generation_index_t gen, lispobj *where) {
+  source_object = where;
   dirty_generation_source = gen;
   trace_object(compute_lispobj(where));
 }
