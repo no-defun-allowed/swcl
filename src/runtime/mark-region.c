@@ -101,6 +101,9 @@ static void allocate_bitmap(uword_t **bitmap, uword_t size,
 uword_t *allocation_bitmap;
 _Atomic(uword_t) *mark_bitmap;
 unsigned char *line_bytemap;
+#ifdef LISP_FEATURE_LOG_CARD_MARKS
+unsigned char *card_visited_bytemap;
+#endif
 line_index_t line_count;
 uword_t mark_bitmap_size;
 static struct free_pages_t {
@@ -115,6 +118,9 @@ static void allocate_bitmaps() {
   allocate_bitmap((uword_t**)&mark_bitmap, mark_bitmap_size, "mark bitmap");
   line_count = dynamic_space_size / LINE_SIZE;
   allocate_bitmap((uword_t**)&line_bytemap, line_count, "line bytemap");
+#ifdef LISP_FEATURE_LOG_CARD_MARKS
+  allocate_bitmap((uword_t**)&card_visited_bytemap, line_count, "cards visited bytemap");
+#endif
   for (int i = 0; i < 8; i++)
     allocate_bitmap((uword_t**)&free_pages_by_type[i].indices,
                     pages * sizeof(page_index_t),
@@ -1107,8 +1113,7 @@ static struct suballocator next_log_suballocator = SUBALLOCATOR_INITIALIZER("Log
 static struct Qblock *_Atomic current_log = NULL, *next_log = NULL;
 
 static void swap_logs() {
-  /* There's no logic to actually process the log yet. */
-  //gc_assert(!current_log);
+  gc_assert(!current_log);
   current_log = next_log;
   next_log = NULL;
   suballoc_release(&current_log_suballocator);
@@ -1150,14 +1155,22 @@ static void swap_logs() { }
 static void update_card_mark(int card, bool dirty) {
   if (gc_card_mark[card] != STICKY_MARK)
     gc_card_mark[card] = dirty ? CARD_MARKED : CARD_UNMARKED;
-  if (gc_card_mark[card] == STICKY_MARK || gc_card_mark[card] == CARD_MARKED) {
-    /* write into next_log */
+#ifdef LISP_FEEATURE_LOG_CARD_MARKS
+  /* Write dirty cards into next_log, for the next GC to read. */
+  if (gc_card_mark[card] != CARD_UNMARKED) {
+    if (!next_log || next_log->count == QBLOCK_CAPACITY) {
+      struct Qblock *block = suballoc_allocate(&next_log_suballocator);
+      block->next = next_log;
+      next_log = block;
+    }
+    next_log->elements[next_log->count++] = card;
   }
+#endif
 }
 
 /* Check if an object is dirty in some way that tracing wouldn't uncover.
  * This happens specifically with weak vectors and weak values, as we
- * don't actually trace those when "tracing" them. We only record dirtyness
+ * don't actually trace those when "tracing" them. We only record dirtiness
  * without tracing, however, in order to allow weak values to be culled
  * without a (more) major GC, and to update the remembered set for
  * compaction. We still treat large weak vectors as non-weak though -
@@ -1176,12 +1189,103 @@ static void watch_deferred(lispobj *where, uword_t start, uword_t end) {
   }
 }
 
+#define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
 static void scavenge_root_object(generation_index_t gen, lispobj *where) {
   dirty_generation_source = gen;
   trace_object(compute_lispobj(where));
 }
 
-#define WORDS_PER_CARD (GENCGC_CARD_BYTES/N_WORD_BYTES)
+static void scavenge_single_object_card(int card, lispobj *limit) {
+  lispobj *start = card_index_to_addr(card), *card_end = start + WORDS_PER_CARD;
+  lispobj *end = (limit < card_end) ? limit : card_end;
+  dirty = 0;
+  for (lispobj *p = start; p < end; p++)
+    mark(*p, p, SOURCE_NORMAL);
+  update_card_mark(card, dirty);
+}
+
+static void scavenge_code_card(page_index_t i, int card) {
+  source_object = (lispobj*)page_address(i);
+  dirty_generation_source = page_table[i].gen;
+  dirty = 0;
+  trace_other_object((lispobj*)page_address(i));
+  update_card_mark(card, dirty);
+}
+
+static bool scavenge_small_card(line_index_t line, int card, line_index_t last_seen) {
+  unsigned char *allocations = (unsigned char*)allocation_bitmap;
+  unsigned char a = allocations[line], gen = DECODE_GEN(line_bytemap[line]);
+  page_index_t page = line / LINES_PER_PAGE;
+  bool worked = 0;
+  dirty = 0;
+  /* Check if there's a new->old word belonging to a
+   * SIMPLE-VECTOR overlapping this card. */
+  for (int word = 0; word < 2 * (a ? __builtin_ctz(a) : 8); word++)
+    if (gc_gen_of(line_address(line)[word], PSEUDO_STATIC_GENERATION) < gen) {
+      lispobj *before = find_object((uword_t)line_address(line), (uword_t)page_address(page));
+      /* Check if we already scavenged this vector before, too. */
+      if (before
+          && widetag_of(before) == SIMPLE_VECTOR_WIDETAG
+          && address_line(before) > last_seen)
+        scavenge_root_object(gen, before);
+      /* Always dirty this card regardless of avoiding a
+       * re-scan or not, as we already found an interesting
+       * pointer. */
+      dirty = 1, worked = 1;
+      break;
+    }
+  while (a) {
+    worked = 1;
+    int bit = __builtin_ctzl(a);
+    scavenge_root_object(gen, (lispobj*)(line_address(line)) + 2 * bit);
+    a &= ~(1 << bit);
+  }
+  update_card_mark(card, dirty);
+  return worked;
+}
+
+#ifdef LISP_FEATURE_LOG_CARD_MARKS
+/* Scan the log. */
+static void mr_scavenge_root_gens() {
+  for (struct Qblock *block = current_log; block; block = block->next)
+    for (int i = 0; i < block->count; i++) {
+      int card = (int)block->elements[i];
+      if (!card_visited_bytemap[card]) {
+        card_visited_bytemap[card] = 1;
+        lispobj *addr = card_index_to_addr(card);
+        page_index_t page = find_page_index(addr);
+        unsigned char page_type = page_table[page].type & PAGE_TYPE_MASK;
+        if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(page)) continue;
+        if (page_single_obj_p(page)) {
+          source_object = (lispobj*)(page_address(i) - page_scan_start_offset(i));
+          dirty_generation_source = page_table[i].gen;
+          int widetag = widetag_of(source_object);
+          switch (widetag) {
+          case SIMPLE_VECTOR_WIDETAG:
+          case WEAK_POINTER_WIDETAG: {
+            lispobj *limit = (lispobj*)page_address(i) + page_words_used(i);
+            scavenge_single_object_card(card, limit);
+            break;
+          }
+          case CODE_HEADER_WIDETAG:
+            if (page_starts_contiguous_block_p(page))
+              scavenge_code_card(page, card);
+            break;
+          }
+        } else {
+          scavenge_small_card(address_line(addr), card, -1);
+        }
+      }
+    }
+  /* Clear card_visited_bytemap */
+  for (struct Qblock *block = current_log; block; block = block->next)
+    for (int i = 0; i < block->count; i++) {
+      card_visited_bytemap[block->elements[i]] = 0;
+    }
+  current_log = NULL;
+}
+#else
+/* Scan the card table. */
 static void CPU_SPLIT scavenge_root_gens_worker(void) {
   page_index_t claim, limit;
   uword_t cards_checked = 0, prefixes_checked = 0;
@@ -1202,18 +1306,12 @@ static void CPU_SPLIT scavenge_root_gens_worker(void) {
              * the end of a (sole) object on the page with this heap
              * layout when the object is large. */
             lispobj *limit = (lispobj*)page_address(i) + page_words_used(i);
-            lispobj *start = (lispobj*)page_address(i);
             for (int j = 0, card = addr_to_card_index(start);
                  j < CARDS_PER_PAGE;
-                 j++, card++, start += WORDS_PER_CARD) {
+                 j++, card++) {
               if (card_dirtyp(card)) {
                 cards_checked++;
-                lispobj *card_end = start + WORDS_PER_CARD;
-                lispobj *end = (limit < card_end) ? limit : card_end;
-                dirty = 0;
-                for (lispobj *p = start; p < end; p++)
-                  mark(*p, p, SOURCE_NORMAL);
-                update_card_mark(card, dirty);
+                scavenge_single_object_card(card, limit);
               }
             }
             break;
@@ -1222,10 +1320,7 @@ static void CPU_SPLIT scavenge_root_gens_worker(void) {
             int card = addr_to_card_index(page_address(i));
             if (page_starts_contiguous_block_p(i) && card_dirtyp(card)) {
               cards_checked++;
-              source_object = (lispobj*)page_address(i);
-              dirty_generation_source = page_table[i].gen, dirty = 0;
-              trace_other_object((lispobj*)page_address(i));
-              update_card_mark(card, dirty);
+              scavenge_code_card(i, card);
             }
             break;
           }
@@ -1260,33 +1355,7 @@ static void CPU_SPLIT scavenge_root_gens_worker(void) {
           if (mask[n]) {
             cards_checked++;
             line_index_t this_line = address_line(start) + n;
-            unsigned char a = allocations[this_line], this_gen = DECODE_GEN(line_bytemap[this_line]);
-            bool worked = 0;
-            dirty = 0;
-            /* Check if there's a new->old word belonging to a
-             * SIMPLE-VECTOR overlapping this card. */
-            for (int word = 0; word < 2 * (a ? __builtin_ctz(a) : 8); word++)
-              if (gc_gen_of(start[WORDS_PER_CARD * n + word], PSEUDO_STATIC_GENERATION) < this_gen) {
-                prefixes_checked++;
-                lispobj *before = find_object((uword_t)line_address(this_line), (uword_t)page_address(i));
-                /* Check if we already scavenged this vector before, too. */
-                if (before
-                    && widetag_of(before) == SIMPLE_VECTOR_WIDETAG
-                    && address_line(before) > last_seen)
-                  scavenge_root_object(this_gen, before);
-                /* Always dirty this card regardless of avoiding a
-                 * re-scan or not, as we already found an interesting
-                 * pointer. */
-                dirty = 1, worked = 1;
-                break;
-              }
-            while (a) {
-              worked = 1;
-              int bit = __builtin_ctzl(a);
-              scavenge_root_object(this_gen, start + WORDS_PER_CARD * n + 2 * bit);
-              a &= ~(1 << bit);
-            }
-            update_card_mark(first_card + n, dirty);
+            bool worked = scavenge_small_card(this_line, first_card + n, last_seen);
             /* Only advance last_seen if we did any work here.
              * If we always advance, we can confuse prefix scanning.
              * Suppose a simple-vector spans cards 0, 1 and 2, and 1
@@ -1308,6 +1377,7 @@ static void __attribute__((noinline)) mr_scavenge_root_gens() {
   last_page_processed = 0;
   run_on_thread_pool(scavenge_root_gens_worker);
 }
+#endif
 
 static void CPU_SPLIT raise_survivors(void) {
   unsigned char *bytemap = line_bytemap;
@@ -1315,9 +1385,21 @@ static void CPU_SPLIT raise_survivors(void) {
   unsigned char line = ENCODE_GEN((unsigned char)gen);
   unsigned char target = ENCODE_GEN((unsigned char)gen + 1);
   for (page_index_t p = 0; p < next_free_page; p++)
-    if (!page_free_p(p))
+    if (!page_free_p(p)) {
+#ifdef LISP_FEATURE_LOG_CARD_MARKS
+      /* Undo pre-dirtying, so that the next major GC doesn't waste time
+       * scavenging newly promoted cards. */
+      if (gen == 0) {
+        void *start = page_address(p);
+        int n, card; line_index_t line;
+        for (card = page_to_card_index(p), line = address_line(start), n = 0;
+             n < CARDS_PER_PAGE; card++, line++, n++)
+          gc_card_mark[card] = (bytemap[line] == target) ? CARD_UNMARKED : gc_card_mark[card];
+      }
+#endif
       for_lines_in_page(l, p)
         bytemap[l] = (bytemap[l] == line) ? target : bytemap[l];
+    }
   for (page_index_t p = 0; p < next_free_page; p++)
     if (page_table[p].gen == gen && page_single_obj_p(p))
       page_table[p].gen++;
