@@ -1112,6 +1112,13 @@ static struct suballocator current_log_suballocator = SUBALLOCATOR_INITIALIZER("
 static struct suballocator next_log_suballocator = SUBALLOCATOR_INITIALIZER("Log B");
 static struct Qblock *_Atomic current_log = NULL, *next_log = NULL;
 
+static void print_log() {
+  for (struct Qblock *block = current_log; block; block = block->next)
+    for (int i = 0; i < block->count; i++) {
+      fprintf(stderr, "%d ", (int)block->elements[i]);
+    }
+  fprintf(stderr, "\n");
+}
 static void swap_logs() {
   gc_assert(!current_log);
   current_log = next_log;
@@ -1121,12 +1128,6 @@ static void swap_logs() {
   struct suballocator temp = current_log_suballocator;
   current_log_suballocator = next_log_suballocator;
   next_log_suballocator = temp;
-  fprintf(stderr, "Log: ");
-  for (struct Qblock *block = current_log; block; block = block->next)
-    for (int i = 0; i < block->count; i++) {
-      fprintf(stderr, "%d ", (int)block->elements[i]);
-    }
-  fprintf(stderr, "\n");
 }
 
 #define CARD_LOG(thread) ((struct Qblock*)(thread->card_log))
@@ -1143,7 +1144,7 @@ void commit_card_log(struct thread *thread) {
   }
 }
 
-void dirty_card(uword_t index) {
+void dirty_card(int index) {
   gc_card_mark[index] = CARD_MARKED;
   struct thread *me = get_sb_vm_thread();
   struct Qblock *log = CARD_LOG(me);
@@ -1205,8 +1206,9 @@ static void scavenge_single_object_card(int card, lispobj *limit) {
   lispobj *start = card_index_to_addr(card), *card_end = start + WORDS_PER_CARD;
   lispobj *end = (limit < card_end) ? limit : card_end;
   dirty = 0;
-  for (lispobj *p = start; p < end; p++)
+  for (lispobj *p = start; p < end; p++) {
     mark(*p, p, SOURCE_NORMAL);
+  }
   update_card_mark(card, dirty);
 }
 
@@ -1227,7 +1229,7 @@ static bool scavenge_small_card(line_index_t line, int card, line_index_t last_s
   /* Check if there's a new->old word belonging to a
    * SIMPLE-VECTOR overlapping this card. */
   for (int word = 0; word < 2 * (a ? __builtin_ctz(a) : 8); word++)
-    if (gc_gen_of(line_address(line)[word], PSEUDO_STATIC_GENERATION) < gen) {
+    if (gc_gen_of(((lispobj*)(line_address(line)))[word], PSEUDO_STATIC_GENERATION) < gen) {
       lispobj *before = find_object((uword_t)line_address(line), (uword_t)page_address(page));
       /* Check if we already scavenged this vector before, too. */
       if (before
@@ -1265,13 +1267,13 @@ static void mr_scavenge_root_gens() {
         unsigned char page_type = page_table[page].type & PAGE_TYPE_MASK;
         if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(page)) continue;
         if (page_single_obj_p(page)) {
-          source_object = (lispobj*)(page_address(i) - page_scan_start_offset(i));
-          dirty_generation_source = page_table[i].gen;
+          source_object = (lispobj*)(page_address(page) - page_scan_start_offset(page));
+          dirty_generation_source = page_table[page].gen;
           int widetag = widetag_of(source_object);
           switch (widetag) {
           case SIMPLE_VECTOR_WIDETAG:
           case WEAK_POINTER_WIDETAG: {
-            lispobj *limit = (lispobj*)page_address(i) + page_words_used(i);
+            lispobj *limit = (lispobj*)page_address(page) + page_words_used(page);
             scavenge_single_object_card(card, limit);
             break;
           }

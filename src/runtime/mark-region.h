@@ -102,6 +102,7 @@ extern void mr_trace_bump_range(lispobj* start, lispobj *end);
 
 #ifdef LISP_FEATURE_LOG_CARD_MARKS
 extern void commit_card_log(struct thread *thread);
+extern void dirty_card(int index);
 #endif
 
 /* Running the GC */
