@@ -91,6 +91,9 @@
       #+system-tlabs (call-c "switch_to_arena" #+win32 rdi-tn #+win32 rsi-tn))))
 
 #+log-card-marks
+(define-assembly-routine (dirty-card-tramp/no-pseudo-atomic) ()
+  (with-registers-preserved (c)
+    (call-c "dirty_card" (ea 16 rbp-tn))))
 (define-assembly-routine (dirty-card-tramp) ()
   (pseudo-atomic ()
     (with-registers-preserved (c)
@@ -253,7 +256,9 @@
         (inst cmp :byte (ea gc-card-table-reg-tn rax) CARD-MARKED)
         (inst jmp :e STORE)
         (inst push rax)
-        (inst call (ea (make-fixup 'dirty-card-tramp :assembly-routine))))
+        (inst call (ea (make-fixup 'dirty-card-tramp/no-pseudo-atomic :assembly-routine)))
+        ;; XXX: ytho
+        (inst add rsp-tn n-word-bytes))
       STORE
       (inst mov rdi object)
       (inst mov rdx word-index)
