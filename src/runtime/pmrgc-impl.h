@@ -298,7 +298,7 @@ extern long gc_card_table_mask;
 static inline lispobj *card_index_to_addr(int card) {
   uword_t addr = (DYNAMIC_SPACE_START &~ ((uword_t)gc_card_table_mask << GENCGC_CARD_SHIFT)) | (card << GENCGC_CARD_SHIFT);
   /* Wrap addr to be inside dynamic space */
-  if (addr < DYNAMIC_SPACE_START + dynamic_space_size)
+  if (addr < DYNAMIC_SPACE_START)
     addr += dynamic_space_size;
   return (lispobj*)addr;
 }

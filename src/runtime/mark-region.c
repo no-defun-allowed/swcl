@@ -1121,6 +1121,12 @@ static void swap_logs() {
   struct suballocator temp = current_log_suballocator;
   current_log_suballocator = next_log_suballocator;
   next_log_suballocator = temp;
+  fprintf(stderr, "Log: ");
+  for (struct Qblock *block = current_log; block; block = block->next)
+    for (int i = 0; i < block->count; i++) {
+      fprintf(stderr, "%d ", (int)block->elements[i]);
+    }
+  fprintf(stderr, "\n");
 }
 
 #define CARD_LOG(thread) ((struct Qblock*)(thread->card_log))
@@ -1155,7 +1161,7 @@ static void swap_logs() { }
 static void update_card_mark(int card, bool dirty) {
   if (gc_card_mark[card] != STICKY_MARK)
     gc_card_mark[card] = dirty ? CARD_MARKED : CARD_UNMARKED;
-#ifdef LISP_FEEATURE_LOG_CARD_MARKS
+#ifdef LISP_FEATURE_LOG_CARD_MARKS
   /* Write dirty cards into next_log, for the next GC to read. */
   if (gc_card_mark[card] != CARD_UNMARKED) {
     if (!next_log || next_log->count == QBLOCK_CAPACITY) {
@@ -1247,11 +1253,13 @@ static bool scavenge_small_card(line_index_t line, int card, line_index_t last_s
 #ifdef LISP_FEATURE_LOG_CARD_MARKS
 /* Scan the log. */
 static void mr_scavenge_root_gens() {
+  int cards_seen = 0;
   for (struct Qblock *block = current_log; block; block = block->next)
     for (int i = 0; i < block->count; i++) {
       int card = (int)block->elements[i];
       if (!card_visited_bytemap[card]) {
         card_visited_bytemap[card] = 1;
+        cards_seen++;
         lispobj *addr = card_index_to_addr(card);
         page_index_t page = find_page_index(addr);
         unsigned char page_type = page_table[page].type & PAGE_TYPE_MASK;
@@ -1283,6 +1291,8 @@ static void mr_scavenge_root_gens() {
       card_visited_bytemap[block->elements[i]] = 0;
     }
   current_log = NULL;
+  fprintf(stderr, "%d cards\n", cards_seen);
+  swap_logs();
 }
 #else
 /* Scan the card table. */
@@ -1467,7 +1477,6 @@ void mr_collect_garbage(bool raise) {
   if (gencgc_verbose>1) mr_print_meters();
   reset_alloc_start_pages(false);
   reset_pinned_pages();
-  swap_logs();
 }
 
 void zero_all_free_ranges() {
