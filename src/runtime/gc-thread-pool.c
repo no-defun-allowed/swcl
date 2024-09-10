@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <semaphore.h>
 #include "interr.h"
+#include "mpk.h"
 
 static unsigned int gc_threads;
 static pthread_t *threads;
@@ -12,6 +13,7 @@ static os_sem_t join_semaphore;
 static void (*action)(void);
 
 static void *worker(void *index) {
+  mpk_unlock_card_table();
   uword_t i = (uword_t)index;
   while (1) {
     os_sem_wait(start_semaphores + i);

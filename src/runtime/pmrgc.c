@@ -28,6 +28,7 @@
 #include "genesis/split-ordered-list.h"
 #include "thread.h"
 #include "sys_mmap.inc"
+#include "mpk.h"
 
 /* forward declarations */
 extern FILE *gc_activitylog();
@@ -411,7 +412,7 @@ static void impart_mark_stickiness(lispobj word)
                 int i;
                 for(i=0; i<CARDS_PER_PAGE; ++i)
                     if (gc_card_mark[card+i]==CARD_MARKED) {
-                        /* We don't need to log, as the card is already 
+                        /* We don't need to log, as the card is already
                          * marked. */
                         gc_card_mark[card+i]=STICKY_MARK;
                     }
@@ -1018,6 +1019,7 @@ collect_garbage(generation_index_t last_gen)
 {
     ++n_lisp_gcs;
     THREAD_JIT_WP(0);
+    mpk_unlock_card_table();
     generation_index_t gen = 0;
     bool gc_mark_only = 0;
     int raise, more = 0;
@@ -1251,6 +1253,7 @@ collect_garbage(generation_index_t last_gen)
         finalizer_thread_runflag = newval ? newval : 1;
     }
     THREAD_JIT_WP(1);
+    mpk_lock_card_table();
     // Clear all pin bits for the next GC cycle.
     // This could be done in the background somehow maybe.
     page_index_t max_nfp = initial_nfp > next_free_page ? initial_nfp : next_free_page;

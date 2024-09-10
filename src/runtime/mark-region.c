@@ -25,6 +25,7 @@
 #include "tiny-lock.h"
 #include "gc-thread-pool.h"
 #include "queue-suballocator.h"
+#include "mpk.h"
 
 #include "genesis/cons.h"
 #include "genesis/gc-tables.h"
@@ -189,11 +190,14 @@ DEF_FINDER(find_used_line, line_index_t, line_bytemap[where], end);
  * on young objects which we don't care about. */
 #ifdef LISP_FEATURE_LOG_CARD_MARKS
 static void pre_dirty_cards(void *start, void *end) {
+  if (!gc_active_p) mpk_unlock_card_table();
   unsigned char state = gc_active_p ? CARD_UNMARKED : CARD_MARKED;
+  //fprintf(stderr, "pre-dirty %x %p to %p\n", state, start, end);
   for (unsigned int card = addr_to_card_index(start);
        card < addr_to_card_index(end);
        card++)
     gc_card_mark[card] = state;
+  if (!gc_active_p) mpk_lock_card_table();
 }
 #else
 #define pre_dirty_cards(start, end)
@@ -1146,9 +1150,11 @@ void commit_card_log(struct thread *thread) {
 }
 
 void dirty_card(int index) {
-  fprintf(stderr, "dirty %d\n", index);
+  //fprintf(stderr, "dirty %d\n", index);
   if (index < 0) lose("boop %d", -index);
+  if (!gc_active_p) mpk_unlock_card_table();
   gc_card_mark[index] = CARD_MARKED;
+  if (!gc_active_p) mpk_lock_card_table();
   struct thread *me = get_sb_vm_thread();
   struct Qblock *log = CARD_LOG(me);
   if (!log || log->count == QBLOCK_CAPACITY) {
@@ -1301,8 +1307,6 @@ static void mr_scavenge_root_gens() {
         lispobj *addr = card_index_to_addr(card);
         page_index_t page = find_page_index(addr);
         unsigned char page_type = page_table[page].type & PAGE_TYPE_MASK;
-        if (page > 980 && page < 990)
-          fprintf(stderr, "page #%d pt %x\n", page, page_table[page].type);
         if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(page)) continue;
         if (page_single_obj_p(page)) {
           source_object = (lispobj*)(page_address(page) - page_scan_start_offset(page));
@@ -1442,11 +1446,18 @@ static void CPU_SPLIT raise_survivors(void) {
       /* Undo pre-dirtying, so that the next major GC doesn't waste time
        * scavenging newly promoted cards. */
       if (gen == 0) {
-        void *start = page_address(p);
-        int n, card; line_index_t line;
-        for (card = page_to_card_index(p), line = address_line(start), n = 0;
-             n < CARDS_PER_PAGE; card++, line++, n++) {
-          gc_card_mark[card] = (bytemap[line] == expected) ? CARD_UNMARKED : gc_card_mark[card];
+        int n = 0, card = page_to_card_index(p);
+        if (page_single_obj_p(p)) {
+          if (page_table[p].gen == 0) {
+            for (; n < CARDS_PER_PAGE; card++, n++)
+              gc_card_mark[card] = CARD_UNMARKED;
+          }
+        } else {
+          void *start = page_address(p);
+          line_index_t line = address_line(start);
+          for (; n < CARDS_PER_PAGE; card++, line++, n++) {
+            gc_card_mark[card] = (bytemap[line] == expected) ? CARD_UNMARKED : gc_card_mark[card];
+          }
         }
       }
 #endif

@@ -45,6 +45,7 @@
 #include "interrupt.h"
 #include "lispregs.h"
 #include "atomiclog.inc"
+#include "mpk.h"
 
 #ifdef LISP_FEATURE_SB_THREAD
 
@@ -367,6 +368,7 @@ void create_main_lisp_thread(lispobj function) {
 #endif
     protect_binding_stack_guard_page(1, NULL);
     protect_alien_stack_guard_page(1, NULL);
+    mpk_lock_card_table();
 
 #if defined(LISP_FEATURE_DARWIN) && defined(LISP_FEATURE_X86_64)
     set_thread_stack(th->control_stack_end);
@@ -596,6 +598,7 @@ void* new_thread_trampoline(void* arg)
 #endif
     th->os_kernel_tid = get_nonzero_tid();
     init_new_thread(th, SCRIBBLE, 0);
+    mpk_lock_card_table();
     // Passing the untagged pointer ensures 2 things:
     // - that the pinning mechanism works as designed, and not just by accident.
     // - that the initial stack does not contain a lisp pointer after it is not needed.

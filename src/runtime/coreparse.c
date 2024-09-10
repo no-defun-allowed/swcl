@@ -41,6 +41,7 @@
 #include "gc.h"
 #include "code.h"
 #include "graphvisit.h"
+#include "mpk.h"
 #include "genesis/instance.h"
 #include "genesis/symbol.h"
 
@@ -1055,8 +1056,9 @@ bool gc_allocate_ptes()
     os_deallocate((void*)linkage_space, LISP_LINKAGE_SPACE_SIZE);
     linkage_space = (lispobj*)mem;
 #else
-    gc_card_mark = successful_malloc(num_gc_cards);
+    gc_card_mark = (unsigned char*)os_alloc_gc_space(0, MOVABLE, 0, ALIGN_UP(num_gc_cards, BACKEND_PAGE_BYTES));
 #endif
+    init_lisp_pkey(gc_card_mark, ALIGN_UP(num_gc_cards, BACKEND_PAGE_BYTES));
 
     /* The mark array used to work "by accident" if the numeric value of CARD_MARKED
      * is 0 - or equivalently the "WP'ed" state - which is the value that calloc()
