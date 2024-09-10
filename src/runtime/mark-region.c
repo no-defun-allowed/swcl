@@ -1146,6 +1146,8 @@ void commit_card_log(struct thread *thread) {
 }
 
 void dirty_card(int index) {
+  fprintf(stderr, "dirty %d\n", index);
+  if (index < 0) lose("boop %d", -index);
   gc_card_mark[index] = CARD_MARKED;
   struct thread *me = get_sb_vm_thread();
   struct Qblock *log = CARD_LOG(me);

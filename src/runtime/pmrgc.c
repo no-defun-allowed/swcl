@@ -411,7 +411,8 @@ static void impart_mark_stickiness(lispobj word)
                 int i;
                 for(i=0; i<CARDS_PER_PAGE; ++i)
                     if (gc_card_mark[card+i]==CARD_MARKED) {
-                        vector_notice_pointer_store(card_index_to_addr(card+i));
+                        /* We don't need to log, as the card is already 
+                         * marked. */
                         gc_card_mark[card+i]=STICKY_MARK;
                     }
                 if (page_ends_contiguous_block_p(page, gen)) return;

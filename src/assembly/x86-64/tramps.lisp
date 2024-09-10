@@ -91,13 +91,16 @@
       #+system-tlabs (call-c "switch_to_arena" #+win32 rdi-tn #+win32 rsi-tn))))
 
 #+log-card-marks
-(define-assembly-routine (dirty-card-tramp/no-pseudo-atomic) ()
+(define-assembly-routine (dirty-card-tramp/no-pseudo-atomic (:return-style :none)) ()
   (with-registers-preserved (c)
-    (call-c "dirty_card" (ea 16 rbp-tn))))
-(define-assembly-routine (dirty-card-tramp) ()
+    (call-c "dirty_card" (ea 16 rbp-tn)))
+  (inst ret 8))
+#+log-card-marks
+(define-assembly-routine (dirty-card-tramp (:return-style :none)) ()
   (pseudo-atomic ()
     (with-registers-preserved (c)
-      (call-c "dirty_card" (ea 16 rbp-tn)))))
+      (call-c "dirty_card" (ea 16 rbp-tn))))
+  (inst ret 8))
 
 (macrolet ((def-routine-pair (name&options vars &body code)
              `(progn
@@ -256,9 +259,7 @@
         (inst cmp :byte (ea gc-card-table-reg-tn rax) CARD-MARKED)
         (inst jmp :e STORE)
         (inst push rax)
-        (inst call (ea (make-fixup 'dirty-card-tramp/no-pseudo-atomic :assembly-routine)))
-        ;; XXX: ytho
-        (inst add rsp-tn n-word-bytes))
+        (inst call (ea (make-fixup 'dirty-card-tramp/no-pseudo-atomic :assembly-routine))))
       STORE
       (inst mov rdi object)
       (inst mov rdx word-index)

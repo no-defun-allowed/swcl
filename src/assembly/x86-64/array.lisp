@@ -64,8 +64,6 @@
       (inst jmp :e CLEAN)
       (inst push card-index)
       (inst call (ea (make-fixup 'dirty-card-tramp :assembly-routine)))
-      ;; XXX: ytho
-      (inst add rsp-tn n-word-bytes)
       (emit-label CLEAN))
     (inst cmp card-index end-card-index)
     (inst jmp :e DONE-CARD-MARKING)
