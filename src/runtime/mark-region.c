@@ -1266,15 +1266,18 @@ void verify_log() {
   for (line_index_t line = 0; line < line_count; line++) {
     int card = addr_to_card_index(line_address(line));
     unsigned char gen = gc_gen_of((lispobj)line_address(line), 255);
-    if (card_dirtyp(card) && line_bytemap[line] && gen > 0 && !card_visited_bytemap[card]) {
-      fprintf(stderr, "Card #%d/line #%ld/%p is dirty but not logged: gen=%d line=%x card=%x\n",
-              card, line, line_address(line),
-              gen, line_bytemap[line], gc_card_mark[card]);
+    if (card_dirtyp(card) && gen > 0 && gen != 255 && !card_visited_bytemap[card]) {
+      if (failures < 20)
+        fprintf(stderr, "Card #%d/line #%ld/%p is dirty but not logged: gen=%d line=%x card=%x\n",
+                card, line, line_address(line),
+                gen, line_bytemap[line], gc_card_mark[card]);
       failures++;
-      if (failures > 100) break;
     }
   }
-  if (failures) lose("Card log is inconsistent, %d errors", failures);
+  if (failures)
+    lose("Card log is %s, %d errors",
+         failures >= 1000 ? "fucked" : "inconsistent",
+         failures);
   /* Clear marks */
   for (struct Qblock *block = current_log; block; block = block->next)
     for (int i = 0; i < block->count; i++)
