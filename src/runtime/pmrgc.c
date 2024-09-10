@@ -2070,6 +2070,8 @@ void gc_show_pte(lispobj obj)
         if (page_starts_contiguous_block_p(page)) printf(" startsblock");
         if (page_ends_contiguous_block_p(page, page_table[page].gen)) printf(" endsblock");
         printf(" (%s)\n", page_card_mark_string(page, marks));
+        line_index_t line = address_line((void*)obj);
+        printf("line %ld gen %d\n", line, DECODE_GEN(line_bytemap[line]));
         return;
     }
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
