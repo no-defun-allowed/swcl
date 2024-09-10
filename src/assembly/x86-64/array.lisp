@@ -56,7 +56,17 @@
     (inst and :dword card-index card-index-mask)
     (inst and :dword end-card-index card-index-mask)
     (emit-label LOOP)
+    #-log-card-marks
     (inst mov :byte (ea gc-card-table-reg-tn card-index) CARD-MARKED) ; mark one card
+    #+log-card-marks
+    (let ((CLEAN (gen-label)))
+      (inst cmp :byte (ea gc-card-table-reg-tn card-index) CARD-MARKED)
+      (inst jmp :e CLEAN)
+      (inst push card-index)
+      (inst call (ea (make-fixup 'dirty-card-tramp :assembly-routine)))
+      ;; XXX: ytho
+      (inst add rsp-tn n-word-bytes)
+      (emit-label CLEAN))
     (inst cmp card-index end-card-index)
     (inst jmp :e DONE-CARD-MARKING)
     (inst inc :dword card-index)

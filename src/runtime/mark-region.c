@@ -1256,7 +1256,7 @@ static bool scavenge_small_card(line_index_t line, int card, line_index_t last_s
 
 #ifdef LISP_FEATURE_LOG_CARD_MARKS
 /* Scan the log. */
-static void validate_log() {
+void verify_log() {
   /* Mark all cards in the log */
   for (struct Qblock *block = current_log; block; block = block->next)
     for (int i = 0; i < block->count; i++)
@@ -1279,10 +1279,11 @@ static void validate_log() {
   for (struct Qblock *block = current_log; block; block = block->next)
     for (int i = 0; i < block->count; i++)
       card_visited_bytemap[block->elements[i]] = 0;
+  fprintf(stderr, "verify_log passed\n");
 }
 
 static void mr_scavenge_root_gens() {
-  validate_log();
+  verify_log();
   int cards_seen = 0;
   for (struct Qblock *block = current_log; block; block = block->next)
     for (int i = 0, count = block->count; i < count; i++) {
@@ -1295,9 +1296,10 @@ static void mr_scavenge_root_gens() {
         lispobj *addr = card_index_to_addr(card);
         page_index_t page = find_page_index(addr);
         unsigned char page_type = page_table[page].type & PAGE_TYPE_MASK;
+        if (page > 980 && page < 990)
+          fprintf(stderr, "page #%d pt %x\n", page, page_table[page].type);
         if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(page)) continue;
         if (page_single_obj_p(page)) {
-          if (page == 987) fprintf(stderr, "yea\n");
           source_object = (lispobj*)(page_address(page) - page_scan_start_offset(page));
           dirty_generation_source = page_table[page].gen;
           int widetag = widetag_of(source_object);
@@ -1325,7 +1327,9 @@ static void mr_scavenge_root_gens() {
     }
   current_log = NULL;
   fprintf(stderr, "%d cards\n", cards_seen);
+  meters.cards += cards_seen;
   swap_logs();
+  verify_log();
 }
 #else
 /* Scan the card table. */

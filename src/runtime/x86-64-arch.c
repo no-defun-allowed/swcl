@@ -101,6 +101,9 @@ void tune_asm_routines_for_microarch(void)
     if (cpuid_fn1_ecx & (1<<23)) our_cpu_feature_bits |= 2;
     SetSymbolValue(CPU_FEATURE_BITS, make_fixnum(our_cpu_feature_bits), 0);
 
+#ifdef LISP_FEATURE_LOG_CARD_MARKS
+    return;
+#endif
     // I don't know if this works on Windows
 #ifndef _MSC_VER
     cpuid(0, 0, &eax, &ebx, &ecx, &edx);
