@@ -952,6 +952,10 @@ static void reset_pinned_pages() {
   memset(gc_page_pins, 0, page_table_pages);
 }
 
+static void add_page_to_free_list(page_index_t p, unsigned char type) {
+  free_pages_by_type[type].indices[free_pages_by_type[type].count++] = p;
+}
+
 static void __attribute__((noinline)) sweep_pages() {
   /* next_free_page is only maintained for page walking - we
    * reuse partially filled pages, so it's not useful for allocation */
@@ -977,19 +981,15 @@ static void __attribute__((noinline)) sweep_pages() {
       set_page_need_to_zero(p, 1);
       set_page_type(page_table[p], FREE_PAGE_FLAG);
       page_table[p].scan_start_offset_ = 0;
+      add_page_to_free_list(p, FREE_PAGE_FLAG);
     } else {
       bytes_allocated += page_bytes_used(p);
       if (page_single_obj_p(p) &&
           (page_table[p].gen == generation_to_collect || generation_to_collect == PSEUDO_STATIC_GENERATION))
         generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
       next_free_page = p + 1;
-    }
-    /* Add the page to a free array */
-    if (!page_single_obj_p(p) &&
-        page_table[p].gen != PSEUDO_STATIC_GENERATION &&
-        page_bytes_used(p) < GENCGC_PAGE_BYTES) {
-      unsigned char ty = page_table[p].type;
-      free_pages_by_type[ty].indices[free_pages_by_type[ty].count++] = p;
+      if (!page_single_obj_p(p) && page_bytes_used(p) < GENCGC_PAGE_BYTES)
+        add_page_to_free_list(p, page_table[p].type);
     }
   }
 }
@@ -1293,13 +1293,11 @@ void verify_log() {
 }
 
 static void mr_scavenge_root_gens() {
-  verify_log();
+  //verify_log();
   int cards_seen = 0;
   for (struct Qblock *block = current_log; block; block = block->next)
     for (int i = 0, count = block->count; i < count; i++) {
       int card = (int)block->elements[i];
-      if (i + PREFETCH_DISTANCE < count)
-        __builtin_prefetch(card_index_to_addr(card));
       if (!card_visited_bytemap[card]) {
         card_visited_bytemap[card] = 1;
         cards_seen++;
@@ -1337,10 +1335,10 @@ static void mr_scavenge_root_gens() {
       card_visited_bytemap[block->elements[i]] = 0;
     }
   current_log = NULL;
-  fprintf(stderr, "%d cards\n", cards_seen);
+  //fprintf(stderr, "%d cards\n", cards_seen);
   meters.cards += cards_seen;
   swap_logs();
-  verify_log();
+  //verify_log();
 }
 #else
 /* Scan the card table. */
@@ -1457,8 +1455,11 @@ static void CPU_SPLIT raise_survivors(void) {
         } else {
           void *start = page_address(p);
           line_index_t line = address_line(start);
-          for (; n < CARDS_PER_PAGE; card++, line++, n++) {
-            gc_card_mark[card] = (bytemap[line] == expected) ? CARD_UNMARKED : gc_card_mark[card];
+          /* GCC can't auto-vectorise the straight-forward way to write
+           * this loop. */
+          unsigned char *cards = gc_card_mark + card, *lines = bytemap + line;
+          for (; n < CARDS_PER_PAGE; n++) {
+            cards[n] = (lines[n] == expected) ? CARD_UNMARKED : cards[n];
           }
         }
       }

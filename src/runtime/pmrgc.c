@@ -45,7 +45,7 @@ int n_lisp_gcs;
 
 /* the verbosity level. All non-error messages are disabled at level 0;
  * and only a few rare messages are printed at level 1. */
-int gencgc_verbose = 1;
+int gencgc_verbose = 0;
 
 /*
  * GC structures and variables
