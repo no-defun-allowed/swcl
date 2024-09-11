@@ -484,7 +484,7 @@ static struct suballocator grey_suballocator = SUBALLOCATOR_INITIALIZER("grey st
 
 /* Thanks to Larry Masinter for suggesting that I use per-thread
  * free lists, rather than hurting my head on lock-free free lists.
- * (Say that five times fast.)*/
+ * (Say that five times fast.) */
 static _Thread_local struct Qblock *recycle_list = NULL;
 /* The "output packet" from "A Parallel, Incremental and Concurrent GC
  * for Servers". The "input packet" is block in trace_everything. */
@@ -1116,7 +1116,7 @@ void mr_preserve_object(lispobj obj) {
  * space to reuse the Qblock machinery. */
 static struct suballocator current_log_suballocator = SUBALLOCATOR_INITIALIZER("Log A");
 static struct suballocator next_log_suballocator = SUBALLOCATOR_INITIALIZER("Log B");
-static struct Qblock *_Atomic current_log = NULL, *next_log = NULL;
+static struct Qblock *_Atomic current_log = NULL, *_Atomic next_log = NULL;
 
 static void print_log() {
   for (struct Qblock *block = current_log; block; block = block->next)
@@ -1138,16 +1138,20 @@ static void swap_logs() {
 
 #define CARD_LOG(thread) ((struct Qblock*)(thread->card_log))
 
-void commit_card_log(struct thread *thread) {
-  struct Qblock *log = CARD_LOG(thread);
-  if (log) {
+static void atomic_push(struct Qblock *_Atomic *list, struct Qblock *block) {
+  if (block) {
     struct Qblock *prior;
     do {
-      prior = current_log;
-      log->next = prior;
-    } while (!atomic_compare_exchange_strong(&current_log, &prior, log));
-    thread->card_log = NULL;
+      prior = *list;
+      block->next = prior;
+    } while (!atomic_compare_exchange_strong(list, &prior, block));
   }
+}
+
+void commit_card_log(struct thread *thread) {
+  struct Qblock *log = CARD_LOG(thread);
+  atomic_push(&current_log, log);
+  thread->card_log = NULL;
 }
 
 void dirty_card(int index) {
@@ -1163,9 +1167,9 @@ void dirty_card(int index) {
   }
   log->elements[log->count++] = index;
 }
-#else
-static void swap_logs() { }
 #endif
+
+static _Thread_local struct Qblock *next_log_block;
 
 static void update_card_mark(int card, bool dirty) {
   if (gc_card_mark[card] != STICKY_MARK)
@@ -1173,12 +1177,11 @@ static void update_card_mark(int card, bool dirty) {
 #ifdef LISP_FEATURE_LOG_CARD_MARKS
   /* Write dirty cards into next_log, for the next GC to read. */
   if (gc_card_mark[card] != CARD_UNMARKED) {
-    if (!next_log || next_log->count == QBLOCK_CAPACITY) {
-      struct Qblock *block = suballoc_allocate(&next_log_suballocator);
-      block->next = next_log;
-      next_log = block;
+    if (!next_log_block || next_log_block->count == QBLOCK_CAPACITY) {
+      atomic_push(&next_log, next_log_block);
+      next_log_block = suballoc_allocate(&next_log_suballocator);
     }
-    next_log->elements[next_log->count++] = card;
+    next_log_block->elements[next_log_block->count++] = card;
   }
 #endif
 }
@@ -1292,20 +1295,24 @@ void verify_log() {
       card_visited_bytemap[block->elements[i]] = 0;
 }
 
-static void mr_scavenge_root_gens() {
-  //verify_log();
+static void scavenge_root_gens_worker() {
   int cards_seen = 0;
-  for (struct Qblock *block = current_log; block; block = block->next)
+  next_log_block = NULL;
+  for (struct Qblock *block = current_log; block; block = block->next) {
     for (int i = 0, count = block->count; i < count; i++) {
       int card = (int)block->elements[i];
-      if (!card_visited_bytemap[card]) {
+      lispobj *addr = card_index_to_addr(card);
+      page_index_t page = find_page_index(addr);
+      if (page != -1 &&
+          page % (gc_threads + 1) == gc_thread_id &&
+          !card_visited_bytemap[card]) {
         card_visited_bytemap[card] = 1;
         cards_seen++;
-        lispobj *addr = card_index_to_addr(card);
-        page_index_t page = find_page_index(addr);
         unsigned char page_type = page_table[page].type & PAGE_TYPE_MASK;
-        if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(page))
+        if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(page)) {
           update_card_mark(card, 0);
+          continue;
+        }
         if (page_single_obj_p(page)) {
           source_object = (lispobj*)(page_address(page) - page_scan_start_offset(page));
           dirty_generation_source = page_table[page].gen;
@@ -1329,16 +1336,23 @@ static void mr_scavenge_root_gens() {
         }
       }
     }
+  }
   /* Clear card_visited_bytemap */
   for (struct Qblock *block = current_log; block; block = block->next)
     for (int i = 0; i < block->count; i++) {
       card_visited_bytemap[block->elements[i]] = 0;
     }
+  atomic_push(&next_log, next_log_block);
+  atomic_fetch_add(&meters.cards, cards_seen);
+}
+
+static void mr_scavenge_root_gens() {
+  struct thread *th;
+  for_each_thread(th) commit_card_log(th);
+  last_page_processed = 0;
+  run_on_thread_pool(scavenge_root_gens_worker);
   current_log = NULL;
-  //fprintf(stderr, "%d cards\n", cards_seen);
-  meters.cards += cards_seen;
   swap_logs();
-  //verify_log();
 }
 #else
 /* Scan the card table. */
@@ -1500,8 +1514,6 @@ void mr_pre_gc(generation_index_t generation) {
 void mr_collect_garbage(bool raise) {
   extern void reset_alloc_start_pages(bool allow_free_pages);
   if (generation_to_collect != PSEUDO_STATIC_GENERATION) {
-    struct thread *th;
-    for_each_thread(th) commit_card_log(th);
     METER(scavenge, mr_scavenge_root_gens());
   }
   trace_static_roots();

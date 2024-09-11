@@ -6,7 +6,9 @@
 #include "interr.h"
 #include "mpk.h"
 
-static unsigned int gc_threads;
+unsigned int gc_threads;
+unsigned int _Thread_local gc_thread_id = 0;
+
 static pthread_t *threads;
 static os_sem_t *start_semaphores;
 static os_sem_t join_semaphore;
@@ -15,6 +17,7 @@ static void (*action)(void);
 static void *worker(void *index) {
   mpk_unlock_card_table();
   uword_t i = (uword_t)index;
+  gc_thread_id = i + 1;
   while (1) {
     os_sem_wait(start_semaphores + i);
     // We don't need pthread_jit_write_protect_np(0) here because workers
