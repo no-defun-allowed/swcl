@@ -1150,8 +1150,6 @@ void commit_card_log(struct thread *thread) {
 }
 
 void dirty_card(int index) {
-  //fprintf(stderr, "dirty %d\n", index);
-  if (index < 0) lose("boop %d", -index);
   if (!gc_active_p) mpk_unlock_card_table();
   gc_card_mark[index] = CARD_MARKED;
   if (!gc_active_p) mpk_lock_card_table();
@@ -1267,8 +1265,9 @@ static bool scavenge_small_card(line_index_t line, int card, line_index_t last_s
 void verify_log() {
   /* Mark all cards in the log */
   for (struct Qblock *block = current_log; block; block = block->next)
-    for (int i = 0; i < block->count; i++)
+    for (int i = 0; i < block->count; i++) {
       card_visited_bytemap[block->elements[i]] = 1;
+    }
   /* Check all dirty cards are either gen0 or logged */
   int failures = 0;
   for (line_index_t line = 0; line < line_count; line++) {
@@ -1276,8 +1275,8 @@ void verify_log() {
     unsigned char gen = gc_gen_of((lispobj)line_address(line), 255);
     if (card_dirtyp(card) && gen > 0 && gen != 255 && !card_visited_bytemap[card]) {
       if (failures < 20)
-        fprintf(stderr, "Card #%d/line #%ld/%p is dirty but not logged: gen=%d line=%x card=%x\n",
-                card, line, line_address(line),
+        fprintf(stderr, "Card #%d/page #%d/%p is dirty but not logged: gen=%d line=%x card=%x\n",
+                card, find_page_index(line_address(line)), line_address(line),
                 gen, line_bytemap[line], gc_card_mark[card]);
       failures++;
     }
