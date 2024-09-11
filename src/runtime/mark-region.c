@@ -195,8 +195,9 @@ static void pre_dirty_cards(void *start, void *end) {
   //fprintf(stderr, "pre-dirty %x %p to %p\n", state, start, end);
   for (unsigned int card = addr_to_card_index(start);
        card < addr_to_card_index(end);
-       card++)
+       card++) {
     gc_card_mark[card] = state;
+  }
   if (!gc_active_p) mpk_lock_card_table();
 }
 #else
@@ -1289,7 +1290,6 @@ void verify_log() {
   for (struct Qblock *block = current_log; block; block = block->next)
     for (int i = 0; i < block->count; i++)
       card_visited_bytemap[block->elements[i]] = 0;
-  fprintf(stderr, "verify_log passed\n");
 }
 
 static void mr_scavenge_root_gens() {
@@ -1306,7 +1306,8 @@ static void mr_scavenge_root_gens() {
         lispobj *addr = card_index_to_addr(card);
         page_index_t page = find_page_index(addr);
         unsigned char page_type = page_table[page].type & PAGE_TYPE_MASK;
-        if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(page)) continue;
+        if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(page))
+          update_card_mark(card, 0);
         if (page_single_obj_p(page)) {
           source_object = (lispobj*)(page_address(page) - page_scan_start_offset(page));
           dirty_generation_source = page_table[page].gen;
@@ -1322,6 +1323,8 @@ static void mr_scavenge_root_gens() {
             if (page_starts_contiguous_block_p(page))
               scavenge_code_card(page, card);
             break;
+          default:
+            update_card_mark(card, 0);
           }
         } else {
           scavenge_small_card(address_line(addr), card, -1);

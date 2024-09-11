@@ -45,7 +45,7 @@ ifdef HAVE_LIBUNWIND
 endif
 
 CFLAGS += -Wunused-parameter -fno-omit-frame-pointer -momit-leaf-frame-pointer
-ifdef LISP_FEATURE_PKU
+ifdef LISP_FEATURE_MPK
   CFLAGS += -mpku
 endif
 DISABLE_PIE=no
