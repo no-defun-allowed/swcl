@@ -54,7 +54,7 @@
 
 /* Metering */
 static struct {
-  _Atomic(uword_t) consider, scavenge, cards, prefix;
+  _Atomic(uword_t) consider, scavenge, cards, prefix, sort;
   _Atomic(uword_t) trace, trace_alive, trace_running;
   _Atomic(uword_t) sweep, weak, sweep_lines, sweep_pages;
   _Atomic(uword_t) compact, copy, fix, compact_resweep, raise;
@@ -71,12 +71,12 @@ void mr_print_meters() {
   fprintf(stderr,
           "collection %d (%.0f%% compacting):\n"
           "  %ldus consider\n"
-          "  %ld scavenge (%ld prefixes, %ld cards) %ld trace (%ld alive %ld running)\n"
+          "  %ld scavenge (%ld prefixes, %ld sorting, %ld cards) %ld trace (%ld alive %ld running)\n"
           "  %ld sweep (%ld lines %ld pages) %ld compact (%ld copy %ld fix %ld resweep)\n"
           "  %ld raise; %ldB fresh %ldpg pinned\n",
           collection,
           collection ? 100.0 *  (float)meters.compacts / collection : 0.0,
-          NORM(consider), NORM(scavenge), NORM(prefix), NORM(cards),
+          NORM(consider), NORM(scavenge), NORM(prefix), NORM(sort), NORM(cards),
           NORM(trace), NORM(trace_alive), NORM(trace_running),
           NORM(sweep), NORM(sweep_lines), NORM(sweep_pages),
           NORM(compact), NORM(copy), NORM(fix), NORM(compact_resweep),
@@ -1167,9 +1167,40 @@ void dirty_card(int index) {
   }
   log->elements[log->count++] = index;
 }
-#endif
 
 static _Thread_local struct Qblock *next_log_block;
+static uword_t *log_array;
+static int log_length, *log_boundaries = NULL;
+
+static void flatten_log() {
+  log_length = 0;
+  for (struct Qblock *block = current_log; block; block = block->next)
+    log_length += block->count;
+  log_array = (uword_t*)os_allocate(log_length * sizeof(uword_t));
+  int cursor = 0;
+  for (struct Qblock *block = current_log; block; block = block->next)
+    for (int i = 0; i < block->count; i++)
+      log_array[cursor++] = block->elements[i];
+  extern void gc_heapsort_uwords(uword_t*, int);
+  gc_heapsort_uwords(log_array, log_length);
+
+  int total_threads = gc_threads + 1;
+  if (!log_boundaries) log_boundaries = (int*)os_allocate((total_threads + 1) * sizeof(int));
+  log_boundaries[0] = 0;
+  log_boundaries[total_threads] = log_length;
+  /* Align each boundary to a page, so that threads will never accidentally
+   * overlap their scans due to prefix processing. */
+  for (int thread = 1; thread < total_threads; thread++) {
+    int n = thread * log_length / total_threads;
+    if (n != 0)
+      for (; n < log_length; n++)
+        if (log_array[n - 1] / CARDS_PER_PAGE != log_array[n] / CARDS_PER_PAGE)
+          break;
+    log_boundaries[thread] = n;
+  }
+}
+
+#endif
 
 static void update_card_mark(int card, bool dirty) {
   if (gc_card_mark[card] != STICKY_MARK)
@@ -1298,50 +1329,49 @@ void verify_log() {
 static void scavenge_root_gens_worker() {
   int cards_seen = 0;
   next_log_block = NULL;
-  for (struct Qblock *block = current_log; block; block = block->next) {
-    for (int i = 0, count = block->count; i < count; i++) {
-      int card = (int)block->elements[i];
-      lispobj *addr = card_index_to_addr(card);
-      page_index_t page = find_page_index(addr);
-      if (page != -1 &&
-          page % (gc_threads + 1) == gc_thread_id &&
-          !card_visited_bytemap[card]) {
-        card_visited_bytemap[card] = 1;
-        cards_seen++;
-        unsigned char page_type = page_table[page].type & PAGE_TYPE_MASK;
-        if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(page)) {
-          update_card_mark(card, 0);
-          continue;
+  int last_card = -1;
+  page_index_t last_interesting_page = -1;
+  line_index_t last_interesting_line = -1;
+  for (int i = log_boundaries[gc_thread_id]; i < log_boundaries[gc_thread_id + 1]; i++) {
+    int card = (int)log_array[i];
+    lispobj *addr = card_index_to_addr(card);
+    page_index_t page = find_page_index(addr);
+    if (page != -1 && card != last_card) {
+      last_card = card;
+      cards_seen++;
+      unsigned char page_type = page_table[page].type & PAGE_TYPE_MASK;
+      if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(page)) {
+        update_card_mark(card, 0);
+        continue;
+      }
+      if (page_single_obj_p(page)) {
+        source_object = (lispobj*)(page_address(page) - page_scan_start_offset(page));
+        dirty_generation_source = page_table[page].gen;
+        int widetag = widetag_of(source_object);
+        switch (widetag) {
+        case SIMPLE_VECTOR_WIDETAG:
+        case WEAK_POINTER_WIDETAG: {
+          lispobj *limit = (lispobj*)page_address(page) + page_words_used(page);
+          scavenge_single_object_card(card, limit);
+          break;
         }
-        if (page_single_obj_p(page)) {
-          source_object = (lispobj*)(page_address(page) - page_scan_start_offset(page));
-          dirty_generation_source = page_table[page].gen;
-          int widetag = widetag_of(source_object);
-          switch (widetag) {
-          case SIMPLE_VECTOR_WIDETAG:
-          case WEAK_POINTER_WIDETAG: {
-            lispobj *limit = (lispobj*)page_address(page) + page_words_used(page);
-            scavenge_single_object_card(card, limit);
-            break;
-          }
-          case CODE_HEADER_WIDETAG:
-            if (page_starts_contiguous_block_p(page))
-              scavenge_code_card(page, card);
-            break;
-          default:
-            update_card_mark(card, 0);
-          }
-        } else {
-          scavenge_small_card(address_line(addr), card, -1);
+        case CODE_HEADER_WIDETAG:
+          if (page_starts_contiguous_block_p(page))
+            scavenge_code_card(page, card);
+          break;
+        default:
+          update_card_mark(card, 0);
+        }
+      } else {
+        /* Use the last_interesting_line hint if it pertains to the right page. */
+        line_index_t last_seen = last_interesting_page == page ? last_interesting_line : -1;
+        if (scavenge_small_card(address_line(addr), card, last_seen)) {
+          last_interesting_page = page;
+          last_interesting_line = address_line(addr);
         }
       }
     }
   }
-  /* Clear card_visited_bytemap */
-  for (struct Qblock *block = current_log; block; block = block->next)
-    for (int i = 0; i < block->count; i++) {
-      card_visited_bytemap[block->elements[i]] = 0;
-    }
   atomic_push(&next_log, next_log_block);
   atomic_fetch_add(&meters.cards, cards_seen);
 }
@@ -1349,9 +1379,11 @@ static void scavenge_root_gens_worker() {
 static void mr_scavenge_root_gens() {
   struct thread *th;
   for_each_thread(th) commit_card_log(th);
+  METER(sort, flatten_log());
   last_page_processed = 0;
   run_on_thread_pool(scavenge_root_gens_worker);
   current_log = NULL;
+  os_deallocate((char*)log_array, log_length * sizeof(uword_t));
   swap_logs();
 }
 #else
