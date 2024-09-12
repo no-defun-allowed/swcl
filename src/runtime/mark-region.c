@@ -1172,6 +1172,32 @@ static _Thread_local struct Qblock *next_log_block;
 static uword_t *log_array;
 static int log_length, *log_boundaries = NULL;
 
+/* Roughly sort the log at least to page granularity, so that we can
+ * partition the work, then let each worker thread sort the rest.
+ * The important part of quicksort() is that it is fast with duplicates.
+ * Another option could be a radix/bucket sort, but I'm not sure how that
+ * would distribute the work - card indices appear non-uniformly in the log. */
+#define SORT_GRANULARITY (32 * CARDS_PER_PAGE)
+#define SORT_KEY(a) ((a) / SORT_GRANULARITY)
+#define SWAP(a,i,j) { uword_t temp=a[i];a[i]=a[j];a[j]=temp; }
+
+static void quicksort(uword_t *a, int start, int end) {
+  if (end <= start) return;
+  uword_t pivot = a[start];
+  int lt = start, i = start + 1, gt = end;
+  while (i <= gt) {
+    if (SORT_KEY(a[i]) < SORT_KEY(pivot)) {
+      SWAP(a, i, lt); lt++; i++;
+    } else if (SORT_KEY(a[i]) > SORT_KEY(pivot)) {
+      SWAP(a, i, gt); gt--;
+    } else {
+      i++;
+    }
+  }
+  quicksort(a, start, lt - 1);
+  quicksort(a, gt + 1, end);
+}
+
 static void flatten_log() {
   log_length = 0;
   for (struct Qblock *block = current_log; block; block = block->next)
@@ -1181,20 +1207,21 @@ static void flatten_log() {
   for (struct Qblock *block = current_log; block; block = block->next)
     for (int i = 0; i < block->count; i++)
       log_array[cursor++] = block->elements[i];
-  extern void gc_heapsort_uwords(uword_t*, int);
-  gc_heapsort_uwords(log_array, log_length);
 
   int total_threads = gc_threads + 1;
   if (!log_boundaries) log_boundaries = (int*)os_allocate((total_threads + 1) * sizeof(int));
   log_boundaries[0] = 0;
   log_boundaries[total_threads] = log_length;
+  /* If there's only one GC worker, it's going to sort everything anyway,
+   * so there is no need to do a rough sort beforehand. */
+  if (total_threads > 1) quicksort(log_array, 0, log_length - 1);
   /* Align each boundary to a page, so that threads will never accidentally
    * overlap their scans due to prefix processing. */
   for (int thread = 1; thread < total_threads; thread++) {
     int n = thread * log_length / total_threads;
     if (n != 0)
       for (; n < log_length; n++)
-        if (log_array[n - 1] / CARDS_PER_PAGE != log_array[n] / CARDS_PER_PAGE)
+        if (SORT_KEY(log_array[n - 1]) != SORT_KEY(log_array[n]))
           break;
     log_boundaries[thread] = n;
   }
@@ -1329,10 +1356,15 @@ void verify_log() {
 static void scavenge_root_gens_worker() {
   int cards_seen = 0;
   next_log_block = NULL;
+
+  int start = log_boundaries[gc_thread_id], limit = log_boundaries[gc_thread_id + 1];
+  /* Hints for scavenge_small_card to cut prefix scanning short. */
   int last_card = -1;
   page_index_t last_interesting_page = -1;
   line_index_t last_interesting_line = -1;
-  for (int i = log_boundaries[gc_thread_id]; i < log_boundaries[gc_thread_id + 1]; i++) {
+  extern void gc_heapsort_uwords(uword_t*, int);
+  gc_heapsort_uwords(log_array + start, limit - start);
+  for (int i = start; i < limit; i++) {
     int card = (int)log_array[i];
     lispobj *addr = card_index_to_addr(card);
     page_index_t page = find_page_index(addr);
