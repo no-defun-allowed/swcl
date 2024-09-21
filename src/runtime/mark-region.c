@@ -1365,6 +1365,7 @@ static void scavenge_root_gens_worker() {
   extern void gc_heapsort_uwords(uword_t*, int);
   gc_heapsort_uwords(log_array + start, limit - start);
   for (int i = start; i < limit; i++) {
+#define SKIP_IF(cond) if (cond) { update_card_mark(card, 0); continue; }
     int card = (int)log_array[i];
     lispobj *addr = card_index_to_addr(card);
     page_index_t page = find_page_index(addr);
@@ -1372,11 +1373,9 @@ static void scavenge_root_gens_worker() {
       last_card = card;
       cards_seen++;
       unsigned char page_type = page_table[page].type & PAGE_TYPE_MASK;
-      if (page_type == PAGE_TYPE_UNBOXED || !page_words_used(page)) {
-        update_card_mark(card, 0);
-        continue;
-      }
+      SKIP_IF(page_type == PAGE_TYPE_UNBOXED || !page_words_used(page));
       if (page_single_obj_p(page)) {
+        SKIP_IF(page_table[page].gen <= generation_to_collect);
         source_object = (lispobj*)(page_address(page) - page_scan_start_offset(page));
         dirty_generation_source = page_table[page].gen;
         int widetag = widetag_of(source_object);
@@ -1395,14 +1394,17 @@ static void scavenge_root_gens_worker() {
           update_card_mark(card, 0);
         }
       } else {
+        line_index_t line = address_line(addr);
+        SKIP_IF(DECODE_GEN(line_bytemap[line]) <= generation_to_collect);
         /* Use the last_interesting_line hint if it pertains to the right page. */
         line_index_t last_seen = last_interesting_page == page ? last_interesting_line : -1;
-        if (scavenge_small_card(address_line(addr), card, last_seen)) {
+        if (scavenge_small_card(line, card, last_seen)) {
           last_interesting_page = page;
-          last_interesting_line = address_line(addr);
+          last_interesting_line = line;
         }
       }
     }
+#undef SKIP_IF
   }
   atomic_push(&next_log, next_log_block);
   atomic_fetch_add(&meters.cards, cards_seen);
