@@ -109,14 +109,9 @@ static void TRACE_NAME(lispobj* where)
             ACTION(lhash_table, plhash_table, SOURCE_NORMAL);
             struct hash_table* hash_table = (void*)native_pointer(lhash_table);
             gc_assert(hashtable_weakp(hash_table));
-#ifdef LISP_FEATURE_LOG_CARD_MARKS
-            /* We might scavenge an object twice due to prefix processing. */
-            if ((lispobj)hash_table->next_weak_hash_table != NIL) return;
-#else
             // An object can only be removed from the queue once.
             // Therefore the 'next' pointer has got to be nil.
             gc_assert((lispobj)hash_table->next_weak_hash_table == NIL);
-#endif
             int weakness = hashtable_weakness(hash_table);
             bool defer = 1;
             LOCK;
@@ -206,9 +201,6 @@ static void TRACE_NAME(lispobj* where)
         } else if (is_lisp_pointer(weakptr->value) && interesting_pointer_p(weakptr->value)) {
             /* XXX: This hard-codes the layout of a weak pointer. Make a scalar WATCH_DEFERRED? */
             WATCH_DEFERRED(where, 1, 2);
-#ifdef LISP_FEATURE_LOG_CARD_MARKS
-            if (in_weak_pointer_list(weakptr)) return;
-#endif
             LOCK;
             add_to_weak_pointer_chain(weakptr);
             UNLOCK;
