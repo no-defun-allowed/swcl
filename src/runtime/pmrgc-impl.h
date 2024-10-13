@@ -534,8 +534,10 @@ static inline void notice_pointer_store(void* base_addr,
     int card = addr_to_card_index(base_addr);
     // STICKY is stronger than MARKED. Only change if UNMARKED.
     if (gc_card_mark[card] == CARD_UNMARKED) gc_card_mark[card] = CARD_MARKED;
+#ifdef LISP_FEATURE_LOG_CARD_MARKS
     extern void dirty_card(int);
     dirty_card(card);
+#endif
 }
 static inline void vector_notice_pointer_store(void* addr) {
     notice_pointer_store(addr, addr);

@@ -1441,7 +1441,8 @@ static void CPU_SPLIT scavenge_root_gens_worker(void) {
             /* page_address(i) + page_words_used(i) only demarcates
              * the end of a (sole) object on the page with this heap
              * layout when the object is large. */
-            lispobj *limit = (lispobj*)page_address(i) + page_words_used(i);
+            lispobj *start = (lispobj*)page_address(i),
+                    *limit = (lispobj*)page_address(i) + page_words_used(i);
             for (int j = 0, card = addr_to_card_index(start);
                  j < CARDS_PER_PAGE;
                  j++, card++) {
@@ -1485,7 +1486,6 @@ static void CPU_SPLIT scavenge_root_gens_worker(void) {
         for (unsigned int n = 0; n < CARDS_PER_PAGE; n++)
           cards[n] = (cards[n] == STICKY_MARK) ? STICKY_MARK : CARD_UNMARKED;
 
-        unsigned char *allocations = (unsigned char*)allocation_bitmap;
         line_index_t last_seen = -1;
         for (unsigned int n = 0; n < CARDS_PER_PAGE; n++)
           if (mask[n]) {
