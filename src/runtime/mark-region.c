@@ -102,9 +102,6 @@ static void allocate_bitmap(uword_t **bitmap, uword_t size,
 uword_t *allocation_bitmap;
 _Atomic(uword_t) *mark_bitmap;
 unsigned char *line_bytemap;
-#ifdef LISP_FEATURE_LOG_CARD_MARKS
-unsigned char *card_visited_bytemap;
-#endif
 line_index_t line_count;
 uword_t mark_bitmap_size;
 static struct free_pages_t {
@@ -119,9 +116,6 @@ static void allocate_bitmaps() {
   allocate_bitmap((uword_t**)&mark_bitmap, mark_bitmap_size, "mark bitmap");
   line_count = dynamic_space_size / LINE_SIZE;
   allocate_bitmap((uword_t**)&line_bytemap, line_count, "line bytemap");
-#ifdef LISP_FEATURE_LOG_CARD_MARKS
-  allocate_bitmap((uword_t**)&card_visited_bytemap, line_count, "cards visited bytemap");
-#endif
   for (int i = 0; i < 8; i++)
     allocate_bitmap((uword_t**)&free_pages_by_type[i].indices,
                     pages * sizeof(page_index_t),
@@ -1325,6 +1319,12 @@ static bool scavenge_small_card(line_index_t line, int card, line_index_t last_s
 #ifdef LISP_FEATURE_LOG_CARD_MARKS
 /* Scan the log. */
 void verify_log() {
+  static unsigned char *card_visited_bytemap;
+  if (!card_visited_bytemap) {
+    card_visited_bytemap = calloc(line_count, 1);
+    if (!card_visited_bytemap) lose("Couldn't allocate card_visited_bytemap");
+  }
+  
   /* Mark all cards in the log */
   for (struct Qblock *block = current_log; block; block = block->next)
     for (int i = 0; i < block->count; i++) {
@@ -1344,9 +1344,7 @@ void verify_log() {
     }
   }
   if (failures)
-    lose("Card log is %s, %d errors",
-         failures >= 1000 ? "fucked" : "inconsistent",
-         failures);
+    lose("Card log is inconsistent with %d errors", failures);
   /* Clear marks */
   for (struct Qblock *block = current_log; block; block = block->next)
     for (int i = 0; i < block->count; i++)
