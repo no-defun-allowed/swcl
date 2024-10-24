@@ -15,7 +15,8 @@
 
 (declaim (inline dynamic-usage))
 (defun dynamic-usage ()
-  (extern-alien "bytes_allocated" os-vm-size-t))
+  (values (extern-alien "bytes_allocated" os-vm-size-t)
+          #+mark-region-gc (extern-alien "bytes_wasted" os-vm-size-t)))
 
 (defun static-space-usage ()
   (- (sap-int sb-vm:*static-space-free-pointer*) sb-vm:static-space-start))

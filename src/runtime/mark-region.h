@@ -13,9 +13,9 @@
 extern uword_t *allocation_bitmap;
 extern _Atomic(uword_t) *mark_bitmap;
 extern unsigned char *line_bytemap;
-typedef intptr_t line_index_t;
 
 /* Line arithmetic */
+typedef intptr_t line_index_t;
 static inline char *line_address(line_index_t line) {
   return (char*)(DYNAMIC_SPACE_START + (line * LINE_SIZE));
 }

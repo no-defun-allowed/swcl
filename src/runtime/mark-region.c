@@ -950,10 +950,12 @@ static void add_page_to_free_list(page_index_t p, unsigned char type) {
   free_pages_by_type[type].indices[free_pages_by_type[type].count++] = p;
 }
 
+uword_t bytes_wasted = 0;
 static void __attribute__((noinline)) sweep_pages() {
   /* next_free_page is only maintained for page walking - we
    * reuse partially filled pages, so it's not useful for allocation */
   next_free_page = page_table_pages;
+  bytes_wasted = 0;
   for (int i = 0; i < 8; i++) free_pages_by_type[i].count = 0;
   for (page_index_t p = 0; p < page_table_pages; p++) {
     /* Rather than clearing marks for every page, we only clear marks for
@@ -982,8 +984,10 @@ static void __attribute__((noinline)) sweep_pages() {
           (page_table[p].gen == generation_to_collect || generation_to_collect == PSEUDO_STATIC_GENERATION))
         generations[page_table[p].gen].bytes_allocated += page_bytes_used(p);
       next_free_page = p + 1;
-      if (!page_single_obj_p(p) && page_bytes_used(p) < GENCGC_PAGE_BYTES)
+      if (!page_single_obj_p(p) && page_bytes_used(p) < GENCGC_PAGE_BYTES) {
+        bytes_wasted += GENCGC_PAGE_BYTES - page_bytes_used(p);
         add_page_to_free_list(p, page_table[p].type);
+      }
     }
   }
 }
