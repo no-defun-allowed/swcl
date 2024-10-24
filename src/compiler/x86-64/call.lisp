@@ -20,12 +20,42 @@
 (defconstant old-fp-passing-offset
   (make-sc+offset control-stack-sc-number ocfp-save-offset))
 
+(defun linkage-cell-fixup (name node)
+  ;; The distinction between the two linkage-cell fixups is that :linkage-cell
+  ;; never warns about undefined linkage but the "-ud" one may, after resolving
+  ;; separately-compiled fasls much the same as a standard linker, thereby liberating
+  ;; SBCL from the restriction that WITH-COMPILATION-UNIT is the only way to avoid
+  ;; style-warnings about defined-elsewhere functions. Needless to say, we must avoid
+  ;; emitting any such warnings at compile-time. Two tests are done to decide whether
+  ;; to emit the load-time warning:
+  ;; - did the compiler style-warn?  If not then don't. This covers the case
+  ;;   of (FUNCALL 'name)
+  ;; - was it lexically notinline? Even if the compiler style-warned, there should
+  ;;   not be a load-time warning if the user wanted an out-of-line call.
+  (let* ((explicit-notinline
+          (sb-c::fun-lexically-notinline-p name (sb-c::node-lexenv node)))
+         (lt-warn ; (possible) load-time warning for unresolved linkage
+          (and (not explicit-notinline)
+               ;; Optimize the predicate to FIND-IF. We can usually
+               ;; compare names by EQ except when NAME is a list.
+               (find-if (if (symbolp name)
+                            (lambda (x)
+                              (and (eq (sb-c::undefined-warning-kind x) :function)
+                                   (eq (sb-c::undefined-warning-name x) name)))
+                            (lambda (x)
+                              (and (eq (sb-c::undefined-warning-kind x) :function)
+                                   (equal (sb-c::undefined-warning-name x) name))))
+                        sb-c::*undefined-warnings*))))
+    (make-fixup name (if lt-warn
+                         :linkage-cell-ud  ; was undefined at compile-time
+                         :linkage-cell))))
+
 (defun compute-linkage-cell (node name res)
   (cond ((sb-c::code-immobile-p node)
-         (inst lea res (rip-relative-ea (make-fixup name :linkage-cell))))
+         (inst lea res (rip-relative-ea (linkage-cell-fixup name node))))
         (t
          (inst mov res (thread-slot-ea sb-vm::thread-linkage-table-slot))
-         (inst lea res (ea (make-fixup name :linkage-cell) res)))))
+         (inst lea res (ea (linkage-cell-fixup name node) res)))))
 
 ;;; Make the TNs used to hold OLD-FP and RETURN-PC within the current
 ;;; function. We treat these specially so that the debugger can find
@@ -266,9 +296,9 @@
                       (not verify))))
      (flet ((check-nargs ()
               (assemble ()
-                (let* ((*location-context* (list* name
-                                                  (type-specifier type)
-                                                  (make-restart-location SKIP)))
+                (let* ((*location-context* (list* (make-restart-location SKIP)
+                                                  name
+                                                  (type-specifier type)))
                        (err-lab (generate-error-code vop 'invalid-arg-count-error))
                        (min min-values)
                        (max (and (< max-values call-arguments-limit)
@@ -701,7 +731,8 @@
 
      (:ignore   ,@(unless (or variable (eq return :tail)) '(arg-locs))
                 ,@(unless variable '(args))
-                ,@(when (eq return :unboxed) '(values)))
+                ,@(when (eq return :unboxed) '(values))
+                ,@(when (eq args :fixed) '(nargs)))
 
      ;; For anonymous call, RAX is the function. For named call, RAX will be the linkage
      ;; table base if not stepping, or the linkage cell itself if stepping.
@@ -710,12 +741,11 @@
      (:temporary (:sc descriptor-reg :offset rax-offset :from (:argument 0) :to :eval) rax)
 
      ;; We pass the number of arguments in RCX.
-     (:temporary
-      (:sc unsigned-reg :offset rcx-offset
-           ,@(if (eq args :fixed)
-                 `(:from :eval :to :save)
-                 `(:to ,(if (eq return :fixed) :save :eval))))
-      rcx)
+     ,@(unless (eq args :fixed)
+         `((:temporary
+            (:sc unsigned-reg :offset rcx-offset
+             :to ,(if (eq return :fixed) :save :eval))
+            rcx)))
 
      ,@(when (eq return :fixed)
                    ;; Save it for DEFAULT-UNKNOWN-VALUES to work
@@ -752,25 +782,25 @@
                ;; changed! RAX stores the 'lexical environment' needed
                ;; for closures.
        ,@(unless named '((move rax fun)))
-
-       ,@(if variable
-                     ;; For variable call, compute the number of
-                     ;; arguments and move some of the arguments to
-                     ;; registers.
-             `((inst mov rcx new-fp)
-               (inst sub rcx rsp-tn)
-               (inst shr rcx ,(- word-shift n-fixnum-tag-bits))
-                              ;; Move the necessary args to registers,
-                              ;; this moves them all even if they are
-                              ;; not all needed.
-               ,@(loop for name in *register-arg-names*
-                       for index downfrom -1
-                       collect `(loadw ,name new-fp ,index)))
-             '((cond ((listp nargs)) ;; no-verify-arg-count
-                     ((zerop nargs)
-                      (zeroize rcx))
-                     (t
-                      (inst mov rcx (fixnumize nargs))))))
+       ,@(unless (eq args :fixed)
+           (if variable
+               ;; For variable call, compute the number of
+               ;; arguments and move some of the arguments to
+               ;; registers.
+               `((inst mov rcx new-fp)
+                 (inst sub rcx rsp-tn)
+                 (inst shr rcx ,(- word-shift n-fixnum-tag-bits))
+                 ;; Move the necessary args to registers,
+                 ;; this moves them all even if they are
+                 ;; not all needed.
+                 ,@(loop for name in *register-arg-names*
+                         for index downfrom -1
+                         collect `(loadw ,name new-fp ,index)))
+               '((cond ((listp nargs)) ;; no-verify-arg-count
+                       ((zerop nargs)
+                        (zeroize rcx))
+                       (t
+                        (inst mov rcx (fixnumize nargs)))))))
        ,@(cond ((eq return :tail)
                 '(        ;; Python has figured out what frame we should
                           ;; return to so might as well use that clue.
@@ -863,6 +893,7 @@
 
 (define-full-call unboxed-call-named t :unboxed nil)
 (define-full-call fixed-unboxed-call-named t :unboxed nil :fixed)
+(define-full-call fixed-multiple-call-named t :unknown nil :fixed)
 
 ;;; Call NAME "directly" meaning in a single JMP or CALL instruction,
 ;;; if possible (without loading RAX)
@@ -871,11 +902,11 @@
          ;; If step-instrumenting, then RAX points to the linkage table cell
          (inst* instruction (ea rax-tn)))
         ((sb-c::code-immobile-p node)
-         (inst* instruction (rip-relative-ea (make-fixup name :linkage-cell))))
+         (inst* instruction (rip-relative-ea (linkage-cell-fixup name node))))
         (t
          ;; get the linkage table base into RAX
          (inst mov rax-tn (thread-slot-ea sb-vm::thread-linkage-table-slot))
-         (inst* instruction (ea (make-fixup name :linkage-cell) rax-tn)))))
+         (inst* instruction (ea (linkage-cell-fixup name node) rax-tn)))))
 
 ;;; Invoke the function-designator FUN.
 (defun tail-call-unnamed (fun type vop)
@@ -1407,11 +1438,16 @@
   (:temporary (:sc unsigned-reg :offset rbx-offset) temp)
   (:info min max)
   (:vop-var vop)
+  (:node-var node)
   (:save-p :compute-only)
   (:generator 3
+    RESTART
     ;; NOTE: copy-more-arg expects this to issue a CMP for min > 1
-    (let ((err-lab
-            (generate-error-code vop 'invalid-arg-count-error nargs)))
+    (let* ((*location-context* (and max
+                                    (policy node (> debug 1))
+                                    (cons (make-restart-location RESTART) max)))
+           (err-lab
+             (generate-error-code vop 'invalid-arg-count-error nargs)))
       (cond ((not min)
              (if (zerop max)
                  (inst test :dword nargs nargs)

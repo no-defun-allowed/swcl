@@ -861,3 +861,14 @@
                       `(lambda (a)
                          (make-array `(,a (+ 1 2))))
                       :allow-warnings t))))
+
+(with-test (:name :data-vector-ref-with-offset-unsigned)
+  (checked-compile
+   `(lambda (b)
+      (declare (type (integer * 2) b))
+      (aref #*11101100 (the (satisfies eval) b))))
+  (checked-compile
+   `(lambda (v n)
+      (declare ((simple-vector 8) v)
+               ((integer -4 -1) n))
+      (aref v (+ n 4)))))

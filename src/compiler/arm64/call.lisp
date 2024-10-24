@@ -203,9 +203,9 @@
                                   :unknown-return))
       (flet ((check-nargs ()
                (assemble ()
-                 (let* ((*location-context* (list* name
-                                                   (type-specifier type)
-                                                   (make-restart-location SKIP)))
+                 (let* ((*location-context* (list* (make-restart-location SKIP)
+                                                   name
+                                                   (type-specifier type)))
                         (err-lab (generate-error-code vop 'invalid-arg-count-error))
                         (min min-values)
                         (max (and (< max-values call-arguments-limit)
@@ -727,11 +727,16 @@
   (:arg-types positive-fixnum (:constant t) (:constant t))
   (:info min max)
   (:vop-var vop)
+  (:node-var node)
   (:temporary (:sc unsigned-reg :offset nl0-offset) temp)
   (:save-p :compute-only)
   (:generator 3
-    (let ((err-lab
-           (generate-error-code vop 'invalid-arg-count-error)))
+    RESTART
+    (let* ((*location-context* (and max
+                                    (policy node (> debug 1))
+                                    (cons (make-restart-location RESTART) max)))
+           (err-lab
+             (generate-error-code vop 'invalid-arg-count-error)))
       (labels ((load-immediate (x)
                  (add-sub-immediate (fixnumize x))))
         (cond ((eql max 0)
@@ -1161,6 +1166,7 @@
 
 (define-full-call unboxed-call-named t :unboxed nil)
 (define-full-call fixed-unboxed-call-named t :unboxed nil :fixed)
+(define-full-call fixed-multiple-call-named t :unknown nil :fixed)
 
 ;;; Defined separately, since needs special code that BLT's the
 ;;; arguments down.

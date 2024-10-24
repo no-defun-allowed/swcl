@@ -1324,7 +1324,7 @@ void verify_log() {
     card_visited_bytemap = calloc(line_count, 1);
     if (!card_visited_bytemap) lose("Couldn't allocate card_visited_bytemap");
   }
-  
+
   /* Mark all cards in the log */
   for (struct Qblock *block = current_log; block; block = block->next)
     for (int i = 0; i < block->count; i++) {
