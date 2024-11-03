@@ -2443,7 +2443,7 @@ you did not expect to see this message, please report it."
      (print-unreadable-object (object stream :type t :identity t)))))
 
 
-(defun assert-error (assertion &rest rest)
+(define-error-wrapper assert-error (assertion &rest rest)
   (let* ((rest rest)
          (n-args-and-values (if (fixnump (car rest))
                                 (* (pop rest) 2)
@@ -2501,7 +2501,7 @@ you did not expect to see this message, please report it."
   (finish-output *query-io*)
   (multiple-value-list (eval (read *query-io*))))
 
-(defun check-type-error (place place-value type &optional type-string)
+(define-error-wrapper check-type-error (place place-value type &optional type-string)
   (let ((condition
          (make-condition
           'simple-type-error
@@ -2516,6 +2516,30 @@ you did not expect to see this message, please report it."
                   (format stream "Supply a new value for ~S." place))
         :interactive read-evaluated-form
         value))))
+
+(define-error-wrapper check-type-error-trap (place value type)
+  (multiple-value-bind (place type type-string)
+      (if (stringp type)
+          (values (car place) (cdr place) type)
+          (values place type))
+    (loop
+     (let ((condition
+             (make-condition
+              'simple-type-error
+              :datum value
+              :expected-type type
+              :format-control
+              "The value of ~S is ~S, which is not ~:[of type ~S~;~:*~A~]."
+              :format-arguments (list place value type-string type))))
+       (restart-case (error condition)
+         (store-value (new-value)
+           :report (lambda (stream)
+                     (format stream "Supply a new value for ~S." place))
+           :interactive read-evaluated-form
+           (setf value new-value)
+           (when (typep new-value type)
+             (return))))))
+    value))
 
 (define-error-wrapper etypecase-failure (value keys)
   (error 'case-failure

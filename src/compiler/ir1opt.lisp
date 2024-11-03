@@ -2812,34 +2812,62 @@
 ;;; (allowing the LIST to be flushed.)
 (defoptimizer (values-list optimizer) ((list) node)
   (let ((use (lvar-uses list)))
-    (when (combination-p use)
-      (let ((name (lvar-fun-name (combination-fun use)))
-            (args (combination-args use)))
-        ;; Recognizing LIST* seems completely ad-hoc, however, once upon a time
-        ;; (LIST x) was translated to (CONS x NIL), so in order for this optimizer to
-        ;; pick off (VALUES-LIST (LIST x)), it had to instead look for (CONS x NIL).
-        ;; Realistically nobody should hand-write (VALUES-LIST ({CONS | LIST*} x NIL))
-        ;; so it seems very questionable in utility to preserve both spellings.
-        (when (or (eq name 'list)
-                  (and (eq name 'list*)
-                       (let ((cdr (car (last args))))
-                        (and (lvar-value-is cdr nil)
-                             (progn
-                               (flush-dest cdr)
-                               (setf args (butlast args))
-                               t)))))
+    (cond ((combination-p use)
+           (let ((name (lvar-fun-name (combination-fun use)))
+                 (args (combination-args use)))
+             ;; Recognizing LIST* seems completely ad-hoc, however, once upon a time
+             ;; (LIST x) was translated to (CONS x NIL), so in order for this optimizer to
+             ;; pick off (VALUES-LIST (LIST x)), it had to instead look for (CONS x NIL).
+             ;; Realistically nobody should hand-write (VALUES-LIST ({CONS | LIST*} x NIL))
+             ;; so it seems very questionable in utility to preserve both spellings.
+             (when (or (eq name 'list)
+                       (and (eq name 'list*)
+                            (let ((cdr (car (last args))))
+                              (and (lvar-value-is cdr nil)
+                                   (progn
+                                     (flush-dest cdr)
+                                     (setf args (butlast args))
+                                     t)))))
 
-          ;; FIXME: VALUES might not satisfy an assertion on NODE-LVAR.
-          (change-ref-leaf (lvar-uses (combination-fun node))
-                           (find-free-fun 'values "in a strange place"))
-          (setf (combination-kind node) :full)
-          (dolist (arg args)
-            (setf (lvar-dest arg) node))
-          (setf (combination-args use) nil)
-          (flush-dest list)
-          (flush-combination use)
-          (setf (combination-args node) args)
-          t)))))
+               ;; FIXME: VALUES might not satisfy an assertion on NODE-LVAR.
+               (change-ref-leaf (lvar-uses (combination-fun node))
+                                (find-free-fun 'values "values-list optimizer"))
+               (setf (combination-kind node) :full)
+               (dolist (arg args)
+                 (setf (lvar-dest arg) node))
+               (setf (combination-args use) nil)
+               (flush-dest list)
+               (flush-combination use)
+               (setf (combination-args node) args)
+               t)))
+          ;; Transform (values-list (if x (list 1 2 3)))
+          ;; to
+          ;; (if x (values 1 2 3) (values))
+          ((flet ((use-good-p (use)
+                    (and
+                     (typecase use
+                       (combination
+                        (lvar-fun-is (combination-fun use) '(list)))
+                       (ref
+                        (and (ref-leaf use)
+                             (constant-p (ref-leaf use))
+                             (proper-list-p (constant-value (ref-leaf use))))))
+                     (almost-immediately-used-p list use))))
+             (and (listp use)
+                  (every #'use-good-p use)))
+           (flet ((transform (use)
+                    (cond ((ref-p use)
+                           (delete-ref use)
+                           (replace-node use `(values ,@(constant-value (ref-leaf use)))))
+                          (t
+                           (change-ref-leaf (lvar-uses (combination-fun use))
+                                            (find-free-fun 'values "values-list optimizer"))
+                           (setf (combination-kind use) :full)
+                           (setf (node-derived-type use) *wild-type*)))))
+             (mapc #'transform use)
+             (substitute-lvar-uses (node-lvar node) list nil)
+             (unlink-node node)
+             t)))))
 
 (deftransform values-list ((list) * * :node node)
   (cond ((and (policy node (< safety 3))

@@ -1817,6 +1817,7 @@
 (defknown method-combination-error (format-control &rest t) *)
 (defknown assert-error (t &rest t) null)
 (defknown check-type-error (t t type-specifier &optional (or null string)) t)
+(defknown check-type-error-trap (t t t) t)
 (defknown invoke-debugger (condition) nil)
 (defknown break (&optional format-control &rest t) null)
 (defknown make-condition (type-specifier &rest t) condition ())
@@ -2346,7 +2347,7 @@
 (defknown (sb-impl::%with-standard-io-syntax
            sb-impl::%with-rebound-io-syntax
            sb-impl::call-with-sane-io-syntax)
-    ((function ())) *)
+    ((function ())) * (no-verify-arg-count))
 (defknown sb-debug::funcall-with-debug-io-syntax ((function ((rest-args))) &rest t) *)
 (defknown sb-impl::%print-unreadable-object (t t t &optional (function ())) null)
 

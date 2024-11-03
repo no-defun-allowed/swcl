@@ -1854,6 +1854,11 @@
    (or double-float null))
   (assert-type
    (lambda (m)
+     (if (typep (truncate m) 'fixnum)
+         m))
+   (or real null))
+  (assert-type
+   (lambda (m)
      (if (typep (nth-value 1 (truncate m 2.0)) 'double-float)
          m))
    (or double-float null)))
@@ -1865,3 +1870,18 @@
      (when (typep (nth-value 1 (truncate x 1)) 'float)
        x))
    (or null real)))
+
+(with-test (:name :not-eq-eql)
+  (assert-type
+   (lambda (a b)
+     (and (eql a b)
+          (not (eq a b))))
+   boolean))
+
+(with-test (:name :equal-no-notes)
+  (checked-compile
+   `(lambda (a b)
+      (if (eq a b)
+          (equal a b)
+          nil))
+   :allow-notes nil))
