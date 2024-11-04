@@ -1,3 +1,4 @@
+#ifdef LISP_FEATURE_MPK
 #define _GNU_SOURCE
 #include <sys/mman.h>
 #include <immintrin.h>
@@ -7,7 +8,6 @@
 
 int cards_pkey;
 
-#ifdef LISP_FEATURE_MPK
 void init_lisp_pkey(unsigned char* start, uword_t length) {
   cards_pkey = pkey_alloc(0, 0);
   fprintf(stderr, "cards_pkey = %d, start = %p, length = %lx\n", cards_pkey, start, length);
@@ -19,7 +19,6 @@ void init_lisp_pkey(unsigned char* start, uword_t length) {
 }
 
 static void wrpkru(int pkey) {
-  //__asm__ __volatile__ ("wrpkru" : : "a"(pkey), "c"(0), "d"(0));
   __builtin_ia32_wrpkru(pkey);
   _mm_lfence();
 }
