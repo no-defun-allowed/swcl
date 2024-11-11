@@ -101,16 +101,18 @@ void tune_asm_routines_for_microarch(void)
     if (cpuid_fn1_ecx & (1<<23)) our_cpu_feature_bits |= 2;
     SetSymbolValue(CPU_FEATURE_BITS, make_fixnum(our_cpu_feature_bits), 0);
 
-#ifdef LISP_FEATURE_LOG_CARD_MARKS
-    return;
-#endif
     // I don't know if this works on Windows
 #ifndef _MSC_VER
+#ifdef LISP_FEATURE_LOG_CARD_MARKS
+    int offset = 0x63;
+#else
+    int offset = 0x12;
+#endif
     cpuid(0, 0, &eax, &ebx, &ecx, &edx);
     if (eax >= 7) {
         cpuid(7, 0, &eax, &ebx, &ecx, &edx);
         if (ebx & (1<<9)) // Enhanced Repeat Movs/Stos
-          asm_routine_poke(VECTOR_FILL_T, 0x12, 0x7C); // Change JMP to JL
+          asm_routine_poke(VECTOR_FILL_T, offset, 0x7C); // Change JMP to JL
     }
 #endif
 }
