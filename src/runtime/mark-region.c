@@ -1116,13 +1116,6 @@ static struct suballocator current_log_suballocator = SUBALLOCATOR_INITIALIZER("
 static struct suballocator next_log_suballocator = SUBALLOCATOR_INITIALIZER("Log B");
 static struct Qblock *_Atomic current_log = NULL, *_Atomic next_log = NULL;
 
-static void print_log() {
-  for (struct Qblock *block = current_log; block; block = block->next)
-    for (int i = 0; i < block->count; i++) {
-      fprintf(stderr, "%d ", (int)block->elements[i]);
-    }
-  fprintf(stderr, "\n");
-}
 static void swap_logs() {
   gc_assert(!current_log);
   current_log = next_log;
@@ -1179,14 +1172,19 @@ static int log_length, *log_boundaries = NULL;
 #define SORT_KEY(a) ((a) / SORT_GRANULARITY)
 #define SWAP(a,i,j) { uword_t temp=a[i];a[i]=a[j];a[j]=temp; }
 
+uint32_t random32() {
+    static uint32_t state = 1;
+    return state = state * 1664525 + 1013904223;
+}
+
 static void quicksort(uword_t *a, int start, int end) {
   if (end <= start) return;
-  uword_t pivot = a[start];
-  int lt = start, i = start + 1, gt = end;
+  uword_t pivot = SORT_KEY(a[random32() % (end - start) + start]);
+  int lt = start, i = start, gt = end;
   while (i <= gt) {
-    if (SORT_KEY(a[i]) < SORT_KEY(pivot)) {
+    if (SORT_KEY(a[i]) < pivot) {
       SWAP(a, i, lt); lt++; i++;
-    } else if (SORT_KEY(a[i]) > SORT_KEY(pivot)) {
+    } else if (SORT_KEY(a[i]) > pivot) {
       SWAP(a, i, gt); gt--;
     } else {
       i++;
