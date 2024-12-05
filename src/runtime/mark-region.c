@@ -104,6 +104,7 @@ _Atomic(uword_t) *mark_bitmap;
 unsigned char *line_bytemap;
 line_index_t line_count;
 uword_t mark_bitmap_size;
+uword_t bytes_wasted = 0;
 static struct free_pages_t {
   int count;
   page_index_t *indices;
@@ -263,10 +264,6 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       if (!page_table[where].type)
           prepare_pages(1, where, where, page_type==PAGE_TYPE_CODE?page_type:0,
                         get_alloc_generation());
-      set_page_type(page_table[where], page_type | OPEN_REGION_PAGE_FLAG);
-      page_table[where].gen = 0;
-      set_page_scan_start_offset(where, 0);
-      start->index = i + 1;
       /* Update residency statistics. mr_update_closed_region will
        * enliven all lines on this page, so it's correct to set the
        * page bytes used like this. */
@@ -274,6 +271,14 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       bytes_allocated += claimed;
       generations[gen].bytes_allocated += claimed;
       set_page_bytes_used(where, GENCGC_PAGE_BYTES);
+      /* Reduce wastage if we're reusing a partly-used page. */
+      if (!page_free_p(where))
+        bytes_wasted -= claimed;
+      /* Set up the page metadata. */
+      set_page_type(page_table[where], page_type | OPEN_REGION_PAGE_FLAG);
+      page_table[where].gen = 0;
+      set_page_scan_start_offset(where, 0);
+      start->index = i + 1;
       if (where + 1 > next_free_page) next_free_page = where + 1;
       return true;
     }
@@ -950,7 +955,6 @@ static void add_page_to_free_list(page_index_t p, unsigned char type) {
   free_pages_by_type[type].indices[free_pages_by_type[type].count++] = p;
 }
 
-uword_t bytes_wasted = 0;
 static void __attribute__((noinline)) sweep_pages() {
   /* next_free_page is only maintained for page walking - we
    * reuse partially filled pages, so it's not useful for allocation */
