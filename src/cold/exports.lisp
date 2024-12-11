@@ -49,6 +49,7 @@
    "*SYSINIT-PATHNAME-FUNCTION*"
 
    "*DEFAULT-EXTERNAL-FORMAT*"
+   "*DEFAULT-SOURCE-EXTERNAL-FORMAT*"
    "*DEFAULT-C-STRING-EXTERNAL-FORMAT*"
 
    ;; Compare and Swap support
@@ -965,6 +966,10 @@ possibly temporarily, because it might be used internally.")
    "*REPL-PROMPT-FUN*"
    "*REPL-READ-FORM-FUN*"
 
+   ;; an experimental thing
+   "STDIO-FILE"
+   "MAKE-STDIO-FILE"
+
    ;; for SB-COVER
 
    "*CODE-COVERAGE-INFO*"
@@ -1292,7 +1297,7 @@ interface stability.")
    #-avoid-clock-gettime
    "CLOCK-GETTIME" "TV-SEC" "TV-USEC"
    "UID-T" "UNIX-CLOSE"
-   "UNIX-CLOSEDIR" "UNIX-DIRENT-NAME" "UNIX-DUP"
+   "UNIX-CLOSEDIR" "UNIX-DIRENT-NAME" "UNIX-DUP" "UNIX-FCLOSE"
    "UNIX-FILE-MODE" "UNIX-FSTAT"
    "UNIX-GETHOSTNAME" "UNIX-GETPID" "UNIX-GETRUSAGE"
    "UNIX-GETTIMEOFDAY" "UNIX-GETUID" "UNIX-GID"
@@ -1301,6 +1306,7 @@ interface stability.")
    "UNIX-ISATTY" "UNIX-LSEEK" "UNIX-LSTAT" "UNIX-MKDIR"
    "UNIX-OPEN" "UNIX-OPENDIR" "UNIX-PATHNAME" "UNIX-PID"
    "UNIX-PIPE" "UNIX-POLL" "UNIX-SIMPLE-POLL"
+   "UNIX-TMPFILE"
    "UNIX-READ" "UNIX-READDIR" "UNIX-READLINK" "UNIX-REALPATH"
    "UNIX-RENAME" "UNIX-STAT" "UNIX-UID"
    "UNIX-UNLINK" "UNIX-WRITE"
@@ -1526,10 +1532,15 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "%CONCATENATE-TO-VECTOR" "%CONCATENATE-TO-VECTOR-SUBSEQ"
            "CONTAINS-HAIRY-TYPE-P" "CONTAINS-UNKNOWN-TYPE-P"
            "%COS" "%COS-QUICK"
-           "%COSH" "%DATA-VECTOR-AND-INDEX" "%DEPOSIT-FIELD"
+           "%COSH"
+           "%DATA-VECTOR-AND-INDEX" "%DATA-VECTOR-AND-INDEX/CHECK-BOUND"
+           "%DATA-VECTOR-AND-INDEX/KNOWN"
+           "%DATA-VECTOR-POP" "%DATA-VECTOR-PUSH"
+           "%DEPOSIT-FIELD"
            "%DOUBLE-FLOAT" "%DPB" "%EQL"
            "%EXIT"
            "%EXP" "%EXPM1"
+           "FILL-POINTER-ERROR"
            "%FIND-POSITION"
            "%FIND-POSITION-VECTOR-MACRO" "%FIND-POSITION-IF"
            "%FIND-POSITION-IF-VECTOR-MACRO" "%FIND-POSITION-IF-NOT"
@@ -1799,7 +1810,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "LIST-COPY-SEQ*"
            "LIST-FILL*"
            "LIST-SUBSEQ*"
-           "LIST-REVERSE-INTO-VECTOR"
+           "LIST-REVERSE-INTO-VECTOR" "LIST-REVERSE-INTO-VECTOR-CDDR"
            "ANSI-STREAM"
            "ANSI-STREAM-BIN" "ANSI-STREAM-BOUT"
            "ANSI-STREAM-IN"
@@ -2594,7 +2605,7 @@ be submitted as a CDR")
            "ALLOCATE-FULL-CALL-FRAME"
            "ALWAYS-TRANSLATABLE"
            "ANCESTOR-FRAME-REF" "ANCESTOR-FRAME-SET"
-           "ANY" "ASSEMBLE-FILE"
+           "ANY"
            "ATTRIBUTES" "ATTRIBUTES-INTERSECTION" "ATTRIBUTES-UNION"
            "ATTRIBUTES="
            "BRANCH"
@@ -2606,6 +2617,7 @@ be submitted as a CDR")
            "COMPARE-AND-SWAP-SLOT"
            "COMPILE-IN-LEXENV"
            "COMPILE-FILES" "COMPILE-FORM-TO-FILE"
+           "COMPILE-FILE-TO-TEMPFILE"
            "%COMPILER-DEFUN" "COMPILER-ERROR" "FATAL-COMPILER-ERROR"
            "COMPILER-NOTIFY"
            "COMPILER-STYLE-WARN" "COMPILER-WARN"

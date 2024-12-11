@@ -189,7 +189,7 @@ static void inflate_core_bytes(int fd, os_vm_offset_t offset,
 
     int ret;
     size_t buf_size = ZSTD_DStreamInSize();
-    unsigned char* buf = successful_malloc(buf_size);
+    unsigned char* buf = checked_malloc(buf_size);
     ZSTD_inBuffer input;
     input.src = buf;
     input.pos = 0;
@@ -760,7 +760,7 @@ process_directory(int count, struct ndir_entry *entry,
             || !PTR_IS_ALIGNED(&lisp_code_end, 4096))
             lose("ELF core alignment bug. Check for proper padding in 'editcore'");
 #ifdef DEBUG_COREPARSE
-        printf("Lisp code present in executable @ %lx:%lx (freeptr=%p)\n",
+        fprintf(stderr, "Lisp code present in executable @ %lx:%lx (freeptr=%p)\n",
                (uword_t)&lisp_code_start, (uword_t)&lisp_code_end,
                text_space_highwatermark);
 #endif
@@ -893,18 +893,18 @@ process_directory(int count, struct ndir_entry *entry,
             {
                 load_core_bytes(fd, offset + file_offset, (os_vm_address_t)addr, len, id == READ_ONLY_CORE_SPACE_ID);
             }
-        }
+
 #ifdef LISP_FEATURE_DARWIN_JIT
-        if (id == READ_ONLY_CORE_SPACE_ID)
-            os_protect((os_vm_address_t)addr, len, OS_VM_PROT_READ | OS_VM_PROT_EXECUTE);
+            if (id == READ_ONLY_CORE_SPACE_ID)
+                os_protect((os_vm_address_t)addr, len, OS_VM_PROT_READ | OS_VM_PROT_EXECUTE);
 #endif
 #ifdef MADV_MERGEABLE
-        if ((merge_core_pages == 1)
-            || ((merge_core_pages == -1) && compressed)) {
-            madvise((void *)addr, len, MADV_MERGEABLE);
-        }
+            if ((merge_core_pages == 1)
+                || ((merge_core_pages == -1) && compressed)) {
+                madvise((void *)addr, len, MADV_MERGEABLE);
+            }
 #endif
-
+        }
         lispobj *free_pointer = (lispobj *) addr + entry->nwords;
         switch (id) {
         default:
@@ -914,14 +914,15 @@ process_directory(int count, struct ndir_entry *entry,
             break;
         case DYNAMIC_CORE_SPACE_ID:
             next_free_page = ALIGN_UP(entry->nwords<<WORD_SHIFT, GENCGC_PAGE_BYTES)
-              / GENCGC_PAGE_BYTES;
+                / GENCGC_PAGE_BYTES;
             anon_dynamic_space_start = (os_vm_address_t)(addr + len);
         }
 #ifdef DEBUG_COREPARSE
-        printf("space %d @ %10lx pg=%4d+%4d nwords=%9ld checksum=%lx\n",
+        fprintf(stderr, " space %d @ %12lx pg=%4d+%4d nwords=%9ld checksum=%lx\n",
                (int)id, addr, (int)entry->data_page, (int)entry->page_count,
                entry->nwords, corespace_checksum((void*)addr, entry->nwords));
 #endif
+
     }
 
 #ifdef LISP_FEATURE_LINKAGE_SPACE
@@ -1020,10 +1021,13 @@ bool gc_allocate_ptes()
 
     // Sure there's a fancier way to round up to a power-of-2
     // but this is executed exactly once, so KISS.
-    while (num_gc_cards < page_table_pages*CARDS_PER_PAGE) { ++nbits; num_gc_cards <<= 1; }
+    while (num_gc_cards / CARDS_PER_PAGE < page_table_pages) { ++nbits; num_gc_cards <<= 1; }
+
     // 2 Gigacards should suffice for now. That would span 2TiB of memory
     // using 1Kb card size, or more if larger card size.
-    gc_assert(nbits < 32);
+    if (nbits > 31)
+        lose("dynamic space too large");
+
     // If the space size is less than or equal to the number of cards
     // that 'gc_card_table_nbits' cover, we're fine. Otherwise, problem.
     // 'nbits' is what we need, 'gc_card_table_nbits' is what the core was compiled for.
@@ -1040,15 +1044,16 @@ bool gc_allocate_ptes()
     num_gc_cards = 1L << gc_card_table_nbits;
 
     gc_card_table_mask =  num_gc_cards - 1;
-#if defined LISP_FEATURE_SB_SAFEPOINT && defined LISP_FEATURE_X86_64
+#if (defined LISP_FEATURE_SB_SAFEPOINT && defined LISP_FEATURE_X86_64) || defined LISP_FEATURE_MPK
     /* The card table is hardware-page-aligned. Preceding it and occupying a whole
      * "backend page" - which by the way is overkill - is the global safepoint trap page.
      * The dummy TEST instruction for safepoints encodes shorter this way */
     void* result = os_alloc_gc_space(0, MOVABLE, 0,
                                      ALIGN_UP(num_gc_cards, BACKEND_PAGE_BYTES) + BACKEND_PAGE_BYTES);
     gc_card_mark = (unsigned char*)result + BACKEND_PAGE_BYTES;
+    init_lisp_pkey(gc_card_mark, ALIGN_UP(num_gc_cards, BACKEND_PAGE_BYTES));
 #elif defined LISP_FEATURE_PPC64
-    unsigned char* mem = successful_malloc(num_gc_cards + LISP_LINKAGE_SPACE_SIZE);
+    unsigned char* mem = checked_malloc(num_gc_cards + LISP_LINKAGE_SPACE_SIZE);
     gc_card_mark = mem + LISP_LINKAGE_SPACE_SIZE;
     /* Copy linkage entries from where they were allocated to where they're accessible
      * off the GC card table register using negative indices. */
@@ -1056,9 +1061,8 @@ bool gc_allocate_ptes()
     os_deallocate((void*)linkage_space, LISP_LINKAGE_SPACE_SIZE);
     linkage_space = (lispobj*)mem;
 #else
-    gc_card_mark = (unsigned char*)os_alloc_gc_space(0, MOVABLE, 0, ALIGN_UP(num_gc_cards, BACKEND_PAGE_BYTES));
+    gc_card_mark = checked_malloc(num_gc_cards);
 #endif
-    init_lisp_pkey(gc_card_mark, ALIGN_UP(num_gc_cards, BACKEND_PAGE_BYTES));
 
     /* The mark array used to work "by accident" if the numeric value of CARD_MARKED
      * is 0 - or equivalently the "WP'ed" state - which is the value that calloc()
@@ -1326,7 +1330,7 @@ init_coreparse_spaces(int n, struct coreparse_space* input)
     // Indexing of spaces[] by the space ID should conveniently just work,
     // so we have to leave an empty row for space ID 0 which doesn't exist.
     struct coreparse_space* output =
-      successful_malloc(sizeof (struct coreparse_space)*(MAX_CORE_SPACE_ID+1));
+      checked_malloc(sizeof (struct coreparse_space)*(MAX_CORE_SPACE_ID+1));
     int i;
     for (i=0; i<n; ++i) {
         int id = input[i].id;
@@ -1404,14 +1408,41 @@ load_core_file(char *file, os_vm_offset_t file_offset, int merge_core_pages)
       init_coreparse_spaces(sizeof defined_spaces/sizeof (struct coreparse_space),
                             defined_spaces);
 
+#ifdef DEBUG_COREPARSE
+    fprintf(stderr, "core header:\n");
+#endif
     for ( ; ; ptr += remaining_len) {
         val = *ptr++;
         len = *ptr++;
+#ifdef DEBUG_COREPARSE
+        fprintf(stderr, "@ +%02x: type_code %d=#x%x len %d:",
+                (int)((char*)(ptr - 2) - (char*)header),
+                (int)val, (int)val, (int)len);
+        for (core_entry_elt_t* p = ptr; p < (ptr-2)+len; ++p)
+            fprintf(stderr, " %"OBJ_FMTX, *p);
+        putc('\n', stderr);
+#endif
         remaining_len = len - 2; /* (-2 to cancel the two ++ operations) */
         switch (val) {
         case BUILD_ID_CORE_ENTRY_TYPE_CODE:
-            // The first 2 data words are the GC selection and address of NIL,
-            // which are mainly of interest to 'editcore'. Here they are ignored.
+            /* The first 2 data words are the GC strategy identifier and address of NIL.
+             * The latter is mainly of interest to 'editcore' since NIL is #defined
+             * in static-symbols.h (or else is relocatable).
+             * We may want to support one of several enhancements (in increasing
+             * order of difficulty):
+             *  - building all GC strategies into the runtime. This should merely be a matter
+             *    of renaming C functions to avoid conflict, and providing an indirect table
+             *    for various routines: allocator fallback, GC main entry point, etc.
+             *    Thusly may a single runtime support any core.
+             *  - reading a core for a different GC strategy by "importing" the on-disk
+             *    heap as a batch of new allocation requests and pointer fixups.
+             *    This will presumably induce measurable startup delay, even worse than
+             *    relocation.
+             *  - actually using the strategy as chosen at runtime, for any on-disk format
+             *    core without reallocating */
+            if (ptr[0] != GC_STRATEGY_ID)
+                lose("GC strategy mismatch: runtime uses %d, core built for %d",
+                     GC_STRATEGY_ID, (int)ptr[0]);
             stringlen = ptr[2];
             ptr += 3; remaining_len -= 3;
             gc_assert(remaining_len * sizeof (core_entry_elt_t) >= stringlen);

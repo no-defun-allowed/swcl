@@ -43,6 +43,7 @@
 #include "genesis/instance.h"
 #include "genesis/vector.h"
 #include "interr.h"             /* for lose() */
+#include "gc-assert.h"
 #include "gc.h"
 #include "pseudo-atomic.h"
 #include "interrupt.h"
@@ -90,9 +91,23 @@ static pthread_mutex_t in_gc_lock = PTHREAD_MUTEX_INITIALIZER;
 extern lispobj call_into_lisp_first_time(lispobj fun, lispobj *args, int nargs);
 #endif
 
+#ifdef ZSTD_STATIC_LINKING_ONLY
+static bool asan_cleanup_called;
+#endif
 static void
 link_thread(struct thread *th)
 {
+#ifdef ZSTD_STATIC_LINKING_ONLY
+    if (!asan_cleanup_called) {
+    /* A thread has a preallocated dcontext if and only if it is in all_threads,
+     * unless cleanup has already been called, in which case we just hope that
+     * no backtrace occurs thereafter, or else that allocating a context
+     * just-in-time (in decompress_vector) works, which it may not */
+        struct extra_thread_data *extra_data = thread_extra_data(th);
+        gc_assert(!extra_data->zstd_dcontext);
+        extra_data->zstd_dcontext = ZSTD_createDCtx();
+    }
+#endif
     if (all_threads) all_threads->prev=th;
     th->next=all_threads;
     th->prev=0;
@@ -103,6 +118,11 @@ link_thread(struct thread *th)
 static void
 unlink_thread(struct thread *th)
 {
+#ifdef ZSTD_STATIC_LINKING_ONLY
+    struct extra_thread_data *extra_data = thread_extra_data(th);
+    if (extra_data->zstd_dcontext) ZSTD_freeDCtx(extra_data->zstd_dcontext);
+    extra_data->zstd_dcontext = 0;
+#endif
     if (th->prev)
         th->prev->next = th->next;
     else
@@ -332,6 +352,31 @@ char* thread_name_from_pthread(pthread_t pointer){
 }
 #endif
 
+/* This function is seemingly unused by the C runtime, but DO NOT DELETE.
+ * It's needed when the C runtime is compiled with --fsanitize=address, because the sanitizer
+ * falsely reports that all the threads running at exit have leaked their zstd_dcontext.
+ * While it's possible to make the sanitizer shut up about particular allocations,
+ * you need to know the size in order to pass it to the unpoisoning routine.
+ * The allocator of the ZSTD context object is opaque; we don't know the size.
+ * Interestingly the sanitizer does not complain about the thread structure per se,
+ * and I think that's because it does not track mmap().
+ * I wanted to register this function using atexit() but apparently that's not soon enough
+ * to solve the problem. It has to to be called by *EXIT-HOOKS* instead */
+void asan_lisp_thread_cleanup() {
+    ignore_value(mutex_acquire(&all_threads_lock));
+#if defined ADDRESS_SANITIZER && defined ZSTD_STATIC_LINKING_ONLY
+    asan_cleanup_called = 1;
+    struct thread* th;
+    for_each_thread(th) {
+        struct extra_thread_data *extra_data = thread_extra_data(th);
+        void* dctx = extra_data->zstd_dcontext;
+        if (dctx && __sync_bool_compare_and_swap(&extra_data->zstd_dcontext, dctx, 0))
+            ZSTD_freeDCtx(dctx);
+    }
+#endif
+    ignore_value(mutex_release(&all_threads_lock));
+}
+
 void create_main_lisp_thread(lispobj function) {
 #ifdef LISP_FEATURE_WIN32
     InitializeCriticalSection(&all_threads_lock);
@@ -417,9 +462,6 @@ void sb_posix_after_fork() { // for use by sb-posix:fork
 void free_thread_struct(struct thread *th)
 {
     struct extra_thread_data *extra_data = thread_extra_data(th);
-#ifdef ZSTD_STATIC_LINKING_ONLY
-    ZSTD_freeDCtx(extra_data->zstd_dcontext);
-#endif
     if (extra_data->arena_savearea) free(extra_data->arena_savearea);
     os_deallocate((os_vm_address_t) th->os_address, THREAD_STRUCT_SIZE);
 }
@@ -931,14 +973,14 @@ alloc_thread_struct(void* spaces) {
      * from failing to obtain contiguous memory. Note that the OS may have a smaller
      * alignment granularity than BACKEND_PAGE_BYTES so we may have to adjust the
      * result to make it conform to our guard page alignment requirement. */
-    bool zeroize_stack = 0;
+    bool is_recycled = 0;
     if (spaces) {
         // If reusing memory from a previously exited thread, start by removing
         // some old junk from the stack. This is imperfect since we only clear a little
         // at the top, but doing so enables diagnosing some garbage-retention issues
         // using a fine-toothed comb. It would not be possible at all to diagnose
         // if any newly started thread could refer a dead thread's heap objects.
-        zeroize_stack = 1;
+        is_recycled = 1;
     } else {
         spaces = os_alloc_gc_space(THREAD_STRUCT_CORE_SPACE_ID, MOVABLE,
                                    NULL, THREAD_STRUCT_SIZE);
@@ -995,7 +1037,7 @@ alloc_thread_struct(void* spaces) {
         (lispobj*)((char*)th->control_stack_start+thread_control_stack_size);
     th->control_stack_end = th->binding_stack_start;
 
-    if (zeroize_stack) {
+    if (is_recycled) {
 #if GENCGC_IS_PRECISE
     /* Clear the entire control stack. Without this I was able to induce a GC failure
      * in a test which hammered on thread creation for hours. The control stack is
@@ -1043,9 +1085,6 @@ alloc_thread_struct(void* spaces) {
 #endif
 #if defined LISP_FEATURE_UNIX && defined LISP_FEATURE_SB_THREAD
     os_sem_init(&extra_data->sprof_sem, 0);
-#endif
-#ifdef ZSTD_STATIC_LINKING_ONLY
-    extra_data->zstd_dcontext = ZSTD_createDCtx();
 #endif
     extra_data->sprof_lock = 0;
     th->sprof_data = 0;

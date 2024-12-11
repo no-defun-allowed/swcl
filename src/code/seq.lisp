@@ -875,6 +875,22 @@ many elements are copied."
         vector)
       #()))
 
+(defun list-reverse-into-vector-cddr (list)
+  (declare (explicit-check))
+  (if list
+      (let* ((list-length (length (the list list)))
+             (length (ceiling list-length 2))
+             (vector (make-array length))
+             (list list))
+        (when (evenp list-length)
+          (pop list))
+        (loop for i from (1- length) downto 0
+              do
+              (setf (aref vector i) (pop list))
+              (pop list))
+        vector)
+      #()))
+
 (defun reverse-word-specialized-vector (from to end)
   (declare (vector from))
   (do ((length (length to))
@@ -1192,35 +1208,48 @@ many elements are copied."
                            (optimize (sb-c:insert-array-bounds-checks 0)))
                   (let ((length 0))
                     (declare (index length))
-                    (do-rest-arg ((arg index) sequences)
-                      (cond ((eq arg '%subseq)
-                             (let* ((seq (fast-&rest-nth (incf index) sequences))
-                                    (start (the index (fast-&rest-nth (incf index) sequences)))
-                                    (end (the (or null index) (fast-&rest-nth (incf index) sequences)))
-                                    (end (or end (length seq))))
-                               (if (> start end)
-                                   (sequence-bounding-indices-bad-error seq start end))
-                               (incf length (- end (truly-the index start)))))
-                            (t
-                             (incf length (length arg)))))
-                    (let ((result (make-array length :element-type ',element-type))
-                          (start 0))
-                      (declare (index start))
-                      (do-rest-arg ((arg index) sequences)
-                        (multiple-value-bind (seq start2 end2 length)
-                            (cond ((eq arg '%subseq)
-                                   (let* ((seq (fast-&rest-nth (incf index) sequences))
-                                          (start (truly-the index (fast-&rest-nth (incf index) sequences)))
-                                          (end (truly-the (or null index) (fast-&rest-nth (incf index) sequences)))
-                                          (end (or end (length seq))))
-                                     (values seq start end (- end start))))
-
-                                  (t
-                                   (values (truly-the sequence arg) 0 nil (length arg))))
-                          (string-dispatch (,@dispatch t) seq
-                            (replace result seq :start1 start :start2 start2 :end2 end2)
-                            (incf start length))))
-                      result))))))
+                    (symbol-macrolet ((index (truly-the index index*))
+                                      (start (truly-the index start*)))
+                      (do-rest-arg ((arg index*) sequences)
+                        (cond ((eq arg '%subseq)
+                               (let* ((seq (fast-&rest-nth (incf index) sequences))
+                                      (start (the index (fast-&rest-nth (incf index) sequences)))
+                                      (end (fast-&rest-nth (incf index) sequences))
+                                      (end (if end
+                                               (the index end)
+                                               (length seq))))
+                                 (if (> start end)
+                                     (sequence-bounding-indices-bad-error seq start end))
+                                 (incf length (- end start))))
+                              ((eq arg '%splice)
+                               (let ((n (truly-the index (fast-&rest-nth (incf index) sequences))))
+                                 (incf index n)
+                                 (incf length n)))
+                              (t
+                               (incf length (length arg)))))
+                      (let ((result (make-array length :element-type ',element-type))
+                            (start* 0))
+                        (declare (index start*))
+                        (do-rest-arg ((arg index*) sequences)
+                          (if (eq arg '%splice)
+                              (let ((n (truly-the index (fast-&rest-nth (incf index) sequences))))
+                                (loop repeat n
+                                      do (setf (aref result start)
+                                               (fast-&rest-nth (incf index) sequences))
+                                         (incf start)))
+                              (multiple-value-bind (seq start2 end2 length)
+                                  (cond ((eq arg '%subseq)
+                                         (let* ((seq (fast-&rest-nth (incf index) sequences))
+                                                (start (truly-the index (fast-&rest-nth (incf index) sequences)))
+                                                (end (truly-the (or null index) (fast-&rest-nth (incf index) sequences)))
+                                                (end (or end (length seq))))
+                                           (values seq start end (- end start))))
+                                        (t
+                                         (values (truly-the sequence arg) 0 nil (length arg))))
+                                (string-dispatch (,@dispatch t) seq
+                                  (replace result seq :start1 start :start2 start2 :end2 end2)
+                                  (incf start length)))))
+                        result)))))))
   #+sb-unicode
   (def %concatenate-to-string character
     (simple-array character (*)) (simple-array base-char (*)))
@@ -1243,7 +1272,7 @@ many elements are copied."
     (declare (index length))
     (do-rest-arg ((seq) sequences)
       (incf length (length seq)))
-    (let* ((n-bits-shift (aref sb-vm::%%simple-array-n-bits-shifts%% widetag))
+    (let* ((n-bits-shift (aref sb-vm::%%simple-array-n-bits-shifts%% (truly-the (unsigned-byte 8) widetag)))
            (result (sb-vm::allocate-vector-with-widetag
                     #+ubsan nil widetag length n-bits-shift))
            (setter (the function (svref %%data-vector-setters%% widetag)))
@@ -1252,61 +1281,79 @@ many elements are copied."
       (do-rest-arg ((seq) sequences)
         (sb-sequence:dosequence (e seq)
           (funcall setter result index e)
-          (incf index)))
+          (incf (truly-the index index))))
       result)))
 
 (defun %concatenate-to-list-subseq (&rest sequences)
   (declare (explicit-check))
   (let* ((result (list nil))
          (splice result))
-    (do-rest-arg ((arg index) sequences)
-      (multiple-value-bind (seq start2 end2)
-          (cond ((eq arg '%subseq)
-                 (let* ((seq (fast-&rest-nth (incf index) sequences))
-                        (start (the index (fast-&rest-nth (incf index) sequences)))
-                        (end (the (or null index) (fast-&rest-nth (incf index) sequences))))
-                   (values seq start end)))
-                (t
-                 (values arg 0 nil)))
-        (do-subsequence (e seq start2 end2)
-          (setf splice (cdr (rplacd splice (list e)))))))
+    (do-rest-arg ((arg index*) sequences)
+      (symbol-macrolet ((index (truly-the index index*)))
+        (if (eq arg '%splice)
+            (let ((n (truly-the index (fast-&rest-nth (incf index) sequences))))
+              (loop repeat n
+                    do
+                    (setf splice (cdr (rplacd splice (list (fast-&rest-nth (incf index) sequences)))))))
+            (multiple-value-bind (seq start2 end2)
+                (cond ((eq arg '%subseq)
+                       (let* ((seq (fast-&rest-nth (incf index) sequences))
+                              (start (the index (fast-&rest-nth (incf index) sequences)))
+                              (end (the (or null index) (fast-&rest-nth (incf index) sequences))))
+                         (values seq start end)))
+                      (t
+                       (values arg 0 nil)))
+              (do-subsequence (e seq start2 end2)
+                (setf splice (cdr (rplacd splice (list e)))))))))
     (cdr result)))
 
 (defun %concatenate-to-vector-subseq (widetag &rest sequences)
   (declare (explicit-check))
   (let ((length 0))
     (declare (index length))
-    (do-rest-arg ((arg index) sequences)
-      (cond ((eq arg '%subseq)
-             (let* ((seq (fast-&rest-nth (incf index) sequences))
-                    (start (the index (fast-&rest-nth (incf index) sequences)))
-                    (end (the (or null index) (fast-&rest-nth (incf index) sequences)))
-                    (end (or end (length seq))))
-               (if (> start end)
-                   (sequence-bounding-indices-bad-error seq start end))
-               (incf length (- end (truly-the index start)))))
-            (t
-             (incf length (length arg)))))
-    (let* ((n-bits-shift (aref sb-vm::%%simple-array-n-bits-shifts%% widetag))
-           (result (sb-vm::allocate-vector-with-widetag
-                    #+ubsan nil widetag length n-bits-shift))
-           (setter (the function (svref %%data-vector-setters%% widetag)))
-           (index 0))
-      (declare (index index))
-      (do-rest-arg ((arg rest-index) sequences)
-        (multiple-value-bind (seq start2 end2)
-            (cond ((eq arg '%subseq)
-                   (let* ((seq (truly-the sequence (fast-&rest-nth (incf rest-index) sequences)))
-                          (start (truly-the index (fast-&rest-nth (incf rest-index) sequences)))
-                          (end (truly-the (or null index) (fast-&rest-nth (incf rest-index) sequences)))
-                          (end (or end (length seq))))
-                     (values seq start end (- end start))))
-                  (t
-                   (values arg 0 nil)))
-          (do-subsequence (e seq start2 end2)
-            (funcall setter result index e)
-            (incf index))))
-      result)))
+    (symbol-macrolet ((index (truly-the index index*))
+                      (rest-index (truly-the index rest-index*)))
+      (do-rest-arg ((arg index*) sequences)
+        (cond ((eq arg '%subseq)
+               (let* ((seq (fast-&rest-nth (incf index) sequences))
+                      (start (the index (fast-&rest-nth (incf index) sequences)))
+                      (end (fast-&rest-nth (incf index) sequences))
+                      (end (if end
+                               (the index end)
+                               (length seq))))
+                 (if (> start end)
+                     (sequence-bounding-indices-bad-error seq start end))
+                 (incf length (- end start))))
+              ((eq arg '%splice)
+               (let ((n (truly-the index (fast-&rest-nth (incf index) sequences))))
+                 (incf index n)
+                 (incf length n)))
+              (t
+               (incf length (length arg)))))
+      (let* ((n-bits-shift (aref sb-vm::%%simple-array-n-bits-shifts%% (truly-the (unsigned-byte 8) widetag)))
+             (result (sb-vm::allocate-vector-with-widetag
+                      #+ubsan nil widetag length n-bits-shift))
+             (setter (the function (svref %%data-vector-setters%% widetag)))
+             (index* 0))
+        (do-rest-arg ((arg rest-index*) sequences)
+          (if (eq arg '%splice)
+              (let ((n (truly-the index (fast-&rest-nth (incf rest-index) sequences))))
+                (loop repeat n
+                      do (funcall setter result index (fast-&rest-nth (incf rest-index) sequences))
+                         (incf index)))
+              (multiple-value-bind (seq start2 end2)
+                  (cond ((eq arg '%subseq)
+                         (let* ((seq (truly-the sequence (fast-&rest-nth (incf rest-index) sequences)))
+                                (start (truly-the index (fast-&rest-nth (incf rest-index) sequences)))
+                                (end (truly-the (or null index) (fast-&rest-nth (incf rest-index) sequences)))
+                                (end (or end (length seq))))
+                           (values seq start end (- end start))))
+                        (t
+                         (values arg 0 nil)))
+                (do-subsequence (e seq start2 end2)
+                  (funcall setter result index e)
+                  (incf index)))))
+        result))))
 
 ;;;; MAP
 
@@ -1330,7 +1377,7 @@ many elements are copied."
     (sb-sequence:dosequence (element sequence)
       (setf (aref result index)
             (funcall really-fun element))
-      (incf index))
+      (incf (truly-the index index)))
     result))
 (defun %map-for-effect-arity-1 (fun sequence)
   (declare (explicit-check))
@@ -2675,7 +2722,7 @@ many elements are copied."
 (macrolet (;; shared logic for defining %FIND-POSITION and
            ;; %FIND-POSITION-IF in terms of various inlineable cases
            ;; of the expression defined in FROB and VECTOR*-FROB
-           (frobs (&optional bit-frob)
+           (frobs (&optional specialized)
              `(seq-dispatch-checking sequence-arg
                (frob sequence-arg from-end)
                (with-array-data ((sequence sequence-arg :offset-var offset)
@@ -2683,12 +2730,31 @@ many elements are copied."
                                  (end end)
                                  :check-fill-pointer t)
                  (typecase sequence
-                   #+sb-unicode
                    ((simple-array character (*))
-                    (vector*-frob sequence))
+                    #1=
+                    (cond ,@(when specialized
+                              #+(or arm64 x86-64) ;; invoke simd routines
+                              `(((and (eq #'identity key)
+                                      (or (eq #'eq test)
+                                          (eq #'eql test)
+                                          (and (or (eq test #'sb-c::two-arg-char=)
+                                                   (eq test #'char=))
+                                               (characterp item))
+                                          (eq #'equal test)))
+                                 (locally
+                                     (declare (optimize (sb-c:insert-array-bounds-checks 0)))
+                                   (let ((p (if from-end
+                                                (nth-value 1 (%find-position item sequence t start end #'identity #'eq))
+                                                (nth-value 1 (%find-position item sequence nil start end #'identity #'eq)))))
+                                     (if p
+                                         (values item (truly-the index (- p offset)))
+                                         (values nil nil)))))))
+                          (t
+                           (vector*-frob sequence))))
+                   #+sb-unicode
                    ((simple-array base-char (*))
-                    (vector*-frob sequence))
-                   ,@(when bit-frob
+                    #1#)
+                   ,@(when specialized
                        `((simple-bit-vector
                           (if (and (typep item 'bit)
                                    (eq #'identity key)

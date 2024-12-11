@@ -21,6 +21,12 @@
 
 (declaim (declaration explicit-check always-bound))
 
+;;; CMUCL warns about NIL not being an integer
+#+host-quirks-cmu
+(declaim (notinline position position-if position-if-not))
+
+(defvar *default-source-external-format* :default)
+
 (defmacro sb-xc:defconstant (&rest args)
   `(eval-when (:compile-toplevel :load-toplevel :execute)
      (cl:defconstant ,@args)))

@@ -272,21 +272,29 @@
   (declare (type lvar lvar))
   (let ((dest (lvar-dest lvar)))
     (when (basic-combination-p dest)
-      (when (call-full-like-p dest)
-        (let ((info (and (eq (basic-combination-kind dest) :known)
-                         (basic-combination-fun-info dest))))
-          (if (and info
-                   (fun-info-externally-checkable-type info))
-              (return-from lvar-externally-checkable-type
-                (coerce-to-values (funcall (fun-info-externally-checkable-type info) dest lvar)))
-              (map-combination-args-and-types
-               (lambda (arg type &rest args)
-                 (declare (ignore args))
-                 (when (eq arg lvar)
-                   (return-from lvar-externally-checkable-type
-                     (coerce-to-values type))))
-               dest
-               :defined-here t :asserted-type t)))))
+      (if (lvar-fun-is (basic-combination-fun dest)
+                       ;; Assembly routines that perform type-checks
+                       '(%data-vector-pop
+                         %data-vector-push))
+          (and (eq lvar (first (basic-combination-args dest)))
+               (return-from
+                lvar-externally-checkable-type
+                (values-specifier-type '(values complex-vector &optional))))
+          (when (call-full-like-p dest)
+            (let ((info (and (eq (basic-combination-kind dest) :known)
+                             (basic-combination-fun-info dest))))
+              (if (and info
+                       (fun-info-externally-checkable-type info))
+                  (return-from lvar-externally-checkable-type
+                    (coerce-to-values (funcall (fun-info-externally-checkable-type info) dest lvar)))
+                  (map-combination-args-and-types
+                   (lambda (arg type &rest args)
+                     (declare (ignore args))
+                     (when (eq arg lvar)
+                       (return-from lvar-externally-checkable-type
+                         (coerce-to-values type))))
+                   dest
+                   :defined-here t :asserted-type t))))))
     *wild-type*))
 
 ;;;; interface routines used by optimizers
@@ -1252,6 +1260,13 @@
              (when (and (constant-fold-call-p node)
                         (constant-fold-call node))
                (return-from ir1-optimize-combination))
+             ;; Don't transform locally flushable functions,
+             ;; their transforms won't know that they are flushable.
+             (when (and (not (node-tail-p node))
+                        (not (node-lvar node))
+                        (let ((name (lvar-fun-name (combination-fun node) t)))
+                          (memq name (lexenv-flushable (node-lexenv node)))))
+               (return-from ir1-optimize-combination))
              (when (fold-call-derived-to-constant node)
                (return-from ir1-optimize-combination))
              (when (and (ir1-attributep attr commutative)
@@ -1506,8 +1521,19 @@
       (:full
        (multiple-value-bind (leaf info)
            (multiple-value-bind (type name leaf asserted) (lvar-fun-type fun-lvar)
-             (declare (ignore name))
-             (validate-call-type call type leaf nil asserted))
+             (declare (ignorable name asserted))
+             (validate-call-type call type leaf nil
+                                 (or asserted
+                                     #+sb-xc-host t
+                                     ;; Trust types coming from the system structures
+                                     (let ((source (lvar-uses fun-lvar)))
+                                       (and (combination-p source)
+                                            (lvar-fun-is (combination-fun source) '(%instance-ref))
+                                            (let ((type (lvar-type (car (combination-args source)))))
+                                              (and (structure-classoid-p type)
+                                                   (let ((package (sb-xc:symbol-package (classoid-name type))))
+                                                     (or (eq package *cl-package*)
+                                                         (and package (system-package-p package)))))))))))
          (cond ((functional-p leaf)
                 (convert-call-if-possible
                  (lvar-uses (basic-combination-fun call))
@@ -1850,7 +1876,16 @@
   (let* ((info (basic-combination-fun-info combination))
          (attr (fun-info-attributes info))
          (args (basic-combination-args combination)))
-    (cond ((not (ir1-attributep attr foldable))
+    (cond ((not (or (ir1-attributep attr foldable)
+                    (and (ir1-attributep attr foldable-read-only)
+                         (let ((dest (node-dest combination)))
+                           (and (combination-p dest)
+                                (eq (combination-kind dest) :known)
+                                (let* ((info (combination-fun-info dest))
+                                       (read-only (fun-info-read-only-args info)))
+                                  (when read-only
+                                    (logbitp (position (node-lvar combination) (combination-args dest))
+                                             read-only))))))))
            nil)
           ((ir1-attributep attr call)
            (map-combination-args-and-types
@@ -2158,20 +2193,67 @@
       (reoptimize-lvar (set-value dest))))
   (give-up-ir1-transform))
 
+;;; Remove bounds
+(defun simplify-numeric-type (x)
+  (macrolet ((m (&rest types)
+               `(cond ,@(loop for type in types
+                              collect
+                              `((csubtypep x (specifier-type ',type))
+                                (specifier-type ',type)))
+                      (t x))))
+    (m single-float double-float integer float real)))
+
+;;; Try to invoke the type deriver of FUNCTION in (setf x (function x))
+(defun set-type-of-combination (var set initial-type)
+  (let ((combination (lvar-uses (set-value set))))
+    (when (and (combination-p combination)
+               (eq (combination-kind combination) :known))
+      (let* ((args (combination-args combination))
+             (var-args
+               (loop for arg in args
+                     for arg-var = (lvar-lambda-var arg)
+                     when (eq arg-var var)
+                     collect arg)))
+        (when var-args
+          (flet ((derive (type)
+                   (single-value-type
+                    (or
+                     (combination-derive-type-for-arg-types combination
+                                                            (loop for arg in args
+                                                                  collect (if (memq arg var-args)
+                                                                              type
+                                                                              arg)))
+                     (return-from set-type-of-combination)))))
+           (let* ((initial-type (simplify-numeric-type initial-type)) ;; remove bounds or the types won't converge
+                  (derived (derive initial-type)))
+             (when derived
+               ;; Does it converge to the same type again?
+               (let* ((union (type-union derived initial-type))
+                      (again-derived (derive union)))
+                 (when (type= derived again-derived)
+                   union))))))))))
+
 ;;; Figure out the type of a LET variable that has sets. We compute
 ;;; the union of the INITIAL-TYPE and the types of all the set
 ;;; values and do a PROPAGATE-TO-REFS with this type.
 (defun propagate-from-sets (var initial-type)
-  (let ((types nil))
-    (dolist (set (lambda-var-sets var))
-      (let ((type (lvar-type (set-value set))))
-        (push type types)
-        (when (and (node-reoptimize set)
-                   (not (node-to-be-deleted-p set)))
-          (let ((old-type (node-derived-type set)))
-            (unless (values-subtypep old-type type)
-              (derive-node-type set (make-single-value-type type))))
-          (setf (node-reoptimize set) nil))))
+  (let ((types nil)
+        (sets (lambda-var-sets var)))
+    (or (and sets
+             (not (cdr sets))
+             (let ((type (set-type-of-combination var (car sets) initial-type)))
+               (when type
+                 (push type types))))
+        (dolist (set sets)
+          (let ((type (lvar-type (set-value set))))
+            (push type types)
+            (when (and (node-reoptimize set)
+                       (not (node-to-be-deleted-p set)))
+              (let ((old-type (node-derived-type set)))
+                (set-type-of-combination var set initial-type)
+                (unless (values-subtypep old-type type)
+                  (derive-node-type set (make-single-value-type type))))
+              (setf (node-reoptimize set) nil)))))
     (let ((res-type (or (maybe-infer-iteration-var-type var initial-type)
                         (apply #'type-union initial-type types))))
       (propagate-to-refs var res-type)))
@@ -2438,7 +2520,7 @@
                                 (when (and arg
                                            (lvar-reoptimize arg)
                                            (null (basic-var-sets var)))
-                                  (lvar-type arg)))
+                                  (list (lvar-type arg))))
                               (basic-combination-args call)
                               vars))
                (this-ref (lvar-use (basic-combination-fun call))))
@@ -2454,13 +2536,13 @@
                       (mapcar (lambda (this-arg old)
                                 (when old
                                   (setf (lvar-reoptimize this-arg) nil)
-                                  (type-union (lvar-type this-arg) old)))
+                                  (cons (lvar-type this-arg) old)))
                               (basic-combination-args dest)
                               union)))))
 
           (loop for var in vars
                 and type in union
-                when type do (propagate-to-refs var type))
+                when type do (propagate-to-refs var (sb-kernel::%type-union type)))
 
           ;; It's possible to discover new inline calls which may have
           ;; incompatible argument types, so don't allow reuse of this
@@ -2831,7 +2913,7 @@
 
                ;; FIXME: VALUES might not satisfy an assertion on NODE-LVAR.
                (change-ref-leaf (lvar-uses (combination-fun node))
-                                (find-free-fun 'values "values-list optimizer"))
+                                (find-free-fun 'values "VALUES-LIST"))
                (setf (combination-kind node) :full)
                (dolist (arg args)
                  (setf (lvar-dest arg) node))
@@ -2861,7 +2943,7 @@
                            (replace-node use `(values ,@(constant-value (ref-leaf use)))))
                           (t
                            (change-ref-leaf (lvar-uses (combination-fun use))
-                                            (find-free-fun 'values "values-list optimizer"))
+                                            (find-free-fun 'values "VALUES-LIST"))
                            (setf (combination-kind use) :full)
                            (setf (node-derived-type use) *wild-type*)))))
              (mapc #'transform use)

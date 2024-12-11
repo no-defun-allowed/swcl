@@ -1221,7 +1221,7 @@
                          (pathname  +pathname-layout-flag+)
                          (t         +structure-layout-flag+))))
             (if (vop-existsp :translate structure-typep)
-                `(structure-typep object ,flag)
+                `(structure-typep object ,layout)
                 `(and (%instancep object)
                       (logtest (,get-flags (%instance-layout object)) ,flag)))))
 
@@ -1693,16 +1693,23 @@
                (if ,already-type-p
                    x
                    ,(cond ((eq dimension '*)
-                           #+ubsan
-                           ;; Passing :INITIAL-CONTENTS avoids allocating ubsan shadow bits,
-                           ;; but redundantly checks the length of the input in MAKE-ARRAY's
-                           ;; transform because we don't or can't infer that LENGTH gives the
-                           ;; same answer each time it is called on X. There may be a way to
-                           ;; extract more efficiency - at least eliminate the unreachable
-                           ;; error-signaling code on mismatch - but I don't care to try.
-                           `(make-array (length x) ,@specialization :initial-contents x)
-                           #-ubsan ; better: do not generate a redundant LENGTH check
-                           `(replace (make-array (length x) ,@specialization) x))
+                           (cond ((and (lvar-matches x :fun-names '(reverse sb-impl::list-reverse
+                                                                    sb-impl::vector-reverse))
+                                       (almost-immediately-used-p x (lvar-use x) :flushable t))
+                                  (splice-fun-args x :any 1)
+                                  ;; The make-array transform can handle this
+                                  `(make-array (length x) ,@specialization :initial-contents (reverse x)))
+                                 (t
+                                  #+ubsan
+                                  ;; Passing :INITIAL-CONTENTS avoids allocating ubsan shadow bits,
+                                  ;; but redundantly checks the length of the input in MAKE-ARRAY's
+                                  ;; transform because we don't or can't infer that LENGTH gives the
+                                  ;; same answer each time it is called on X. There may be a way to
+                                  ;; extract more efficiency - at least eliminate the unreachable
+                                  ;; error-signaling code on mismatch - but I don't care to try.
+                                  `(make-array (length x) ,@specialization :initial-contents x)
+                                  #-ubsan ; better: do not generate a redundant LENGTH check
+                                  `(replace (make-array (length x) ,@specialization) x))))
                           ((policy node (= safety 0)) ; Disregard the input length
                            `(replace (make-array ,dimension ,@specialization) x))
                           (t
@@ -1767,12 +1774,7 @@
 
 (deftransform structure-typep ((object type) (t (constant-arg t)))
   (let* ((layout (lvar-value type))
-         (type (case layout
-                 (#.+condition-layout-flag+ (specifier-type 'condition))
-                 (#.+pathname-layout-flag+  (specifier-type 'pathname))
-                 (#.+structure-layout-flag+ (specifier-type 'structure-object))
-                 (t
-                  (layout-classoid layout))))
+         (type (layout-classoid layout))
          (diff (type-difference (lvar-type object) type))
          (pred (backend-type-predicate diff)))
     (cond ((not (types-equal-or-intersect (lvar-type object) type))
