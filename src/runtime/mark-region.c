@@ -379,14 +379,13 @@ page_index_t try_allocate_large(uword_t nbytes,
   uword_t largest_hole_seen = 0;
   while (1) {
     page_index_t chunk_start = find_free_page(where, end);
-    if (chunk_start == -1) return -1;
-    /* TODO: this is suboptimal - the full extent of the free space is irrelevant
-     * as long as it's at _least_ pages_needed. So find_used_page is a poor choice
-     * of algorithm for this. It's not wrong, though I've seen it say (via added
-     * printing) that it needed 2 pages but found 40000 pages. So it scanned
-     * the entire page table before deciding yup, we have enough to work with..
-     */
-    page_index_t chunk_end = find_used_page(chunk_start, end);
+    if (chunk_start == -1) {
+      *largest_hole = 0;
+      return -1;
+    }
+    page_index_t search_end = chunk_start + pages_needed;
+    if (search_end > end) search_end = end;
+    page_index_t chunk_end = find_used_page(chunk_start, search_end);
     uword_t hole_size = chunk_end - chunk_start;
     if (hole_size >= pages_needed) {
       page_index_t last_page = chunk_start + pages_needed - 1;
