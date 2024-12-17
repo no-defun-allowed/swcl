@@ -1174,10 +1174,42 @@
                                type1 type2
                                :complex-arg1 :complex-subtypep-arg1)))))
 
+;;; Like EQUAL but uses EQL for MEMBER and EQL.
+(defun equal-type-specifiers-p (x y)
+  (labels ((equal-rest (test x y)
+             (if (and (consp x))
+                 (and (consp y)
+                      (funcall test (car x) (car y))
+                      (equal-rest test (cdr x) (cdr y)))
+                 (funcall test x y)))
+           (equal-types (x y)
+             (cond ((eql x y)
+                    t)
+                   ((and (consp x)
+                         (cdr x)) ;; don't bother if there are no parameters
+                    (and (consp y)
+                         (cdr y)
+                         (let ((x (typexpand x))
+                               (y (typexpand y)))
+                           (if (consp x)
+                               (and (consp y)
+                                    ;; &key (name ...) can be confused with a type
+                                    (neq (first y) 'function)
+                                    (equal-types (first x) (first y))
+                                    ;; (EQL x) expands to (MEMBER x).
+                                    (equal-rest (if (eq (first x) 'member)
+                                                    #'eql
+                                                    #'equal-types)
+                                                (rest x)
+                                                (rest y)))
+                               (equal-types x y)))))
+                   (t (equal x y)))))
+    (equal-types x y)))
+
 ;;; Just parse the type specifiers and call CSUBTYPE.
 ;;; Well, not "just" - Despite memoization of parsing and CSUBTYPEP,
 ;;; it's nonetheless better to test EQUAL first, which is ~10x faster
-;;; in the positive case, and insigificant in the negative.
+;;; in the positive case, and insignificant in the negative.
 ;;; The specifiers might not be legal type specifiers,
 ;;; but we're not obligated to police that:
 ;;;   "This version eliminates the requirement to signal an error."
@@ -1198,10 +1230,12 @@
   If values are NIL and NIL, it couldn't be determined."
   (declare (type lexenv-designator environment) (ignore environment))
   (declare (explicit-check))
-  (if (and #-sb-xc-host
-           (sb-c:policy sb-c::*policy* (not (or (> debug 1)
+  (if #-sb-xc-host
+      (and (sb-c:policy sb-c::*policy* (not (or (> debug 1)
                                                 (= safety 3))))
-           (equal type1 type2))
+           (equal-type-specifiers-p type1 type2))
+      #+sb-xc-host
+      (equal type1 type2)
       (values t t)
       (csubtypep (specifier-type type1) (specifier-type type2))))
 
@@ -3616,8 +3650,8 @@ used for a COMPLEX component.~:@>"
                    (eq (array-type-complexp type1)
                        (array-type-complexp type2))))
          (values nil t))
-        ((or (unknown-type-p (array-type-element-type type1))
-             (unknown-type-p (array-type-element-type type2)))
+        ((or (contains-unknown-type-p (array-type-element-type type1))
+             (contains-unknown-type-p (array-type-element-type type2)))
          (type= (array-type-element-type type1)
                 (array-type-element-type type2)))
         (t
@@ -3742,8 +3776,8 @@ used for a COMPLEX component.~:@>"
           (;; Since we didn't match any of the special cases above, if
            ;; either element type is unknown we can only give a good
            ;; answer if they are the same.
-           (or (unknown-type-p (array-type-element-type type1))
-               (unknown-type-p (array-type-element-type type2)))
+           (or (contains-unknown-type-p (array-type-element-type type1))
+               (contains-unknown-type-p (array-type-element-type type2)))
            (if (type= (array-type-element-type type1)
                       (array-type-element-type type2))
                (values t t)
@@ -3928,34 +3962,40 @@ used for a COMPLEX component.~:@>"
            :element-type result-eltype
            :specialized-element-type result-stype))))))
 
-(define-type-method (array :simple-intersection2) (type1 type2)
-  (declare (type array-type type1 type2))
+(defun array-intersection (type1 type2 use-specialized)
   (if (array-types-intersect type1 type2)
-      (let ((dims1 (array-type-dimensions type1))
-            (dims2 (array-type-dimensions type2))
-            (complexp1 (array-type-complexp type1))
-            (complexp2 (array-type-complexp type2))
-            (eltype1 (array-type-element-type type1))
-            (eltype2 (array-type-element-type type2))
-            (stype1 (array-type-specialized-element-type type1))
-            (stype2 (array-type-specialized-element-type type2)))
+      (let* ((dims1 (array-type-dimensions type1))
+             (dims2 (array-type-dimensions type2))
+             (complexp1 (array-type-complexp type1))
+             (complexp2 (array-type-complexp type2))
+             (eltype1 (array-type-element-type type1))
+             (eltype2 (array-type-element-type type2))
+             (stype1 (array-type-specialized-element-type type1))
+             (stype2 (array-type-specialized-element-type type2))
+             (specialized-element-type
+               (cond
+                 ((eq stype1 *wild-type*) stype2)
+                 ((eq stype2 *wild-type*) stype1)
+                 (t
+                  (aver (type= stype1 stype2))
+                  stype1))))
         (make-array-type (cond ((eq dims1 '*) dims2)
                                ((eq dims2 '*) dims1)
                                (t
                                 (mapcar (lambda (x y) (if (eq x '*) y x))
                                         dims1 dims2)))
-         :complexp (if (eq complexp1 :maybe) complexp2 complexp1)
-         :element-type (cond
-                         ((eq eltype1 *wild-type*) eltype2)
-                         ((eq eltype2 *wild-type*) eltype1)
-                         (t (type-intersection eltype1 eltype2)))
-         :specialized-element-type (cond
-                                     ((eq stype1 *wild-type*) stype2)
-                                     ((eq stype2 *wild-type*) stype1)
-                                     (t
-                                      (aver (type= stype1 stype2))
-                                      stype1))))
+                         :complexp (if (eq complexp1 :maybe) complexp2 complexp1)
+                         :element-type (cond
+                                         (use-specialized
+                                          specialized-element-type)
+                                         ((eq eltype1 *wild-type*) eltype2)
+                                         ((eq eltype2 *wild-type*) eltype1)
+                                         (t (type-intersection eltype1 eltype2)))
+                         :specialized-element-type specialized-element-type))
       *empty-type*))
+
+(define-type-method (array :simple-intersection2) (type1 type2)
+  (array-intersection type1 type2 nil))
 
 ;;; Check a supplied dimension list to determine whether it is legal,
 ;;; and return it in canonical form (as either '* or a list).
@@ -4809,8 +4849,17 @@ used for a COMPLEX component.~:@>"
          (multiple-value-bind (sub-value sub-certain?)
              (type= type1
                     (%type-union
-                     (mapcar (lambda (x) (type-intersection type1 x))
-                             (union-type-types type2))))
+                     ;; Upgrading rules do not work with intersections
+                     (if (and (array-type-p type1)
+                              (not (contains-unknown-type-p (array-type-element-type type1))))
+                         (mapcar (lambda (x)
+                                   (if (array-type-p x)
+                                       (array-intersection type1 x t)
+                                       (type-intersection type1 x)))
+                                 (union-type-types type2))
+                         (mapcar (lambda (x)
+                                   (type-intersection type1 x))
+                                 (union-type-types type2)))))
            (if sub-certain?
                (values sub-value sub-certain?)
                ;; The ANY/TYPE expression above is a sufficient condition for

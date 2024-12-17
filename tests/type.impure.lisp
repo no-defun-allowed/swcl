@@ -941,8 +941,7 @@
 (with-test (:name :source-transform-union-of-arrays-typep)
   ;; Ensure we don't pessimize rank 1 specialized array.
   ;; (SIMPLE unboxed vector is done differently)
-  (let* ((hair (sb-kernel:specifier-type '(sb-kernel:unboxed-array 1)))
-         (xform (sb-c::source-transform-union-typep 'myobj hair)))
+  (let* ((xform (sb-c::%source-transform-typep 'myobj '(sb-kernel:unboxed-array 1))))
     (assert (equal xform
                    '(or (typep myobj
                                '(and vector (not (array t)) (not (array nil))))))))
