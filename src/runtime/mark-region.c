@@ -104,6 +104,7 @@ _Atomic(uword_t) *mark_bitmap;
 unsigned char *line_bytemap;
 line_index_t line_count;
 uword_t mark_bitmap_size;
+uword_t bytes_wasted = 0;
 static struct free_pages_t {
   int count;
   page_index_t *indices;
@@ -263,10 +264,6 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       if (!page_table[where].type)
           prepare_pages(1, where, where, page_type==PAGE_TYPE_CODE?page_type:0,
                         get_alloc_generation());
-      set_page_type(page_table[where], page_type | OPEN_REGION_PAGE_FLAG);
-      page_table[where].gen = 0;
-      set_page_scan_start_offset(where, 0);
-      start->index = i + 1;
       /* Update residency statistics. mr_update_closed_region will
        * enliven all lines on this page, so it's correct to set the
        * page bytes used like this. */
@@ -274,6 +271,14 @@ bool try_allocate_small_from_pages(sword_t nbytes, struct alloc_region *region,
       bytes_allocated += claimed;
       generations[gen].bytes_allocated += claimed;
       set_page_bytes_used(where, GENCGC_PAGE_BYTES);
+      /* Reduce wastage if we're reusing a partly-used page. */
+      if (!page_free_p(where))
+        bytes_wasted -= claimed;
+      /* Set up the page metadata. */
+      set_page_type(page_table[where], page_type | OPEN_REGION_PAGE_FLAG);
+      page_table[where].gen = 0;
+      set_page_scan_start_offset(where, 0);
+      start->index = i + 1;
       if (where + 1 > next_free_page) next_free_page = where + 1;
       return true;
     }
@@ -374,14 +379,13 @@ page_index_t try_allocate_large(uword_t nbytes,
   uword_t largest_hole_seen = 0;
   while (1) {
     page_index_t chunk_start = find_free_page(where, end);
-    if (chunk_start == -1) return -1;
-    /* TODO: this is suboptimal - the full extent of the free space is irrelevant
-     * as long as it's at _least_ pages_needed. So find_used_page is a poor choice
-     * of algorithm for this. It's not wrong, though I've seen it say (via added
-     * printing) that it needed 2 pages but found 40000 pages. So it scanned
-     * the entire page table before deciding yup, we have enough to work with..
-     */
-    page_index_t chunk_end = find_used_page(chunk_start, end);
+    if (chunk_start == -1) {
+      *largest_hole = 0;
+      return -1;
+    }
+    page_index_t search_end = chunk_start + pages_needed;
+    if (search_end > end) search_end = end;
+    page_index_t chunk_end = find_used_page(chunk_start, search_end);
     uword_t hole_size = chunk_end - chunk_start;
     if (hole_size >= pages_needed) {
       page_index_t last_page = chunk_start + pages_needed - 1;
@@ -950,7 +954,6 @@ static void add_page_to_free_list(page_index_t p, unsigned char type) {
   free_pages_by_type[type].indices[free_pages_by_type[type].count++] = p;
 }
 
-uword_t bytes_wasted = 0;
 static void __attribute__((noinline)) sweep_pages() {
   /* next_free_page is only maintained for page walking - we
    * reuse partially filled pages, so it's not useful for allocation */
@@ -1116,13 +1119,6 @@ static struct suballocator current_log_suballocator = SUBALLOCATOR_INITIALIZER("
 static struct suballocator next_log_suballocator = SUBALLOCATOR_INITIALIZER("Log B");
 static struct Qblock *_Atomic current_log = NULL, *_Atomic next_log = NULL;
 
-static void print_log() {
-  for (struct Qblock *block = current_log; block; block = block->next)
-    for (int i = 0; i < block->count; i++) {
-      fprintf(stderr, "%d ", (int)block->elements[i]);
-    }
-  fprintf(stderr, "\n");
-}
 static void swap_logs() {
   gc_assert(!current_log);
   current_log = next_log;
@@ -1179,14 +1175,19 @@ static int log_length, *log_boundaries = NULL;
 #define SORT_KEY(a) ((a) / SORT_GRANULARITY)
 #define SWAP(a,i,j) { uword_t temp=a[i];a[i]=a[j];a[j]=temp; }
 
+uint32_t random32() {
+    static uint32_t state = 1;
+    return state = state * 1664525 + 1013904223;
+}
+
 static void quicksort(uword_t *a, int start, int end) {
   if (end <= start) return;
-  uword_t pivot = a[start];
-  int lt = start, i = start + 1, gt = end;
+  uword_t pivot = SORT_KEY(a[random32() % (end - start) + start]);
+  int lt = start, i = start, gt = end;
   while (i <= gt) {
-    if (SORT_KEY(a[i]) < SORT_KEY(pivot)) {
+    if (SORT_KEY(a[i]) < pivot) {
       SWAP(a, i, lt); lt++; i++;
-    } else if (SORT_KEY(a[i]) > SORT_KEY(pivot)) {
+    } else if (SORT_KEY(a[i]) > pivot) {
       SWAP(a, i, gt); gt--;
     } else {
       i++;

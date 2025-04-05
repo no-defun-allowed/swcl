@@ -107,12 +107,11 @@ void tune_asm_routines_for_microarch(void)
     if (cpuid_fn1_ecx & (1<<23)) our_cpu_feature_bits |= 2;
     SetSymbolValue(CPU_FEATURE_BITS, make_fixnum(our_cpu_feature_bits), 0);
 
-#ifdef LISP_FEATURE_LOG_CARD_MARKS
-    /* XXX: I need to figure out where everything is with the new barrier */
-    return;
-#endif
     unsigned char* asm_routine = (void*)get_asm_routine_by_name(VECTOR_FILL_T, 0);
     if (!asm_routine) return;
+#ifdef LISP_FEATURE_LOG_CARD_MARKS
+    return;
+#endif
     // Since a particular runtime expects a particular core,
     // mismatch of the ASM routine is a fatal error.
     if (memcmp(asm_routine + vector_fill_offset_to_check,
@@ -120,7 +119,6 @@ void tune_asm_routines_for_microarch(void)
                sizeof vector_fill_expect_bytes))
         lose("%s does not match expectation @ %p",
              VECTOR_FILL_T, asm_routine + vector_fill_offset_to_check);
-
     // I don't know if this works on Windows
 #ifndef _MSC_VER
     cpuid(0, 0, &eax, &ebx, &ecx, &edx);
