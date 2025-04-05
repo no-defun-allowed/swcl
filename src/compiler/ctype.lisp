@@ -389,7 +389,10 @@ and no value was provided for it." name)))))))))))
            #-sb-xc-host (values fun-type &optional))
   (if (lambda-p functional)
       (make-fun-type
-       :required (mapcar #'leaf-type (lambda-vars functional))
+       :required (loop for var in (lambda-vars functional)
+                       collect (if (lambda-var-sets var)
+                                   (leaf-defined-type var)
+                                   (leaf-type var)))
        :returns (if (functional-kind-eq functional deleted)
                     *empty-type*
                     (tail-set-type (lambda-tail-set functional))))
@@ -399,7 +402,9 @@ and no value was provided for it." name)))))))))))
                   (keys))
           (dolist (arg (optional-dispatch-arglist functional))
             (let ((info (lambda-var-arg-info arg))
-                  (type (leaf-type arg)))
+                  (type (if (lambda-var-sets arg)
+                            (leaf-defined-type arg)
+                            (leaf-type arg))))
               (if info
                   (ecase (arg-info-kind info)
                     (:required (req type))
@@ -672,7 +677,7 @@ and no value was provided for it." name)))))))))))
   (collect ((res))
     (mapc (lambda (var type)
             (let* ((vtype (leaf-type var))
-                   (int (type-approx-intersection2 vtype type)))
+                   (int (type-intersection vtype type)))
               (cond
                ((eq int *empty-type*)
                 (note-lossage
@@ -752,18 +757,14 @@ and no value was provided for it." name)))))))))))
         (dolist (arg arglist)
           (cond
             ((lambda-var-arg-info arg)
-             (let* ((info (lambda-var-arg-info arg))
-                    (default-p (arg-info-default-p info)))
+             (let* ((info (lambda-var-arg-info arg)))
                (ecase (arg-info-kind info)
                  (:keyword
                   (let* ((key (arg-info-key info))
                          (kinfo (find key keys :key #'key-info-name)))
                     (cond
                       (kinfo
-                       (res (if default-p
-                                (key-info-type kinfo)
-                                (type-union (key-info-type kinfo)
-                                            (specifier-type 'null)))))
+                       (res (key-info-type kinfo)))
                       (t
                        (note-lossage
                         "Defining a ~S keyword not present in ~A."
@@ -773,12 +774,8 @@ and no value was provided for it." name)))))))))))
                  (:optional
                   ;; We can exhaust TYPE-OPTIONAL when the type was
                   ;; simplified as described above.
-                  (res (let ((type (or (pop type-optional)
-                                       *universal-type*)))
-                         (if default-p
-                             type
-                             (type-union type
-                                         (specifier-type 'null))))))
+                  (res (or (pop type-optional)
+                           *universal-type*)))
                  (:rest
                   (when (fun-type-rest type)
                     (res (specifier-type 'list))))
@@ -845,7 +842,6 @@ and no value was provided for it." name)))))))))))
 (defun assert-definition-type
     (functional type &key (really-assert t)
                           ((:lossage-fun *lossage-fun*) #'compiler-style-warn)
-                          unwinnage-fun
                           (where "previous declaration"))
   (declare (type functional functional)
            (type function *lossage-fun*)
@@ -878,19 +874,18 @@ and no value was provided for it." name)))))))))))
                                  policy
                                  'ftype-context)))
            (loop for var in vars
+                 for arg-info = (lambda-var-arg-info var)
                  for type in types do
-                 (cond ((basic-var-sets var)
-                        (when (and unwinnage-fun
-                                   (not (csubtypep (leaf-type var) type)))
-                          (funcall unwinnage-fun
-                                   (sb-format:tokens
-                                      "Assignment to argument: ~S~%  ~
-                                       prevents use of assertion from function ~
-                                       type ~A:~% ~/sb-impl:print-type/~%")
-                                   (leaf-debug-name var) where type)))
-                       ((and (listp really-assert) ; (:NOT . ,vars)
+                 (cond ((and (listp really-assert) ; (:NOT . ,vars)
                              (member (lambda-var-%source-name var)
                                      (cdr really-assert)))) ; do nothing
+                       ((or (basic-var-sets var)
+                            ;; optional args have to account for
+                            ;; default values and will be checked
+                            ;; elsewhere.
+                            (and arg-info
+                                 (memq (arg-info-kind arg-info) '(:keyword :optional))))
+                        (setf (leaf-defined-type var) type))
                        (t
                         (setf (leaf-type var) type)
                         (let ((s-type (make-single-value-type type)))
@@ -1017,10 +1012,10 @@ and no value was provided for it." name)))))))))))
     (substitute-lvar internal-lvar lvar)
     (with-ir1-environment-from-node dest
       (let ((cast (make-array-index-cast
-                   :asserted-type type
-                   :type-to-check (maybe-weaken-check type policy)
-                   :value lvar
-                   :derived-type (coerce-to-values type))))
+                   type
+                   (maybe-weaken-check type policy)
+                   lvar
+                   (coerce-to-values type))))
         (%insert-cast-before dest cast)
         (use-lvar cast internal-lvar)
         t))))
@@ -1115,7 +1110,7 @@ and no value was provided for it." name)))))))))))
                unportable because THROW and CATCH use EQ comparison)~@:>"
              (rest sources) (first sources) (lvar-type tag)))))))
 
-(defun %compile-time-type-error (values atype dtype detail code-context cast-context)
+(define-error-wrapper %compile-time-type-error (values atype dtype detail code-context cast-context)
   (declare (ignore dtype))
   (cond ((eq cast-context 'ftype-context)
          (error 'simple-type-error

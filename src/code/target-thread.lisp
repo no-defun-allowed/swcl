@@ -1427,8 +1427,8 @@ WAIT-ON-SEMAPHORE or TRY-SEMAPHORE."
 
 (declaim (ftype (sfunction (semaphore &key
                                       (:n (integer 1))
-                                      (:timeout (real (0)))
-                                      (:notification semaphore-notification))
+                                      (:timeout (or null (real (0))))
+                                      (:notification (or null semaphore-notification)))
                            (or null (integer 0)))
                 wait-on-semaphore))
 (defun wait-on-semaphore (semaphore &key (n 1) timeout notification)
@@ -2281,6 +2281,13 @@ subject to change."
           :late ("SBCL" "1.2.15")
           (function destroy-thread :replacement terminate-thread)))
 
+(defvar *interrupt-handler* nil
+  "A function which is called with the function argument to SB-THREAD:INTERRUPT-THREAD
+when the interrupt is ready to run.
+The default behavior is to use FUNCALL.")
+(declaim (type (or sb-kernel:function-designator null) *interrupt-handler*)
+         (sb-ext:always-bound *interrupt-handler*))
+
 ;;; Called from the signal handler.
 #-(or sb-safepoint win32)
 (defun run-interruption ()
@@ -2295,7 +2302,10 @@ subject to change."
     ;; FIXME: does this really respect the promised ordering of interruptions?
     ;; It looks backwards to raise first and run the popped function second.
     (when interruption
-      (funcall interruption))))
+      (without-interrupts (allow-with-interrupts
+                            (if *interrupt-handler*
+                                (funcall *interrupt-handler* interruption)
+                                (funcall interruption)))))))
 
 #+sb-safepoint
 (defun run-interruption (*current-internal-error-context*)
@@ -2303,7 +2313,7 @@ subject to change."
     (let ((interruption (with-deathlok (*current-thread*)
                           (pop (thread-interruptions *current-thread*)))))
       (when interruption
-        (funcall interruption)
+        (without-interrupts (allow-with-interrupts (funcall interruption)))
         ;; I tried implementing this function as an explicit LOOP, because
         ;; if we are currently processing the thruption queue, why not do
         ;; all of them in one go instead of one-by-one?
@@ -2405,12 +2415,7 @@ Short version: be careful out there."
   ;; O(N), but it does not hurt to slow interruptors down a
   ;; bit when the queue gets long.
   (setf (thread-interruptions thread)
-        (append (thread-interruptions thread)
-                ;; It seems to me that this junk should be in RUN-INTERRUPTION,
-                ;; but it doesn't really matter where it goes.
-                (list (lambda ()
-                        (barrier (:memory)) ; why???
-                        (without-interrupts (allow-with-interrupts (funcall function)))))))
+        (append (thread-interruptions thread) (list function)))
   ;; We use SIGURG because it satisfies a lot of requirements that
   ;; other people have thought about more than we have.
   ;; See https://golang.org/src/runtime/signal_unix.go where they describe
@@ -2797,3 +2802,30 @@ mechanism for inter-thread communication."
                   tot-bytes-unboxed tot-bytes-boxed
                   (/ tot-bytes-unboxed tot-bytes)
                   (/ tot-bytes-boxed tot-bytes)))))))
+
+(defun show-thread-tlabs (&optional (thread *current-thread*) (stream *standard-output*))
+  (declare (type (or (eql :all) thread) thread))
+  (when (eq thread :all)
+    (return-from show-thread-tlabs
+      (avltree-filter
+       (lambda (node &aux (thread (avlnode-data node)))
+         (write-string "Thr ")
+         (sb-impl::%output-integer-in-base (thread-primitive-thread thread) 16 stream)
+         (show-thread-tlabs thread stream)
+         (awhen (thread-name thread) (write-string it))
+         (terpri)
+         nil)
+       *all-threads*)))
+  (flet ((show (label slot)
+           (write-string label stream)
+           (loop for i from slot repeat 3
+                 do (let ((val (sap-int (sb-vm::current-thread-offset-sap i))))
+                      (when (> i slot) (write-char #\space stream))
+                      (sb-impl::%output-integer-in-base val 16 stream)))
+           (write-char #\) stream)))
+    (show " usr=(mix=(" sb-vm::thread-mixed-tlab-slot)
+    (show " cons=(" sb-vm::thread-cons-tlab-slot)
+    (show ") sys=((" sb-vm::thread-sys-mixed-tlab-slot)
+    (show " (" sb-vm::thread-cons-tlab-slot)
+    (write-string ") "))
+  (values))

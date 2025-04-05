@@ -1484,3 +1484,27 @@ redefinition."
   (checked-compile
    `(lambda (m)
       (make-type-mismatch :v m))))
+
+(defstruct (boa-constructor-&rest-nil-t
+             (:constructor make-bcrnt (&rest rest))
+             (:conc-name bcrnt-))
+  rest (nil 4) (t 5))
+(with-test (:name (:boa-constructor &rest nil t))
+  (let ((struct (make-bcrnt 1 2 3)))
+    (assert (equal (bcrnt-rest struct) '(1 2 3)))
+    (assert (eql (bcrnt-nil struct) 4))
+    (assert (eql (bcrnt-t struct) 5))))
+
+(let ((a 0))
+  (defstruct (out-of-line-boa-constructor
+               (:constructor make-oolbc (&aux x))
+               (:conc-name oolbc-))
+    x
+    (y (incf a))
+    (z 104 :type sb-vm:word)))
+(with-test (:name (:boa-constructor :out-of-line :uninitialized))
+  (let ((struct (make-oolbc)))
+    (assert (eql (oolbc-y struct) 1))
+    (setf (oolbc-x struct) 2)
+    (assert (eql (oolbc-x struct) 2))
+    (assert (eql (oolbc-z struct) 104))))

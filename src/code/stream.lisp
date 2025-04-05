@@ -335,13 +335,14 @@
             (progn (done-with-fast-read-char)
                    (eof-or-lose stream eof-error-p (values eof-value t))))))))
 
-;; to potentially avoid consing a bufer on sucessive calls to read-line
+;; to potentially avoid consing a buffer on successive calls to read-line
 ;; (just consing the result string)
 (define-load-time-global *read-line-buffers* nil)
 (declaim (list *read-line-buffers*))
 
 (declaim (inline ansi-stream-read-line))
 (defun ansi-stream-read-line (stream eof-error-p eof-value)
+  (declare (sb-c::tlab :system))
   (if (ansi-stream-cin-buffer stream)
       ;; Stream has a fast-read-char buffer. Copy large chunks directly
       ;; out of the buffer.
@@ -983,8 +984,8 @@
   ;; CLHS 21.1.4 implies that CLOSE on a synonym stream closes the synonym stream in that
   ;; "The consequences are undefined if the synonym stream symbol is not bound to an open
   ;;  stream from the time of the synonym stream's creation until the time it is closed."
-  ;;         The antecent of this "it" is the synonym stream --------------^
-  ;; which means that there exist a way to close synonym streams.
+  ;;       The antecedent of this "it" is the synonym stream --------------^
+  ;; which means that there exists a way to close synonym streams.
   ;; We can presume that CLOSE is that way, despite some text seemingly to the contrary
   ;;  "Any operations on a synonym stream will be performed on the stream that is then
   ;;   the value of the dynamic variable named by the synonym stream symbol."
@@ -1282,7 +1283,7 @@
   (limit nil :type index :read-only t)
   ;; Backing string after following displaced array chain
   (string nil :type simple-string :read-only t)
-  ;; So that we know what string index FILE-POSITION 0 correponds to
+  ;; So that we know what string index FILE-POSITION 0 corresponds to
   (start nil :type index :read-only t))
 
 (declaim (freeze-type string-input-stream))
@@ -2316,51 +2317,66 @@ benefit of the function GET-OUTPUT-STREAM-STRING."
          (read 0))
     (prepare-for-fast-read-char stream
       (declare (ignore %frc-method%))
-      ;; Read directly into the string when possible
-      (or (and (= %frc-index% +ansi-stream-in-buffer-length+)
-               (>= needed (/ +ansi-stream-in-buffer-length+ 2))
-               (fd-stream-p stream)
-               (fd-stream-ibuf stream)
-               (cond #+sb-unicode
-                     ((typep seq 'simple-base-string)
-                      (cond
+      (let ((buffered (- +ansi-stream-in-buffer-length+ %frc-index%)))
+        (labels ((refill-buffer ()
+                   (prog1 (fast-read-char-refill stream nil)
+                     (setf %frc-index% (ansi-stream-in-index %frc-stream%))))
+                 (add-chunk ()
+                   (let* ((end (length %frc-buffer%))
+                          (len (min (- end %frc-index%)
+                                    (- needed read))))
+                     (declare (type index end len read needed))
+                     (string-dispatch (simple-base-string simple-character-string)
+                                      seq
+                       (replace seq %frc-buffer%
+                                :start1 (+ start read)
+                                :end1 (+ start read len)
+                                :start2 %frc-index%
+                                :end2 (+ %frc-index% len)))
+                     (incf read len)
+                     (incf %frc-index% len)
+                     (when (or (eql needed read) (not (refill-buffer)))
+                       (done-with-fast-read-char)
+                       (return-from ansi-stream-read-string-from-frc-buffer
+                         (+ start read)))))
+                 (copy ()
+                   (when (plusp buffered)
+                     (replace seq %frc-buffer%
+                              :start1 start
+                              :start2 %frc-index%)
+                     (setf (ansi-stream-in-index %frc-stream%)
+                           +ansi-stream-in-buffer-length+)
+                     (incf start buffered))))
+          (declare (inline refill-buffer copy))
+          (cond
+            ;; Read directly into the string when possible
+            ((and (> (- needed buffered)
+                     (/ +ansi-stream-in-buffer-length+ 2))
+                  (fd-stream-p stream)
+                  (fd-stream-ibuf stream)
+                  (cond #+sb-unicode
+                        ((typep seq 'simple-base-string)
+                         (cond
+                           ((eq (ansi-stream-n-bin stream) #'fd-stream-read-n-characters/utf-8)
+                            (copy)
+                            (fd-stream-read-sequence/utf-8-to-base-string stream seq start end))
+                           ((eq (ansi-stream-n-bin stream) #'fd-stream-read-n-characters/utf-8/crlf)
+                            (copy)
+                            (fd-stream-read-sequence/utf-8-crlf-to-base-string stream seq start end))))
                         ((eq (ansi-stream-n-bin stream) #'fd-stream-read-n-characters/utf-8)
-                         (fd-stream-read-sequence/utf-8-to-base-string stream seq start end))
+                         (copy)
+                         (fd-stream-read-sequence/utf-8-to-string stream seq start end))
                         ((eq (ansi-stream-n-bin stream) #'fd-stream-read-n-characters/utf-8/crlf)
-                         (fd-stream-read-sequence/utf-8-crlf-to-base-string stream seq start end))))
-                     ((eq (ansi-stream-n-bin stream) #'fd-stream-read-n-characters/utf-8)
-                      (fd-stream-read-sequence/utf-8-to-string stream seq start end))
-                     ((eq (ansi-stream-n-bin stream) #'fd-stream-read-n-characters/utf-8/crlf)
-                      (fd-stream-read-sequence/utf-8-crlf-to-character-string stream seq start end))))
-          (labels ((refill-buffer ()
-                     (prog1 (fast-read-char-refill stream nil)
-                       (setf %frc-index% (ansi-stream-in-index %frc-stream%))))
-                   (add-chunk ()
-                     (let* ((end (length %frc-buffer%))
-                            (len (min (- end %frc-index%)
-                                      (- needed read))))
-                       (declare (type index end len read needed))
-                       (string-dispatch (simple-base-string simple-character-string)
-                                        seq
-                         (replace seq %frc-buffer%
-                                  :start1 (+ start read)
-                                  :end1 (+ start read len)
-                                  :start2 %frc-index%
-                                  :end2 (+ %frc-index% len)))
-                       (incf read len)
-                       (incf %frc-index% len)
-                       (when (or (eql needed read) (not (refill-buffer)))
-                         (done-with-fast-read-char)
-                         (return-from ansi-stream-read-string-from-frc-buffer
-                           (+ start read))))))
-            (declare (inline refill-buffer))
-            (when (and (= %frc-index% +ansi-stream-in-buffer-length+)
-                       (not (refill-buffer)))
-              ;; EOF had been reached before we read anything
-              ;; at all. But READ-SEQUENCE never signals an EOF error.
-              (done-with-fast-read-char)
-              (return-from ansi-stream-read-string-from-frc-buffer start))
-            (loop (add-chunk)))))))
+                         (copy)
+                         (fd-stream-read-sequence/utf-8-crlf-to-character-string stream seq start end)))))
+            (t
+             (when (and (= %frc-index% +ansi-stream-in-buffer-length+)
+                        (not (refill-buffer)))
+               ;; EOF had been reached before we read anything
+               ;; at all. But READ-SEQUENCE never signals an EOF error.
+               (done-with-fast-read-char)
+               (return-from ansi-stream-read-string-from-frc-buffer start))
+             (loop (add-chunk)))))))))
 
 (declaim (maybe-inline read-sequence/read-function))
 (defun read-sequence/read-function (seq stream start %end
@@ -2656,7 +2672,7 @@ benefit of the function GET-OUTPUT-STREAM-STRING."
 
 (defun stream-deinit ()
   (setq *tty* nil *stdin* nil *stdout* nil *stderr* nil)
-  ;; Unbind to make sure we're not accidently dealing with it
+  ;; Unbind to make sure we're not accidentally dealing with it
   ;; before we're ready (or after we think it's been deinitialized).
   ;; This uses the internal %MAKUNBOUND because the CL: function would
   ;; rightly complain that *AVAILABLE-BUFFERS* is proclaimed always bound.

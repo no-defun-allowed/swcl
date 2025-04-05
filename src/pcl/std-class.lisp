@@ -497,6 +497,7 @@
          (dolist (superclass direct-superclasses)
            (unless (validate-superclass class superclass)
              (invalid-superclass class superclass)))
+         (check-superclass-cycle class direct-superclasses)
          (setf (slot-value class 'direct-superclasses) direct-superclasses))
         (t
          (setq direct-superclasses (slot-value class 'direct-superclasses))))
@@ -604,6 +605,7 @@
         (make-instance 'class-eq-specializer :class class)))
 
 (defmethod reinitialize-instance :before ((class slot-class) &key direct-superclasses)
+  (check-superclass-cycle class direct-superclasses)
   (dolist (old-super (set-difference (class-direct-superclasses class) direct-superclasses))
     (remove-direct-subclass old-super class))
   (remove-slot-accessors class (class-direct-slots class)))
@@ -952,6 +954,14 @@
       (some #'class-has-a-forward-referenced-superclass-p
             (class-direct-superclasses class))))
 
+(defun check-superclass-cycle (class new-superclasses)
+  (loop for superclass in new-superclasses
+        do (when (eq class superclass)
+             (error "~@<Specified class ~S as a superclass of ~
+                       itself.~@:>"
+                    class))
+           (check-superclass-cycle class (class-direct-superclasses superclass))))
+
 ;;; This is called by :after shared-initialize whenever a class is initialized
 ;;; or reinitialized. The class may or may not be finalized.
 (defun update-class (class finalizep)
@@ -960,19 +970,24 @@
                (error "~@<Specified class ~S as a superclass of ~
                        itself.~@:>"
                       class))
-             (without-package-locks
-               (with-world-lock ()
-                 (when (or finalizep (class-finalized-p class))
-                   (%update-cpl class (compute-class-precedence-list class))
-                   ;; This invocation of UPDATE-SLOTS, in practice, finalizes the
-                   ;; class
-                   (%update-slots class (compute-slots class))
-                   (update-gfs-of-class class)
-                   (setf (plist-value class 'default-initargs) (compute-default-initargs class))
-                   (update-ctors 'finalize-inheritance :class class))
-                 (let ((seen (list* class seen)))
-                   (dolist (sub (class-direct-subclasses class))
-                     (rec sub nil seen)))))))
+             (when (without-package-locks
+                     (with-world-lock ()
+                       (prog1
+                           (when (or finalizep (class-finalized-p class))
+                             (%update-cpl class (compute-class-precedence-list class))
+                             ;; This invocation of UPDATE-SLOTS, in practice, finalizes the
+                             ;; class
+                             (%update-slots class (compute-slots class))
+                             (update-gfs-of-class class)
+                             (setf (plist-value class 'default-initargs) (compute-default-initargs class))
+                             (update-ctors 'finalize-inheritance :class class)
+                             t)
+                         (let ((seen (list* class seen)))
+                           (dolist (sub (class-direct-subclasses class))
+                             (rec sub nil seen))))))
+               ;; Warning at run-time is not nice, can it be done at compile-time?
+               #+nil
+               (style-warn-about-duplicate-slots class))))
     (rec class finalizep)))
 
 (define-condition cpl-protocol-violation (reference-condition error)
@@ -1140,7 +1155,6 @@
             (layout-slot-table nwrapper) (make-slot-table class eslotds)
             (layout-length nwrapper) nslots
             (slot-value class 'wrapper) nwrapper)
-      (style-warn-about-duplicate-slots class)
       (setf (slot-value class 'finalized-p) t))))
 
 (defun update-gf-dfun (class gf)
@@ -1738,9 +1752,6 @@
 
     ;; Make the copy point to the old instance's storage, and make the
     ;; old instance point to the new storage.
-    ;; All uses of %CHANGE-CLASS are under the world lock, but that doesn't
-    ;; preclude user code operating on the old slots + new layout or v.v.
-    ;; Users need to synchronize their own access when changing class.
     (replace-wrapper-and-slots copy old-wrapper old-slots)
     (replace-wrapper-and-slots instance new-wrapper new-slots)
 
@@ -1786,10 +1797,9 @@
                 ,@body)))
 (defmethod change-class ((instance standard-object) (new-class standard-class)
                          &rest initargs)
-  (with-world-lock ()
-    (check-new-class-not-metaobject new-class)
-    (with-temporary-instance (temp)
-      (%change-class temp instance new-class initargs))))
+  (check-new-class-not-metaobject new-class)
+  (with-temporary-instance (temp)
+    (%change-class temp instance new-class initargs)))
 
 (defmethod change-class ((instance forward-referenced-class)
                          (new-class standard-class) &rest initargs)
@@ -1824,10 +1834,9 @@
 (defmethod change-class ((instance funcallable-standard-object)
                          (new-class funcallable-standard-class)
                          &rest initargs)
-  (with-world-lock ()
-    (check-new-class-not-metaobject new-class)
-    (with-temporary-funinstance (temp)
-      (%change-class temp instance new-class initargs)))))
+  (check-new-class-not-metaobject new-class)
+  (with-temporary-funinstance (temp)
+    (%change-class temp instance new-class initargs))))
 
 (defmethod change-class ((instance standard-object)
                          (new-class funcallable-standard-class)

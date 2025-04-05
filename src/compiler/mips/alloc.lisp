@@ -112,14 +112,17 @@
   (:temporary (:sc non-descriptor-reg) temp)
   (:temporary (:sc non-descriptor-reg :offset nl4-offset) pa-flag)
   (:results (result :scs (descriptor-reg) :from :load))
+  (:vop-var vop)
+  (:node-var node)
   (:policy :fast-safe)
   (:generator 100
     (inst addu bytes words (+ lowtag-mask
                               (* vector-data-offset n-word-bytes)))
     (inst srl bytes n-lowtag-bits)
     (inst sll bytes n-lowtag-bits)
-    ;; FIXME: It would be good to check for stack overflow here.
-    (pseudo-atomic (pa-flag) ; FIXME: why pseudo-atomic on stack?
+    (when (sb-c::make-vector-check-overflow-p node)
+      (generate-stack-overflow-check vop bytes temp))
+    (pseudo-atomic (pa-flag)      ; FIXME: why pseudo-atomic on stack?
       (align-csp temp pa-flag)
       (inst or result csp-tn other-pointer-lowtag)
       (inst addu temp csp-tn (* vector-data-offset n-word-bytes))
@@ -141,7 +144,7 @@
   (:temporary (:sc non-descriptor-reg :offset nl4-offset) pa-flag)
   (:results (result :scs (descriptor-reg) :from :argument))
   (:generator 37
-    (with-fixed-allocation (result pa-flag temp fdefn-widetag fdefn-size nil)
+    (with-fixed-allocation (result pa-flag temp fdefn-widetag fdefn-size)
       (inst li temp (make-fixup 'undefined-tramp :assembly-routine))
       (storew name result fdefn-name-slot other-pointer-lowtag)
       (storew null-tn result fdefn-fun-slot other-pointer-lowtag)
@@ -170,11 +173,10 @@
   (:args (value :to :save :scs (descriptor-reg any-reg null zero)))
   (:temporary (:scs (non-descriptor-reg)) temp)
   (:temporary (:sc non-descriptor-reg :offset nl4-offset) pa-flag)
-  (:info stack-allocate-p)
   (:results (result :scs (descriptor-reg)))
   (:generator 10
     (with-fixed-allocation (result pa-flag temp value-cell-widetag
-                            value-cell-size stack-allocate-p)
+                            value-cell-size)
       (storew value result value-cell-value-slot other-pointer-lowtag))))
 
 ;;;; Automatic allocators for primitive objects.

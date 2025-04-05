@@ -70,6 +70,12 @@ static void xgetbv(unsigned *eax, unsigned *edx)
 }
 
 #define VECTOR_FILL_T "VECTOR-FILL/T"
+static const int vector_fill_offset_to_check = 0x52;
+static const int vector_fill_offset_to_poke  = 0x59;
+static const unsigned char vector_fill_expect_bytes[] = {
+  0x48, 0x81, 0xF9, 0xBC, 0x02, 0x00, 0x00,
+  0xEB, 0x07
+};
 
 // Poke in a byte that changes an opcode to enable faster vector fill.
 // Using fixed offsets and bytes is no worse than what we do elsewhere.
@@ -102,15 +108,27 @@ void tune_asm_routines_for_microarch(void)
     SetSymbolValue(CPU_FEATURE_BITS, make_fixnum(our_cpu_feature_bits), 0);
 
 #ifdef LISP_FEATURE_LOG_CARD_MARKS
+    /* XXX: I need to figure out where everything is with the new barrier */
     return;
 #endif
+    unsigned char* asm_routine = (void*)get_asm_routine_by_name(VECTOR_FILL_T, 0);
+    if (!asm_routine) return;
+    // Since a particular runtime expects a particular core,
+    // mismatch of the ASM routine is a fatal error.
+    if (memcmp(asm_routine + vector_fill_offset_to_check,
+               vector_fill_expect_bytes,
+               sizeof vector_fill_expect_bytes))
+        lose("%s does not match expectation @ %p",
+             VECTOR_FILL_T, asm_routine + vector_fill_offset_to_check);
+
     // I don't know if this works on Windows
 #ifndef _MSC_VER
     cpuid(0, 0, &eax, &ebx, &ecx, &edx);
     if (eax >= 7) {
         cpuid(7, 0, &eax, &ebx, &ecx, &edx);
         if (ebx & (1<<9)) // Enhanced Repeat Movs/Stos
-          asm_routine_poke(VECTOR_FILL_T, 0x12, 0x7C); // Change JMP to JL
+          asm_routine_poke(VECTOR_FILL_T, vector_fill_offset_to_poke,
+                           0x7C); // Change JMP to JL
     }
 #endif
 }
@@ -121,8 +139,13 @@ void tune_asm_routines_for_microarch(void)
    instructions that don't exist on some cpu family members */
 void untune_asm_routines_for_microarch(void)
 {
-    asm_routine_poke(VECTOR_FILL_T, 0x12, 0xEB); // Change JL to JMP
+#ifndef LISP_FEATURE_LOG_CARD_MARKS
+    asm_routine_poke(VECTOR_FILL_T, vector_fill_offset_to_poke,
+                     0xEB); // Change JL to JMP
+#endif
     SetSymbolValue(CPU_FEATURE_BITS, 0, 0);
+    // ensure no random value lingering in static space on image save
+    SYMBOL(CALLBACK_WRAPPER_TRAMPOLINE)->value = 0;
 }
 
 #ifndef _WIN64

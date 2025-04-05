@@ -63,6 +63,7 @@
         *print-radix* nil
         *print-vector-length* nil
         *print-circle* nil
+        *print-circle-not-shared* nil
         *print-case* :upcase
         *print-array* t
         *print-gensym* t
@@ -75,33 +76,28 @@
 
 ;;; Create a stream that works early.
 (defun !make-cold-stderr-stream ()
-  (let ((stderr
-          #-win32 2
-          #+win32 (sb-win32::get-std-handle-or-null sb-win32::+std-error-handle+))
-        (buf (make-string 1 :element-type 'base-char :initial-element #\Space)))
-    (%make-fd-stream
-     :cout (lambda (stream ch)
+  (let* ((stderr
+           #-win32 2
+           #+win32 (sb-win32::get-std-handle-or-null sb-win32::+std-error-handle+))
+         (ucs2 #+win32 (sb-win32::console-handle-p stderr))
+         (char-size (if ucs2 4 1))
+         (buf (make-string 1 :element-type (if ucs2 'character 'base-char) :initial-element #\Space)))
+    (flet ((cout (stream ch)
              (declare (ignore stream))
              (setf (char buf 0) ch)
-             (sb-unix:unix-write stderr buf 0 1)
-             ch)
-     :sout (lambda (stream string start end)
-             (declare (ignore stream))
-             (flet ((out (s start len)
-                      (when (plusp len)
-                        (setf (char buf 0) (char s (+ start len -1))))
-                      (sb-unix:unix-write stderr s start len)))
-               (if (typep string 'simple-base-string)
-                   (out string start (- end start))
-                   (let ((n (- end start)))
-                     ;; will croak if there is any non-BASE-CHAR in the string
-                     (out (replace (make-array n :element-type 'base-char)
-                                   string :start2 start) 0 n)))))
-     :misc (lambda (stream operation arg1)
-             (declare (ignore stream arg1))
-             (stream-misc-case (operation :default nil)
-               (:charpos ; impart just enough smarts to make FRESH-LINE dtrt
-                (if (eql (char buf 0) #\newline) 0 1)))))))
+             (sb-unix:unix-write stderr buf 0 char-size)
+             ch))
+      (%make-fd-stream
+       :cout #'cout
+       :sout (lambda (stream string start end)
+               (declare (simple-string string))
+               (loop for i from start below end
+                     do (cout stream (char string i))))
+       :misc (lambda (stream operation arg1)
+               (declare (ignore stream arg1))
+               (stream-misc-case (operation :default nil)
+                                 (:charpos ; impart just enough smarts to make FRESH-LINE dtrt
+                                  (if (eql (char buf 0) #\newline) 0 1))))))))
 
 (defun !xc-sanity-checks ()
   ;; Verify on startup that some constants were dumped reflecting the
@@ -263,12 +259,6 @@
 
   (makunbound '*!cold-toplevels*) ; so it gets GC'd
 
-  ;; Need the static-space replica of the assembly routine jump vector
-  ;; filled in, and the static space vector of static fdefns.
-  ;; This matters only for code that gets compiled to dynamic space,
-  ;; so it's OK that it occurs somewhat late in cold-init.
-  #+x86-64 (sb-vm::validate-asm-routine-vector)
-
   #+win32 (show-and-call reinit-internal-real-time)
 
   ;; Set sane values again, so that the user sees sane values instead
@@ -415,7 +405,6 @@ process to continue normally."
     ;; can be called, as pretty much anything can assume that it is set.
     (when total ; newly started process, and not a failed save attempt
       (sb-thread::init-main-thread)
-      #+x86-64 (sb-vm::validate-asm-routine-vector)
       (rebuild-package-vector))
     ;; Initialize streams next, so that any errors can be printed
     (stream-reinit t)

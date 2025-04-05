@@ -49,7 +49,8 @@ distinct from the global value. Can also be SETF."
 
 (defun set-symbol-global-value (symbol new-value)
   (about-to-modify-symbol-value symbol 'set new-value)
-  (%set-symbol-global-value symbol new-value))
+  (%primitive %set-symbol-global-value symbol new-value)
+  new-value)
 
 (declaim (inline %makunbound))
 (defun %makunbound (symbol)
@@ -315,7 +316,6 @@ distinct from the global value. Can also be SETF."
                    (aref *id->package* id)))))
 
 (defun %set-symbol-package (symbol package)
-  (declare (type symbol symbol))
   (let* ((new-id (cond ((not package) +package-id-none+)
                        ((package-id package))
                        (t +package-id-overflow+)))
@@ -346,8 +346,6 @@ distinct from the global value. Can also be SETF."
 ;;; All symbols go into immobile space if #+immobile-symbols is enabled,
 ;;; but not if disabled. The win with immobile space that is that all symbols
 ;;; can be considered static from an addressing viewpoint, but GC'able.
-;;; (After codegen learns how, provided that defrag becomes smart enough
-;;; to fixup machine code so that defrag remains meaningful)
 ;;;
 ;;; However, with immobile space being limited in size, you might not want
 ;;; symbols in there. In particular, if an application uses symbols as data
@@ -395,17 +393,14 @@ distinct from the global value. Can also be SETF."
                #-x86-64 (sb-vm::%alloc-symbol name)))
     (let ((salt (murmur-hash-word/fixnum
                  (word-mix name-hash (get-lisp-obj-address symbol)))))
-      #+64-bit
-      (let ((hash (logior (ash name-hash 32) (mask-field symbol-hash-prng-byte salt))))
-        ;; %SET-SYMBOL-HASH wants a unsigned fixnum, which HASH is not.
-        (%primitive sb-vm::set-slot symbol (%make-lisp-obj hash)
-                    'make-symbol sb-vm:symbol-hash-slot sb-vm:other-pointer-lowtag))
-      #-64-bit
       (with-pinned-objects (symbol) ; no vop sets the raw slot
-        (setf (sap-ref-32 (int-sap (get-lisp-obj-address symbol))
-                          (- (ash sb-vm:symbol-hash-slot sb-vm:word-shift)
-                             sb-vm:other-pointer-lowtag))
-              (logior (ash name-hash 3) (ldb (byte 3 0) salt)))))
+        (setf (sap-ref-word (int-sap (get-lisp-obj-address symbol))
+                            (- (ash sb-vm:symbol-hash-slot sb-vm:word-shift)
+                               sb-vm:other-pointer-lowtag))
+              #+64-bit (logior (ash name-hash 32)
+                               (mask-field symbol-hash-prng-byte salt)
+                               #+x86-64 #b111) ; boolean flags
+              #-64-bit (logior (ash name-hash 3) (ldb (byte 3 0) salt)))))
     ;; Compact-symbol (which is equivalent to #+64-bit) has the package already NIL
     ;; because the PACKAGE-ID-BITS field defaults to 0.
     #-compact-symbol (%set-symbol-package symbol nil)

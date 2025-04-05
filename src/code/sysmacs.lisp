@@ -203,22 +203,16 @@ maintained."
                 (type index ,f-index))
        (declare (disable-package-locks fast-read-byte))
        (flet ((fast-read-byte ()
-                (,@(cond ((equal '(unsigned-byte 8) type)
-                          ;; KLUDGE: For some reason I haven't tracked down
-                          ;; this makes a difference even in given the TRULY-THE.
-                          `(logand #xff))
-                         (t
-                          `(identity)))
-                 (truly-the ,type
-                            (cond
-                              ((not ,f-buffer)
-                               (funcall ,f-method ,f-stream ,eof-p ,eof-val))
-                              ((< ,f-index (length ,f-buffer))
-                               (prog1 (aref ,f-buffer ,f-index)
-                                 (setf (ansi-stream-in-index ,f-stream) (incf ,f-index))))
-                              (t
-                               (prog1 (fast-read-byte-refill ,f-stream ,eof-p ,eof-val)
-                                 (setq ,f-index (ansi-stream-in-index ,f-stream)))))))))
+                (truly-the ,type
+                           (cond
+                             ((not ,f-buffer)
+                              (funcall ,f-method ,f-stream ,eof-p ,eof-val))
+                             ((< ,f-index (length ,f-buffer))
+                              (prog1 (aref ,f-buffer ,f-index)
+                                (setf (ansi-stream-in-index ,f-stream) (incf ,f-index))))
+                             (t
+                              (prog1 (fast-read-byte-refill ,f-stream ,eof-p ,eof-val)
+                                (setq ,f-index (ansi-stream-in-index ,f-stream))))))))
          (declare (inline fast-read-byte))
          (declare (enable-package-locks fast-read-byte))
          (locally ,@body)))))
@@ -236,7 +230,7 @@ maintained."
         (cond ((< (truly-the index ,index) (length ,rest-var))
                (let ((,var (fast-&rest-nth ,index ,rest-var)))
                  ,@body)
-               (incf ,index))
+               (incf (truly-the index ,index)))
               (t
                (return ,result)))))))
 

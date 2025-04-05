@@ -154,168 +154,6 @@ void unmap_gc_page()
                              PAGE_NOACCESS, &oldProt));
 }
 
-/* This feature has already saved me more development time than it
- * took to implement.  In its current state, ``dynamic RT<->core
- * linking'' is a protocol of initialization of C runtime and Lisp
- * core, populating SBCL linkage table with entries for runtime
- * "foreign" symbols that were referenced in cross-compiled code.
- *
- * How it works: a sketch
- *
- * Last Genesis (resulting in cold-sbcl.core) binds foreign fixups in
- * x-compiled lisp-objs to sequential addresses from the beginning of
- * linkage-table space; that's how it ``resolves'' foreign references.
- * Obviously, this process doesn't require pre-built runtime presence.
- *
- * When the runtime loads the core (cold-sbcl.core initially,
- * sbcl.core later), runtime should do its part of the protocol by (1)
- * traversing a list of ``runtime symbols'' prepared by Genesis and
- * dumped as a static symbol value, (2) resolving each name from this
- * list to an address (stubbing unresolved ones with
- * undefined_alien_address or undefined_alien_function), (3) adding an
- * entry for each symbol somewhere near the beginning of linkage table
- * space (location is provided by the core).
- *
- * The implementation of the part described in the last paragraph
- * follows. C side is currently more ``hackish'' and less clear than
- * the Lisp code; OTOH, related Lisp changes are scattered, and some
- * of them play part in complex interrelations -- beautiful but taking
- * much time to understand --- but my subset of PE-i386 parser below
- * is in one place (here) and doesn't have _any_ non-trivial coupling
- * with the rest of the Runtime.
- *
- * What do we gain with this feature, after all?
- *
- * One things that I have to do rather frequently: recompile and
- * replace runtime without rebuilding the core. Doubtlessly, slam.sh
- * was a great time-saver here, but relinking ``cold'' core and bake a
- * ``warm'' one takes, as it seems, more than 10x times of bare
- * SBCL.EXE build time -- even if everything is recompiled, which is
- * now unnecessary. Today, if I have a new idea for the runtime,
- * getting from C-x C-s M-x ``compile'' to fully loaded SBCL
- * installation takes 5-15 seconds.
- *
- * Another thing (that I'm not currently using, but obviously
- * possible) is delivering software patches to remote system on
- * customer site. As you are doing minor additions or corrections in
- * Lisp code, it doesn't take much effort to prepare a tiny ``FASL
- * bundle'' that rolls up your patch, redumps and -- presto -- 100MiB
- * program is fixed by sending and loading a 50KiB thingie.
- *
- * However, until LISP_FEATURE_ALIEN_LINKAGE_TABLE, if your bug were fixed
- * by modifying two lines of _C_ sources, a customer described above
- * had to be ready to receive and reinstall a new 100MiB
- * executable. With the aid of code below, deploying such a fix
- * requires only sending ~300KiB (when stripped) of SBCL.EXE.
- *
- * But there is more to it: as the common linkage-table is used for
- * DLLs and core, its entries may be overridden almost without a look
- * into SBCL internals. Therefore, ``patching'' C runtime _without_
- * restarting target systems is also possible in many situations
- * (it's not as trivial as loading FASLs into a running daemon, but
- * easy enough to be a viable alternative if any downtime is highly
- * undesirable).
- *
- * During my (rather limited) commercial Lisp development experience
- * I've already been through a couple of situations where such
- * ``deployment'' issues were important; from my _total_ programming
- * experience I know -- _sometimes_ they are a two orders of magnitude
- * more important than those I observed.
- *
- * The possibility of entire runtime ``hot-swapping'' in running
- * process is not purely theoretical, as it could seem. There are 2-3
- * problems whose solution is not obvious (call stack patching, for
- * instance), but it's literally _nothing_ if compared with
- * e.g. LISP_FEATURE_SB_AUTO_FPU_SWITCH.  By the way, one of the
- * problems with ``hot-swapping'', that could become a major one in
- * many other environments, is nonexistent in SBCL: we already have a
- * ``global quiesce point'' that is generally required for this kind
- * of worldwide revolution -- around collect_garbage.
- *
- * If we look at the majority of the ``new style'' code units, it's a
- * common thing to observe how #+-ifdeffery _vanishes_ instead of
- * multiplying: #-sb-xc, #+sb-xc-host and #-sb-xc-host end up
- * needing the same code. Runtime checks of static v. dynamic symbol
- * disappear even faster. STDCALL mangling and leading underscores go
- * out of scope (and GCed, hopefully) instead of surfacing here and
- * there as a ``special case for core static symbols''. What I like
- * the most about CL development in general is a frequency of solving
- * problems and fixing bugs by simplifying code and dropping special
- * cases.
- *
- * Last important thing about the following code: besides resolving
- * symbols provided by the core itself, it detects runtime's own
- * build-time prerequisite DLLs. Any symbol that is unresolved against
- * the core is looked up in those DLLs (normally kernel32, msvcrt,
- * ws2_32... I could forget something). This action (1) resembles
- * implementation of foreign symbol lookup in SBCL itself, (2)
- * emulates shared library d.l. facilities of OSes that use flat
- * dynamic symbol namespace (or default to it). Anyone concerned with
- * portability problems of this PE-i386 stuff below will be glad to
- * hear that it could be ported to most modern Unices _by deletion_:
- * raw dlsym() with null handle usually does the same thing that i'm
- * trying to squeeze out of MS Windows by the brute force.
- *
- * My reason for _desiring_ flat symbol namespace, populated from
- * link-time dependencies, is avoiding any kind of ``requested-by-Lisp
- * symbol lists to be linked statically'', providing core v. runtime
- * independence in both directions. Minimizing future maintenance
- * effort is very important; I had gone for it consistently, starting
- * by turning "CloseHandle@4" into a simple "CloseHandle", continuing
- * by adding intermediate Genesis resulting in autogenerated symbol
- * list (farewell, void scratch(); good riddance), going to take
- * another great step for core/runtime independence... and _without_
- * flat namespace emulation, the ghosts and spirits exiled at the
- * first steps would come and take revenge: well, here are the symbols
- * that are really in msvcrt.dll.. hmm, let's link statically against
- * them, so the entry is pulled from the import library.. and those
- * entry has mangled names that we have to map.. ENOUGH, I though
- * here: fed up with stuff like that.
- *
- * Now here we are, without import libraries, without mangled symbols,
- * and without nm-generated symbol tables. Every symbol exported by
- * the runtime is added to SBCL.EXE export directory; every symbol
- * requested by the core is looked up by GetProcAddress for SBCL.EXE,
- * falling back to GetProcAddress for MSVCRT.dll, etc etc.. All ties
- * between SBCL's foreign symbols with object file symbol tables,
- * import libraries and other pre-linking symbol-resolving entities
- * _having no representation in SBCL.EXE_ were teared.
- *
- * This simplistic approach proved to work well; there is only one
- * problem introduced by it, and rather minor: in real MSVCRT.dll,
- * what's used to be available as open() is now called _open();
- * similar thing happened to many other `lowio' functions, though not
- * every one, so it's not a kind of name mangling but rather someone's
- * evil creative mind in action.
- *
- * When we look up any of those poor `uglified' functions in CRT
- * reference on MSDN, we can see a notice resembling this one:
- *
- * `unixishname()' is obsolete and provided for backward
- * compatibility; new standard-compliant function, `_unixishname()',
- * should be used instead.  Sentences of that kind were there for
- * several years, probably even for a decade or more (a propos,
- * MSVCRT.dll, as the name to link against, predates year 2000, so
- * it's actually possible). Reasoning behing it (what MS people had in
- * mind) always seemed strange to me: if everyone uses open() and that
- * `everyone' is important to you, why rename the function?  If no one
- * uses open(), why provide or retain _open() at all? <kidding>After
- * all, names like _open() are entirely non-informative and just plain
- * ugly; compare that with CreateFileW() or InitCommonControlsEx(),
- * the real examples of beauty and clarity.</kidding>
- *
- * Anyway, if the /standard/ name on Windows is _open() (I start to
- * recall, vaguely, that it's because of _underscore names being
- * `reserved to system' and all other ones `available for user', per
- * ANSI/ISO C89) -- well, if the /standard/ name is _open, SBCL should
- * use it when it uses MSVCRT and not some ``backward-compatible''
- * stuff. Deciding this way, I added a hack to SBCL's syscall macros,
- * so "[_]open" as a syscall name is interpreted as a request to link
- * agains "_open" on win32 and "open" on every other system.
- *
- * Of course, this name-parsing trick lacks conceptual clarity; we're
- * going to get rid of it eventually. */
-
 uint32_t os_get_build_time_shared_libraries(uint32_t excl_maximum,
                                        void* opt_root,
                                        void** opt_store_handles,
@@ -427,14 +265,41 @@ void* os_dlsym_default(char* name)
 {
     unsigned int i;
     void* result = 0;
+
     buildTimeImages[0] = (void*)runtime_module_handle;
     if (buildTimeImageCount == 0) {
         buildTimeImageCount =
             1 + os_get_build_time_shared_libraries(15u,
-            NULL, 1+(void**)buildTimeImages, NULL);
+                                                   NULL, 1+(void**)buildTimeImages, NULL);
     }
     for (i = 0; i<buildTimeImageCount && (!result); ++i) {
         result = GetProcAddress(buildTimeImages[i], name);
+    }
+    return result;
+}
+BOOL K32EnumProcessModules(HANDLE  hProcess, HMODULE *lphModule, DWORD cb, LPDWORD lpcbNeeded);
+
+void* sb_dlsym(char* name)
+{
+    unsigned int i;
+    void* result = 0;
+
+    if ((result = GetProcAddress(GetModuleHandle(NULL), name)))
+        return result;
+
+    HANDLE process = GetCurrentProcess();
+    HMODULE modules[1024];
+    DWORD needed;
+    if (K32EnumProcessModules(process, modules, sizeof(modules), &needed)) {
+        DWORD fetched = (needed / sizeof(HMODULE));
+
+        if (fetched > sizeof(modules))
+            fetched = sizeof(modules);
+
+        for (i = 0; i < fetched; i++) {
+            if ((result = GetProcAddress(modules[i], name)))
+                return result;
+        }
     }
     return result;
 }
@@ -1040,7 +905,7 @@ handle_access_violation(os_context_t *ctx,
     /* dynamic space */
     page_index_t page = find_page_index(fault_address);
 #ifdef LISP_FEATURE_SOFT_CARD_MARKS
-    if (page >= 0) lose("should not get access violation in dynamic space");
+    if (page >= 0) lose("should not get access violation in dynamic space %p", fault_address);
 #else
     if (page != -1 && !PAGE_WRITEPROTECTED_P(page)) {
         os_commit_memory(PTR_ALIGN_DOWN(fault_address, os_vm_page_size),
@@ -1065,6 +930,8 @@ handle_access_violation(os_context_t *ctx,
     return -1;
 }
 
+void lisp_memory_fault_warning(os_context_t *context, os_vm_address_t addr);
+
 static void
 signal_internal_error_or_lose(os_context_t *ctx,
                               EXCEPTION_RECORD *exception_record,
@@ -1075,6 +942,10 @@ signal_internal_error_or_lose(os_context_t *ctx,
      * the exception to the lisp-side exception handler if it's
      * set up, or drop to LDB.
      */
+
+    if ((long int)exception_record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+        lisp_memory_fault_warning(ctx, fault_address);
+    }
 
     if (internal_errors_enabled) {
         /* The exception system doesn't automatically clear pending
@@ -1115,17 +986,7 @@ signal_internal_error_or_lose(os_context_t *ctx,
             (void*)(intptr_t)exception_record->ExceptionCode);
     fprintf(stderr, "Faulting IP: %p.\n",
             (void*)(intptr_t)exception_record->ExceptionAddress);
-    if ((long int)exception_record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
-        MEMORY_BASIC_INFORMATION mem_info;
 
-        if (VirtualQuery(fault_address, &mem_info, sizeof mem_info)) {
-            fprintf(stderr, "page status: 0x%lx.\n", mem_info.State);
-        }
-
-        fprintf(stderr, "Was writing: %p, where: %p.\n",
-                (void*)exception_record->ExceptionInformation[0],
-                fault_address);
-    }
 
     fflush(stderr);
 

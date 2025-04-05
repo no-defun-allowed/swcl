@@ -52,31 +52,19 @@
   (let ((constraints (lambda-var-equality-constraints-hash x-var)))
     (when constraints
       (let ((constraints (gethash y-key constraints)))
-        (if (typep y-key 'sb-kernel::type-class)
-            (loop for con in constraints
-                  when (and (eq (equality-constraint-operator con) operator)
-                            (eq (constraint-not-p con) not-p)
-                            (eql (equality-constraint-amount con) amount)
-                            (vector-constraint-eq-p (constraint-x con) x)
-                            (type= (constraint-y con) y))
-                  return con)
-            (loop for con in constraints
-                  when (and (eq (equality-constraint-operator con) operator)
-                            (eq (constraint-not-p con) not-p)
-                            (vector-constraint-eq-p (constraint-x con) x)
-                            (vector-constraint-eq-p (constraint-y con) y)
-                            (eql (equality-constraint-amount con) amount))
-                  return con))))))
+        (loop for con in constraints
+              when (and (eq (equality-constraint-operator con) operator)
+                        (eq (constraint-not-p con) not-p)
+                        (vector-constraint-eq-p (constraint-x con) x)
+                        (vector-constraint-eq-p (constraint-y con) y)
+                        (eql (equality-constraint-amount con) amount))
+              return con)))))
 
 (defun find-or-create-equality-constraint (operator x y not-p &optional (amount 0))
   (unless amount
     (setf amount 0))
   (let ((x-var (constraint-var x))
         (cache-key (typecase y
-                     (numeric-type ;; eq-comparable
-                      y)
-                     (ctype
-                      (sb-kernel::type-class y))
                      (vector-length-constraint y
                       (vector-length-constraint-var y))
                      (t
@@ -463,12 +451,12 @@
     (map-equality-constraints x y gen
                               (lambda (op not-p)
                                 (case op
-                                  ((eq eql char=)
+                                  ((eq char=)
                                    (return (not not-p)))
                                   ((> <)
                                    (unless not-p
                                      (return nil)))
-                                  ((= <= >= char-equal)
+                                  ((= <= >= char-equal eql)
                                    (when not-p
                                      (return nil))))))
     :give-up))
@@ -649,7 +637,7 @@
       (setf (combination-info node) 'array-in-bounds-p)))
   :give-up)
 
-(deftransform %check-bound ((array dimension index) ((simple-array * (*)) t t) * :node node)
+(deftransform %check-bound ((array dimension index) (simple-array t t) * :node node)
   (if (or (eq (combination-info node) 'array-in-bounds-p)
           (let ((index (type-approximate-interval (lvar-type index)))
                 (dim (type-approximate-interval (lvar-type dimension))))
@@ -961,6 +949,14 @@
                         (if h
                             (incf max-sum h)
                             (setf max nil))))
+                     ((and subseq
+                           (constant-lvar-p arg)
+                           (eq (lvar-value arg) 'sb-impl::%splice))
+                      (let ((n (lvar-value (pop args))))
+                        (incf min-sum n)
+                        (incf max-sum n)
+                        (loop repeat n
+                              do (pop args))))
                      (t
                       (let ((int (type-approximate-interval (type-intersection (or (vector-length-type (lvar-type arg))
                                                                                    *universal-type*)
@@ -1035,8 +1031,8 @@
     type))
 
 (defun sequence-type-from-item (item-type)
-  (if (and item-type
-           (types-equal-or-intersect item-type (specifier-type '(or number character))))
+  (if (or (not item-type)
+          (types-equal-or-intersect item-type (specifier-type '(or number character))))
       (specifier-type '(not null))
       (specifier-type '(and (not null) (or (not array) (vector t))))))
 

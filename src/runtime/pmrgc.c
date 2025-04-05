@@ -1744,7 +1744,7 @@ static int verify_headered_object(lispobj* object, sword_t nwords,
     if (instanceoid_widetag_p(widetag)) {
         lispobj layout = layout_of(object);
         if (layout) {
-            CHECK(layout, object);
+            CHECK(layout, (lispobj*)&layout_of(object));
             struct bitmap bitmap = get_layout_bitmap(LAYOUT(layout));
             if (lockfree_list_node_layout_p(LAYOUT(layout))) {
                 struct list_node* node = (void*)object;
@@ -2046,7 +2046,7 @@ int verify_heap(__attribute__((unused)) lispobj* cur_thread_approx_stackptr,
     if (verbose)
         fprintf(stderr, " [static]");
     // Just don't worry about NIL, it's seldom the problem
-    // if (verify(NIL_SYMBOL_SLOTS_START, (lispobj*)NIL_SYMBOL_SLOTS_END, &state, 0)) goto out;
+    // if (verify(NIL_SYMBOL_SLOTS_START, NIL_SYMBOL_SLOTS_END, &state, 0)) goto out;
     if (verify(STATIC_SPACE_OBJECTS_START, static_space_free_pointer, &state, 0)) goto out;
     if (verbose)
         fprintf(stderr, " [permgen]");
@@ -2066,19 +2066,19 @@ int verify_heap(__attribute__((unused)) lispobj* cur_thread_approx_stackptr,
     return state.nerrors;
 }
 
-void gc_show_pte(lispobj obj)
+void gc_show_pte(lispobj obj, FILE* f)
 {
     char marks[1+CARDS_PER_PAGE];
     page_index_t page = find_page_index((void*)obj);
     if (page>=0) {
-        printf("page %"PAGE_INDEX_FMT" base %p gen %d type %x ss %p used %x",
+        fprintf(f, "page %"PAGE_INDEX_FMT" base %p gen %d type %x ss %p used %x",
                page, page_address(page), page_table[page].gen, page_table[page].type,
                page_scan_start(page), page_bytes_used(page));
-        if (page_starts_contiguous_block_p(page)) printf(" startsblock");
-        if (page_ends_contiguous_block_p(page, page_table[page].gen)) printf(" endsblock");
-        printf(" (%s)\n", page_card_mark_string(page, marks));
+        if (page_starts_contiguous_block_p(page)) fprintf(f, " startsblock");
+        if (page_ends_contiguous_block_p(page, page_table[page].gen)) fprintf(f, " endsblock");
+        fprintf(f, " (%s)\n", page_card_mark_string(page, marks));
         line_index_t line = address_line((void*)obj);
-        printf("line %ld gen %d\n", line, DECODE_GEN(line_bytemap[line]));
+        fprintf(f, "line %ld gen %d\n", line, DECODE_GEN(line_bytemap[line]));
         return;
     }
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
@@ -2090,7 +2090,7 @@ void gc_show_pte(lispobj obj)
         int i;
         for (i=0;i<8;++i) genstring[i] = (gens & (1<<i)) ? '0'+i : '-';
         genstring[8] = 0;
-        printf("page %d (v) base %p gens %s ss=%p%s\n",
+        fprintf(f, "page %d (v) base %p gens %s ss=%p%s\n",
                (int)page, text_page_address(page), genstring,
                text_page_scan_start(page),
                card_markedp((void*)obj)?"":" WP");
@@ -2098,14 +2098,14 @@ void gc_show_pte(lispobj obj)
     }
     page = find_fixedobj_page_index((void*)obj);
     if (page>=0) {
-        printf("page %d (f) align %d gens %x%s\n", (int)page,
+        fprintf(f, "page %d (f) align %d gens %x%s\n", (int)page,
                fixedobj_pages[page].attr.parts.obj_align,
                fixedobj_pages[page].attr.parts.gens_,
                card_markedp((void*)obj)?"": " WP");
         return;
     }
 #endif
-    printf("not in GC'ed space\n");
+    fprintf(f, "not in GC'ed space\n");
 }
 
 /* The other implementation of gc_gen_report_to_file gets the generations

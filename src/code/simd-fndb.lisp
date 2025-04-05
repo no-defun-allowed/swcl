@@ -32,3 +32,9 @@
     ((simple-array * (*)) (simple-array * (*)) fixnum)
     (boolean)
     (sb-c::no-verify-arg-count))
+
+(defknown (simd-position8 simd-position8-from-end
+           simd-position32 simd-position32-from-end)
+    (fixnum (simple-array * (*)) fixnum fixnum)
+    (or (mod #.(1- array-dimension-limit)) null)
+    (sb-c::no-verify-arg-count))

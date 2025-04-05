@@ -62,11 +62,12 @@
                    :qword))
          (ea (ea (- (* slot n-word-bytes) lowtag) ptr)))
     (aver (eq size :qword))
-    (cond ((and (integerp value)
-                (not (typep value '(signed-byte 32))))
+    (cond ((typep value '(and integer (not (signed-byte 32))))
            (cond (temp
                   (inst mov temp value)
                   (inst mov ea temp)
+                  ;; uhh, why does this clause return TEMP but the
+                  ;; T clause returns nothing in particular?
                   temp)
                  (t
                   (bug "need temp reg for STOREW of oversized immediate operand"))))
@@ -83,15 +84,7 @@
 ;;;; macros to generate useful values
 
 (defmacro load-symbol (reg symbol)
-  `(inst mov ,reg (+ nil-value (static-symbol-offset ,symbol))))
-
-;; Return the effective address of the value slot of static SYMBOL.
-(defun static-symbol-value-ea (symbol &optional (byte 0))
-   (ea (+ nil-value
-          (static-symbol-offset symbol)
-          (ash symbol-value-slot word-shift)
-          byte
-          (- other-pointer-lowtag))))
+  `(inst mov ,reg (+ nil-value ,(static-symbol-offset symbol))))
 
 (defun thread-tls-ea (index)
   #+gs-seg (ea :gs index) ; INDEX is either a DISP or a BASE of the EA
@@ -206,8 +199,10 @@
       (inst jmp :z OUT)
       ;; if PAI was set, interrupts were disabled at the same time
       ;; using the process signal mask.
+      #+partial-sw-int-avoidance (inst call (ea (make-fixup 'synchronous-trap :assembly-routine)))
+      #-partial-sw-int-avoidance (progn
       #+int1-breakpoints (inst icebp)
-      #-int1-breakpoints (inst break pending-interrupt-trap)
+      #-int1-breakpoints (inst break pending-interrupt-trap))
       OUT)))
 
 ;;; This macro is purposely unhygienic with respect to THREAD-TN,

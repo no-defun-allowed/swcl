@@ -13,6 +13,22 @@
 
 ;;;; allocation helpers
 
+(defun generate-stack-overflow-check (vop size)
+  (let ((overflow (generate-error-code
+                   vop
+                   'stack-allocated-object-overflows-stack-error
+                   size)))
+        (inst sub esp-tn size)
+        (inst cmp esp-tn
+              #-sb-thread
+              (make-ea-for-symbol-value *control-stack-start* :dword)
+              #+sb-thread
+              (make-ea :dword :disp (* 4 thread-control-stack-start-slot))
+              #+sb-thread :fs)
+        ;; avoid clearing condition codes
+        (inst lea esp-tn (make-ea :dword :base esp-tn :index size))
+        (inst jmp :le overflow)))
+
 ;;; Allocation within alloc_region (which is thread local) can be done
 ;;; inline.  If the alloc_region is overflown allocation is done by
 ;;; calling the C alloc() function.
@@ -178,14 +194,14 @@
 ;;; Allocate an other-pointer object of fixed SIZE with a single word
 ;;; header having the specified WIDETAG value. The result is placed in
 ;;; RESULT-TN.
-(defun alloc-other (result-tn widetag size node &optional stack-allocate-p)
-  (pseudo-atomic (:elide-if stack-allocate-p)
-      (allocation nil (* (pad-data-block size)
-                         #+bignum-assertions (if (eql widetag bignum-widetag) 2 1))
-                  other-pointer-lowtag
-                  node stack-allocate-p result-tn)
-      (storew (compute-object-header size widetag)
-              result-tn 0 other-pointer-lowtag)))
+(defun alloc-other (result-tn widetag size node)
+  (pseudo-atomic ()
+    (allocation nil (* (pad-data-block size)
+                       #+bignum-assertions (if (eql widetag bignum-widetag) 2 1))
+                other-pointer-lowtag
+                node nil result-tn)
+    (storew (compute-object-header size widetag)
+            result-tn 0 other-pointer-lowtag)))
 
 ;;;; CONS, LIST and LIST*
 (define-vop (list)
@@ -280,11 +296,11 @@
 
 (define-vop (allocate-vector-on-stack)
   (:args (type :scs (unsigned-reg immediate) :to :save)
-         (length :scs (any-reg) :to :eval :target zero)
+         (length :scs (any-reg) :to :eval :target res)
          (words :scs (any-reg) :target ecx))
   (:temporary (:sc any-reg :offset ecx-offset :from (:argument 2)) ecx)
-  (:temporary (:sc any-reg :offset eax-offset :from :eval) zero)
-  (:temporary (:sc any-reg :offset edi-offset) res)
+  (:temporary (:sc unsigned-reg :offset eax-offset) bytes)
+  (:temporary (:sc any-reg :offset edi-offset :from :eval) res)
   (:node-var node)
   (:vop-var vop)
   (:results (result :scs (descriptor-reg) :from :load))
@@ -293,29 +309,16 @@
               positive-fixnum)
   (:policy :fast-safe)
   (:generator 100
-    (inst lea result (make-ea :byte :base words :disp
-                              (+ (1- (ash 1 n-lowtag-bits))
-                                 (* vector-data-offset n-word-bytes))))
-    (inst and result (lognot lowtag-mask))
+    (inst lea bytes (make-ea :byte :base words :disp
+                             (+ (1- (ash 1 n-lowtag-bits))
+                                (* vector-data-offset n-word-bytes))))
+    (inst and bytes (lognot lowtag-mask))
     (move ecx words)
     (inst shr ecx n-fixnum-tag-bits)
     (when (sb-c::make-vector-check-overflow-p node)
-      (let ((overflow (generate-error-code vop 'stack-allocated-object-overflows-stack-error result)))
-        (inst sub esp-tn result)
-        (inst cmp esp-tn
-              #-sb-thread
-              (make-ea-for-symbol-value *control-stack-start* :dword)
-              #+sb-thread
-              (make-ea :dword :disp (* 4 thread-control-stack-start-slot))
-              #+sb-thread :fs)
-        ;; avoid clearing condition codes
-        (inst lea esp-tn (make-ea :dword :base esp-tn :index result))
-        (inst jmp :be overflow)))
-    (stack-allocation result result other-pointer-lowtag)
+      (generate-stack-overflow-check vop bytes))
+    (stack-allocation result bytes other-pointer-lowtag)
     (inst cld)
-    (inst lea res
-          (make-ea :byte :base result :disp (- (* vector-data-offset n-word-bytes)
-                                               other-pointer-lowtag)))
     (sc-case type
       (immediate
        (aver (typep (tn-value type) '(unsigned-byte 8)))
@@ -323,9 +326,12 @@
       (t
        (storew type result 0 other-pointer-lowtag)))
     (storew length result vector-length-slot other-pointer-lowtag)
-    (inst xor zero zero)
+    (inst lea res
+          (make-ea :byte :base result :disp (- (* vector-data-offset n-word-bytes)
+                                               other-pointer-lowtag)))
+    (inst xor bytes bytes)
     (inst rep)
-    (inst stos zero)))
+    (inst stos bytes)))
 
 
 (define-vop (make-fdefn)
@@ -364,10 +370,9 @@
 (define-vop (make-value-cell)
   (:args (value :scs (descriptor-reg any-reg) :to :result))
   (:results (result :scs (descriptor-reg) :from :eval))
-  (:info stack-allocate-p)
   (:node-var node)
   (:generator 10
-    (alloc-other result value-cell-widetag value-cell-size node stack-allocate-p)
+    (alloc-other result value-cell-widetag value-cell-size node)
     (storew value result value-cell-value-slot other-pointer-lowtag)))
 
 ;;;; automatic allocators for primitive objects

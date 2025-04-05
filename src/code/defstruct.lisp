@@ -45,8 +45,7 @@
          (if (functionp fun)
              (funcall fun ,@slot-vars)
              (funcall (setf (car cell)
-                            (%make-structure-instance-allocator ,dd ,slot-specs
-                                                                ',slot-vars))
+                            (%make-structure-instance-allocator ,dd ,slot-specs ',slot-vars))
                       ,@slot-vars)))))
 
 (sb-xc:defmacro %new-instance (layout size)
@@ -67,13 +66,15 @@
 (declaim (ftype (sfunction (defstruct-description list list) function)
                 %make-structure-instance-allocator))
 (defun %make-structure-instance-allocator (dd slot-specs slot-vars)
-  (values (compile nil
-                   `(lambda ,(loop for var in slot-vars
-                                   collect (if (consp var)
-                                               (third var)
-                                               var))
-                      (declare (optimize (sb-c:store-source-form 0)))
-                      (%make-structure-instance-macro ,dd ',slot-specs ,@slot-vars)))))
+  (let* ((args (make-gensym-list (length slot-vars)))
+         (vals (mapcar (lambda (v a) (if (typep v '(cons (member the the*)))
+                                         `(,(first v) ,(second v) ,a)
+                                         a))
+                       slot-vars args)))
+    (values (compile nil
+                     `(lambda ,args
+                        (declare (optimize (sb-c:store-source-form 0)))
+                        (%make-structure-instance-macro ,dd ',slot-specs ,@vals))))))
 
 (defun %make-funcallable-structure-instance-allocator (dd slot-specs)
   (when slot-specs
@@ -364,12 +365,13 @@
          (*dsd-source-form* nil)
          ((inherits comparators) (parse-defstruct dd options slot-descriptions))
          (constructor-definitions
-          (mapcar (lambda (ctor)
-                    `(sb-c:xdefun ,(car ctor)
-                         :constructor
-                         nil
-                       ,@(structure-ctor-lambda-parts dd (cdr ctor))))
-                  (dd-constructors dd)))
+          (unless (find :no-constructor-defun options)
+            (mapcar (lambda (ctor)
+                      `(sb-c:xdefun ,(car ctor)
+                           :constructor
+                           nil
+                           ,@(structure-ctor-lambda-parts dd (cdr ctor))))
+                    (dd-constructors dd))))
          (print-method
           (when (dd-print-option dd)
             (let* ((x (make-symbol "OBJECT"))
@@ -727,6 +729,7 @@ requires exactly~;accepts at most~] one argument" keyword syntax-group)
       (:pure
        (setf (dd-flags dd) (logior (logandc2 (dd-flags dd) +dd-pure+)
                                    (if arg +dd-pure+ 0))))
+      (:no-constructor-defun)
       (t
        (error "unknown DEFSTRUCT option:~%  ~S" option)))
     seen-options))
@@ -744,7 +747,7 @@ requires exactly~;accepts at most~] one argument" keyword syntax-group)
                 (parse-1-dd-option
                  (cond ((consp option) option)
                        ((member option
-                                '(:conc-name :constructor :copier :predicate))
+                                '(:conc-name :constructor :copier :predicate :no-constructor-defun))
                         (list option))
                        (t
                         ;; FIXME: ugly message (defstruct (s :include) a)
@@ -2044,15 +2047,16 @@ or they must be declared locally notinline at each call site.~@:>"
                  `(function (,type ,dd-name) (values ,type &optional))  ; writer
                  `(function (,dd-name) (values ,type &optional))))))))) ; reader
      (t
-      type))))
+      (sb-kernel::maybe-reparse-specifier type)))))
 
 ;;; Given a DD and a constructor spec (a cons of name and pre-parsed
 ;;; BOA lambda list, or the symbol :DEFAULT), return the effective
 ;;; lambda list and the body of the lambda.
 (defun structure-ctor-lambda-parts
-    (dd args &aux (creator (ecase (dd-type dd)
-                             (structure #'instance-constructor-form)
-                             ((list vector) #'typed-constructor-form))))
+    (dd args &optional inline
+     &aux (creator (ecase (dd-type dd)
+                     (structure #'instance-constructor-form)
+                     ((list vector) #'typed-constructor-form))))
   (labels ((default-value (dsd &optional pretty)
              (let ((default (dsd-default dsd))
                    (type (dsd-type dsd))
@@ -2082,7 +2086,10 @@ or they must be declared locally notinline at each call site.~@:>"
         (return-from structure-ctor-lambda-parts
           `((&key ,@lambda-list)
             (declare (explicit-check)
-                     (sb-c::lambda-list (&key ,@(parse t))))
+                     (sb-c::lambda-list (&key ,@(parse t)))
+                     ;; #S with #n= depend on restartable type errors.
+                     ,@(unless inline
+                         `((optimize sb-c::compute-debug-fun))))
             ,(funcall creator dd
                       (mapcar (lambda (dsd arg)
                                 (let ((type (dsd-type dsd))
@@ -2090,7 +2097,9 @@ or they must be declared locally notinline at each call site.~@:>"
                                   (if (eq type t)
                                       var
                                       `(the* (,type :context
-                                              (struct-context ,(dd-name dd) . ,(dsd-name dsd)))
+                                              (struct-context ,(dd-name dd) . ,(dsd-name dsd))
+                                              ,@(unless inline ;; can't restart in user code due to value copying.
+                                                  '(:restart t)))
                                              ,var))))
                               (dd-slots dd) lambda-list))))))
     (destructuring-bind (llks &optional req opt rest keys aux) args
@@ -2102,7 +2111,13 @@ or they must be declared locally notinline at each call site.~@:>"
             (aux-vars name)
             (unless (typep binding '(cons t cons))
               (skipped-vars name))))
-        (macrolet ((rewrite (input key parse pretty)
+        (macrolet ((walk (input key parse)
+                     `(dolist (arg ,input)
+                        (multiple-value-bind (,@key var def sup-p) (,parse arg)
+                          (declare (ignore ,@key def))
+                          (vars var)
+                          (when sup-p (vars (car sup-p))))))
+                   (rewrite (input key parse pretty)
                      `(mapcar
                        (lambda (arg)
                          (multiple-value-bind (,@key var def sup-p) (,parse arg)
@@ -2110,8 +2125,6 @@ or they must be declared locally notinline at each call site.~@:>"
                            (rewrite-1 arg var sup-p ,pretty)))
                        ,input)))
           (labels ((rewrite-1 (arg var sup-p-var pretty)
-                     (vars var)
-                     (when sup-p-var (vars (car sup-p-var)))
                      (let* ((slot (unless (member var (aux-vars) :test #'string=)
                                     (find var (dd-slots dd)
                                           :key #'dsd-name :test #'string=)))
@@ -2128,21 +2141,26 @@ or they must be declared locally notinline at each call site.~@:>"
                              ,@sup-p-var)
                            arg)))        ; keep it as it was
                    (make-ll (opt rest keys aux-vars &optional pretty)
+                     (declare (ignore aux-vars))
                      ;; Can we substitute symbols that are not EQ to symbols
                      ;; naming slots, so we don't have to compare by STRING= later?
                      ;; Probably not because other symbols could reference them.
                      (setq opt (rewrite opt () parse-optional-arg-spec pretty))
-                     (when rest (vars (car rest) pretty))
                      (setq keys (rewrite keys (key) parse-key-arg-spec pretty))
-                     (dolist (arg aux-vars)
-                       (vars arg))
                      (sb-c::make-lambda-list
                       llks nil req opt rest keys
                       ;; &AUX vars which do not initialize a slot are not mentioned
                       ;; in the lambda list, though it's not clear what to do if
                       ;; subsequent bindings refer to the deleted ones.
                       ;; And worse, what if it's SETQd - is that even legal?
-                      (remove-if (lambda (x) (not (typep x '(cons t cons)))) aux))))
+                      (remove-if (lambda (x) (not (typep x '(cons t cons)))) aux)))
+                   (walk-ll (opt rest keys aux-vars)
+                     (walk opt () parse-optional-arg-spec)
+                     (when rest (vars (car rest)))
+                     (walk keys (key) parse-key-arg-spec)
+                     (dolist (arg aux-vars)
+                       (vars arg))))
+            (walk-ll opt rest keys (aux-vars))
             `(,(make-ll opt rest keys (aux-vars))
               (declare (explicit-check)
                        (sb-c::lambda-list ,(make-ll opt rest keys (aux-vars) t)))

@@ -265,6 +265,8 @@
 ;;; DEBUG-BLOCKs.
 (defstruct (debug-block (:constructor nil)
                         (:copier nil))
+  ;; Code-locations where execution continues after this block.
+  (successors nil :type list)
   ;; This indicates whether the block is a special glob of code shared
   ;; by various functions and tucked away elsewhere in a component.
   ;; This kind of block has no start code-location. This slot is in
@@ -274,10 +276,17 @@
   (print-unreadable-object (obj str :type t)
     (prin1 (debug-block-fun-name obj) str)))
 
+(setf (documentation 'debug-block-successors 'function)
+  "Returns the list of possible code-locations where execution may continue
+   when the basic-block represented by debug-block completes its execution.")
+
 (setf (documentation 'debug-block-elsewhere-p 'function)
   "Return whether debug-block represents elsewhere code.")
 
 (defstruct (compiled-debug-block (:include debug-block)
+                                 (:constructor
+                                  make-compiled-debug-block
+                                  (code-locations successors elsewhere-p))
                                  (:copier nil))
   ;; code-location information for the block
   (code-locations #() :type simple-vector))
@@ -485,7 +494,7 @@
 (defstruct (compiled-code-location
             (:include code-location)
             (:constructor make-known-code-location
-                (pc debug-fun %debug-block %tlf-offset %form-number
+                (pc debug-fun %tlf-offset %form-number
                  %live-set kind step-info context &aux (%unknown-p nil)))
             (:constructor make-compiled-code-location (pc debug-fun))
             (:copier nil))
@@ -513,15 +522,15 @@
 ;;; different values, because this slot is relative to the object base
 ;;; address, whereas the one in C is an index into code->constants.
 (defconstant bpt-lra-boxed-nwords
-  ;; * For non-x86: a single boxed constant holds the true LRA.
+  ;; * For backends with LRA: a single boxed constant holds the true LRA.
   ;;   Additionally, MIPS gets a boxed slot for the cookie
   ;;   that formerly went in a weak hash-table.
-  ;; * For x86[-64]: one boxed constant holds the code object to which
+  ;; * For backends without LRA: one boxed constant holds the code object to which
   ;;   to return, one holds the displacement into that object,
   ;;   and one holds the cookie
-  (+ code-constants-offset 2 #+(or x86-64 x86) 1))
+  (+ code-constants-offset 2 #+(or x86-64 x86 arm64 riscv) 1))
 (defconstant real-lra-slot code-constants-offset)
-(defconstant cookie-slot (+ code-constants-offset 1 #+(or x86 x86-64) 1))
+(defconstant cookie-slot (+ code-constants-offset 1 #+(or x86 x86-64 arm64 riscv) 1))
 
 (declaim (inline control-stack-pointer-valid-p))
 (defun control-stack-pointer-valid-p (x &optional (aligned t))
@@ -633,6 +642,16 @@
                  (system-area-pointer pc)
                  (word (int-sap pc)))))))
       (unless (= base-ptr 0) (%make-lisp-obj (logior base-ptr other-pointer-lowtag))))))
+
+#+(or arm64 riscv)
+(defun compute-lra-data-from-pc (pc)
+  (declare (type integer pc))
+  (let* ((pc-sap (int-sap (ash pc n-fixnum-tag-bits)))
+         (code (code-header-from-pc pc-sap)))
+    (values (if code
+                (sap- pc-sap (code-instructions code))
+                nil)
+            code)))
 
 ;;;; (OR X86 X86-64) support
 
@@ -914,52 +933,14 @@
                                                         escaped)
                                  (if up-frame (1+ (frame-number up-frame)) 0)
                                  escaped))))))
-#+(or arm64 riscv)
+
+#+(or x86 x86-64 arm64 riscv)
 (defun compute-calling-frame (caller ra up-frame &optional savedp)
-  (declare (type system-area-pointer caller)
-           (ignore savedp))
+  (declare (type system-area-pointer caller #-(or arm64 riscv) ra))
   (when (control-stack-pointer-valid-p caller)
-    (multiple-value-bind (code pc-offset escaped)
-        (if ra
-            (let* ((ra-sap (int-sap (ash ra n-fixnum-tag-bits)))
-                   (code (code-header-from-pc ra-sap)))
-              (values code
-                      (if code
-                          (sap- ra-sap (code-instructions code))
-                          0)))
-            (find-escaped-frame caller))
-      (if (and (code-component-p code)
-               (eq (%code-debug-info code) :bpt-lra))
-          (let ((real-lra (code-header-ref code real-lra-slot)))
-            (compute-calling-frame caller real-lra up-frame))
-          (let ((d-fun (case code
-                         (:undefined-function
-                          (make-bogus-debug-fun
-                           "undefined function"))
-                         (:foreign-function
-                          (make-bogus-debug-fun
-                           (foreign-function-backtrace-name
-                            (int-sap (get-lisp-obj-address ra)))))
-                         ((nil)
-                          (make-bogus-debug-fun
-                           "bogus stack frame"))
-                         (t
-                          (debug-fun-from-pc code pc-offset escaped)))))
-            (make-compiled-frame caller up-frame d-fun
-                                 (code-location-from-pc d-fun pc-offset
-                                                        escaped)
-                                 (if up-frame (1+ (frame-number up-frame)) 0)
-                                 escaped))))))
-#+(or x86 x86-64)
-(defun compute-calling-frame (caller ra up-frame &optional savedp)
-  (declare (type system-area-pointer caller ra))
-  (/noshow0 "entering COMPUTE-CALLING-FRAME")
-  (when (control-stack-pointer-valid-p caller)
-    (/noshow0 "in WHEN")
     ;; First check for an escaped frame.
     (multiple-value-bind (code pc-offset escaped off-stack)
         (find-escaped-frame caller)
-      (/noshow0 "at COND")
       (cond (code
              ;; If it's escaped it may be a function end breakpoint trap.
              (when (and (code-component-p code)
@@ -980,13 +961,13 @@
                        "undefined function"))
                      (:foreign-function
                       (make-bogus-debug-fun
-                       (foreign-function-backtrace-name ra)))
+                       (foreign-function-backtrace-name #-(or arm64 riscv) ra
+                                                        #+(or arm64 riscv) (int-sap (get-lisp-obj-address ra)))))
                      ((nil)
                       (make-bogus-debug-fun
                        "bogus stack frame"))
                      (t
                       (debug-fun-from-pc code pc-offset escaped)))))
-        (/noshow0 "returning MAKE-COMPILED-FRAME from COMPUTE-CALLING-FRAME")
         (make-compiled-frame caller up-frame d-fun
                              (code-location-from-pc d-fun pc-offset
                                                     escaped)
@@ -1147,6 +1128,9 @@
               (setf pc-offset 0))))
         (/noshow0 "returning from FIND-ESCAPED-FRAME")
         (return
+          #+(or riscv arm64)
+          (values code pc-offset context)
+          #-(or riscv arm64)
           (if (eq (%code-debug-info code) :bpt-lra)
               (let ((real-lra (code-header-ref code real-lra-slot)))
                 (values (lra-code-header real-lra)
@@ -1170,12 +1154,12 @@ register."
 ;;; Find the code object corresponding to the object represented by
 ;;; bits and return it. We assume bogus functions correspond to the
 ;;; undefined-function.
-#+(or arm64 ppc64 x86 x86-64)
+#+(or riscv arm64 ppc64 x86 x86-64)
 (defun code-object-from-context (context)
   (declare (type (sb-alien:alien (* os-context-t)) context))
   (code-header-from-pc (context-pc context)))
 
-#-(or arm64 ppc64 x86 x86-64)
+#-(or riscv arm64 ppc64 x86 x86-64)
 (defun code-object-from-context (context)
   (declare (type (sb-alien:alien (* os-context-t)) context))
   ;; The GC constraint on the program counter on precisely-scavenged
@@ -1210,7 +1194,6 @@ register."
            (let ((widetag (widetag-of object)))
              (cond ((= widetag code-header-widetag)
                     object)
-                   #-riscv
                    ((= widetag return-pc-widetag)
                     (lra-code-header object))
                    ((= widetag simple-fun-widetag)
@@ -1802,89 +1785,97 @@ register."
 
 ;;; This does some of the work of PARSE-DEBUG-BLOCKS.
 (defun parse-compiled-debug-blocks (debug-fun)
-  (macrolet ((aref+ (a i) `(prog1 (aref ,a ,i) (incf ,i))))
-    (let* ((var-count (length (debug-fun-debug-vars debug-fun)))
-           (compiler-debug-fun (compiled-debug-fun-compiler-debug-fun
-                                debug-fun))
-           (blocks
-             (let ((blocks (sb-c::compiled-debug-fun-blocks compiler-debug-fun)))
-               (if (null blocks)
-                   (return-from parse-compiled-debug-blocks nil)
-                   blocks)))
-           ;; KLUDGE: 8 is a hard-wired constant in the compiler for the
-           ;; element size of the packed binary representation of the
-           ;; blocks data.
-           (live-set-len (ceiling var-count 8))
-           (tlf-number (sb-c::compiled-debug-fun-tlf-number compiler-debug-fun))
-           (elsewhere-pc (sb-c::compiled-debug-fun-elsewhere-pc compiler-debug-fun))
-           elsewhere-p
-           (len (length blocks))
-           (i 0)
-           (last-pc 0)
-           result-blocks
-           (block (make-compiled-debug-block))
-           locations
-           prev-live
-           prev-form-number)
-      (flet ((new-block ()
-               (when locations
-                 (setf (compiled-debug-block-code-locations block)
-                       (coerce (nreverse (shiftf locations nil))
-                               'simple-vector)
-                       (compiled-debug-block-elsewhere-p block)
-                       elsewhere-p)
-                 (push block result-blocks)
-                 (setf block (make-compiled-debug-block)))))
+  (let* ((var-count (length (debug-fun-debug-vars debug-fun)))
+         (compiler-debug-fun (compiled-debug-fun-compiler-debug-fun
+                              debug-fun))
+         (blocks
+           (let ((blocks (sb-c::compiled-debug-fun-blocks compiler-debug-fun)))
+             (if (null blocks)
+                 (return-from parse-compiled-debug-blocks nil)
+                 blocks)))
+         ;; KLUDGE: 8 is a hard-wired constant in the compiler for the
+         ;; element size of the packed binary representation of the
+         ;; blocks data.
+         (live-set-len (ceiling var-count 8))
+         (tlf-number (sb-c::compiled-debug-fun-tlf-number compiler-debug-fun))
+         (result-blocks))
+    (unless blocks
+      (return-from parse-compiled-debug-blocks nil))
+    (macrolet ((aref+ (a i) `(prog1 (aref ,a ,i) (incf ,i))))
+      (let ((i 0)
+            (len (length blocks))
+            (last-pc 0)
+            prev-form-number
+            prev-live)
         (loop
-         (when (>= i len)
-           (new-block)
-           (return))
-         (let* ((flags (aref+ blocks i))
-                (kind (svref sb-c::+compiled-code-location-kinds+
-                             (ldb (byte 3 0) flags)))
-                (pc (+ last-pc
-                       (sb-c:read-var-integerf blocks i)))
-                (tlf-offset (or tlf-number
-                                (sb-c::read-var-integerf blocks i)))
-                (equal-live (logtest sb-c::compiled-code-location-equal-live flags))
-                (form-number
-                  (cond ((logtest sb-c::compiled-code-location-zero-form-number flags)
-                         0)
-                        ((and equal-live
-                              (logtest sb-c::compiled-code-location-live flags))
-                         prev-form-number)
-                        (t
-                         (setf prev-form-number
-                               (sb-c:read-var-integerf blocks i)))))
-                (live-set
-                  (cond (equal-live
-                         prev-live)
-                        ((logtest sb-c::compiled-code-location-live flags)
-                         (setf prev-live
-                               (sb-c:read-packed-bit-vector live-set-len blocks i)))
-                        (t
-                         (make-array (* live-set-len 8) :element-type 'bit))))
-                (step-info
-                  (if (logtest sb-c::compiled-code-location-stepping flags)
-                      (sb-c:read-var-string blocks i)
-                      ""))
-                (context
-                  (and (logtest sb-c::compiled-code-location-context flags)
-                       (compact-vector-ref (sb-c::compiled-debug-info-contexts
-                                            (%code-debug-info (compiled-debug-fun-component debug-fun)))
-                                           (sb-c:read-var-integerf blocks i)))))
-           (when (or (memq kind '(:block-start :non-local-entry))
-                     (and (not elsewhere-p)
-                          (> pc elsewhere-pc)
-                          (setf elsewhere-p t)))
-             (new-block))
-           (push (make-known-code-location
-                  pc debug-fun block tlf-offset
-                  form-number live-set kind
-                  step-info context)
-                 locations)
-           (setf last-pc pc))))
-      (coerce (nreverse result-blocks) 'simple-vector))))
+         (when (>= i len) (return))
+         (let ((succ-and-flags (sb-c::read-var-integerf blocks i))
+               (successors nil)
+               locations)
+           (declare (list successors))
+           (dotimes (k (ash succ-and-flags
+                            (- sb-c::compiled-debug-block-nsucc-shift)))
+             (push (sb-c::read-var-integerf blocks i) successors))
+           (dotimes (k (sb-c:read-var-integerf blocks i))
+             (let* ((flags (aref+ blocks i))
+                    (kind (svref sb-c::+compiled-code-location-kinds+
+                                 (ldb sb-c::compiled-code-location-kind-byte
+                                      flags)))
+                    (pc (+ last-pc
+                           (sb-c:read-var-integerf blocks i)))
+                    (tlf-offset (or tlf-number
+                                    (sb-c:read-var-integerf blocks i)))
+                    (equal-live (logtest sb-c::compiled-code-location-equal-live flags))
+                    (form-number
+                      (cond ((logtest sb-c::compiled-code-location-zero-form-number flags)
+                             0)
+                            ((and equal-live
+                                  (logtest sb-c::compiled-code-location-live flags))
+                             prev-form-number)
+                            (t
+                             (setf prev-form-number
+                                   (sb-c:read-var-integerf blocks i)))))
+                    (live-set
+                      (cond (equal-live
+                             prev-live)
+                            ((logtest sb-c::compiled-code-location-live flags)
+                             (setf prev-live
+                                   (sb-c:read-packed-bit-vector live-set-len blocks i)))
+                            (t
+                             (make-array (* live-set-len 8) :element-type 'bit))))
+                    (step-info
+                      (if (logtest sb-c::compiled-code-location-stepping flags)
+                          (sb-c:read-var-string blocks i)
+                          ""))
+                    (context
+                      (and (logtest sb-c::compiled-code-location-context flags)
+                           (compact-vector-ref (sb-c::compiled-debug-info-contexts
+                                                (%code-debug-info (compiled-debug-fun-component debug-fun)))
+                                               (sb-c:read-var-integerf blocks i)))))
+               (push (make-known-code-location
+                      pc debug-fun tlf-offset
+                      form-number live-set kind
+                      step-info context)
+                     locations)
+               (setf last-pc pc)))
+           (let* ((locations (coerce (nreverse locations) 'simple-vector))
+                  (block (make-compiled-debug-block
+                          locations successors
+                          (not (zerop (logand
+                                       sb-c::compiled-debug-block-elsewhere-p
+                                       succ-and-flags))))))
+             (push block result-blocks)
+             (dotimes (k (length locations))
+               (setf (code-location-%debug-block (svref locations k))
+                     block))))))
+      (let ((res (coerce (nreverse result-blocks) 'simple-vector)))
+        (dotimes (i (length res))
+          (let* ((block (svref res i))
+                 (succs nil))
+            (dolist (ele (debug-block-successors block))
+              (push (svref res ele) succs))
+            (setf (debug-block-successors block) succs)))
+        res))))
 
 ;;; VARS is the parsed variables for a minimal debug function. We need
 ;;; to assign names of the form ARG-NNN. We must pad with leading
@@ -2450,18 +2441,10 @@ register."
           (intern (debug-var-name debug-var) package))
         (make-symbol (debug-var-name debug-var)))))
 
-;;; Return the value stored for DEBUG-VAR in frame, or if the value is
-;;; not :VALID, then signal an INVALID-VALUE error.
-(defun debug-var-valid-value (debug-var frame)
-  (unless (eq (debug-var-validity debug-var (frame-code-location frame))
-              :valid)
-    (error 'invalid-value :debug-var debug-var :frame frame))
-  (debug-var-value debug-var frame))
-
 ;;; Returns the value stored for DEBUG-VAR in frame. The value may be
 ;;; invalid. This is SETFable.
 (defun debug-var-value (debug-var frame)
-  (aver (typep frame 'compiled-frame))
+  (declare (compiled-frame frame))
   (let ((res (access-compiled-debug-var-slot debug-var frame)))
     (if (indirect-value-cell-p res)
         (value-cell-ref res)
@@ -2577,7 +2560,7 @@ register."
                           (format nil "invalid object #x~X" val))
                          nil)))))))
 
-(defun sub-access-debug-var-slot (fp sc+offset &optional escaped)
+(defun sub-access-debug-var-slot (fp sc+offset &optional escaped integer-float)
   ;; NOTE: The long-float support in here is obviously decayed.  When
   ;; the x86oid and non-x86oid versions of this function were unified,
   ;; the behavior of long-floats was preserved, which only served to
@@ -2597,7 +2580,7 @@ register."
              (escaped-float-value (format)
                `(if escaped
                     (context-float-register escaped
-                     (sb-c:sc+offset-offset sc+offset) ',format)
+                     (sb-c:sc+offset-offset sc+offset) ',format integer-float)
                     :invalid-value-for-unescaped-register-storage))
              (with-nfp ((var) &body body)
                ;; x86oids have no separate number stack, so dummy it
@@ -2633,12 +2616,9 @@ register."
          (if (logbitp (1- n-word-bits) val)
              (logior val (ash -1 n-word-bits))
              val)))
-      (#.unsigned-reg-sc-number
+      ((#.unsigned-reg-sc-number #-(or x86 x86-64) #.non-descriptor-reg-sc-number)
        (with-escaped-value (val)
          val))
-      #-(or x86 x86-64)
-      (#.non-descriptor-reg-sc-number
-       (error "Local non-descriptor register access?"))
       #-(or x86 x86-64 arm64)
       (#.interior-reg-sc-number
        (error "Local interior register access?"))
@@ -2779,7 +2759,7 @@ register."
 ;;; it is an indirect value cell. This occurs when the variable is
 ;;; both closed over and set.
 (defun (setf debug-var-value) (new-value debug-var frame)
-  (aver (typep frame 'compiled-frame))
+  (declare (compiled-frame frame))
   (let ((old-value (access-compiled-debug-var-slot debug-var frame)))
     (if (indirect-value-cell-p old-value)
         (value-cell-set old-value new-value)
@@ -3849,11 +3829,9 @@ register."
 ;;; state of the program, not merely a return PC location.
 ;;; (I tried changing this to DEFUN-CACHED, which failed a regression test)
 (defun make-bpt-lra (real-lra)
-  (declare (type #-(or x86 x86-64 arm64 riscv) lra #+(or x86 x86-64 arm64 riscv) system-area-pointer real-lra))
-  real-lra
-  #+arm64 (error "Breakpoints do not work on ARM64")
-  #+riscv (error "Breakpoints don't work on RISC-V")
-  #-(or arm64 riscv)
+  (declare (type #-(or x86 x86-64 arm64 riscv) lra
+                 #+(or arm64 riscv) fixnum
+                 #+(or x86 x86-64) system-area-pointer real-lra))
   (macrolet ((symbol-addr (name)
                `(find-dynamic-foreign-symbol-address ,name))
              (trap-offset ()
@@ -3876,20 +3854,28 @@ register."
                  2))))
       (setf (%code-debug-info code-object) :bpt-lra)
       (with-pinned-objects (code-object)
-        #+(or x86 x86-64 arm64)
+        #+(or x86 x86-64 arm64 riscv)
         (let ((instructions   ; Don't touch the jump table prefix word
                 (sap+ (code-instructions code-object) n-word-bytes)))
           (multiple-value-bind (offset code) (compute-lra-data-from-pc real-lra)
             (setf (code-header-ref code-object real-lra-slot) code
                   (code-header-ref code-object (1+ real-lra-slot)) offset)
+            #-darwin-jit
             (system-area-ub8-copy (int-sap src-start) 0 instructions 0 length)
+            #+darwin-jit
+            (sb-vm::jit-memcpy instructions (int-sap src-start) length)
+            #-(or x86 x86-64)
+            (sanctify-for-execution code-object)
             ;; CODE-OBJECT is implicitly pinned after leaving WITH-PINNED-OBJECTS
             ;; (and would be pinned even if the W-P-O were deleted), so we're OK
             ;; to return a SAP to the instructions.
             ;; TRAP-OFFSET is the distance from CODE-INSTRUCTIONS to the trapping
             ;; opcode, for which we have to account for the jump table prefix word.
-            (values instructions code-object (+ (trap-offset) n-word-bytes))))
-        #-(or x86 x86-64 arm64)
+            (values #+(or x86 x86-64) instructions
+                    #+(or arm64 riscv) (%make-lisp-obj (sap-int instructions))
+                    code-object
+                    (+ (trap-offset) n-word-bytes))))
+        #-(or x86 x86-64 arm64 riscv)
         (let* ((lra-header-addr
                  ;; Skip over the jump table prefix, and align properly for LRA header
                  (sap+ (code-instructions code-object) (* 2 n-word-bytes)))

@@ -79,7 +79,7 @@
   ;; Handle the register arg cases.
   ZERO-VALUES
   (inst lea rbx (ea (* sp->fp-offset n-word-bytes) rbp-tn))
-  (inst mov rdx nil-value)
+  (inst mov rdx null-tn)
   (inst mov rdi rdx)
   (inst mov rsi rdx)
   (inst stc)
@@ -98,7 +98,7 @@
   (inst lea rbx (ea (* sp->fp-offset n-word-bytes) rbp-tn))
   (loadw rdx rsi -1)
   (loadw rdi rsi -2)
-  (inst mov rsi nil-value)
+  (inst mov rsi null-tn)
   (inst stc)
   (inst leave)
   (inst ret)
@@ -239,7 +239,7 @@
   (inst mov fun tmp) ; needed if the JMP invokes UNDEFINED-TRAMP
   (inst jmp (object-slot-ea tmp closure-fun-slot fun-pointer-lowtag))
   NOT-CALLABLE
-  (inst cmp fun nil-value) ;; NIL doesn't have SYMBOL-WIDETAG
+  (inst cmp fun null-tn) ;; NIL doesn't have SYMBOL-WIDETAG
   (inst jmp :e UNDEFINED-TRAMP)
   ;; Not a symbol
   (inst pop (ea n-word-bytes rbp-tn))
@@ -293,6 +293,7 @@
 
 ;;; Simply return and enter the loop in UNWIND instead of calling
 ;;; UNWIND directly
+#-sb-assembling
 (define-vop ()
   (:translate %continue-unwind)
   (:policy :fast-safe)
@@ -382,15 +383,15 @@
   (with-registers-preserved (lisp :except rdx)
     (call-static-fun 'update-object-layout 1)))
 
-(define-assembly-routine (sb-impl::install-hash-table-lock
+(define-assembly-routine (sb-impl:install-hash-table-lock
                           (:policy :fast-safe)
-                          (:translate sb-impl::install-hash-table-lock)
+                          (:translate sb-impl:install-hash-table-lock)
                           (:return-style :raw))
     ((:arg x (descriptor-reg) rdx-offset)
      (:res r (descriptor-reg) rdx-offset))
   (progn x r)
   (with-registers-preserved (lisp :except rdx)
-    (call-static-fun 'sb-impl::install-hash-table-lock 1)))
+    (call-static-fun 'sb-impl:install-hash-table-lock 1)))
 
 (define-assembly-routine
     (return-values-list (:return-style :none))
@@ -455,7 +456,7 @@
       (pushw list cons-car-slot list-pointer-lowtag)
       (loadw list list cons-cdr-slot list-pointer-lowtag)
       (check DONE)
-      (inst cmp list nil-value)
+      (inst cmp list null-tn)
       (inst jmp :ne LOOP)
 
       DONE
@@ -508,7 +509,8 @@
   ;;     RBX spill <- sp now
   ;;     RCX spill
   ;; Filter out non-permgen objects. RAX is the object
-  (inst mov rbx-tn (rip-relative-ea (make-fixup "permgen_bounds" :foreign-dataref)))
+  ;; (inst mov rbx-tn (rip-relative-ea (make-fixup "permgen_bounds" :foreign-dataref)))
+  (inst mov rbx-tn (ea (make-fixup "permgen_bounds" :foreign-dataref)))
   (inst cmp rax-tn (ea rbx-tn))
   (inst jmp :b SET-BIT-AND-DONE)
   (inst cmp rax-tn (ea 8 rbx-tn))

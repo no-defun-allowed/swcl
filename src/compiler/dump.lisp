@@ -56,7 +56,12 @@
   (packages () :type list)
   ;; a table mapping from the ENTRY-INFO structures for dumped XEPs to
   ;; the table offsets of the corresponding code pointers
-  (entry-table (make-hash-table :test 'eq) :type hash-table)
+  (entry-table (make-hash-table :test 'eq
+                                ;; It holds on to clambdas, retaining
+                                ;; them for the duration of
+                                ;; compile-file.
+                                #-sb-xc-host :weakness #-sb-xc-host :key)
+   :type hash-table)
   ;; a table holding back-patching info for forward references to XEPs.
   ;; The key is the ENTRY-INFO structure for the XEP, and the value is
   ;; a list of conses (<code-handle> . <offset>), where <code-handle>
@@ -372,16 +377,18 @@
 ;;; object for dumping to it. Some human-readable information about
 ;;; the source code is given by the string WHERE.
 (defun open-fasl-output (name where)
-  (declare (type pathname name))
+  (declare (type (or pathname #-sb-xc-host stream) name))
   (flet ((fasl-write-string (string stream)
            ;; UTF-8 is safe to use, because +FASL-HEADER-STRING-STOP-CHAR-CODE+
            ;; may not appear in UTF-8 encoded bytes
            (write-sequence (string-to-octets string :external-format :utf-8)
                            stream)))
-    (let* ((stream (open name
+    (let* ((stream (if (streamp name)
+                       name
+                       (open name
                          :direction :output
                          :if-exists :supersede
-                         :element-type 'sb-assem:assembly-unit))
+                         :element-type 'sb-assem:assembly-unit)))
            (res (make-fasl-output stream)))
       ;; Before the actual FASL header, write a shebang line using the current
       ;; runtime path, so our fasls can be executed directly from the shell.

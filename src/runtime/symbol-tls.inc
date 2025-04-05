@@ -108,7 +108,7 @@ static inline unsigned int fdefn_linkage_index(struct fdefn* f) {
 static inline unsigned int symbol_linkage_index(struct symbol* s) {
     // never look at NIL's hash slot's low bits
     if ((uword_t)s == (STATIC_SPACE_START + NIL_SYMBOL_SLOTS_OFFSET)) return 0;
-    return s->hash & ((1<<N_LINKAGE_INDEX_BITS)-1);
+    return (s->hash >> WORD_SHIFT) & ((1<<N_LINKAGE_INDEX_BITS)-1);
 }
 
 static lispobj __attribute__((unused)) symbol_function(struct symbol* s) {
@@ -118,7 +118,8 @@ static lispobj __attribute__((unused)) symbol_function(struct symbol* s) {
 // Convert a function entry address to a tagged function pointer regardless of whether
 // SIMPLE-FUN-SELF is kept as tagged or untagged on this architecture.
 #define linkage_val_to_fun_ptr(x) (x ? x - 2*N_WORD_BYTES + FUN_POINTER_LOWTAG : 0)
-#define linkage_cell_function(i) linkage_val_to_fun_ptr(linkage_space[i])
+// Return a lispobj with FUN_POINTER_LOWTAG, or 0 if no function.
+#define linkage_cell_function(i) (i ? linkage_val_to_fun_ptr(linkage_space[i]) : 0)
 #define StaticSymbolFunction(x) linkage_cell_function(x##_fname_index)
 
 #else

@@ -885,8 +885,7 @@
            (error (generate-error-code+ (lambda ()
                                           (inst mov r (fixnumize y)))
                                         vop
-                                        'sb-kernel::mul-overflow2-error x
-                                        r)))
+                                        'sb-kernel::mul-overflow2-error x r)))
       (inst imul r x y)
       (inst jmp :o error))))
 
@@ -1049,6 +1048,27 @@
            (error (generate-error-code vop 'sb-kernel::add-sub-overflow-error r)))
       (inst jmp :o error))))
 
+(define-vop (overflow+-fixnum)
+  (:translate overflow+)
+  (:args (x :scs (any-reg))
+         (y :scs (any-reg (immediate
+                           (plausible-signed-imm32-operand-p (fixnumize (tn-value tn)))))))
+  (:arg-types tagged-num tagged-num)
+  (:info type)
+  (:results (r :scs (any-reg) :from (:argument 0)))
+  (:result-types tagged-num)
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:generator 1
+    (move r x)
+    (inst add r (if (sc-is y immediate)
+                    (fixnumize (tn-value y))
+                    y))
+    (let* ((*location-context* (unless (eq type 'fixnum)
+                                 type))
+           (error (generate-error-code vop 'sb-kernel::add-sub-overflow-error r)))
+      (inst jmp :o error))))
+
 (define-vop (overflow+-signed=>unsigned)
   (:translate overflow+)
   (:args (x :scs (signed-reg))
@@ -1151,6 +1171,27 @@
   (:generator 2
     (move r x)
     (inst sub r y)
+    (let* ((*location-context* (unless (eq type 'fixnum)
+                                 type))
+           (error (generate-error-code vop 'sb-kernel::sub-overflow-error r)))
+      (inst jmp :o error))))
+
+(define-vop (overflow-fixnum)
+  (:translate overflow-)
+  (:args (x :scs (any-reg))
+         (y :scs (any-reg (immediate
+                           (plausible-signed-imm32-operand-p (fixnumize (tn-value tn)))))))
+  (:arg-types tagged-num tagged-num)
+  (:info type)
+  (:results (r :scs (any-reg) :from (:argument 0)))
+  (:result-types tagged-num)
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:generator 1
+    (move r x)
+    (inst sub r (if (sc-is y immediate)
+                    (fixnumize (tn-value y))
+                    y))
     (let* ((*location-context* (unless (eq type 'fixnum)
                                  type))
            (error (generate-error-code vop 'sb-kernel::sub-overflow-error r)))
@@ -1390,11 +1431,10 @@
                             nil)
                            (t
                             (setf amount-error
-                                  (make-random-tn :kind :normal
-                                                  :sc (sc-or-lose (if (typep amount 'word)
-                                                                      'unsigned-reg
-                                                                      'signed-reg))
-                                                  :offset (tn-offset temp)))
+                                  (make-random-tn (sc-or-lose (if (typep amount 'word)
+                                                                  'unsigned-reg
+                                                                  'signed-reg))
+                                                  (tn-offset temp)))
 
                             (lambda ()
                               (inst mov temp amount)))))
@@ -1492,11 +1532,10 @@
                             nil)
                            (t
                             (setf amount-error
-                                  (make-random-tn :kind :normal
-                                                  :sc (sc-or-lose (if (typep amount 'word)
+                                  (make-random-tn (sc-or-lose (if (typep amount 'word)
                                                                       'unsigned-reg
                                                                       'signed-reg))
-                                                  :offset (tn-offset temp)))
+                                                  (tn-offset temp)))
 
                             (lambda ()
                               (inst mov temp amount)))))
@@ -4131,7 +4170,7 @@
                                      (t
                                       (inst mov temp x)
                                       temp)))
-                             (test-fixnum (lo hi)
+                             (test-fixnum ()
                                (unless (and (< -1 lo lowest-bignum-address)
                                             (< -1 hi lowest-bignum-address))
                                  (generate-fixnum-test x)
@@ -4142,17 +4181,33 @@
                                (inst cmp x (imm lo))
                                (inst jmp (if not-p :ne :e) target))
                               ((= hi ,(fixnumize -1))
-                               (test-fixnum lo hi)
+                               (test-fixnum)
                                (inst cmp x (imm lo))
                                (inst jmp (if not-p :b :ae) target))
-                              ((= hi ,(fixnumize most-positive-fixnum))
-                               (test-fixnum lo hi)
-                               (inst cmp x (imm lo))
-                               (inst jmp (if not-p :l :ge) target))
                               ((= lo ,(fixnumize most-negative-fixnum))
-                               (test-fixnum lo hi)
+                               (test-fixnum)
                                (inst cmp x (imm hi))
                                (inst jmp (if not-p :g :le) target))
+                              ((and (if (= hi ,(fixnumize most-positive-fixnum))
+                                        (/= lo 0)
+                                        (> lo 0))
+                                    (= (logcount (+ hi (fixnumize 1))) 1)
+                                    (>= hi lowest-bignum-address))
+                               (if (= hi ,(fixnumize most-positive-fixnum))
+                                   (inst test :byte x n-fixnum-tag-bits)
+                                   (inst test x (imm (lognot hi))))
+                               (inst jmp :ne (if not-p target skip))
+                               (let ((size (if (typep hi '(unsigned-byte 32))
+                                               :dword
+                                               :qword)))
+                                 (cond
+                                   ((and (eq lo (fixnumize 1))
+                                         (/= hi ,(fixnumize most-positive-fixnum)))
+                                    (inst test size x x)
+                                    (inst jmp (if not-p :e :ne) target))
+                                   (t
+                                    (inst cmp size x (imm lo))
+                                    (inst jmp (if not-p :l :ge) target)))))
                               (t
                                (if (= lo 0)
                                    (setf temp x)
@@ -4166,14 +4221,14 @@
                                              (inst add temp x)))))
                                (let ((diff (- hi lo)))
                                  (cond ((= diff (fixnumize most-positive-fixnum))
-                                        (test-fixnum 0 diff)
+                                        (test-fixnum)
                                         (inst test temp temp)
                                         (inst jmp (if not-p :l :ge) target))
                                        ((= (logcount (+ diff (fixnumize 1))) 1)
                                         (inst test temp (imm (lognot diff)))
                                         (inst jmp (if not-p :ne :e) target))
                                        (t
-                                        (test-fixnum 0 diff)
+                                        (test-fixnum)
                                         (inst cmp temp (imm diff))
                                         (inst jmp (if not-p :a :be) target))))))))
                     skip)))))

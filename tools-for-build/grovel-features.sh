@@ -34,6 +34,7 @@ featurep() {
 # It will get added in by Config.*-win32 only if LISP_FEATURE_SB_FUTEX.
 if [ "$sbcl_os" = win32 ] ; then
    LOADLIBES=-lSynchronization featurep os-provides-wakebyaddr sb-futex
+   featurep ucrt
 fi
 
 featurep os-provides-dlopen
@@ -51,6 +52,13 @@ featurep os-provides-poll
 featurep os-provides-close-range-wrapper
 
 featurep os-provides-posix-spawn
+
+if [ "$sbcl_os" = linux ] ; then
+    case "$sbcl_arch" in
+        arm | x86 | ppc | mips | sparc | riscv32)
+            featurep 64-bit-time
+    esac
+fi
 
 if [ "$sbcl_arch" = arm ] ; then
    featurep arm-softfp

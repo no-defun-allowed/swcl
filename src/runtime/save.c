@@ -48,20 +48,25 @@
 
 /* write_memsize_options uses a simple serialization scheme that
  * consists of one word of magic, one word indicating the size of the
- * core entry, and one word per struct field. */
+ * core entry, and one word per struct field.
+ * options == 2 => accept memsize options at runtime.
+ * options == 1 => don't accept them
+*/
 static void
-write_memsize_options(FILE *file)
+write_memsize_options(FILE *file, int options)
 {
-    core_entry_elt_t optarray[RUNTIME_OPTIONS_WORDS] = {
+    size_t size = 5 + options -1;
+    core_entry_elt_t optarray[] = {
       RUNTIME_OPTIONS_MAGIC,
-      5, // number of words in this core header entry
+      size, // number of words in this core header entry
       dynamic_space_size,
       thread_control_stack_size,
-      dynamic_values_bytes
+      dynamic_values_bytes,
+      0
     };
 
-    if (RUNTIME_OPTIONS_WORDS !=
-        fwrite(optarray, sizeof(core_entry_elt_t), RUNTIME_OPTIONS_WORDS, file)) {
+    if (size !=
+        fwrite(optarray, sizeof(core_entry_elt_t), size, file)) {
         perror("Error writing runtime options to file");
     }
 }
@@ -98,13 +103,13 @@ write_bytes_to_file(FILE * file, char *addr, size_t bytes, int compression)
         input.pos = 0;
 
         size_t buf_size = ZSTD_CStreamOutSize();
-        unsigned char* buf = successful_malloc(buf_size);
+        unsigned char* buf = checked_malloc(buf_size);
         ZSTD_outBuffer output;
         output.dst = buf;
         output.size = buf_size;
 
         unsigned char * written, * end;
-        long total_written = 0;
+        size_t total_written = 0;
         ZSTD_CStream *stream = ZSTD_createCStream();
         if (stream == NULL)
             lose("failed to create zstd compression context");
@@ -134,7 +139,7 @@ write_bytes_to_file(FILE * file, char *addr, size_t bytes, int compression)
                 }
             }
         } while (ret != 0);
-        printf("compressed %lu bytes into %lu at level %i\n",
+        printf("compressed %zu bytes into %zu at level %i\n",
                bytes, total_written, compression);
 
         ZSTD_freeCStream(stream);
@@ -158,12 +163,6 @@ static long write_bytes(FILE *file, char *addr, size_t bytes,
                         os_vm_offset_t file_offset, int compression)
 {
     ftell_type here, data;
-
-#ifdef LISP_FEATURE_WIN32
-    // I can't see how we'd ever attempt writing from uncommitted memory,
-    // but this is better than was was previously here (a "touch" loop over all pages)
-    os_commit_memory(addr, bytes);
-#endif
 
     fflush(file);
     here = FTELL(file);
@@ -259,7 +258,7 @@ static void unwind_binding_stack(struct thread* th)
 
 bool save_to_filehandle(FILE *file, char *filename, lispobj init_function,
                         bool make_executable,
-                        bool save_runtime_options,
+                        int save_runtime_options,
                         int core_compression_level)
 {
     bool verbose = !lisp_startup_options.noinform;
@@ -279,22 +278,23 @@ bool save_to_filehandle(FILE *file, char *filename, lispobj init_function,
      * all command-line arguments are available to Lisp in SB-EXT:*POSIX-ARGV*.
      * Otherwise command-line processing is performed as normal */
     if (save_runtime_options)
-        write_memsize_options(file);
+        write_memsize_options(file, save_runtime_options);
 
     int stringlen = strlen((const char *)build_id);
     int string_words = ALIGN_UP(stringlen, sizeof (core_entry_elt_t))
         / sizeof (core_entry_elt_t);
     int pad = string_words * sizeof (core_entry_elt_t) - stringlen;
-    /* Write 5 word entry header: a word for entry-type-code, the length in words,
-     * the GC enum, the address of NIL, and the string length */
+    /* Write 6 word entry header: a word for entry-type-code, the length in words,
+     * the GC enum, card table bit width, address of NIL, and string length */
     write_lispobj(BUILD_ID_CORE_ENTRY_TYPE_CODE, file);
-    write_lispobj(5 + string_words, file);
+    write_lispobj(6 + string_words, file);
 #ifdef LISP_FEATURE_GENCGC
     write_lispobj(1, file);
 #endif
 #ifdef LISP_FEATURE_MARK_REGION_GC
     write_lispobj(2, file);
 #endif
+    write_lispobj(gc_card_table_nbits, file);
 #ifdef LISP_FEATURE_RELOCATABLE_STATIC_SPACE
     write_lispobj(0, file);
 #else
@@ -314,7 +314,7 @@ bool save_to_filehandle(FILE *file, char *filename, lispobj init_function,
     /* The C runtime is theoretically position-independent so don't write out the address
      * of the unused entry sentinel. The affected elements needn't be restored on restart.
      * (Maybe add a renumbering pass in Lisp to ensure the table is 100% dense) */
-    for (i=0; i<linkage_table_count; ++i)
+    for (i=FIRST_USABLE_LINKAGE_ELT; i<linkage_table_count; ++i)
         if (linkage_space[i] == (uword_t)illegal_linkage_space_call)
             linkage_space[i] = 0;
     int nbytes = ALIGN_UP(linkage_table_count<<WORD_SHIFT, BACKEND_PAGE_BYTES);
@@ -413,7 +413,7 @@ bool save_to_filehandle(FILE *file, char *filename, lispobj init_function,
 #endif
         size_t ptes_nbytes = next_free_page * sizeof(struct corefile_pte);
         size_t aligned_size = ALIGN_UP((bitmapsize+ptes_nbytes), N_WORD_BYTES);
-        char* data = successful_malloc(aligned_size);
+        char* data = checked_malloc(aligned_size);
         // Zeroize the final few bytes of data that get written out
         // but might be untouched by gc_store_corefile_ptes().
         memset(data + aligned_size - N_WORD_BYTES, 0, N_WORD_BYTES);
@@ -422,8 +422,7 @@ bool save_to_filehandle(FILE *file, char *filename, lispobj init_function,
 #endif
         gc_store_corefile_ptes((struct corefile_pte*)(data + bitmapsize));
         write_lispobj(PAGE_TABLE_CORE_ENTRY_TYPE_CODE, file);
-        write_lispobj(6, file); // number of words in this core header entry
-        write_lispobj(gc_card_table_nbits, file);
+        write_lispobj(5, file); // number of words in this core header entry
         write_lispobj(next_free_page, file);
         write_lispobj(aligned_size, file);
         sword_t offset = write_bytes(file, data, aligned_size, core_start_pos,
@@ -503,7 +502,7 @@ load_runtime(char *runtime_path, size_t *size_out)
     if (core_offset != -1 && size > (size_t) core_offset)
         size = core_offset;
 
-    buf = successful_malloc(size);
+    buf = checked_malloc(size);
     if ((count = fread(buf, 1, size, input)) != size) {
         fprintf(stderr, "Premature EOF while reading runtime.\n");
         goto lose;
@@ -563,7 +562,7 @@ bool save_runtime_to_filehandle(FILE *output, void *runtime, size_t runtime_size
 
     padding = (os_vm_page_size - (runtime_size % os_vm_page_size)) & ~os_vm_page_size;
     if (padding > 0) {
-        padbytes = successful_malloc(padding);
+        padbytes = checked_malloc(padding);
         memset(padbytes, 0, padding);
         if (padding != fwrite(padbytes, 1, padding, output)) {
             perror("Error saving runtime");
@@ -727,7 +726,7 @@ extern void move_rospace_to_dynamic(int), prepare_readonly_space(int,int);
  */
 void
 gc_and_save(char *filename, bool prepend_runtime, bool purify,
-            bool save_runtime_options, bool compressed,
+            int save_runtime_options, bool compressed,
             int compression_level, int application_type)
 {
     // FIXME: Instead of disabling purify for static space relocation,

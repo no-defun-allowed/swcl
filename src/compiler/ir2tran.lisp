@@ -35,7 +35,7 @@
 (defevent make-value-cell-event "Allocate heap value cell for lexical var.")
 (defun emit-make-value-cell (node block value res)
   (event make-value-cell-event node)
-  (vop make-value-cell node block value nil res))
+  (vop make-value-cell node block value res))
 
 ;;;; leaf reference
 
@@ -130,13 +130,13 @@
       ((:special :unknown)
        (aver (symbolp name))
        (let ((name-tn (emit-constant name)))
-         (if (or unsafe (always-boundp name))
+         (if (or unsafe (always-boundp name node))
              (vop fast-symbol-value node block name-tn res)
              (vop symbol-value node block name-tn res))))
       (:global
        (aver (symbolp name))
        (let ((name-tn (emit-constant name)))
-         (if (or unsafe (always-boundp name))
+         (if (or unsafe (always-boundp name node))
              (vop fast-symbol-global-value node block name-tn res)
              (vop symbol-global-value node block name-tn res))))
       (:global-function
@@ -1103,7 +1103,7 @@
            (let ((name (uncross (lvar-fun-name lvar t))))
              ;; Always pass name as a literal symbol or list if #+linkage-space,
              ;; otherwise do so only if the fdefn is static.
-             (values (if (or #+linkage-space t (sb-vm::static-fdefn-offset name))
+             (values (if (or #+linkage-space t (static-fdefn-p name))
                          name
                          (make-load-time-constant-tn :fdefinition name))
                      name)))
@@ -2408,8 +2408,7 @@
                              (policy first-node (/= insert-safepoints 0)))
                     (vop sb-vm::insert-safepoint first-node 2block))))
             (ir2-convert-block block)
-            (incf num))))
-      (setf (component-max-block-number component) num)))
+            (incf num))))))
   (values))
 
 ;;; If necessary, emit a terminal unconditional branch to go to the

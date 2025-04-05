@@ -163,13 +163,9 @@
     ;; That being so, it has to use the #-sb-thread mechanism of placing the new value
     ;; in the symbol's value slot for compatibility with UNBIND and all else.
     #-sb-thread *alien-stack-pointer*    ; a thread slot if #+sb-thread
-    ;; Since the text space and alien linkage table might both get relocated on startup
-    ;; under #+immobile-space, an alien callback wrapper can't wire in the address
-    ;; of a word that holds the C function pointer to callback_wrapper_trampoline.
-    ;; (There is no register that points to a known address when entering the callback)
-    ;; A static symbol works well for this, and is sensible considering that
-    ;; the assembled wrappers also reside in static space.
-    #+(and sb-thread immobile-space) callback-wrapper-trampoline
+    ;; Asm code assembled by DEFINE-ALIEN-CALLABLE resides in static space and looks up
+    ;; the address of the C helper via the SYMBOL-VALUE slot of this Lisp symbol.
+    callback-wrapper-trampoline
     *cpu-feature-bits*)
   #'equalp)
 
@@ -199,3 +195,7 @@
         simd-pack-256-ub8 simd-pack-256-ub16 simd-pack-256-ub32 simd-pack-256-ub64
         simd-pack-256-sb8 simd-pack-256-sb16 simd-pack-256-sb32 simd-pack-256-sb64)
     #'equalp))
+
+;;; This symbol-macro will be changed to something different after merging
+;;; the role of the GC card base register with a pointer to NIL.
+(define-symbol-macro null-tn nil-value)

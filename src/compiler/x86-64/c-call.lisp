@@ -239,7 +239,7 @@
     #-immobile-space ; non-relocatable alien linkage table
     (inst mov res (make-fixup foreign-symbol :foreign))
     #+immobile-space ; relocatable alien linkage table
-    (cond ((sb-c::code-immobile-p vop)
+    (cond ((code-immobile-p vop)
            (inst lea res (rip-relative-ea (make-fixup foreign-symbol :foreign))))
           (t
            (inst mov res (thread-slot-ea thread-alien-linkage-table-base-slot))
@@ -258,7 +258,7 @@
     #-immobile-space ; non-relocatable alien linkage table
     (inst mov res (ea (make-fixup foreign-symbol :foreign-dataref)))
     #+immobile-space ; relocatable alien linkage table
-    (cond ((sb-c::code-immobile-p vop)
+    (cond ((code-immobile-p vop)
            (inst mov res (rip-relative-ea (make-fixup foreign-symbol :foreign-dataref))))
           (t
            (inst mov res (thread-slot-ea thread-alien-linkage-table-base-slot))
@@ -394,7 +394,7 @@
                  fun
                  #-immobile-space (ea (make-fixup fun :foreign 8))
                  #+immobile-space
-                 (cond ((sb-c::code-immobile-p vop) (make-fixup fun :foreign))
+                 (cond ((code-immobile-p vop) (make-fixup fun :foreign))
                        (t
                         ;; Pick r10 as the lowest unused clobberable register.
                         ;; RAX has a designated purpose, and RBX is nonvolatile (not always
@@ -413,7 +413,7 @@
          ;; linkage table of the alien function to call. This informs UNDEFINED-ALIEN-TRAMP
          ;; which table cell was referenced, if undefined.
          #+immobile-space ; relocatable table
-         (cond ((sb-c::code-immobile-p vop)
+         (cond ((code-immobile-p vop)
                 (inst lea rbx (rip-relative-ea (make-fixup fun :foreign 8))))
                (t
                 (inst mov rbx (make-fixup fun :alien-code-linkage-index 8))
@@ -469,9 +469,7 @@
 (defun alien-callback-assembler-wrapper (index result-type argument-types)
   (labels ((make-tn-maker (sc-name)
              (lambda (offset)
-               (make-random-tn :kind :normal
-                               :sc (sc-or-lose sc-name)
-                               :offset offset))))
+               (make-random-tn (sc-or-lose sc-name) offset))))
     (let* ((segment (make-segment))
            (rax rax-tn)
            #+win32 (rcx rcx-tn)
@@ -537,6 +535,14 @@
                   (t
                    (bug "Unknown alien floating point type: ~S" type)))))
 
+        (macrolet
+            ((call-wrapper ()
+               ;; Technically this fixup should have an optional arg of
+               ;;  (- (ASH SYMBOL-VALUE-SLOT WORD-SHIFT) OTHER-POINTER-LOWTAG)
+               ;; but as the fixup is hand-crafted anyway, it doesn't matter.
+               `(inst call (rip-relative-ea
+                      (make-fixup 'callback-wrapper-trampoline
+                                  :immobile-symbol))))) ; arbitraryish flavor
         #-sb-thread
         (progn
           ;; arg0 to ENTER-ALIEN-CALLBACK (trampoline index)
@@ -555,8 +561,7 @@
           (inst mov  rbp rsp)
 
           ;; Call
-          (inst mov  rax (foreign-symbol-address "funcall_alien_callback"))
-          (inst call rax)
+          (call-wrapper)
 
           ;; Back! Restore frame
           (inst leave))
@@ -579,13 +584,10 @@
           #+win32 (inst sub rsp #x20)
           #+win32 (inst and rsp #x-20)
           ;; Call
-          #+immobile-space (inst call (static-symbol-value-ea 'callback-wrapper-trampoline))
-          ;; do this without MAKE-FIXUP because fixup'ing does not happen when
-          ;; assembling callbacks (probably could, but ...)
-          #-immobile-space
-          (inst call (ea (+ (foreign-symbol-address "callback_wrapper_trampoline") 8)))
+          (call-wrapper)
+
           ;; Back! Restore frame
-          (inst leave))
+          (inst leave)))
 
         ;; Result now on top of stack, put it in the right register
         (cond
@@ -615,7 +617,22 @@
       (finalize-segment segment)
       ;; Now that the segment is done, convert it to a static
       ;; vector we can point foreign code to.
-      (let ((buffer (sb-assem:segment-buffer segment)))
-        (make-static-vector (length buffer)
-                            :element-type '(unsigned-byte 8)
-                            :initial-contents buffer)))))
+      (let* ((buffer (sb-assem:segment-buffer segment))
+             (result (make-static-vector (length buffer)
+                                         :element-type '(unsigned-byte 8)
+                                         :initial-contents buffer)))
+        ;; This is an ad-hoc substitute for the general fixup logic, due to
+        ;; absence of a code component. Even the machine-dependent part is not
+        ;; useful since it wants to call CODE-INSTRUCTIONS.
+        (let* ((notes (sb-assem::segment-fixup-notes segment))
+               (note (car notes)))
+          (when note
+            (aver (eq (fixup-note-kind note) :rel32))
+            ;; +4 is because RIP-relative EA is relative to following instruction
+            (let* ((pc (sap+ (vector-sap result) (+ (fixup-note-position note) 4)))
+                   (fixup (fixup-note-fixup note))
+                   (disp (sap- (int-sap (ea-disp (static-symbol-value-ea (fixup-name fixup))))
+                               pc)))
+              (setf (signed-sap-ref-32  (vector-sap result) (fixup-note-position note))
+                    disp))))
+        result))))

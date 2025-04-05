@@ -8,7 +8,7 @@
 
 ;; sb-xref-for-internals is actively harmful to tree-shaking.
 ;; Remove some symbols to make the hide-packages test pass.
-#+sb-xref-for-internals
+#+(and sb-xref-for-internals (not sb-devel))
 (progn
   (fmakunbound 'sb-kernel::type-class-fun-slot)
   (fmakunbound 'sb-kernel::new-ctype))
@@ -99,32 +99,9 @@
        (removable-features
         (append non-target-features public-features)))
   (defconstant sb-impl:+internal-features+
-    ;;; Well, who would have guessed that our internal features list would nicely
-    ;;; repair damage induced by ASDF, namely: ASDF removes features when loaded.
-    ;;; Take a look at (DEFUN DETECT-OS) in uiop.lisp if you don't believe it,
-    ;;; and watch it in action after (require "ASDF") -
-    ;;;
-    ;;; * *FEATURES* =>
-    ;;; (:X86-64 :64-BIT :ANSI-CL :COMMON-LISP :ELF :GENCGC :HAIKU :IEEE-FLOATING-POINT
-    ;;; :LITTLE-ENDIAN :PACKAGE-LOCAL-NICKNAMES :SB-LDB
-    ;;; :SB-PACKAGE-LOCKS :SB-UNICODE :SBCL :UNIX)
-    ;;;
-    ;;; * (require :asdf)
-    ;;; ("ASDF" "asdf" "UIOP" "uiop")
-    ;;; * *FEATURES*
-    ;;; (:ASDF3.3 :ASDF3.2 :ASDF3.1 :ASDF3 :ASDF2 :ASDF :OS-UNIX
-    ;;; :NON-BASE-CHARS-EXIST-P :ASDF-UNICODE :X86-64 :64-BIT :ANSI-CL :COMMON-LISP
-    ;;; :ELF :GENCGC :IEEE-FLOATING-POINT :LITTLE-ENDIAN :PACKAGE-LOCAL-NICKNAMES
-    ;;; :SB-LDB :SB-PACKAGE-LOCKS :SB-UNICODE :SBCL :UNIX)
-    ;;;
-    ;;; So, what the heck happened to :HAIKU? It's gone.
-    ;;; Well this is pure evil. Just madness.
-    ;;; However, by stashing an extra copy of :HAIKU in the internal feature list,
-    ;;; we can stuff it back in because our contrib builder first loads ASDF
-    ;;; and then rebinds *FEATURES* with the union of the internal ones.
-    (append #+haiku '(:haiku)
             (remove-if (lambda (x) (member x #+sb-devel public-features
-                                             #-sb-devel removable-features)) *features*)))
+                                             #-sb-devel removable-features))
+                       *features*))
   (setq *features* (remove-if-not (lambda (x) (member x public-features))
                                   *features*)))
 
@@ -137,7 +114,7 @@
 ;;; uninterned.
 ;;; Additionally, you can specify an arbitrary way to destroy
 ;;; random bootstrap stuff on per-package basis.
-(defun !unintern-init-only-stuff (&aux result)
+(defun !unintern-init-only-stuff ()
   (dolist (package (list-all-packages))
     (sb-int:awhen (find-symbol "!REMOVE-BOOTSTRAP-SYMBOLS" package)
       (funcall sb-int:it)))
@@ -172,9 +149,13 @@
                                       (and (consp x) (uninternable-p (car x))))
                                     (dd-constructors dd))))))
              (classoid-subclasses (find-classoid t)))
-    ;; PATHNAME is not a structure-classoid
-    (setf (sb-kernel:dd-constructors (sb-kernel:find-defstruct-description 'pathname))
-          nil)
+
+    (loop for type in '(pathname ;; PATHNAME is not a structure-classoid
+                        sb-c:storage-class
+                        sb-c:storage-base)
+          do
+          (setf (sb-kernel:dd-constructors (sb-kernel:find-defstruct-description type))
+                nil))
     ;; Todo: perform one pass, then a full GC, then a final pass to confirm
     ;; it worked. It should be an error if any uninternable symbols remain,
     ;; but at present there are about 7 symbols with referrers.
@@ -209,7 +190,7 @@
     (setf (sb-c::vop-parse-body v) nil))
   ;; Used for inheriting from other VOPs, not needed in the target.
   (setf sb-c::*backend-parsed-vops* (make-hash-table))
-  result)
+  nil)
 
 
 ;;; Check for potentially bad format-control strings
@@ -468,7 +449,8 @@ Please check that all strings which were not recognizable to the compiler
            (search "-OFFSET" (string symbol))
            (search "-TN" (string symbol))))
       (#.(find-package "SB-ALIEN")
-       (or (eq accessibility :external) (eq symbol 'sb-alien::alien-callback-p)))
+       (or (eq accessibility :external) (member symbol '(sb-alien::alien-callback-p
+                                                         sb-alien::alien-lambda))))
       (#.(mapcar 'find-package
                  '("SB-ASSEM" "SB-BROTHERTREE" "SB-DISASSEM" "SB-FORMAT"
                    "SB-IMPL" "SB-KERNEL" "SB-MOP" "SB-PCL" "SB-PRETTY" "SB-PROFILE"

@@ -415,132 +415,135 @@
                   (let ((name (make-od-name ',base-name accessor)))
                     `(progn
                        ;;(declaim (inline ,name))
-                       (let ((lexically-max
-                              (string->utf8 (string (code-char ,(1- char-code-limit)))
-                                            0 1 0 nil)))
-                         (declare (type (simple-array (unsigned-byte 8) (#+sb-unicode 4 #-sb-unicode 2)) lexically-max))
-                         (defun ,name (array pos end replacement)
-                           (declare (optimize speed #.*safety-0*)
-                                    (type ,type array)
-                                    (type array-range pos end))
-                           ;; returns the number of bytes consumed and nil if it's a
-                           ;; valid character or the number of bytes consumed and a
-                           ;; replacement string if it's not.
-                           (let ((initial-byte (,accessor array pos))
-                                 (reject-reason nil)
-                                 (reject-position pos)
-                                 (remaining-bytes (- end pos)))
-                             (declare (type array-range reject-position remaining-bytes))
-                             (labels ((valid-utf8-starter-byte-p (b)
-                                        (declare (type (unsigned-byte 8) b))
-                                        (let ((ok (cond
-                                                    ((zerop (logand b #b10000000)) 1)
-                                                    ((and (= (logand b #b11100000) #b11000000)
-                                                          (>= b #xc2)) 2)
-                                                    ((= (logand b #b11110000) #b11100000) 3)
-                                                    ((and (= (logand b #b11111000) #b11110000)
-                                                          (<= b #xf4)) 4)
-                                                    (t nil))))
-                                          (unless ok
-                                            (setf reject-reason 'invalid-utf8-starter-byte))
-                                          ok))
-                                      (enough-bytes-left-p (x)
-                                        (let ((ok (> end (+ pos (1- x)))))
-                                          (unless ok
-                                            (setf reject-reason 'end-of-input-in-character))
-                                          ok))
-                                      (valid-secondary-p (x)
-                                        (let* ((idx (the array-range (+ pos x)))
-                                               (b (,accessor array idx))
-                                               (ok (= (logand b #b11000000) #b10000000)))
-                                          (when (and ok (= x 1))
-                                            (setf ok
-                                                  (case initial-byte
-                                                    (#xe0 (>= b #xa0))
-                                                    (#xed (< b #xa0))
-                                                    (#xf0 (>= b #x90))
-                                                    (#xf4 (< b #x90))
-                                                    (t t))))
-                                          (unless ok
-                                            (setf reject-reason 'invalid-utf8-continuation-byte)
-                                            (setf reject-position idx))
-                                          ok))
-                                      (preliminary-ok-for-length (maybe-len len)
-                                        (and (eql maybe-len len)
-                                             ;; Has to be done in this order so that
-                                             ;; certain broken sequences (e.g., the
-                                             ;; two-byte sequence `"initial (length 3)"
-                                             ;; "non-continuation"' -- `#xef #x32')
-                                             ;; signal only part of that sequence as
-                                             ;; erroneous.
-                                             (loop for i from 1 below (min len remaining-bytes)
-                                                   always (valid-secondary-p i))
-                                             (enough-bytes-left-p len)))
-                                      (character-below-char-code-limit-p ()
-                                        ;; This is only called on a four-byte sequence
-                                        ;; (two in non-unicode builds) to ensure we
-                                        ;; don't go over SBCL's character limts.
-                                        (let ((ok (cond ((< (aref lexically-max 0) (,accessor array pos))
-                                                         nil)
-                                                        ((> (aref lexically-max 0) (,accessor array pos))
-                                                         t)
-                                                        ((< (aref lexically-max 1) (,accessor array (+ pos 1)))
-                                                         nil)
-                                                        #+sb-unicode
-                                                        ((> (aref lexically-max 1) (,accessor array (+ pos 1)))
-                                                         t)
-                                                        #+sb-unicode
-                                                        ((< (aref lexically-max 2) (,accessor array (+ pos 2)))
-                                                         nil)
-                                                        #+sb-unicode
-                                                        ((> (aref lexically-max 2) (,accessor array (+ pos 2)))
-                                                         t)
-                                                        #+sb-unicode
-                                                        ((< (aref lexically-max 3) (,accessor array (+ pos 3)))
-                                                         nil)
-                                                        (t t))))
-                                          (unless ok
-                                            (setf reject-reason 'character-out-of-range))
-                                          ok)))
-                               (declare (inline valid-utf8-starter-byte-p
-                                                enough-bytes-left-p
-                                                valid-secondary-p
-                                                preliminary-ok-for-length))
-                               (let ((maybe-len (valid-utf8-starter-byte-p initial-byte)))
-                                 (cond
-                                   ,@,(when crlfp
-                                        ``(((= initial-byte 13)
-                                            (values
-                                             (if (and (> remaining-bytes 1)
-                                                      (= (,accessor array (+ pos 1)) 10))
-                                                 2
-                                                 1)
-                                             nil))))
-                                   ((eql maybe-len 1)
-                                    (values 1 nil))
-                                   ((and (preliminary-ok-for-length maybe-len 2)
-                                         #-sb-unicode (character-below-char-code-limit-p))
-                                    (values 2 nil))
-                                   ((and (preliminary-ok-for-length maybe-len 3)
-                                         #-sb-unicode (not (setf reject-reason 'character-out-of-range)))
-                                    (values 3 nil))
-                                   ((and (preliminary-ok-for-length maybe-len 4)
-                                         #-sb-unicode (not (setf reject-reason 'character-out-of-range))
-                                         (character-below-char-code-limit-p))
-                                    (values 4 nil))
-                                   (t
-                                    (let* ((bad-end
-                                            (ecase reject-reason
-                                              (invalid-utf8-starter-byte (1+ pos))
-                                              (end-of-input-in-character end)
-                                              (invalid-utf8-continuation-byte reject-position)
-                                              (character-out-of-range (+ pos maybe-len))))
-                                           (bad-len (- bad-end pos)))
-                                      (declare (type array-range bad-end bad-len))
-                                      (let ((replacement (decoding-error array pos bad-end
-                                                                         ,,(if newline ``'(:utf-8 :newline ,,newline) '':utf-8)
-                                                                         replacement reject-reason reject-position)))
-                                        (values bad-len replacement)))))))))))))
+                       (defun ,name (array pos end replacement)
+                         (declare (optimize speed #.*safety-0*)
+                                  (type ,type array)
+                                  (type array-range pos end))
+                         ;; returns the number of bytes consumed and nil if it's a
+                         ;; valid character or the number of bytes consumed and a
+                         ;; replacement string if it's not.
+                         (let ((initial-byte (,accessor array pos))
+                               (reject-reason nil)
+                               (reject-position pos)
+                               (remaining-bytes (- end pos))
+                               (lexically-max
+                                 (load-time-value
+                                  (string->utf8 (string (code-char ,(1- char-code-limit)))
+                                                0 1 0 nil))))
+                           (declare (type (simple-array (unsigned-byte 8)
+                                                        (#+sb-unicode 4 #-sb-unicode 2))
+                                          lexically-max))
+                           (declare (type array-range reject-position remaining-bytes))
+                           (labels ((valid-utf8-starter-byte-p (b)
+                                      (declare (type (unsigned-byte 8) b))
+                                      (let ((ok (cond
+                                                  ((zerop (logand b #b10000000)) 1)
+                                                  ((and (= (logand b #b11100000) #b11000000)
+                                                        (>= b #xc2)) 2)
+                                                  ((= (logand b #b11110000) #b11100000) 3)
+                                                  ((and (= (logand b #b11111000) #b11110000)
+                                                        (<= b #xf4)) 4)
+                                                  (t nil))))
+                                        (unless ok
+                                          (setf reject-reason 'invalid-utf8-starter-byte))
+                                        ok))
+                                    (enough-bytes-left-p (x)
+                                      (let ((ok (> end (+ pos (1- x)))))
+                                        (unless ok
+                                          (setf reject-reason 'end-of-input-in-character))
+                                        ok))
+                                    (valid-secondary-p (x)
+                                      (let* ((idx (the array-range (+ pos x)))
+                                             (b (,accessor array idx))
+                                             (ok (= (logand b #b11000000) #b10000000)))
+                                        (when (and ok (= x 1))
+                                          (setf ok
+                                                (case initial-byte
+                                                  (#xe0 (>= b #xa0))
+                                                  (#xed (< b #xa0))
+                                                  (#xf0 (>= b #x90))
+                                                  (#xf4 (< b #x90))
+                                                  (t t))))
+                                        (unless ok
+                                          (setf reject-reason 'invalid-utf8-continuation-byte)
+                                          (setf reject-position idx))
+                                        ok))
+                                    (preliminary-ok-for-length (maybe-len len)
+                                      (and (eql maybe-len len)
+                                           ;; Has to be done in this order so that
+                                           ;; certain broken sequences (e.g., the
+                                           ;; two-byte sequence `"initial (length 3)"
+                                           ;; "non-continuation"' -- `#xef #x32')
+                                           ;; signal only part of that sequence as
+                                           ;; erroneous.
+                                           (loop for i from 1 below (min len remaining-bytes)
+                                                 always (valid-secondary-p i))
+                                           (enough-bytes-left-p len)))
+                                    (character-below-char-code-limit-p ()
+                                      ;; This is only called on a four-byte sequence
+                                      ;; (two in non-unicode builds) to ensure we
+                                      ;; don't go over SBCL's character limts.
+                                      (let ((ok (cond ((< (aref lexically-max 0) (,accessor array pos))
+                                                       nil)
+                                                      ((> (aref lexically-max 0) (,accessor array pos))
+                                                       t)
+                                                      ((< (aref lexically-max 1) (,accessor array (+ pos 1)))
+                                                       nil)
+                                                      #+sb-unicode
+                                                      ((> (aref lexically-max 1) (,accessor array (+ pos 1)))
+                                                       t)
+                                                      #+sb-unicode
+                                                      ((< (aref lexically-max 2) (,accessor array (+ pos 2)))
+                                                       nil)
+                                                      #+sb-unicode
+                                                      ((> (aref lexically-max 2) (,accessor array (+ pos 2)))
+                                                       t)
+                                                      #+sb-unicode
+                                                      ((< (aref lexically-max 3) (,accessor array (+ pos 3)))
+                                                       nil)
+                                                      (t t))))
+                                        (unless ok
+                                          (setf reject-reason 'character-out-of-range))
+                                        ok)))
+                             (declare (inline valid-utf8-starter-byte-p
+                                              enough-bytes-left-p
+                                              valid-secondary-p
+                                              preliminary-ok-for-length))
+                             (let ((maybe-len (valid-utf8-starter-byte-p initial-byte)))
+                               (cond
+                                 ,@,(when crlfp
+                                      ``(((= initial-byte 13)
+                                          (values
+                                           (if (and (> remaining-bytes 1)
+                                                    (= (,accessor array (+ pos 1)) 10))
+                                               2
+                                               1)
+                                           nil))))
+                                 ((eql maybe-len 1)
+                                  (values 1 nil))
+                                 ((and (preliminary-ok-for-length maybe-len 2)
+                                       #-sb-unicode (character-below-char-code-limit-p))
+                                  (values 2 nil))
+                                 ((and (preliminary-ok-for-length maybe-len 3)
+                                       #-sb-unicode (not (setf reject-reason 'character-out-of-range)))
+                                  (values 3 nil))
+                                 ((and (preliminary-ok-for-length maybe-len 4)
+                                       #-sb-unicode (not (setf reject-reason 'character-out-of-range))
+                                       (character-below-char-code-limit-p))
+                                  (values 4 nil))
+                                 (t
+                                  (let* ((bad-end
+                                           (ecase reject-reason
+                                             (invalid-utf8-starter-byte (1+ pos))
+                                             (end-of-input-in-character end)
+                                             (invalid-utf8-continuation-byte reject-position)
+                                             (character-out-of-range (+ pos maybe-len))))
+                                         (bad-len (- bad-end pos)))
+                                    (declare (type array-range bad-end bad-len))
+                                    (let ((replacement (decoding-error array pos bad-end
+                                                                       ,,(if newline ``'(:utf-8 :newline ,,newline) '':utf-8)
+                                                                       replacement reject-reason reject-position)))
+                                      (values bad-len replacement))))))))))))
                 (instantiate-octets-definition ,definer-name))))
   (def nil nil define-bytes-per-utf8-character bytes-per-utf8-character)
   (def nil :cr define-bytes-per-utf8-character/clr bytes-per-utf8-character/cr)
@@ -658,7 +661,7 @@
             (incf string-offset (* 4 sb-vm:n-word-bytes))
             finally (incf head n))
       (setf (buffer-head ibuf) head)
-      (truly-the index (truncate string-offset 4)))))
+      (truly-the index (values (truncate string-offset 4))))))
 
 #+(and sb-unicode 64-bit little-endian)
 (defun sb-vm::simd-copy-utf8-crlf-to-character-string-with-size (start end string ibuf size-buffer)
@@ -993,6 +996,117 @@
                    (stream-decoding-error-and-handle stream (- tail head) 1))
            (return index)))))))
 
+#+(and sb-unicode 64-bit little-endian
+       (not (or arm64 x86-64)))
+(defun sb-vm::simd-copy-character-string-to-utf8 (start end string obuf)
+  (declare (type index start end)
+           (optimize speed (safety 0)))
+  (with-pinned-objects (string)
+    (let* ((tail (buffer-tail obuf))
+           (sap (buffer-sap obuf))
+           (buffer-left (- (buffer-length obuf) tail))
+           (string-left (- end start))
+           (n (logand (min buffer-left string-left) -2))
+           (ascii-mask (ldb (byte 64 0)
+                            (lognot (logior 127 (ash 127 32)))))
+           (string-sap (vector-sap string))
+           (string-offset (truly-the fixnum (* start 4)))
+           (last-newline -1))
+      (declare (optimize sb-c::preserve-single-use-debug-variables
+                         sb-c::preserve-constants))
+      (loop for obuf-offset from tail below (+ tail n) by 2
+            do
+            (let ((word (sap-ref-word string-sap string-offset)))
+              (when (logtest word ascii-mask)
+                (setf tail obuf-offset)
+                (return))
+              (let ((a (ldb (byte 8 0) word))
+                    (b (ash word -24)))
+                (when (= a 10)
+                  (setf last-newline string-offset))
+                (when (= b (ash 10 8))
+                  (setf last-newline (truly-the index (+ string-offset 4))))
+                (incf string-offset 8)
+                (setf (sap-ref-16 sap obuf-offset)
+                      (logior a b))))
+            finally (incf tail n))
+      (setf (buffer-tail obuf) tail)
+      (values (truly-the index (values (truncate string-offset 4)))
+              (ash (truly-the fixnum last-newline) -2)))))
+
+(defun output-bytes/utf-8/lf (stream string start* end)
+  (declare (optimize (sb-c:verify-arg-count 0)))
+  (let ((start (or start* 0))
+        (end (or end (length string)))
+        (last-newline -1))
+    (declare (type index start end))
+    (when (fd-stream-synchronize-output stream)
+      (synchronize-stream-output stream))
+    (unless (<= 0 start end (length string))
+      (sequence-bounding-indices-bad-error string start end))
+    (do ()
+        ((= end start))
+      (let ((obuf (fd-stream-obuf stream)))
+        (string-dispatch (simple-base-string (simple-array character (*)) string)
+                         string
+          #+(and sb-unicode 64-bit little-endian)
+          (when (and (typep string '(simple-array character (*)))
+                     (>= (- end start) 16))
+            (multiple-value-bind (new-start newline)
+                (truly-the (values index fixnum &optional) (sb-vm::simd-copy-character-string-to-utf8 start end string obuf))
+              (setf start new-start)
+              (when (>= newline 0)
+                (setf last-newline newline))))
+          (let ((len (- (buffer-length obuf) 4))
+                (sap (buffer-sap obuf))
+                (tail (buffer-tail obuf)))
+            (declare (type index tail)
+                     (optimize (safety 0)))
+            (block output-nothing
+              (do* ()
+                   ((or (= start end) (>= tail len)))
+                (let* ((|ch| (aref string start))
+                       (bits (char-code |ch|)))
+                  (declare (ignorable bits))
+                  (when (char= |ch| #\Newline)
+                    (setf last-newline start))
+                  (cond ((< bits 128)
+                         (setf (sap-ref-8 sap tail) bits) (incf tail))
+                        ((< bits 2048)
+                         (setf (sap-ref-8 sap tail) (logior 192 (ldb (byte 5 6) bits))
+                               (sap-ref-8 sap (+ 1 tail)) (logior 128 (ldb (byte 6 0) bits)))
+                         (incf tail 2))
+                        ((< bits 65536)
+                         (when (<= 55296 bits 57343)
+                           (external-format-encoding-error stream bits))
+                         (setf (sap-ref-8 sap tail) (logior 224 (ldb (byte 4 12) bits))
+                               (sap-ref-8 sap (+ 1 tail)) (logior 128 (ldb (byte 6 6) bits))
+                               (sap-ref-8 sap (+ 2 tail)) (logior 128 (ldb (byte 6 0) bits)))
+                         (incf tail 3))
+                        (t
+                         (setf (sap-ref-8 sap tail) (logior 240 (ldb (byte 3 18) bits))
+                               (sap-ref-8 sap (+ 1 tail)) (logior 128 (ldb (byte 6 12) bits))
+                               (sap-ref-8 sap (+ 2 tail)) (logior 128 (ldb (byte 6 6) bits))
+                               (sap-ref-8 sap (+ 3 tail)) (logior 128 (ldb (byte 6 0) bits)))
+                         (incf tail 4)))
+                  (setf (buffer-tail obuf) tail)
+                  (incf start)))
+              (go flush))
+            (incf start))))
+     flush
+      (when (< start end)
+        (flush-output-buffer stream)))
+    (ecase (fd-stream-buffering stream)
+      (:full)
+      (:line
+       (when (>= last-newline 0)
+         (flush-output-buffer stream)))
+      (:none
+       (flush-output-buffer stream)))
+    (if (>= last-newline 0)
+        (setf (fd-stream-output-column stream) (- end last-newline 1))
+        (incf (fd-stream-output-column stream) (- end (truly-the index start*))))))
+
 (define-external-format/variable-width (:utf-8 :utf8) t
   #+sb-unicode (code-char #xfffd) #-sb-unicode #\?
   (let ((bits (char-code |ch|)))
@@ -1000,19 +1114,27 @@
           ((< bits #x800) 2)
           ((< bits #x10000) 3)
           (t 4)))
-  (ecase size
-    (1 (setf (sap-ref-8 sap tail) bits))
-    (2 (setf (sap-ref-8 sap tail)       (logior #xc0 (ldb (byte 5 6) bits))
-             (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 0) bits))))
-    (3 (when (<= #xd800 bits #xdfff)
-         (external-format-encoding-error stream bits))
+  (cond
+    ((< bits #x80)
+     (setf (sap-ref-8 sap tail) bits)
+     (incf tail))
+    ((< bits #x800)
+     (setf (sap-ref-8 sap tail)       (logior #xc0 (ldb (byte 5 6) bits))
+           (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 0) bits)))
+     (incf tail 2))
+    ((< bits #x10000)
+     (when (<= #xd800 bits #xdfff)
+       (external-format-encoding-error stream bits))
      (setf (sap-ref-8 sap tail)       (logior #xe0 (ldb (byte 4 12) bits))
            (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 6) bits))
-           (sap-ref-8 sap (+ 2 tail)) (logior #x80 (ldb (byte 6 0) bits))))
-    (4 (setf (sap-ref-8 sap tail)       (logior #xf0 (ldb (byte 3 18) bits))
-             (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 12) bits))
-             (sap-ref-8 sap (+ 2 tail)) (logior #x80 (ldb (byte 6 6) bits))
-             (sap-ref-8 sap (+ 3 tail)) (logior #x80 (ldb (byte 6 0) bits)))))
+           (sap-ref-8 sap (+ 2 tail)) (logior #x80 (ldb (byte 6 0) bits)))
+     (incf tail 3))
+    (t
+     (setf (sap-ref-8 sap tail)       (logior #xf0 (ldb (byte 3 18) bits))
+           (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 12) bits))
+           (sap-ref-8 sap (+ 2 tail)) (logior #x80 (ldb (byte 6 6) bits))
+           (sap-ref-8 sap (+ 3 tail)) (logior #x80 (ldb (byte 6 0) bits)))
+     (incf tail 4)))
   (1 (cond ((< byte #x80) 1)
            ((< byte #xc2) (return-from decode-break-reason 1))
            ((< byte #xe0) 2)
@@ -1048,7 +1170,9 @@
   string->utf8
   #+sb-unicode :base-string-direct-mapping #+sb-unicode t
   :fd-stream-read-n-characters fd-stream-read-n-characters/utf-8
-  :char-encodable-p (let ((bits (char-code |ch|))) (not (<= #xd800 bits #xdfff))))
+  :write-n-bytes-fun output-bytes/utf-8/lf
+  :char-encodable-p (let ((bits (char-code |ch|))) (not (<= #xd800 bits #xdfff)))
+  :handle-size nil)
 
 (define-external-format/variable-width (:utf-8) t
   #+sb-unicode (code-char #xfffd) #-sb-unicode #\?
@@ -1057,19 +1181,27 @@
           ((< bits #x800) 2)
           ((< bits #x10000) 3)
           (t 4)))
-  (ecase size
-    (1 (setf (sap-ref-8 sap tail) (if (= bits 10) 13 bits)))
-    (2 (setf (sap-ref-8 sap tail)       (logior #xc0 (ldb (byte 5 6) bits))
-             (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 0) bits))))
-    (3 (when (<= #xd800 bits #xdfff)
-         (external-format-encoding-error stream bits))
+  (cond
+    ((< bits #x80)
+     (setf (sap-ref-8 sap tail) (if (= bits 10) 13 bits))
+     (incf tail))
+    ((< bits #x800)
+     (setf (sap-ref-8 sap tail)       (logior #xc0 (ldb (byte 5 6) bits))
+           (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 0) bits)))
+     (incf tail 2))
+    ((< bits #x10000)
+     (when (<= #xd800 bits #xdfff)
+       (external-format-encoding-error stream bits))
      (setf (sap-ref-8 sap tail)       (logior #xe0 (ldb (byte 4 12) bits))
            (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 6) bits))
-           (sap-ref-8 sap (+ 2 tail)) (logior #x80 (ldb (byte 6 0) bits))))
-    (4 (setf (sap-ref-8 sap tail)       (logior #xf0 (ldb (byte 3 18) bits))
-             (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 12) bits))
-             (sap-ref-8 sap (+ 2 tail)) (logior #x80 (ldb (byte 6 6) bits))
-             (sap-ref-8 sap (+ 3 tail)) (logior #x80 (ldb (byte 6 0) bits)))))
+           (sap-ref-8 sap (+ 2 tail)) (logior #x80 (ldb (byte 6 0) bits)))
+     (incf tail 3))
+    (t
+     (setf (sap-ref-8 sap tail)       (logior #xf0 (ldb (byte 3 18) bits))
+           (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 12) bits))
+           (sap-ref-8 sap (+ 2 tail)) (logior #x80 (ldb (byte 6 6) bits))
+           (sap-ref-8 sap (+ 3 tail)) (logior #x80 (ldb (byte 6 0) bits)))
+     (incf tail 4)))
   (1 (cond ((< byte #x80) 1)
            ((< byte #xc2) (return-from decode-break-reason 1))
            ((< byte #xe0) 2)
@@ -1104,7 +1236,8 @@
   utf8->string/cr-aref
   string/cr->utf8
   :char-encodable-p (let ((bits (char-code |ch|))) (not (<= #xd800 bits #xdfff)))
-  :newline-variant :cr)
+  :newline-variant :cr
+  :handle-size nil)
 
 (define-external-format/variable-width (:utf-8 :utf8) t
   #+sb-unicode (code-char #xfffd) #-sb-unicode #\?
@@ -1114,21 +1247,31 @@
           ((< bits #x800) 2)
           ((< bits #x10000) 3)
           (t 4)))
-  (ecase size
-    (1 (setf (sap-ref-8 sap tail) bits))
-    (2 (if (= bits 10)
-           (setf (sap-ref-8 sap tail) 13 (sap-ref-8 sap (+ 1 tail)) 10)
-           (setf (sap-ref-8 sap tail)       (logior #xc0 (ldb (byte 5 6) bits))
-                 (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 0) bits)))))
-    (3 (when (<= #xd800 bits #xdfff)
-         (external-format-encoding-error stream bits))
+  (cond
+    ((= bits 10)
+     (setf (sap-ref-8 sap tail) 13
+           (sap-ref-8 sap (+ 1 tail)) 10)
+     (incf tail 2))
+    ((< bits #x80)
+     (setf (sap-ref-8 sap tail) (if (= bits 10) 13 bits))
+     (incf tail))
+    ((< bits #x800)
+     (setf (sap-ref-8 sap tail)       (logior #xc0 (ldb (byte 5 6) bits))
+           (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 0) bits)))
+     (incf tail 2))
+    ((< bits #x10000)
+     (when (<= #xd800 bits #xdfff)
+       (external-format-encoding-error stream bits))
      (setf (sap-ref-8 sap tail)       (logior #xe0 (ldb (byte 4 12) bits))
            (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 6) bits))
-           (sap-ref-8 sap (+ 2 tail)) (logior #x80 (ldb (byte 6 0) bits))))
-    (4 (setf (sap-ref-8 sap tail)       (logior #xf0 (ldb (byte 3 18) bits))
-             (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 12) bits))
-             (sap-ref-8 sap (+ 2 tail)) (logior #x80 (ldb (byte 6 6) bits))
-             (sap-ref-8 sap (+ 3 tail)) (logior #x80 (ldb (byte 6 0) bits)))))
+           (sap-ref-8 sap (+ 2 tail)) (logior #x80 (ldb (byte 6 0) bits)))
+     (incf tail 3))
+    (t
+     (setf (sap-ref-8 sap tail)       (logior #xf0 (ldb (byte 3 18) bits))
+           (sap-ref-8 sap (+ 1 tail)) (logior #x80 (ldb (byte 6 12) bits))
+           (sap-ref-8 sap (+ 2 tail)) (logior #x80 (ldb (byte 6 6) bits))
+           (sap-ref-8 sap (+ 3 tail)) (logior #x80 (ldb (byte 6 0) bits)))
+     (incf tail 4)))
   ((2 1)
    (cond
      ((< byte #x80)
@@ -1173,7 +1316,8 @@
   string/crlf->utf8
   :char-encodable-p (let ((bits (char-code |ch|))) (not (<= #xd800 bits #xdfff)))
   :fd-stream-read-n-characters fd-stream-read-n-characters/utf-8/crlf
-  :newline-variant :crlf)
+  :newline-variant :crlf
+  :handle-size nil)
 
 #+(and sb-unicode 64-bit little-endian
        (not arm64)) ;; have true simd definitions or might be redefined with def-variant
@@ -1255,7 +1399,7 @@
                      (incf head 2)
                      (incf string-offset 8)))))
       (setf (buffer-head ibuf) head)
-      (truly-the index (truncate string-offset 4)))))
+      (truly-the index (values (truncate string-offset 4))))))
 
 (defun fd-stream-read-sequence/utf-8-crlf-to-character-string (stream string start end)
   (declare (type fd-stream stream)

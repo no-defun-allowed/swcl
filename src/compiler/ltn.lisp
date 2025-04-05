@@ -152,7 +152,6 @@
 ;;; reference, otherwise we annotate for a single value.
 (defun annotate-fun-lvar (lvar &optional (delay t))
   (declare (type lvar lvar))
-  (aver (not (lvar-dynamic-extent lvar)))
   (let* ((tn-ptype (primitive-type (lvar-type lvar)))
          (info (make-ir2-lvar tn-ptype)))
     (setf (lvar-info lvar) info)
@@ -237,6 +236,8 @@
   (let ((kind (basic-combination-kind call))
         (info (basic-combination-fun-info call)))
 
+    (rewrite-full-call call)
+
     (dolist (arg (basic-combination-args call))
       (unless (lvar-info arg)
         (setf (lvar-info arg)
@@ -254,8 +255,7 @@
          (when (basic-combination-info call)
            (signal-delayed-combination-condition call))
          (setf (basic-combination-kind call) :full))
-       (setf (basic-combination-info call) :full)
-       (rewrite-full-call call))))
+       (setf (basic-combination-info call) :full))))
   (annotate-fun-lvar (basic-combination-fun call))
   (values))
 
@@ -959,7 +959,7 @@
                     (name (lvar-fun-name (combination-fun call))))
                 (and (leaf-has-source-name-p funleaf)
                      (eq name (leaf-source-name funleaf))
-                     (not (sb-vm::static-fdefn-offset name))
+                     (not (static-fdefn-p name))
                      (let ((info (basic-combination-fun-info call)))
                        (not (or (fun-info-ir2-convert info)
                                 (ir1-attributep (fun-info-attributes info)

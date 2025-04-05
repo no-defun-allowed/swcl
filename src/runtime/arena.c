@@ -253,13 +253,13 @@ static void* memblk_claim_subrange(struct arena* a, struct arena_memblk* mem,
                 mem = actual_current_block;
                 // fall into the mutex release and restart below
             } else { // potentially extend
-                // An object occupying 1/512th or more of an extension is separately allocated.
+                // An object occupying strictly more than 1/512th of an extension is separately allocated.
                 int oversized = nbytes > (sword_t)(a->uw_growth_amount >> 9);
                 long request = oversized ? nbytes : (sword_t)a->uw_growth_amount;
                 if (a->uw_length + request > a->uw_size_limit) { // limit reached
                     ARENA_MUTEX_RELEASE(a);
-                    lose("Fatal: won't add arena %s block. Length=%lx request=%lx max=%lx",
-                         oversized ? "huge-object" : "extension",
+                     lose("Fatal: won't add arena %s block. Arena %p length=%#lx request=%#lx max=%#lx",
+                          oversized ? "huge-object" : "extension", a,
                          (long)a->uw_length, (long)request, (long)a->uw_size_limit);
                 }
                 // For a huge object, ensure that there will be adequate space after aligning

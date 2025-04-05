@@ -19,7 +19,7 @@
 (define-move-fun (load-immediate 1) (vop x y)
   ((immediate)
    (any-reg descriptor-reg))
-  (move-immediate y (encode-value-if-immediate x)))
+  (move-immediate y (immediate-tn-repr x)))
 
 (define-move-fun (load-number 1) (vop x y)
   ((immediate) (signed-reg unsigned-reg))
@@ -57,6 +57,14 @@
   (inst mov y x))
 
 ;;;; the MOVE VOP
+(defun is-operand-immediate (val)
+  (typep val '(or (signed-byte 32) #+(or immobile-space permgen) fixup)))
+(defun cpu-immediate-tn-p (tn)
+  (is-operand-immediate (immediate-tn-repr tn)))
+(defun reg-or-legal-imm32-p (tn)
+  (cond ((sc-is tn any-reg descriptor-reg) t)
+        ((sc-is tn immediate) (cpu-immediate-tn-p tn))))
+
 (define-vop (move)
   (:args (x :scs (any-reg descriptor-reg immediate) :target y
             :load-if (not (location= x y))))
@@ -64,14 +72,11 @@
                :load-if
                (not (location= x y))))
   (:temporary (:sc any-reg :from (:argument 0) :to (:result 0)
-               :unused-if (or (not (sc-is x immediate))
-                              (typep (encode-value-if-immediate x)
-                                     '(or (signed-byte 32)
-                                          #+(or immobile-space permgen) fixup))))
+               :unused-if (or (not (sc-is x immediate)) (cpu-immediate-tn-p x)))
               temp)
   (:generator 0
     (if (sc-is x immediate)
-        (move-immediate y (encode-value-if-immediate x) temp)
+        (move-immediate y (immediate-tn-repr x) temp)
         (move y x))))
 
 (define-move-vop move :move
@@ -128,16 +133,14 @@
              :load-if (not (sc-is y any-reg descriptor-reg))))
   (:results (y))
   (:temporary (:sc unsigned-reg
-               :unused-if (or (not (sc-is x immediate))
-                              (typep (encode-value-if-immediate x)
-                                     '(signed-byte 32))))
+               :unused-if (or (not (sc-is x immediate)) (cpu-immediate-tn-p x)))
               val-temp) ; for oversized immediate operand
   (:generator 0
     (let ((val (encode-value-if-immediate x)))
       (sc-case y
         ((any-reg descriptor-reg)
          (if (sc-is x immediate)
-             (if (eql val 0) (zeroize y) (inst mov y val))
+             (if (eql val 0) (zeroize y) (move-immediate y val))
              (move y x)))
         ((control-stack)
          (if (= (tn-offset fp) rsp-offset)

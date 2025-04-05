@@ -4,17 +4,17 @@ on: [push]
 
 jobs:
   ppc64le:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     name: ppc64le
     steps:
       - uses: actions/checkout@v4
-      - uses: uraimo/run-on-arch-action@v2
+      - uses: uraimo/run-on-arch-action@v3
         name: Run commands
         id: runcmd
         with:
           arch: none
           distro: none
-          base_image: ppc64le/debian:trixie
+          base_image: --platform=linux/ppc64le debian:trixie
 
           githubToken: ${{ github.token }}
           install: |

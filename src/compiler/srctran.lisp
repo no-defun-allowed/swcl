@@ -140,9 +140,12 @@
       (specifier-type 'cons)
       (lvar-type arg)))
 
-(unless-vop-existsp (:translate unaligned-dx-cons)
-  (define-source-transform unaligned-dx-cons (arg)
-    `(list ,arg)))
+(define-source-transform unaligned-dx-cons (arg)
+  (cond ((and (vop-existsp :translate unaligned-dx-cons)
+              *stack-allocate-dynamic-extent*)
+         (values nil t))
+        (t
+         `(list ,arg))))
 
 (define-source-transform make-list (length &rest rest &environment env)
   (if (or (null rest)
@@ -299,20 +302,32 @@
                 vars
                 (args (loop for arg in args
                             if (and subseq
-                                    (lvar-matches arg :fun-names '(vector-subseq* subseq))
-                                    ;; Nothing should be modifying the original sequence
-                                    (almost-immediately-used-p arg (lvar-use arg) :flushable t))
+                                    (or
+                                     (and (lvar-matches arg :fun-names '(vector-subseq* subseq))
+                                          ;; Nothing should be modifying the original sequence
+                                          (almost-immediately-used-p arg (lvar-use arg) :flushable t))
+                                     (lvar-matches arg :fun-names '(list vector))))
                             append (let ((call (lvar-uses arg)))
                                      (setf new t
                                            subseqp t)
-                                     (destructuring-bind (sequence start &optional end) (combination-args call)
-                                       (declare (ignorable sequence start))
-                                       (splice-fun-args arg :any (if end 3 2))
-                                       (list ''sb-impl::%subseq
-                                             (car (push (gensym) vars))
-                                             (car (push (gensym) vars))
-                                             (when end
-                                               (car (push (gensym) vars))))))
+                                     (if (lvar-matches arg :fun-names '(list vector))
+                                         (destructuring-bind (&rest elements) (combination-args call)
+                                           (splice-fun-args arg :any nil)
+                                           (list* ''sb-impl::%splice
+                                                  (length elements)
+                                                  (loop for elt in elements
+                                                        for sym = (gensym)
+                                                        do
+                                                        (push sym vars)
+                                                        collect sym)))
+                                         (destructuring-bind (sequence start &optional end) (combination-args call)
+                                           (declare (ignorable sequence start))
+                                           (splice-fun-args arg :any (if end 3 2))
+                                           (list ''sb-impl::%subseq
+                                                 (car (push (gensym) vars))
+                                                 (car (push (gensym) vars))
+                                                 (when end
+                                                   (car (push (gensym) vars)))))))
                             else if (or (eq (lvar-type arg) (specifier-type 'null))
                                         (csubtypep (lvar-type arg) (specifier-type '(simple-array * (0)))))
                             do (setf new t)
@@ -363,6 +378,10 @@
                       (check (pop args) (specifier-type 'sequence))
                       (check (pop args) (specifier-type 'index))
                       (check (pop args) (specifier-type '(or null index))))
+                     ((and (constant-lvar-p arg)
+                           (eq (lvar-value arg) 'sb-impl::%splice))
+                      (loop repeat (lvar-value (pop args))
+                            do (pop args)))
                      (t
                       (check arg (specifier-type 'sequence))))))))
 
@@ -761,10 +780,14 @@
          (null type))
      val)
     ((consp val)
-     (let ((xbound (coerce-for-bound (car val) type)))
-       (if (coercion-loses-precision-p (car val) type)
-           xbound
-           (list xbound))))
+     (let ((val (car val)))
+       (if (and (floatp val)
+                (float-infinity-p val))
+           (list (coerce val type))
+           (let ((xbound (coerce-for-bound val type)))
+             (if (coercion-loses-precision-p val type)
+                 xbound
+                 (list xbound))))))
     ((subtypep type 'double-float)
      (if (sb-xc:<= most-negative-double-float val most-positive-double-float)
          (coerce val type)))
@@ -797,9 +820,9 @@
 
 ;;; Convert a numeric-type object to an interval object.
 (defun numeric-type->interval (x &optional integer)
-  (declare (type numeric-type x))
-  (let ((low (numeric-type-low x))
-        (high (numeric-type-high x)))
+  (declare (type numeric-union-type x))
+  (let ((low (numeric-union-type-low x))
+        (high (numeric-union-type-high x)))
     (make-interval :low (cond ((not integer)
                                low)
                               ((consp low)
@@ -825,7 +848,7 @@
 
 (defun type-approximate-interval (type &optional integer)
   (declare (type ctype type))
-  (let ((types (prepare-arg-for-derive-type type))
+  (let ((types (prepare-arg-for-derive-type type nil))
         (result nil)
         complex)
     (dolist (type types)
@@ -833,11 +856,11 @@
                     (member-type type
                      (convert-member-type type))
                     (intersection-type
-                     (find-if #'numeric-type-p
+                     (find-if #'numeric-union-type-p
                               (intersection-type-types type)))
                     (t
                      type))))
-        (unless (numeric-type-p type)
+        (unless (numeric-union-type-p type)
           (return-from type-approximate-interval (values nil nil)))
         (let ((interval (numeric-type->interval type integer)))
           (when (eq (numeric-type-complexp type) :complex)
@@ -1448,38 +1471,41 @@
 ;;; Take some type of lvar and massage it so that we get a list of the
 ;;; constituent types. If ARG is *EMPTY-TYPE*, return NIL to indicate
 ;;; failure.
-(defun prepare-arg-for-derive-type (arg)
-  (flet ((listify (arg)
-           (typecase arg
-             (numeric-type
-              (list arg))
-             (union-type
-              (union-type-types arg))
-             (list
-              arg)
-             (t
-              (list arg))))
-         (ignore-hairy-type (type)
-           (if (and (intersection-type-p type)
-                    (find-if #'hairy-type-p (intersection-type-types type)))
-               (find-if-not #'hairy-type-p (intersection-type-types type))
-               type)))
+(defun prepare-arg-for-derive-type (arg &optional (flatten-numeric-union t))
+  (labels ((split (arg)
+             (typecase arg
+               (numeric-type
+                (list arg))
+               (numeric-union-type
+                (if flatten-numeric-union
+                    (flatten-numeric-union-types arg)
+                    (list arg)))
+               (union-type
+                (mapcan #'split (union-type-types arg)))
+               (intersection-type
+                (if (find-if #'hairy-type-p (intersection-type-types arg))
+                    (split (find-if-not #'hairy-type-p (intersection-type-types arg)))
+                    (list arg)))
+               (list
+                (loop for a in arg
+                      append (split a)))
+               (t
+                (list arg)))))
     (unless (eq arg *empty-type*)
       ;; Make sure all args are some type of numeric-type. For member
       ;; types, convert the list of members into a union of equivalent
       ;; single-element member-type's.
       (let ((new-args nil))
-        (dolist (arg (listify arg))
-          (let ((arg (ignore-hairy-type arg)))
-            (if (member-type-p arg)
-                ;; Run down the list of members and convert to a list of
-                ;; member types.
-                (mapc-member-type-members
-                 (lambda (member)
-                   (push (if (numberp member) (make-eql-type member) *empty-type*)
-                         new-args))
-                 arg)
-                (push arg new-args))))
+        (dolist (arg (split arg))
+          (if (member-type-p arg)
+              ;; Run down the list of members and convert to a list of
+              ;; member types.
+              (mapc-member-type-members
+               (lambda (member)
+                 (push (if (numberp member) (make-eql-type member) *empty-type*)
+                       new-args))
+               arg)
+              (push arg new-args)))
         (unless (member *empty-type* new-args)
           new-args)))))
 
@@ -1498,6 +1524,42 @@
 ;;; optimizations.
 (defvar *derived-numeric-union-complexity-limit* 6)
 
+(defun widen-bignum-types (numeric-type)
+  (labels ((strip-cons (x)
+             (if (consp x)
+                 (car x)
+                 x))
+           (cut-ratio-p (r)
+             (and (ratiop r)
+                  (or (not (fixnump (numerator r)))
+                      (not (fixnump (denominator r))))))
+           (cut-bignum-p (n)
+             (and (integerp n)
+                  (> (integer-length n) 512))))
+    (let* ((lo (strip-cons (numeric-type-low numeric-type)))
+           (hi (strip-cons (numeric-type-high numeric-type)))
+           (new-lo lo)
+           (new-hi hi))
+      (when (cut-ratio-p lo)
+        (setf new-lo
+              (list (floor lo))))
+      (when (cut-ratio-p hi)
+        (setf new-hi
+              (list (ceiling hi))))
+      (let ((lo (strip-cons new-lo)))
+        (when (cut-bignum-p lo)
+          (setf new-lo (if (> lo 0)
+                           (expt 2 512)))))
+      (let ((hi (strip-cons new-hi)))
+        (when (cut-bignum-p hi)
+          (setf new-hi (if (< hi 0)
+                           (- (expt 2 512))))))
+      (if (and (eq lo new-lo)
+               (eq hi new-hi))
+          numeric-type
+          (modified-numeric-type numeric-type :low new-lo
+                                              :high new-hi)))))
+
 (defun make-derived-union-type (type-list)
   (let ((xset (alloc-xset))
         (fp-zeroes '())
@@ -1513,7 +1575,7 @@
                     (add-to-xset member xset)))
               type))
             ((numeric-type-p type)
-             (setf numeric-type (type-union type numeric-type)))
+             (setf numeric-type (type-union (widen-bignum-types type) numeric-type)))
             (t
              (push type misc-types))))
     (setf numeric-type (sb-kernel::weaken-numeric-type-union *derived-numeric-union-complexity-limit* numeric-type))
@@ -1917,23 +1979,36 @@
          (ash-inner (n s)
            (if (and (fixnump s)
                     (> s most-negative-fixnum))
-             (ash n (min s 64))
-             (if (minusp n) -1 0))))
+               (ash n (min s 64))
+               (if (minusp n) -1 0))))
     (or (and (csubtypep n-type (specifier-type 'integer))
              (csubtypep shift (specifier-type 'integer))
              (let ((n-low (numeric-type-low n-type))
                    (n-high (numeric-type-high n-type))
                    (s-low (numeric-type-low shift))
                    (s-high (numeric-type-high shift)))
-               (make-numeric-type :class 'integer  :complexp :real
-                                  :low (when n-low
-                                         (if (minusp n-low)
-                                           (ash-outer n-low s-high)
-                                           (ash-inner n-low s-low)))
-                                  :high (when n-high
-                                          (if (minusp n-high)
-                                            (ash-inner n-high s-low)
-                                            (ash-outer n-high s-high))))))
+               (flet ((make (n-low n-high s-low s-high)
+                        (make-numeric-type :class 'integer
+                                           :low (when n-low
+                                                  (if (minusp n-low)
+                                                      (ash-outer n-low s-high)
+                                                      (ash-inner n-low s-low)))
+                                           :high (when n-high
+                                                   (if (minusp n-high)
+                                                       (ash-inner n-high s-low)
+                                                       (ash-outer n-high s-high))))))
+                 (cond ((eql n-low 0)
+                        (type-union (specifier-type '(eql 0))
+                                    (make (1+ n-low) n-high s-low s-high)))
+                       ((and (or (not n-low)
+                                 (minusp n-low))
+                             (or (not n-high)
+                                 (plusp n-high)))
+                        (type-union (make n-low -1 s-low s-high)
+                                    (specifier-type '(eql 0))
+                                    (make 1 n-high s-low s-high)))
+                       (t
+                        (make n-low n-high s-low s-high))))))
         *universal-type*)))
 
 (defoptimizer (ash derive-type) ((n shift))
@@ -2042,8 +2117,6 @@
   (let* ((rem-type (rem-result-type number-type divisor-type))
          (number-interval (numeric-type->interval number-type))
          (divisor-interval (numeric-type->interval divisor-type)))
-    ;;(declare (type (member '(integer rational float)) rem-type))
-    ;; We have real numbers now.
     (cond ((eq rem-type 'integer)
            ;; Since the remainder type is INTEGER, both args are
            ;; INTEGERs.
@@ -2059,7 +2132,7 @@
                         (eql (interval-low divisor-interval) 1))
                    (values number-interval nil)
                    (values (interval-div number-interval
-                                         divisor-interval)))
+                                         divisor-interval) t))
              (let* ((*conservative-quotient-bound* conservative)
                     (quot (truncate-quotient-bound quot)))
                (specifier-type `(integer ,(or (interval-low quot) '*)
@@ -2595,7 +2668,7 @@
 ;;; - The abs of the minimal value (i.e. closest to 0) in the range.
 ;;; - The abs of the maximal value if there is one, or nil if it is
 ;;;   unbounded.
-(defun numeric-range-info (low high)
+(defun numeric-union-info (low high)
   (cond ((and low (not (minusp low)))
          (values '+ low high))
         ((and high (not (plusp high)))
@@ -2609,9 +2682,9 @@
   ;; sign might change. If we can determine the sign of either the
   ;; number or the divisor, we can eliminate some of the cases.
   (multiple-value-bind (number-sign number-min number-max)
-      (numeric-range-info number-low number-high)
+      (numeric-union-info number-low number-high)
     (multiple-value-bind (divisor-sign divisor-min divisor-max)
-        (numeric-range-info divisor-low divisor-high)
+        (numeric-union-info divisor-low divisor-high)
       (when (and divisor-max (zerop divisor-max))
         ;; We've got a problem: guaranteed division by zero.
         (return-from integer-truncate-derive-type t))
@@ -3337,6 +3410,17 @@
                   (reciprocate %denominator)
                   %denominator))))))
 
+
+(deftransform expt ((base power) ((integer 10 10) t) * :important nil :node node)
+  (delay-ir1-transform node :ir1-phases)
+  `(sb-kernel::10expt power))
+
+(deftransform expt ((base power) ((integer 10 10) (integer 0 20)) * :important nil)
+  `(aref #.(coerce (loop for i to 20
+                         collect (expt 10 i))
+                   'vector)
+         power))
+
 (deftransform expt ((base power) ((constant-arg unsigned-byte) unsigned-byte))
   (let ((base (lvar-value base)))
     (unless (= (logcount base) 1)
@@ -3350,6 +3434,8 @@
     ;; KLUDGE: this is not INTEGER-type-numeric-bounds
     (numeric-type (values (numeric-type-low type)
                           (numeric-type-high type)))
+    (numeric-union-type
+     (sb-kernel::numeric-union-bounds type))
     (union-type
      (let ((low  nil)
            (high nil))
@@ -3442,9 +3528,6 @@
     (give-up-ir1-transform))
   (delay-ir1-transform node :ir1-phases)
   (let ((type (single-value-type (node-derived-type node))))
-    (when (or (csubtypep type (specifier-type 'word))
-              (csubtypep type (specifier-type 'sb-vm:signed-word)))
-      (give-up-ir1-transform))
     (unless (and (or (csubtypep (lvar-type x) (specifier-type 'word))
                      (csubtypep (lvar-type x) (specifier-type 'sb-vm:signed-word)))
                  (or (csubtypep (lvar-type y) (specifier-type 'word))
@@ -3456,6 +3539,15 @@
            (result-type (type-intersection type cast)))
       (when (eq result-type *empty-type*)
         (give-up-ir1-transform))
+      (let ((wordp (or (csubtypep type (specifier-type 'word))
+                       (csubtypep type (specifier-type 'sb-vm:signed-word)))))
+        (when (if (csubtypep result-type (specifier-type 'fixnum))
+                  (or (csubtypep type (specifier-type 'fixnum))
+                      (and wordp
+                           (not (and (csubtypep (lvar-type x) (specifier-type 'fixnum))
+                                     (csubtypep (lvar-type y) (specifier-type 'fixnum))))))
+                  wordp)
+         (give-up-ir1-transform)))
       (flet ((subp (lvar type)
                (cond
                  ((not (constant-type-p type))
@@ -3684,11 +3776,12 @@
         (give-up-ir1-transform))))
 
 (deftransform ceiling ((number divisor) (integer integer) * :node node)
+  (delay-ir1-transform node :constraint)
   (let ((truncate-type (truncate-derive-type-optimizer node)))
     (if (template-translates 'truncate (combination-args node) (single-value-type truncate-type))
-        (let* ((rem-int (type-approximate-interval (lvar-type divisor)))
-               (rem-type (let* ((low (interval-low rem-int))
-                                (high (interval-high rem-int))
+        (let* ((div-int (type-approximate-interval (lvar-type divisor)))
+               (rem-type (let* ((low (interval-low div-int))
+                                (high (interval-high div-int))
                                 (rem-low (cond ((not high) '*)
                                                ((<= high 1)
                                                 0)
@@ -3704,6 +3797,10 @@
                                  (high (interval-high n-int)))
                             (if (and low high)
                                 (let ((max (max (abs low) (abs high))))
+                                  (unless (or (interval-contains-p 1 div-int)
+                                              (interval-contains-p -1 div-int)
+                                              (= max 1))
+                                    (decf max))
                                   `(integer ,(- max) ,max))
                                 t))))
           `(multiple-value-bind (tru rem) (truncate number divisor)
@@ -3715,6 +3812,12 @@
                  (values tru
                          (truly-the ,rem-type rem)))))
         (give-up-ir1-transform))))
+
+(deftransform ceiling ((number divisor) ((and unsigned-byte fixnum) (and unsigned-byte fixnum)) * :result result)
+  (if (and result
+           (lvar-single-value-p result))
+      `(values (truly-the fixnum (truncate (+ number (1- divisor)) divisor)) 0)
+      (give-up-ir1-transform)))
 
 (define-source-transform rem (number divisor)
   `(nth-value 1 (truncate ,number ,divisor)))
@@ -3740,27 +3843,48 @@
 ;;; If arg is a constant power of two, turn FLOOR into a shift and
 ;;; mask. If CEILING, add in (1- (ABS Y)), do FLOOR and correct a
 ;;; remainder.
-(flet ((frob (y ceil-p)
-         (let* ((y (lvar-value y))
-                (y-abs (abs y))
-                (len (1- (integer-length y-abs))))
-           (unless (and (> y-abs 0) (= y-abs (ash 1 len)))
-             (give-up-ir1-transform))
-           (let ((shift (- len))
-                 (mask (1- y-abs))
-                 (delta (if ceil-p (* (signum y) (1- y-abs)) 0)))
-             `(let ((x (+ x ,delta)))
-                ,(if (minusp y)
-                     `(values (ash (- x) ,shift)
-                              (- (- (logand (- x) ,mask)) ,delta))
-                     `(values (ash x ,shift)
-                              (- (logand x ,mask) ,delta))))))))
-  (deftransform floor ((x y) (integer (constant-arg integer)) *)
-    "convert division by 2^k to shift"
-    (frob y nil))
-  (deftransform ceiling ((x y) (integer (constant-arg integer)) *)
-    "convert division by 2^k to shift"
-    (frob y t)))
+(deftransform floor ((x y) (integer (constant-arg integer)) *)
+  "convert division by 2^k to shift"
+  (let* ((y (lvar-value y))
+         (y-abs (abs y))
+         (len (1- (integer-length y-abs))))
+    (unless (and (> y-abs 0) (= y-abs (ash 1 len)))
+      (give-up-ir1-transform))
+    (let ((shift (- len))
+          (mask (1- y-abs)))
+      (if (minusp y)
+          `(values (ash (- x) ,shift)
+                   (- (logand (- x) ,mask)))
+          `(values (ash x ,shift)
+                   (logand x ,mask))))))
+
+(deftransform ceiling ((x y) (integer (constant-arg integer)) * :result result :node node)
+  "convert division by 2^k to shift"
+  (let* ((y (lvar-value y))
+         (y-abs (abs y))
+         (len (1- (integer-length y-abs))))
+    (unless (and (> y-abs 0) (= y-abs (ash 1 len)))
+      (give-up-ir1-transform))
+    (delay-ir1-optimizer node :constraint)
+    (let ((shift (- len))
+          (mask (1- y-abs))
+          (delta (* (signum y) (1- y-abs))))
+      (if (and (plusp y)
+               result
+               (lvar-single-value-p result)
+               (csubtypep (lvar-type result) (specifier-type 'word))
+               (not (csubtypep (lvar-type x)
+                               (make-numeric-type :class 'integer :low 0 :high (- sb-ext:most-positive-word delta)))))
+          ;; Avoid overflowing word-sized arithmetic
+          `(if (= x 0)
+               (values 0 0)
+               (values (1+ (ash (1- x) ,shift)) 0))
+          `(let ((x (+ x ,delta)))
+             ,(if (minusp y)
+                  `(values (ash (- x) ,shift)
+                           (- (- (logand (- x) ,mask)) ,delta))
+                  `(values (ash x ,shift)
+                           (- (logand x ,mask) ,delta))))))))
 
 ;;; If arg is a constant power of two, turn TRUNCATE into a shift and mask.
 (deftransform truncate ((x y) (integer (constant-arg integer)) *  :result result :node node)
@@ -4729,12 +4853,27 @@
                                     'consp)
                                ,y)
                               (eq (car ,y) ',(car value))
-                              (null (cdr ,y)))))))))
+                              (null (cdr ,y))))))))
+           ;; (equal x (list y))
+           ;; (equal x (cons car cdr))
+           (unroll-list (lvar x y)
+             (cond ((splice-fun-args lvar 'list 1 nil)
+                    `(and (typep ,y '(cons t null))
+                          (equal (car ,y) ,x)))
+                   ((splice-fun-args lvar 'list* 2 nil)
+                    `(lambda ,(if (eq x 'x)
+                                  `(car cdr x)
+                                  `(x car cdr))
+                       (and (consp x)
+                            (equal (car x) car)
+                            (equal (cdr x) cdr)))))))
       (cond ((same-leaf-ref-p x y) t)
             ((array-type-dimensions-mismatch x-type y-type)
              nil)
             ((unroll-constant x 'y))
             ((unroll-constant y 'x))
+            ((unroll-list x 'x 'y))
+            ((unroll-list y 'y 'x))
             (t
              (flet ((try (x-type y-type)
                       (flet ((both-csubtypep (type)
@@ -4824,12 +4963,27 @@
                              (loop with cdr = value
                                    while (consp cdr)
                                    always (symbolp (pop cdr))))
-                        `(equal x y)))))))
+                        `(equal x y))))))
+           ;; (equalp x (list y))
+           ;; (equalp x (cons car cdr))
+           (unroll-list (lvar x y)
+             (cond ((splice-fun-args lvar 'list 1 nil)
+                    `(and (typep ,y '(cons t null))
+                          (equalp (car ,y) ,x)))
+                   ((splice-fun-args lvar 'list* 2 nil)
+                    `(lambda ,(if (eq x 'x)
+                                  `(car cdr x)
+                                  `(x car cdr))
+                       (and (consp x)
+                            (equalp (car x) car)
+                            (equalp (cdr x) cdr)))))))
       (cond ((same-leaf-ref-p x y) t)
             ((array-type-dimensions-mismatch x-type y-type)
              nil)
             ((unroll-constant x 'y))
             ((unroll-constant y 'x))
+            ((unroll-list x 'x 'y))
+            ((unroll-list y 'y 'x))
             (t
              (flet ((try (x-type y-type)
                       (flet ((both-csubtypep (type)
@@ -5699,24 +5853,36 @@
          (var (when (ref-p use) (ref-leaf use)))
          (home (when (lambda-var-p var) (lambda-var-home var)))
          (info (when (lambda-var-p var) (lambda-var-arg-info var)))
-         (restp (when info (eq :rest (arg-info-kind info)))))
-    (flet ((ref-good-for-more-context-p (ref)
-             (when (not (node-lvar ref)) ; ref that goes nowhere is ok
-               (return-from ref-good-for-more-context-p t))
-             (let ((dest (principal-lvar-end (node-lvar ref))))
-               (and (combination-p dest)
-                    ;; If the destination is to anything but these, we're going to
-                    ;; actually need the rest list -- and since other operations
-                    ;; might modify the list destructively, the using the context
-                    ;; isn't good anywhere else either.
-                    (lvar-fun-is (combination-fun dest)
-                                 '(%rest-values %rest-ref %rest-length
-                                   %rest-null %rest-true))
-                    ;; If the home lambda is different and isn't DX, it might
-                    ;; escape -- in which case using the more context isn't safe.
-                    (let ((clambda (node-home-lambda dest)))
-                      (or (eq home clambda)
-                          (leaf-dynamic-extent clambda)))))))
+         (restp (when info (eq :rest (arg-info-kind info))))
+         (seen '()))
+    (labels ((ref-good-for-more-context-p (ref)
+               (when (not (node-lvar ref)) ; ref that goes nowhere is ok
+                 (return-from ref-good-for-more-context-p t))
+               (let ((dest (principal-lvar-end (node-lvar ref))))
+                 (and (combination-p dest)
+                      ;; If the destination is to anything but these, we're going to
+                      ;; actually need the rest list -- and since other operations
+                      ;; might modify the list destructively, the using the context
+                      ;; isn't good anywhere else either.
+                      (lvar-fun-is (combination-fun dest)
+                                   '(%rest-values %rest-ref %rest-length
+                                     %rest-null %rest-true %rest-listify))
+                      ;; If the home lambda is different and isn't DX, it might
+                      ;; escape -- in which case using the more context isn't safe.
+                      (dx-node-p dest))))
+             (dx-node-p (node)
+               (let ((fun (node-home-lambda node)))
+                 (or (eq home fun)
+                     (and (or (leaf-dynamic-extent fun)
+                              (let ((entry (or (lambda-entry-fun fun)
+                                               (lambda-optional-dispatch fun))))
+                                (and entry
+                                     (leaf-dynamic-extent entry))))
+                          (cond ((member fun seen) t)
+                                (t
+                                 (push fun seen)
+                                 (loop for ref in (leaf-refs fun)
+                                       always (dx-node-p ref)))))))))
       (let ((ok (and restp
                      (consp (arg-info-default info))
                      (not (lambda-var-specvar var))
@@ -5843,6 +6009,26 @@
   (if (rest-var-more-context-ok list)
       `(not (eql 0 count))
       `list))
+
+;;; Unlike a plain reference to &rest it will only allocate when
+;;; executed and won't stop other %rest functions
+(define-source-transform %rest-list (rest)
+  (multiple-value-bind (context count) (possible-rest-arg-context rest)
+    (if context
+        `(%rest-listify ,rest ,context ,count)
+        rest)))
+
+(deftransform %rest-listify ((list context count))
+  (if (rest-var-more-context-ok list)
+      `(%listify-rest-args context count)
+      `list))
+
+(define-source-transform %rest-context (rest)
+  (multiple-value-bind (context count) (possible-rest-arg-context rest)
+    (if context
+        `(progn ,rest (values ,context ,count))
+        (bug "no &REST context"))))
+
 
 ;;;; transforming FORMAT
 ;;;;
@@ -6570,8 +6756,8 @@
         symbol
         (give-up-ir1-transform))))
 
-(deftransform boundp ((symbol) ((constant-arg symbol)) * :policy (< safety 3))
-  (if (always-boundp (lvar-value symbol))
+(deftransform boundp ((symbol) ((constant-arg symbol)) * :policy (< safety 3) :node node)
+  (if (always-boundp (lvar-value symbol) node)
       t
       (give-up-ir1-transform)))
 
@@ -6598,6 +6784,91 @@
 
 (deftransform princ ((object &optional stream) (string &optional t) * :important nil)
   `(write-string object stream))
+
+#-sb-xc-host ;; ansi-stream not defined
+(deftransform write-char ((object stream) (t ansi-stream) * :important nil)
+  `(progn (funcall (ansi-stream-cout stream) stream object)
+          object))
+
+#-sb-xc-host
+(deftransform write-string ((object stream &key (start 0) end)
+                            (simple-string ansi-stream &rest t) * :important nil)
+  `(progn (funcall (ansi-stream-sout stream) stream object start (or end
+                                                                     (length object)))
+          object))
+
+(deftransform read-char ((&optional stream eof-error-p eof-value recursive-p))
+  (when stream
+    (let ((uses (lvar-uses stream)))
+      (when (cast-p uses)
+        (delete-cast uses))))
+  `(block nil
+     (or (and (sb-impl::ansi-stream-p stream)
+              (let* ((buffer (sb-impl::ansi-stream-cin-buffer stream))
+                     (index (ansi-stream-in-index stream)))
+                (if buffer
+                    (when (/= index sb-impl::+ansi-stream-in-buffer-length+)
+                      (prog1
+                          (aref buffer index)
+                        (setf (ansi-stream-in-index stream) (1+ index))))
+                    (return (funcall (ansi-stream-in stream) stream ,(if eof-error-p
+                                                                         'eof-error-p
+                                                                         t) eof-value)))))
+         (locally (declare (notinline read-char))
+           (read-char ,@(loop for (lvar var) on (list stream 'stream
+                                                      eof-error-p 'eof-error-p
+                                                      eof-value 'eof-value
+                                                      recursive-p 'recursive-p)
+                              by #'cddr
+                              when lvar
+                              collect var))))))
+
+(deftransform read-byte ((stream &optional eof-error-p eof-value))
+  (when stream
+    (let ((uses (lvar-uses stream)))
+      (when (cast-p uses)
+        (delete-cast uses))))
+  `(block nil
+     (or (and (sb-impl::ansi-stream-p stream)
+              (let* ((buffer (ansi-stream-in-buffer stream))
+                     (index (ansi-stream-in-index stream)))
+                (if buffer
+                    (when (/= index sb-impl::+ansi-stream-in-buffer-length+)
+                      (prog1
+                          (aref buffer index)
+                        (setf (ansi-stream-in-index stream) (1+ index))))
+                    (return (funcall (ansi-stream-bin stream) stream ,(if eof-error-p
+                                                                          'eof-error-p
+                                                                          t) eof-value)))))
+         (locally (declare (notinline read-byte))
+           (read-byte stream
+                      ,@(loop for (lvar var) on (list eof-error-p 'eof-error-p
+                                                      eof-value 'eof-value)
+                              by #'cddr
+                              when lvar
+                              collect var))))))
+
+(deftransform peek-char ((&optional peek-type stream eof-error-p eof-value recursive-p)
+                         (null &rest t))
+  (when stream
+    (let ((uses (lvar-uses stream)))
+      (when (cast-p uses)
+        (delete-cast uses))))
+  `(or (and (sb-impl::ansi-stream-p stream)
+            (let* ((buffer (sb-impl::ansi-stream-cin-buffer stream))
+                   (index (ansi-stream-in-index stream)))
+              (when (and buffer
+                         (/= index sb-impl::+ansi-stream-in-buffer-length+))
+                (aref (truly-the vector buffer) index))))
+       (locally (declare (notinline peek-char))
+         (peek-char peek-type
+                    ,@(loop for (lvar var) on (list stream 'stream
+                                                    eof-error-p 'eof-error-p
+                                                    eof-value 'eof-value
+                                                    recursive-p 'recursive-p)
+                            by #'cddr
+                            when lvar
+                            collect var)))))
 
 #+sb-thread
 (progn
@@ -6735,8 +7006,7 @@
               node))))
        (go :next))))
 
-(defun next-node (node-or-block &key type (cast t) single-predecessor
-                                     strict)
+(defun next-node (node-or-block &key type single-predecessor strict)
   (let ((node node-or-block)
         ctran)
     (tagbody
@@ -6754,10 +7024,6 @@
               (typecase node
                 (ref (unless (eq type :non-ref)
                        (return-from next-node node)))
-                (cast
-                 (when (or strict
-                           (not cast))
-                   (return-from next-node node)))
                 (enclose
                  (when strict
                    (return-from next-node node)))
@@ -7261,10 +7527,12 @@
                                                                       ,(logxor c1 c2))
                                                             ,min)))
                                                   (t
-                                                   `(not (logtest (,@(if type-check
-                                                                         '(logand most-positive-word)
-                                                                         '(mask-signed-field sb-vm:n-fixnum-bits)) (- ,value ,min))
-                                                                  ,(lognot (- max min)))))))
+                                                   (let ((mask (lognot (- max min))))
+                                                     `(not (logtest (,@(if (or type-check
+                                                                               (not (fixnump mask)))
+                                                                           '(logand most-positive-word)
+                                                                           '(mask-signed-field sb-vm:n-fixnum-bits)) (- ,value ,min))
+                                                                    ,mask))))))
                                         'or-eq-transform)))))))))))
 
 ;;; Prevent slow perfect hash finder from hogging time if time spent compiling
@@ -7313,7 +7581,8 @@
                                      ,(or constant-target
                                           (node-ends-block ref))
                                      (the* (,(lvar-type (node-lvar ref)) :truly t)
-                                           ,code))))
+                                           ,code)))
+                         t)
           (loop for ref in constant-refs
                 do
                 (delete-ref ref)

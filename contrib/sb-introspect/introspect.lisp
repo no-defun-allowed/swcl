@@ -128,6 +128,17 @@ constant pool."
      spaces
      (lambda (obj size)
        (declare (ignore size))
+       ;; There are no constants for linkage-space calls. Not only that,
+       ;; but certain linkage entry refs get elided because it is not
+       ;; required for liveness from a GC perspective.
+       #+linkage-space
+       (dolist (index (sb-c:unpack-code-fixup-locs (sb-vm::%code-fixups obj)))
+         (let ((ep (sb-sys:sap-ref-word
+                    (sb-alien:extern-alien "linkage_space" sb-sys:system-area-pointer)
+                    (ash index sb-vm:word-shift))))
+           (when (eq (sb-kernel:%make-lisp-obj (+ ep -16 sb-vm:fun-pointer-lowtag)) function)
+             (funcall fn obj))))
+       #-linkage-space
        (map-code-constants
         obj
         (lambda (constant)
@@ -263,15 +274,18 @@ If an unsupported TYPE is requested, the function will return NIL.
           (and converter
            (find-definition-source converter))))
        ((:function :generic-function)
-        (when (and (fboundp name)
-                   (or (consp name)
-                       (and
-                        (not (macro-function name))
-                        (not (special-operator-p name)))))
-          (let ((fun (real-fdefinition name)))
-            (when (eq (not (typep fun 'generic-function))
-                      (not (eq type :generic-function)))
-              (find-definition-source fun)))))
+        (if (fboundp name)
+            (when (and (or (consp name)
+                           (and
+                            (not (macro-function name))
+                            (not (special-operator-p name)))))
+              (let ((fun (real-fdefinition name)))
+                (when (eq (not (typep fun 'generic-function))
+                          (not (eq type :generic-function)))
+                  (find-definition-source fun))))
+            (let ((dd (info :function :source-transform name)))
+              (when (typep dd '(cons defstruct-description))
+                (find-definition-sources-by-name (dd-name (car dd)) :structure)))))
        ((:type)
         ;; Source locations for types are saved separately when the expander
         ;; is a closure without a good source-location.
@@ -577,6 +591,12 @@ or a method combination name."
 ;;; strategy would be to use the disassembler to find actual
 ;;; call-sites.
 
+;; FIXME[1]: this is quite clearly intended to do just about the same thing
+;;           as CTU:FIND-NAMED-CALLEES yet the two are unnecessarily different.
+;; FIXME[2]: for at least #+linkage-space we should disassemble FUNCTION
+;;           because the stored linkage indices underestimate the answer.
+;;           The gain from doing it right is that code constants overestimate
+;;           especially if >1 simple-fun is present in the code.
 (defun find-function-callees (function)
   "Return functions called by FUNCTION."
   (if (typep function 'generic-function)
@@ -587,6 +607,13 @@ or a method combination name."
                         (sb-kernel:%closure-index-ref  method-fun 0)
                         method-fun)))
       (let ((callees '()))
+        #+linkage-space
+        (dolist (index (sb-c:unpack-code-fixup-locs
+                        (sb-vm::%code-fixups (fun-code-header (sb-kernel:%fun-fun function)))))
+          (let ((name (sb-vm::linkage-addr->name index :index)))
+            (when (fboundp name)
+              (push (fdefinition name) callees))))
+        #-linkage-space
         (map-code-constants
          (fun-code-header (sb-kernel:%fun-fun function))
          (lambda (obj)
@@ -596,9 +623,7 @@ or a method combination name."
                  (push fun callees))))))
         callees)))
 
-(defun find-function-callers (function &optional (spaces '(:read-only :static
-                                                           :dynamic
-                                                           #+immobile-code :immobile)))
+(defun find-function-callers (function &optional (spaces '(:all)))
   "Return functions which call FUNCTION, by searching SPACES for code objects"
   (let ((referrers '()))
     (map-caller-code-components
@@ -670,20 +695,21 @@ or a method combination name."
                   ;; entry.
                   (setf (definition-source-form-number source-location)
                         xref-form-number)
-                  (let ((name (cond ((sb-c::transform-p name)
-                                     (let ((fun-name (%fun-name fun)))
-                                       (append (if (consp fun-name)
-                                                   fun-name
-                                                   (list fun-name))
-                                               (let* ((type (sb-c::transform-type name))
-                                                      (type-spec (type-specifier type)))
-                                                 (and (sb-kernel:fun-type-p type)
-                                                      (list (second type-spec)))))))
-                                    ((sb-c::vop-info-p name)
-                                     (list 'sb-c:define-vop
-                                           (sb-c::vop-info-name name)))
-                                    (t
-                                     name))))
+                  (let ((name (typecase name
+                                (sb-c::transform
+                                 (let ((fun-name (%fun-name fun)))
+                                   (append (if (consp fun-name)
+                                               fun-name
+                                               (list fun-name))
+                                           (let* ((type (sb-c::transform-type name))
+                                                  (type-spec (type-specifier type)))
+                                             (and (sb-kernel:fun-type-p type)
+                                                  (list (second type-spec)))))))
+                                (sb-c::vop-info
+                                 (list 'sb-c:define-vop
+                                       (sb-c::vop-info-name name)))
+                                (t
+                                 name))))
                     (push (cons name source-location) result)))))
             xrefs))))
       result)))

@@ -84,7 +84,7 @@
     (pseudo-atomic (pa-flag)
       (with-fixnum-as-word-index (words bytes)
         (inst addi bytes words (* (1+ vector-data-offset) n-word-bytes)))
-      (inst andi bytes bytes (lognot lowtag-mask))
+      (inst andi bytes bytes (lognot lowtag-mask)) ; double word align
       (allocation nil bytes other-pointer-lowtag result :flag-tn pa-flag)
       (storew type result 0 other-pointer-lowtag)
       (storew length result vector-length-slot other-pointer-lowtag))))
@@ -99,14 +99,17 @@
   (:temporary (:sc non-descriptor-reg) bytes temp)
   (:temporary (:sc non-descriptor-reg) pa-flag)
   (:results (result :scs (descriptor-reg) :from :load))
+  (:vop-var vop)
+  (:node-var node)
   (:policy :fast-safe)
   (:generator 100
     (pseudo-atomic (pa-flag)
       (with-fixnum-as-word-index (words bytes)
         (inst addi bytes words (* (1+ vector-data-offset) n-word-bytes)))
-      (inst andi bytes bytes (lognot lowtag-mask))
+      (inst andi bytes bytes (lognot lowtag-mask)) ; double word align
 
-      ;; FIXME: It would be good to check for stack overflow here.
+      (when (sb-c::make-vector-check-overflow-p node)
+        (generate-stack-overflow-check vop bytes temp))
       (allocation nil bytes other-pointer-lowtag result
                   :flag-tn pa-flag :stack-allocate-p t)
 
@@ -150,10 +153,8 @@
   (:args (value :to :save :scs (descriptor-reg any-reg zero)))
   (:temporary (:sc non-descriptor-reg) pa-flag)
   (:results (result :scs (descriptor-reg)))
-  (:info stack-allocate-p)
   (:generator 10
-    (with-fixed-allocation (result pa-flag value-cell-widetag value-cell-size
-                            :stack-allocate-p stack-allocate-p)
+    (with-fixed-allocation (result pa-flag value-cell-widetag value-cell-size)
       (storew value result value-cell-value-slot other-pointer-lowtag))))
 
 ;;;; Automatic allocators for primitive objects.

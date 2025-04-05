@@ -42,34 +42,30 @@
     ;; defined.
     (setf (info :type :kind name) :forthcoming-defclass-type)))
 
-(symbol-macrolet
-    ((reader-function-type (specifier-type '(function (t) t)))
-     (writer-function-type (specifier-type '(function (t t) t))))
-  (flet ((proclaim-ftype-for-name (kind name type)
-           (ecase kind
-             (condition
-              (proclaim `(ftype ,(type-specifier type) ,name)))
-             (class
-              (when (eq (info :function :where-from name) :assumed)
-                (sb-c:proclaim-ftype name type nil :defined))))))
+(defun proclaim-ftype-for-name (kind name type)
+  (ecase kind
+    (condition
+     (proclaim `(ftype ,(type-specifier type) ,name)))
+    (class
+     (when (eq (info :function :where-from name) :assumed)
+       (sb-c:proclaim-ftype name type nil :defined)))))
 
-    (defun preinform-compiler-about-accessors (kind readers writers)
-      (flet ((inform (names type)
-               (mapc (lambda (name) (proclaim-ftype-for-name kind name type))
-                     names)))
-        (inform readers reader-function-type)
-        (inform writers writer-function-type)))
+(defun preinform-compiler-about-accessors (kind readers writers)
+  (dolist (reader readers)
+    (proclaim-ftype-for-name kind reader (specifier-type '(function (t) t))))
+  (dolist (writer writers)
+    (proclaim-ftype-for-name kind writer (specifier-type '(function (t t) t)))))
 
-    (defun preinform-compiler-about-slot-functions (kind slots)
-      (flet ((inform (slots key type)
-               (mapc (lambda (slot)
-                       (let ((name (funcall key slot)))
-                         (proclaim-ftype-for-name kind name type)))
-                     slots)))
-        (inform slots #'sb-pcl::slot-reader-name reader-function-type)
-        (inform slots #'sb-pcl::slot-boundp-name reader-function-type)
-        (inform slots #'sb-pcl::slot-makunbound-name reader-function-type)
-        (inform slots #'sb-pcl::slot-writer-name writer-function-type)))))
+(defun preinform-compiler-about-slot-functions (kind slots)
+  (dolist (slot slots)
+    (macrolet ((frob (accessor type)
+                 `(proclaim-ftype-for-name kind
+                                           (,accessor slot)
+                                           (specifier-type ',type))))
+      (frob sb-pcl::slot-reader-name (function (t) t))
+      (frob sb-pcl::slot-boundp-name (function (t) t))
+      (frob sb-pcl::slot-makunbound-name (function (t) t))
+      (frob sb-pcl::slot-writer-name (function (t t) t)))))
 
 (defun %%compiler-defclass (name readers writers slots)
   ;; ANSI says (Macro DEFCLASS, section 7.7) that DEFCLASS, if it
@@ -295,6 +291,11 @@
                                 ~S in DEFCLASS ~S."
                                key name class-name))
              (push val (getf others key)))
+            ;; While any option can be passed to slot definitions, MOP
+            ;; says :INITARGs are passed as a list to :INITARGS for
+            ;; slot-definitions, so this will be just shadowed.
+            (:initargs
+             (warn "~s can't be used as a slot option" key))
             (otherwise
              ;; For non-standard options multiple entries go in a list
              (push val (getf others key))))))

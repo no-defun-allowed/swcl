@@ -3554,7 +3554,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
     }
 
     if (GC_LOGGING) fprintf(gc_activitylog(), "begin scavenge static roots\n");
-    heap_scavenge((lispobj*)NIL_SYMBOL_SLOTS_START, (lispobj*)NIL_SYMBOL_SLOTS_END);
+    heap_scavenge(NIL_SYMBOL_SLOTS_START, NIL_SYMBOL_SLOTS_END);
     heap_scavenge((lispobj*)STATIC_SPACE_OBJECTS_START, static_space_free_pointer);
 #ifdef LISP_FEATURE_PERMGEN
     // Remembered objects below the core permgen end, and all objects above it, are roots.
@@ -3564,10 +3564,6 @@ garbage_collect_generation(generation_index_t generation, int raise,
         lispobj* o = native_pointer(permgen_remset[i]);
         heap_scavenge(o, object_size(o)+o);
     }
-#endif
-#ifdef LISP_FEATURE_LINKAGE_SPACE
-    extern void scavenge_elf_linkage_space();
-    scavenge_elf_linkage_space();
 #endif
 #ifndef LISP_FEATURE_IMMOBILE_SPACE
     // TODO: use an explicit remembered set of modified objects in this range
@@ -4360,10 +4356,16 @@ void zero_all_free_ranges() /* called only by gc_and_save() */
         char* start = page_address(i);
         char* page_end = start + GENCGC_PAGE_BYTES;
         start += page_bytes_used(i);
+
+#ifdef LISP_FEATURE_WIN32
+        if(!page_bytes_used(i))
+            os_commit_memory(page_address(i), npage_bytes(1));
+#endif
         memset(start, 0, page_end-start);
     }
-#ifndef LISP_FEATURE_SB_THREAD
+#if !defined LISP_FEATURE_X86_64 && !defined LISP_FEATURE_SB_THREAD
     // zero the allocation regions at the start of static-space
+    // (Note x86-64 uses alloc regions in 'struct thread' with or without #+sb-thread)
     // This gets a spurious warning:
     //   warning: 'memset' offset [0, 71] is out of the bounds [0, 0] [-Warray-bounds]
     // which 'volatile' works around.
@@ -4696,7 +4698,7 @@ static int verify_headered_object(lispobj* object, sword_t nwords,
     if (instanceoid_widetag_p(widetag)) {
         lispobj layout = layout_of(object);
         if (layout) {
-            CHECK(layout, object);
+          CHECK(layout, (lispobj*)&layout_of(object));
             struct bitmap bitmap = get_layout_bitmap(LAYOUT(layout));
             if (lockfree_list_node_layout_p(LAYOUT(layout))) {
                 // These objects might have _two_ untagged references -
@@ -4960,7 +4962,7 @@ int verify_heap(__attribute__((unused)) lispobj* cur_thread_approx_stackptr,
     if (verbose)
         fprintf(stderr, " [static]");
     // Just don't worry about NIL, it's seldom the problem
-    // if (verify(NIL_SYMBOL_SLOTS_START, (lispobj*)NIL_SYMBOL_SLOTS_END, &state, 0)) goto out;
+    // if (verify(NIL_SYMBOL_SLOTS_START, NIL_SYMBOL_SLOTS_END, &state, 0)) goto out;
     if (verify(STATIC_SPACE_OBJECTS_START, static_space_free_pointer, &state, 0)) goto out;
     if (verbose)
         fprintf(stderr, " [permgen]");
@@ -4979,17 +4981,17 @@ int verify_heap(__attribute__((unused)) lispobj* cur_thread_approx_stackptr,
     return state.nerrors;
 }
 
-void gc_show_pte(lispobj obj)
+void gc_show_pte(lispobj obj, FILE* f)
 {
     char marks[1+CARDS_PER_PAGE];
     page_index_t page = find_page_index((void*)obj);
     if (page>=0) {
-        printf("page %"PAGE_INDEX_FMT" base %p gen %d type %x ss %p used %x",
+        fprintf(f, "page %"PAGE_INDEX_FMT" base %p gen %d type %x ss %p used %x",
                page, page_address(page), page_table[page].gen, page_table[page].type,
                page_scan_start(page), page_bytes_used(page));
-        if (page_starts_contiguous_block_p(page)) printf(" startsblock");
-        if (page_ends_contiguous_block_p(page, page_table[page].gen)) printf(" endsblock");
-        printf(" (%s)\n", page_card_mark_string(page, marks));
+        if (page_starts_contiguous_block_p(page)) fprintf(f, " startsblock");
+        if (page_ends_contiguous_block_p(page, page_table[page].gen)) fprintf(f, " endsblock");
+        fprintf(f, " (%s)\n", page_card_mark_string(page, marks));
         return;
     }
 #ifdef LISP_FEATURE_IMMOBILE_SPACE
@@ -5001,7 +5003,7 @@ void gc_show_pte(lispobj obj)
         int i;
         for (i=0;i<8;++i) genstring[i] = (gens & (1<<i)) ? '0'+i : '-';
         genstring[8] = 0;
-        printf("page %d (v) base %p gens %s ss=%p%s\n",
+        fprintf(f, "page %d (v) base %p gens %s ss=%p%s\n",
                (int)page, text_page_address(page), genstring,
                text_page_scan_start(page),
                card_markedp((void*)obj)?"":" WP");
@@ -5009,14 +5011,14 @@ void gc_show_pte(lispobj obj)
     }
     page = find_fixedobj_page_index((void*)obj);
     if (page>=0) {
-        printf("page %d (f) align %d gens %x%s\n", (int)page,
+        fprintf(f, "page %d (f) align %d gens %x%s\n", (int)page,
                fixedobj_pages[page].attr.parts.obj_align,
                fixedobj_pages[page].attr.parts.gens_,
                card_markedp((void*)obj)?"": " WP");
         return;
     }
 #endif
-    printf("not in GC'ed space\n");
+    fprintf(f, "not in GC'ed space\n");
 }
 
 static int count_immobile_objects(__attribute__((unused)) int gen, int res[3])

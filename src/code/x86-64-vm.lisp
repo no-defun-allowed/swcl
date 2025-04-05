@@ -18,11 +18,15 @@
 (define-alien-routine ("os_context_float_register_addr" context-float-register-addr)
   (* unsigned) (context (* os-context-t)) (index int))
 
+#+linux
+(define-alien-routine ("os_context_ymm_register_addr" context-ymm-register-addr)
+    (* unsigned) (context (* os-context-t)) (index int))
+
 ;;; This is like CONTEXT-REGISTER, but returns the value of a float
 ;;; register. FORMAT is the type of float to return.
 
-(defun context-float-register (context index format)
-  (declare (ignorable context index))
+(defun context-float-register (context index format &optional integer)
+  (declare (ignorable context index integer))
   #-(or darwin linux openbsd win32 sunos (and freebsd x86-64))
   (progn
     (warn "stub CONTEXT-FLOAT-REGISTER")
@@ -31,15 +35,24 @@
   (let ((sap (alien-sap (context-float-register-addr context index))))
     (ecase format
       (single-float
-       (sap-ref-single sap 0))
+       (if integer
+           (values (sap-ref-32 sap 0) 4)
+           (sap-ref-single sap 0)))
       (double-float
-       (sap-ref-double sap 0))
+       (if integer
+           (values (sap-ref-64 sap 0) 8)
+           (sap-ref-double sap 0)))
       (complex-single-float
        (complex (sap-ref-single sap 0)
                 (sap-ref-single sap 4)))
       (complex-double-float
-       (complex (sap-ref-double sap 0)
-                (sap-ref-double sap 8)))
+       (if integer
+           (values (dpb (sap-ref-64 sap 8)
+                        (byte 64 64)
+                        (sap-ref-64 sap 0))
+                   16)
+           (complex (sap-ref-double sap 0)
+                    (sap-ref-double sap 8))))
       #+sb-simd-pack
       (simd-pack-int
        (%make-simd-pack-ub64
@@ -59,29 +72,44 @@
         (sap-ref-double sap 8)))
       #+sb-simd-pack-256
       (simd-pack-256-int
-       (%make-simd-pack-256-ub64
-        (sap-ref-64 sap 0)
-        (sap-ref-64 sap 8)
-        (sap-ref-64 sap 16)
-        (sap-ref-64 sap 24)))
+       (let ((saph #+linux (alien-sap (context-ymm-register-addr context index))
+                   #-linux sap)) ;; Unimplemented
+         (if integer
+             (values (dpb (dpb (sap-ref-64 saph 8)
+                               (byte 64 64)
+                               (sap-ref-64 saph 0))
+                          (byte 128 128)
+                          (dpb (sap-ref-64 sap 8)
+                               (byte 64 64)
+                               (sap-ref-64 sap 0)))
+                     32)
+             (%make-simd-pack-256-ub64
+              (sap-ref-64 sap 0)
+              (sap-ref-64 sap 8)
+              (sap-ref-64 saph 0)
+              (sap-ref-64 saph 8)))))
       #+sb-simd-pack-256
       (simd-pack-256-single
-       (%make-simd-pack-256-single
-        (sap-ref-single sap 0)
-        (sap-ref-single sap 4)
-        (sap-ref-single sap 8)
-        (sap-ref-single sap 12)
-        (sap-ref-single sap 16)
-        (sap-ref-single sap 20)
-        (sap-ref-single sap 24)
-        (sap-ref-single sap 28)))
+       (let ((saph #+linux (alien-sap (context-ymm-register-addr context index))
+                   #-linux sap))
+         (%make-simd-pack-256-single
+          (sap-ref-single sap 0)
+          (sap-ref-single sap 4)
+          (sap-ref-single sap 8)
+          (sap-ref-single sap 12)
+          (sap-ref-single saph 0)
+          (sap-ref-single saph 4)
+          (sap-ref-single saph 8)
+          (sap-ref-single saph 12))))
       #+sb-simd-pack-256
       (simd-pack-256-double
-       (%make-simd-pack-256-double
-        (sap-ref-double sap 0)
-        (sap-ref-double sap 8)
-        (sap-ref-double sap 16)
-        (sap-ref-double sap 24))))))
+       (let ((saph #+linux (alien-sap (context-ymm-register-addr context index))
+                   #-linux sap))
+         (%make-simd-pack-256-double
+          (sap-ref-double sap 0)
+          (sap-ref-double sap 8)
+          (sap-ref-double saph 0)
+          (sap-ref-double saph 8)))))))
 
 (defun %set-context-float-register (context index format value)
   (declare (ignorable context index format))
@@ -160,6 +188,10 @@
 (define-alien-routine ("os_context_fp_control" context-floating-point-modes)
     (unsigned 32)
   (context (* os-context-t)))
+#+linux
+(define-alien-routine ("os_context_set_fp_control" context-set-floating-point-modes) void
+  (context (* os-context-t))
+  (value (unsigned 32)))
 
 (define-alien-routine
     ("arch_get_fp_modes" floating-point-modes) (unsigned 32))
@@ -264,23 +296,6 @@
       (set-context-pc context (sap-ref-word (int-sap fun-addr)
                                             (- (ash simple-fun-self-slot word-shift)
                                                fun-pointer-lowtag))))))
-
-(defun validate-asm-routine-vector ()
-  ;; If the jump table in static space does not match the jump table
-  ;; in *assembler-routines*, fix the one one in static space.
-  ;; It's OK that this is delayed until startup, because code pertinent to
-  ;; core restart always uses relative jumps to asm code.
-  #+immobile-space
-  (let* ((code sb-fasl:*assembler-routines*)
-         (external-table (truly-the (simple-array word (*))
-                                    sb-fasl::*asm-routine-vector*))
-         (insts (code-instructions code))
-         (n (sb-impl::hash-table-%count (sb-fasl::%asm-routine-table code))))
-    (declare (optimize (insert-array-bounds-checks 0)))
-    (dotimes (i n)
-      (unless (= (aref external-table i) 0)
-        (setf (aref external-table i)
-              (sap-ref-word insts (truly-the index (ash (1+ i) word-shift))))))))
 
 (defconstant cf-bit 0)
 (defconstant sf-bit 7)

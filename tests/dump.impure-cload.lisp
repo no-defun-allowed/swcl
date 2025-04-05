@@ -12,7 +12,8 @@
 ;;;; more information.
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  (load "compiler-test-util.lisp"))
+  (load "compiler-test-util.lisp")
+  (setf *print-circle* t))
 
 (declaim (optimize (debug 3) (speed 2) (space 1)))
 (declaim (muffle-conditions compiler-note))
@@ -344,12 +345,14 @@
 
 ;; Track the make-load-form FOPs as they fly by at load-time.
 (defvar *call-tracker* nil)
+(defvar *fop-funs*
+  (car (ctu:find-code-constants #'sb-fasl::load-fasl-group :type '(simple-vector 128))))
 (dolist (fop-name '(sb-fasl::fop-instance))
-  (let* ((index (position fop-name sb-fasl::**fop-funs**
+  (let* ((index (position fop-name *fop-funs*
                           :key
                           (lambda (x) (and (functionp x) (sb-kernel:%fun-name x)))))
-         (fun (aref sb-fasl::**fop-funs** index)))
-    (setf (aref sb-fasl::**fop-funs** index)
+         (fun (aref *fop-funs* index)))
+    (setf (aref *fop-funs* index)
           (lambda (&rest args)
             (push fop-name *call-tracker*)
             (apply fun args)))))

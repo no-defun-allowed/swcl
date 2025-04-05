@@ -18,6 +18,30 @@
                  (+ nil-value (static-symbol-offset symbol) offset)
                  (make-fixup symbol :immobile-symbol offset)))))
 
+(defun mark-gc-card (addr-or-card-index &optional (compute t) (pseudo-atomic-slow-path t))
+  #-log-card-marks (declare (ignore pseudo-atomic-slow-path))
+  (when compute
+    (inst shr addr-or-card-index gencgc-card-shift)
+    ;; :DWORD suffices because gc_allocate_ptes() asserts mask to be < 32 bits
+    (inst and :dword addr-or-card-index card-index-mask))
+  #-log-card-marks
+  (inst mov :byte (ea gc-card-table-reg-tn addr-or-card-index) CARD-MARKED)
+  #+log-card-marks
+  (let ((CLEAN (gen-label)) (BACK (gen-label)))
+    ;; Slow-path if the card is clean and needs to be dirtied.
+    (inst cmp :byte (ea gc-card-table-reg-tn addr-or-card-index) CARD-MARKED)
+    (inst jmp :ne CLEAN)
+    (emit-label BACK)
+    (assemble (:elsewhere)
+      (emit-label CLEAN)
+      (inst push addr-or-card-index)
+      (inst call (ea (make-fixup
+                      (if pseudo-atomic-slow-path
+                          'dirty-card-tramp
+                          'dirty-card-tramp/no-pseudo-atomic)
+                      :assembly-routine)))
+      (inst jmp BACK))))
+
 ;;; TODOs:
 ;;; 1. Sometimes people write constructors like
 ;;;     (defun make-foo (&key a b c)
@@ -45,29 +69,7 @@
                (inst lea scratch-reg cell-address)
                ;; OBJECT could be a symbol in immobile space
                (inst mov scratch-reg (encode-value-if-immediate object)))
-           (inst shr scratch-reg gencgc-card-shift)
-           ;; gc_allocate_ptes() asserts mask to be < 32 bits, which is hugely generous.
-           (inst and :dword scratch-reg card-index-mask)
-           ;; I wanted to use thread-tn as the source of the store, but it isn't 256-byte-aligned
-           ;; due to presence of negatively indexed thread header slots.
-           ;; Probably word-alignment is enough, because we can just check the lowest bit,
-           ;; borrowing upon the idea from PSEUDO-ATOMIC which uses RBP-TN as the source.
-           ;; I'd like to measure to see if using a register is actually better.
-           ;; If all threads store 0, it might be easier on the CPU's store buffer.
-           ;; Otherwise, it has to remember who "wins". 0 makes it indifferent.
-           #-log-card-marks
-           (inst mov :byte (ea gc-card-table-reg-tn scratch-reg) CARD-MARKED)
-           #+log-card-marks
-          (let ((CLEAN (gen-label)) (BACK (gen-label)))
-            ;; Slow-path if the card is clean and needs to be dirtied.
-            (inst cmp :byte (ea gc-card-table-reg-tn scratch-reg) CARD-MARKED)
-            (inst jmp :ne CLEAN)
-            (emit-label BACK)
-            (assemble (:elsewhere)
-              (emit-label CLEAN)
-              (inst push scratch-reg)
-              (inst call (ea (make-fixup 'dirty-card-tramp :assembly-routine)))
-              (inst jmp BACK))))
+           (mark-gc-card scratch-reg))
           #+debug-gc-barriers
           (t
            (flet ((encode (x)
@@ -94,14 +96,12 @@
 #-soft-card-marks
 (defun emit-code-page-gengc-barrier (object scratch-reg)
   (inst mov scratch-reg object)
-  (inst shr scratch-reg gencgc-card-shift)
-  (inst and :dword scratch-reg card-index-mask)
-  (inst mov :byte (ea gc-card-table-reg-tn scratch-reg) CARD-MARKED))
+  (mark-gc-card scratch-reg))
 
 (defun emit-store (ea value val-temp &optional (tag-immediate t))
   (sc-case value
    (immediate
-      (let ((bits (encode-value-if-immediate value tag-immediate)))
+      (let ((bits (immediate-tn-repr value tag-immediate)))
         ;; Try to move imm-to-mem if BITS fits
         (acond ((or (and (fixup-p bits)
                          ;; immobile-object fixups must fit in 32 bits
@@ -110,7 +110,7 @@
                     (plausible-signed-imm32-operand-p bits))
                 (inst mov :qword ea it))
                (t
-                (inst mov val-temp bits)
+                (move-immediate val-temp bits)
                 (inst mov ea val-temp)))))
    (constant
       (inst mov val-temp value)
@@ -159,22 +159,6 @@
       (move result value)
       (inst neg result)))
     (inst xadd :lock (object-slot-ea object offset lowtag) result)))
-
-(define-vop (atomic-inc-symbol-global-value cell-xadd)
-  (:translate %atomic-inc-symbol-global-value)
-  ;; The function which this vop translates will not
-  ;; be used unless the variable is proclaimed as fixnum.
-  ;; All stores are checked in a safe policy, so this
-  ;; vop is safe because it increments a known fixnum.
-  (:policy :fast-safe)
-  (:arg-types * tagged-num)
-  (:variant symbol-value-slot other-pointer-lowtag))
-
-(define-vop (atomic-dec-symbol-global-value cell-xsub)
-  (:translate %atomic-dec-symbol-global-value)
-  (:policy :fast-safe)
-  (:arg-types * tagged-num)
-  (:variant symbol-value-slot other-pointer-lowtag))
 
 (macrolet
     ((def-atomic (fun-name inherit slot)
@@ -237,13 +221,13 @@
           ;; to select byte 1 of the header word.
           (ash 1 (- stable-hash-required-flag 8)))))
 
-(defmacro compute-splat-bits (value)
+(defun compute-splat-bits (value)
   ;; :SAFE-DEFAULT means any unspecific value that is safely a default.
   ;; Heap allocation uses 0 since that costs nothing.
   ;; If the user wanted a specific value, it could have been explicitly given.
-  `(if (typep ,value 'sb-vm:word)
-       ,value
-       (case ,value
+  (if (typep value 'sb-vm:word)
+      value
+      (case value
          (:unbound (unbound-marker-bits))
          ((nil) (bug "Should not see SPLAT NIL"))
          (t #+ubsan unwritten-vector-element-marker
@@ -252,6 +236,9 @@
 ;;; This logic was formerly in ALLOCATE-VECTOR-ON-STACK.
 ;;; Choosing amongst 3 vops gets potentially better register allocation
 ;;; by not wasting registers in the cases that don't use them.
+;;; (Actually now that :UNUSED-IF is an option, these can probably
+;;; all be combined into one vop which can indicate which temps aren't
+;;; used. When these vops were first written, it wasn't an option)
 (define-vop (splat-word)
   (:policy :fast-safe)
   (:translate splat)
@@ -261,29 +248,33 @@
   (:results (result :scs (descriptor-reg)))
   (:generator 1
    (progn words) ; don't put it in :ignore, which gets inherited
-   (inst mov :qword
-         (ea (- (* vector-data-offset n-word-bytes) other-pointer-lowtag) vector)
-         (compute-splat-bits value))
+   (let ((bits (compute-splat-bits value)))
+     (when (integerp bits)
+       ;; it's gonna get treated as simm32 by the CPU, so it had better be
+       (aver (plausible-signed-imm32-operand-p bits)))
+     (inst mov :qword
+           (ea (- (* vector-data-offset n-word-bytes) other-pointer-lowtag) vector)
+           bits))
    (move result vector)))
 
 (define-vop (splat-small splat-word)
   (:arg-types * (:constant (integer 2 10)) (:constant t))
-  (:temporary (:sc complex-double-reg) zero)
+  (:temporary (:sc complex-double-reg) pattern)
   (:generator 5
    (let ((bits (compute-splat-bits value)))
-     (if (= bits 0)
-         (inst xorpd zero zero)
-         (inst movdqa zero
-               (register-inline-constant :oword (logior (ash bits 64) bits)))))
+     (cond ((= bits nil-value)
+            (inst movaps pattern (ea (- nil-value list-pointer-lowtag))))
+           ((/= bits 0) (inst movddup pattern (register-inline-constant :qword bits)))
+           (t (inst xorps pattern pattern))))
    (let ((data-addr (ea (- (* vector-data-offset n-word-bytes) other-pointer-lowtag)
                         vector)))
-     (multiple-value-bind (double single) (truncate words 2)
-       (dotimes (i double)
-         (inst movapd data-addr zero)
+     (multiple-value-bind (quo rem) (truncate words 2)
+       (dotimes (i quo)
+         (inst movaps data-addr pattern) ; 1 byte shorter encoding than movapd
          (setf data-addr (ea (+ (ea-disp data-addr) (* n-word-bytes 2))
                              (ea-base data-addr))))
-       (unless (zerop single)
-         (inst movaps data-addr zero))))
+       (unless (zerop rem)
+         (inst movsd data-addr pattern))))
    (move result vector)))
 
 (define-vop (splat-any splat-word)

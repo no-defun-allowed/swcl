@@ -2,7 +2,7 @@ freebsd_build_task:
 
   freebsd_instance:
     matrix:
-      image_family: freebsd-14-0
+      image_family: freebsd-14-2
     cpu: 1
     memory: 1G
 
@@ -19,21 +19,21 @@ freebsd_build_task:
   ansi_test_script:
     - cd tests; ./ansi-tests.sh
 
-task:
-  name: Linux arm64
-  arm_container:
-    image: gcc:latest
-    cpu: 1
-    memory: 2G
-  install_script:
-    - apt-get -qq update
-    - apt-get -qq -y install sbcl strace libzstd-dev
-  build_script:
-    - echo '"1.9.99.999"' > version.lisp-expr
-    - ./make.sh --with-sb-core-compression
+# task:
+#   name: Linux arm64
+#   arm_container:
+#     image: gcc:latest
+#     cpu: 1
+#     memory: 2G
+#   install_script:
+#     - apt-get -qq update
+#     - apt-get -qq -y install sbcl strace libzstd-dev
+#   build_script:
+#     - echo '"1.9.99.999"' > version.lisp-expr
+#     - ./make.sh --with-sb-core-compression
 
-  test_script:
-    - cd tests; ./run-tests.sh --slow
+#   test_script:
+#     - cd tests; ./run-tests.sh --slow
 
-  ansi_test_script:
-    - cd tests; ./ansi-tests.sh
+#   ansi_test_script:
+#     - cd tests; ./ansi-tests.sh

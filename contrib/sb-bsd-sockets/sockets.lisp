@@ -114,8 +114,16 @@ directly instantiated.")))
 
 (defmethod socket-connect ((socket socket) &rest peer)
   (with-socket-fd-and-addr (fd sockaddr size peer) socket
-    (socket-error-case ("connect" (sockint::connect fd sockaddr size))
-        socket)))
+    (cond ((= (sb-bsd-sockets-internal::connect fd sockaddr size) -1)
+           (let ((errno (socket-errno)))
+             (cond ((= errno sb-bsd-sockets-internal::eintr)
+                    (loop until (sb-unix:unix-simple-poll fd :output -1))
+                    (when (= (sockopt-error socket) -1)
+                      (socket-error "connect"))
+                    socket)
+                   (t
+                    (socket-error "connect" errno)))))
+          (t socket))))
 
 (defmethod socket-peername ((socket socket))
   (with-socket-fd-and-addr (fd sockaddr size) socket
@@ -345,7 +353,7 @@ request an input stream and get an output stream in response\)."
 (define-socket-condition sockint::EOPNOTSUPP operation-not-supported-error)
 (define-socket-condition sockint::EPERM operation-not-permitted-error)
 (define-socket-condition sockint::EPROTONOSUPPORT protocol-not-supported-error)
-(define-socket-condition sockint::ESOCKTNOSUPPORT socket-type-not-supported-error)
+#-haiku (define-socket-condition sockint::ESOCKTNOSUPPORT socket-type-not-supported-error)
 (define-socket-condition sockint::ENETUNREACH network-unreachable-error)
 (define-socket-condition sockint::ENOTCONN not-connected-error)
 (define-socket-condition sockint::EAFNOSUPPORT address-family-not-supported)

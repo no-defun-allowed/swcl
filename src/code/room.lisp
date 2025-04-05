@@ -81,6 +81,8 @@
 
 (defconstant-eqx +heap-spaces+
   '((:dynamic   "Dynamic space"   dynamic-usage)
+    #-immobile-space
+    (:text      "Text space"      sb-kernel::text-space-usage)
     #+immobile-space
     (:immobile  "Immobile space"  sb-kernel::immobile-space-usage)
     (:read-only "Read-only space" sb-kernel::read-only-space-usage)
@@ -123,8 +125,7 @@
       (:fixed
        (bounds fixedobj-space-start
                (sap-int *fixedobj-space-free-pointer*)))
-      #+immobile-space
-      (:variable
+      (:text
        (bounds text-space-start
                (sap-int *text-space-free-pointer*)))
       (:dynamic
@@ -249,16 +250,14 @@
 ;;; MAP-ALLOCATED-OBJECTS
 (define-alien-variable "next_free_page" sb-kernel::page-index-t)
 
-#+immobile-space
-(progn
-(deftype immobile-subspaces () '(member :fixed :variable))
+(deftype immobile-subspaces () '(member :fixed :text))
 (declaim (ftype (sfunction (function &rest immobile-subspaces) null)
                 map-immobile-objects))
 (defun map-immobile-objects (function &rest subspaces) ; Perform no filtering
   (declare (dynamic-extent function))
   (do-rest-arg ((subspace) subspaces)
     (multiple-value-bind (start end) (%space-bounds subspace)
-      (map-objects-in-range function start end)))))
+      (map-objects-in-range function start end))))
 
 #|
 MAP-ALLOCATED-OBJECTS is fundamentally unsafe to use if the user-supplied
@@ -313,6 +312,7 @@ We could try a few things to mitigate this:
      (map-allocated-objects fun
                             :read-only :static
                             #+immobile-space :immobile
+                            #-immobile-space :text
                             :dynamic)))
   ;; You can't specify :ALL and also a list of spaces. Check that up front.
   (do-rest-arg ((space) spaces) (the spaces space))
@@ -330,10 +330,14 @@ We could try a few things to mitigate this:
              ;; of contiguous allocations.
              (multiple-value-bind (start end) (%space-bounds space)
                                   (map-objects-in-range fun start end)))
+            #-immobile-space
+            (:text
+             (with-system-mutex (*allocator-mutex*)
+               (map-immobile-objects fun :text)))
             #+immobile-space
             (:immobile
              (with-system-mutex (*allocator-mutex*)
-               (map-immobile-objects fun :variable))
+               (map-immobile-objects fun :text))
              ;; Filter out padding words
              (dx-flet ((filter (obj type size)
                          (unless (= type list-pointer-lowtag)
@@ -447,6 +451,10 @@ We could try a few things to mitigate this:
 
 ;;;; MEMORY-USAGE
 
+#-immobile-space
+(defun sb-kernel::text-space-usage ()
+  (- (sap-int *text-space-free-pointer*) text-space-start))
+
 #+immobile-space
 (progn
 (declaim (ftype (function (immobile-subspaces) (values t t t &optional))
@@ -471,7 +479,7 @@ We could try a few things to mitigate this:
           (setq hole-bytes (- used-bytes sum-sizes))))
     (values holes hole-bytes used-bytes)))
 
-(defun show-fragmentation (&key (subspaces '(:fixed :variable))
+(defun show-fragmentation (&key (subspaces '(:fixed :text))
                                 (stream *standard-output*))
   (dolist (subspace subspaces)
     (format stream "~(~A~) subspace fragmentation:~%" subspace)
@@ -488,7 +496,7 @@ We could try a few things to mitigate this:
   (binding* (((nil fixed-hole-bytes fixed-used-bytes)
               (immobile-fragmentation-information :fixed))
              ((nil variable-hole-bytes variable-used-bytes)
-              (immobile-fragmentation-information :variable))
+              (immobile-fragmentation-information :text))
              (total-used-bytes (+ fixed-used-bytes variable-used-bytes))
              (total-hole-bytes (+ fixed-hole-bytes variable-hole-bytes)))
     (values total-used-bytes total-hole-bytes)))
@@ -646,10 +654,11 @@ We could try a few things to mitigate this:
   (let ((totals (make-hash-table :test 'eq))
         (total-objects 0)
         (total-bytes 0))
-    (declare (unsigned-byte total-objects total-bytes))
+    (declare (type word total-objects total-bytes))
     (map-allocated-objects
      (lambda (obj type size)
-       (declare (optimize (speed 3)))
+       (declare (optimize (speed 3))
+                (type word size))
        (when (or (eql type instance-widetag)
                  (eql type funcallable-instance-widetag))
          (incf total-objects)
@@ -662,11 +671,33 @@ We could try a few things to mitigate this:
                                 (return)
                                 (layout-classoid layout)))
                   (found (ensure-gethash classoid totals (cons 0 0)))
-                  (size size))
-             (declare (fixnum size))
-             (incf total-bytes size)
+                  ;; Include the space used for slot vector for PCL
+                  ;; instances.
+                  (logical-size
+                    (cond ((hash-table-p obj)
+                           (let ((size size))
+                             (when (plusp (sb-impl::hash-table-%count obj))
+                               (incf (truly-the word size) (primitive-object-size (sb-impl::hash-table-pairs obj)))
+                               (incf (truly-the word size) (primitive-object-size (sb-impl::hash-table-index-vector obj)))
+                               (let ((next (sb-impl::hash-table-next-vector obj))
+                                     (hash (sb-impl::hash-table-hash-vector obj)))
+                                 (when (> (length next) 0)
+                                   (incf (truly-the word size) (primitive-object-size next)))
+                                 (when hash
+                                   (incf (truly-the word size) (primitive-object-size hash)))))
+                             size))
+                          ((not (%pcl-instance-p obj))
+                           size)
+                          ((funcallable-instance-p obj)
+                           (let ((slots (%funcallable-instance-info obj 0)))
+                             (+ size (primitive-object-size slots))))
+                          (t
+                           (let ((slots (%instance-ref obj sb-vm:instance-data-start)))
+                             (+ size (primitive-object-size slots)))))))
+             (declare (type word logical-size))
+             (incf total-bytes logical-size)
              (incf (the fixnum (car found)))
-             (incf (the fixnum (cdr found)) size)))))
+             (incf (the fixnum (cdr found)) logical-size)))))
      space)
     (let* ((sorted (sort (%hash-table-alist totals) #'> :key #'cddr))
            (interesting (if top-n
@@ -693,14 +724,17 @@ We could try a few things to mitigate this:
       (flet ((type-usage (type objects bytes)
                (etypecase type
                  (string
-                  (format t "  ~V@<~A~> ~V:D bytes, ~V:D object~:P.~%"
-                          (1+ types-width) type bytes-width bytes
-                          objects-width objects))
+                  (format t "  ~V@<~A~>" (1+ types-width) type))
                  (classoid
-                  (format t "  ~V@<~/sb-ext:print-symbol-with-prefix/~> ~
-                             ~V:D bytes, ~V:D object~:P.~%"
-                          (1+ types-width) (classoid-name type) bytes-width bytes
-                          objects-width objects)))))
+                  (format t "  ~V@<~/sb-ext:print-symbol-with-prefix/~>"
+                          (1+ types-width) (classoid-name type))))
+               (format t " ~V:D bytes, ~V:D object~:P "
+                        bytes-width bytes objects-width objects)
+               (let ((avarage-size (/ bytes objects)))
+                 (if (ratiop avarage-size)
+                     (format t "(~,2F per object)" (float avarage-size))
+                     (format t "(~:D per object)" avarage-size)))
+               (format t ".~%")))
         (loop for (type . (objects . bytes)) in interesting
               do (incf printed-bytes bytes)
                  (incf printed-objects objects)
@@ -1182,7 +1216,7 @@ We could try a few things to mitigate this:
       (map-objects-in-range #'show
         (%make-lisp-obj fixedobj-space-start)
         (%make-lisp-obj (sap-int *fixedobj-space-free-pointer*))))
-    (when (or (eq which :variable) (eq which :both))
+    (when (or (eq which :text) (eq which :both))
       (format t "Text space~%=============~%")
       (map-objects-in-range #'show
         (%make-lisp-obj text-space-start)
@@ -1427,25 +1461,29 @@ We could try a few things to mitigate this:
                      (type-of x)
                      (type-of pointee)))))))
 
-(macrolet ((aligned-base (blk)
-             `(align-up (sap-int (sap+ ,blk (* 4 n-word-bytes))) 4096)))
-(defun dump-arena-objects (arena &aux (tot-size 0))
+(defun print-arena-contents (arena)
   (do-arena-blocks (memblk arena)
-    (let ((from (aligned-base memblk))
-          (to (sap-int (arena-memblk-freeptr memblk))))
-      (format t "~&Memory block ~X..~X~%" from to)
+    (let ((base (sap-int (arena-memblk-base memblk)))
+          (free (arena-memblk-freeptr memblk))
+          (limit (arena-memblk-limit memblk)))
+      (format t "Memblk=~X Base=~X Freeptr=~X Limit=~x avail=~x~%"
+              (sap-int memblk) base (sap-int free) (sap-int limit) (sap- limit free))
       (map-objects-in-range
-       (lambda (obj type size)
-         (declare (ignore type))
-         (incf tot-size size)
-         (format t "~x ~s~%" (get-lisp-obj-address obj) (type-of obj)))
-       (%make-lisp-obj from)
-       (%make-lisp-obj to))))
-  tot-size)
+       (lambda (obj widetag size)
+         (let ((where (get-lisp-obj-address obj)))
+           (if (consp obj)
+               (format t " ~7x: (~x ~x)~%" where
+                       (get-lisp-obj-address (car obj))
+                       (get-lisp-obj-address (cdr obj)))
+               (format t " ~7x: ~x ~x~%" where widetag size))))
+       (%make-lisp-obj (sap-int (arena-memblk-base memblk)))
+       (%make-lisp-obj (sap-int (arena-memblk-freeptr memblk)))))))
+
 (defun arena-contents (arena)
   (let ((count 0))
+    ;; pass 1 - just count
     (do-arena-blocks (memblk arena)
-      (let ((base (aligned-base memblk))
+      (let ((base (sap-int (arena-memblk-base memblk)))
             (limit (sap-int (arena-memblk-freeptr memblk))))
         (map-objects-in-range
          (lambda (obj widetag size)
@@ -1453,10 +1491,11 @@ We could try a few things to mitigate this:
            (incf count))
          (%make-lisp-obj base)
          (%make-lisp-obj limit))))
+    ;; pass 2 - collect
     (let ((result (make-array count))
           (index 0))
       (do-arena-blocks (memblk arena)
-        (let ((base (aligned-base memblk))
+        (let ((base (sap-int (arena-memblk-base memblk)))
               (limit (sap-int (arena-memblk-freeptr memblk))))
           (map-objects-in-range
            (lambda (obj widetag size)
@@ -1465,7 +1504,7 @@ We could try a few things to mitigate this:
              (incf count))
            (%make-lisp-obj base)
            (%make-lisp-obj limit))))
-      result)))))
+      result))))
 
 (defun show-hashed-instances ()
   (flet ((foo (legend pred)
@@ -1483,6 +1522,37 @@ We could try a few things to mitigate this:
            (when (and (= type instance-widetag)
                       (= (ldb (byte 2 8) (instance-header-word obj)) 1))
              (format t "~x ~s~%" (get-lisp-obj-address obj) obj))))))
+
+#+sb-thread
+(defun show-all-tls-indexed-symbols ()
+  ;; *FREE-TLS-INDEX* is funky -
+  ;; Shifting turns it from a pointer into a count, taking into consideration
+  ;; that it's not really a tagged fixnum as stored, but only looks that way.
+  (let ((used (make-array (ash *free-tls-index*
+                               (- (- word-shift n-fixnum-tag-bits)))
+                          :element-type 'bit :initial-element 0))
+        (result))
+    (map-allocated-objects
+     (lambda (obj widetag size)
+       (declare (ignore size))
+       (when (= widetag symbol-widetag)
+         (let ((index (symbol-tls-index obj)))
+           (when (plusp index)
+             (push (cons index obj) result)
+             (setf (bit used (ash index (- word-shift))) 1)))))
+     :all)
+    (dolist (x (sort result #'< :key 'car))
+      (format t "~5x ~s~%" (car x) (cdr x)))
+    (format t "Wasted indices:~%")
+    (let ((n 0))
+      (loop for i from thread-lisp-thread-slot below (length used)
+            do (when (zerop (bit used i))
+                 (format t " ~5x" i)
+                 (incf n)
+                 (when (= n 10) ; print this many per line
+                   (terpri)
+                   (setq n 0)))))
+    (terpri)))
 
 (in-package "SB-C")
 ;;; As soon as practical in warm build it makes sense to add

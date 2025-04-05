@@ -97,11 +97,14 @@
                             #-sb-xc-host
                             (declare (muffle-conditions compiler-note))
                             (unaligned-dx-cons nil))))
-                   (declare (dynamic-extent ,map-result))
+                   (declare (dynamic-extent ,map-result)
+                            (no-debug ,map-result))
                    (do-anonymous ((,temp ,map-result) . ,(do-clauses))
                      (,endtest
                       (%rplacd ,temp nil) ;; replace the 0
                       (truly-the list (cdr ,map-result)))
+                     (declare (no-debug ,temp))
+
                      ;; Accumulate using %RPLACD. RPLACD becomes (SETF CDR)
                      ;; which becomes %RPLACD but relies on "defsetfs".
                      ;; This is for effect, not value, so makes no difference.
@@ -394,13 +397,13 @@
          result)))
 
 
-;;; FIXME: once the confusion over doing transforms with known-complex
-;;; arrays is over, we should also transform the calls to (AND (ARRAY
-;;; * (*)) (NOT (SIMPLE-ARRAY * (*)))) objects.
-(deftransform elt ((s i) ((simple-array * (*)) t) *)
+;;; Arrays with a fill-pointer check bounds differently in ELT.
+(deftransform elt ((s i) (simple-array t) *)
   '(aref s i))
 
 (deftransform elt ((s i) (list t) * :policy (< safety 3))
+  (when (eql (lvar-type s) (specifier-type 'null))
+    (give-up-ir1-transform))
   '(nth i s))
 
 (deftransform %setelt ((s i v) ((simple-array * (*)) t t) *)
@@ -1233,65 +1236,66 @@
                                        key
                                        (type-specifier returns)))))))))))
 
-(defun check-sequence-ranges (string start end node &optional (suffix "") sequence-name)
-  (let* ((type (lvar-type string))
-         (lengths (vector-type-lengths type))
-         (annotation (find-if #'lvar-sequence-bounds-annotation-p (lvar-annotations string))))
-    (when annotation
-      (when (shiftf (lvar-annotation-fired annotation) t)
-        (return-from check-sequence-ranges)))
-    (flet ((arg-type (x)
-             (typecase x
-               (constant (ctype-of (constant-value x)))
-               (lvar (lvar-type x))
-               (t (leaf-type x)))))
-      (flet ((check (index name length-type)
-               (when index
-                 (let ((index-type (arg-type index)))
-                   (unless (types-equal-or-intersect index-type
-                                                     (specifier-type length-type))
-                     (let ((*compiler-error-context* node))
-                       (compiler-warn "Bad :~a~a ~a for~a ~a"
-                                      name suffix
-                                      (type-specifier index-type)
-                                      (if sequence-name
-                                          (format nil " for ~a of type" sequence-name)
-                                          suffix)
-                                      (type-specifier type))
-                       t))))))
-        (loop for length in lengths
-              thereis
-              (check start "start" `(integer 0 ,length)))
-        (loop for length in lengths
-              thereis
-              (check end "end" `(or null (integer 0 ,length)))))
-      (when (and start end)
-        (let* ((start-type (arg-type start))
-               (start-interval (type-approximate-interval start-type))
-               (end-type (arg-type end))
-               (end-interval (type-approximate-interval end-type)))
-          (when (and (interval-p start-interval)
-                     (interval-p end-interval)
-                     (interval-< end-interval start-interval))
-            (let ((*compiler-error-context* node))
-              (compiler-warn ":start~a ~a is greater than :end~a ~a"
-                             suffix
-                             (type-specifier start-type)
-                             suffix
-                             (type-specifier end-type)))))))))
+(defun check-sequence-ranges (sequence start end node &key (suffix "") name (warn t))
+  (prog* ((type (lvar-type sequence))
+          (annotation (find-if #'lvar-sequence-bounds-annotation-p (lvar-annotations sequence))))
+     (when annotation
+       (when (shiftf (lvar-annotation-fired annotation) t)
+         (return)))
+     (flet ((arg-type (x)
+              (typecase x
+                (constant (ctype-of (constant-value x)))
+                (lvar (lvar-type x))
+                (t (leaf-type x)))))
+       (flet ((check (index var-name length-type)
+                (when index
+                  (let ((index-type (arg-type index)))
+                    (unless (types-equal-or-intersect index-type
+                                                      (specifier-type length-type))
+                      (let ((*compiler-error-context* node))
+                        (if warn
+                            (compiler-warn "Bad :~a~a ~a for~a ~a"
+                                           var-name suffix
+                                           (type-specifier index-type)
+                                           (if name
+                                               (format nil " for ~a of type" name)
+                                               suffix)
+                                           (type-specifier type))
+                            (return t))))))))
+         (multiple-value-bind (max) (sequence-lvar-dimensions sequence)
+           (when max
+             (check start "start" `(integer 0 ,max)))
+           (when max
+             (check end "end" `(or null (integer 0 ,max))))))
+       (when (and start end)
+         (let* ((start-type (arg-type start))
+                (start-interval (type-approximate-interval start-type))
+                (end-type (arg-type end))
+                (end-interval (type-approximate-interval end-type)))
+           (when (and (interval-p start-interval)
+                      (interval-p end-interval)
+                      (interval-< end-interval start-interval))
+             (let ((*compiler-error-context* node))
+               (if warn
+                   (compiler-warn ":start~a ~a is greater than :end~a ~a"
+                                  suffix
+                                  (type-specifier start-type)
+                                  suffix
+                                  (type-specifier end-type))
+                   (return t)))))))))
 (defoptimizers ir2-hook
     (string=* string<* string>* string<=* string>=*
      %sp-string-compare simple-base-string=
      #+sb-unicode simple-character-string=)
     ((string1 string2 start1 end1 start2 end2) node)
-  (check-sequence-ranges string1 start1 end1 node 1 'string1)
-  (check-sequence-ranges string2 start2 end2 node 2 'string2))
+  (check-sequence-ranges string1 start1 end1 node :suffix 1 :name 'string1)
+  (check-sequence-ranges string2 start2 end2 node :suffix 2 :name 'string2))
 
 (defoptimizers ir2-hook
     (string-equal string-not-equal string-greaterp string-lessp)
     ((string1 string2 &key start1 end1 start2 end2) node)
-  (check-sequence-ranges string1 start1 end1 node 1 'string1)
-  (check-sequence-ranges string2 start2 end2 node 2 'string2))
+  (check-sequence-ranges string1 start1 end1 node :suffix 1 :name 'string1)
+  (check-sequence-ranges string2 start2 end2 node :suffix 2 :name 'string2))
 
 (defoptimizers ir2-hook
     (string-downcase string-upcase
@@ -1334,15 +1338,15 @@
   (check-sequence-ranges sequence start end node))
 
 (defoptimizer (search ir2-hook) ((sub-sequence1 main-sequence2 &key start1 end1 start2 end2 &allow-other-keys) node)
-  (check-sequence-ranges sub-sequence1 start1 end1 node 1 'sub-sequence1)
-  (check-sequence-ranges main-sequence2 start2 end2 node 2 'main-sequence2))
+  (check-sequence-ranges sub-sequence1 start1 end1 node :suffix 1 :name 'sub-sequence1)
+  (check-sequence-ranges main-sequence2 start2 end2 node :suffix 2 :name 'main-sequence2))
 
 (defoptimizer (mismatch ir2-hook) ((sequence1 sequence2 &key start1 end1 start2 end2 &allow-other-keys) node)
-  (check-sequence-ranges sequence1 start1 end1 node 1 'sequence1)
-  (check-sequence-ranges sequence2 start2 end2 node 2 'sequence2))
+  (check-sequence-ranges sequence1 start1 end1 node :suffix 1 :name 'sequence1)
+  (check-sequence-ranges sequence2 start2 end2 node :suffix 2 :name 'sequence2))
 
-(defoptimizer (vector-subseq* ir2-hook) ((vector start end) node)
-  (check-sequence-ranges vector start end node))
+(defoptimizers ir2-hook (vector-subseq* list-subseq*) ((sequence start end) node)
+  (check-sequence-ranges sequence start end node))
 
 (defoptimizers ir2-hook (%member-key-test)
     ((item list key test) node)
@@ -1350,6 +1354,11 @@
 
 (defoptimizers ir2-hook (%member-key-eq %member-key) ((item list key) node)
   (check-sequence-test item list nil key node))
+
+(defoptimizers ir2-hook
+    (read-sequence write-sequence write-string)
+    ((sequence stream &key start end) node)
+  (check-sequence-ranges sequence start end node))
 
 (defun string-cmp-deriver (string1 string2 start1 end1 start2 end2 &optional equality)
   (flet ((dims (string start end)
@@ -1491,8 +1500,8 @@
                      (declare (optimize (insert-array-bounds-checks 0)))
                      (setf (aref seq1 i) (data-vector-ref seq2 j))))
                  (up ()
-                   '(do ((i start1 (1+ i))
-                         (j start2 (1+ j))
+                   '(do ((i start1 (truly-the index (1+ i)))
+                         (j start2 (truly-the index (1+ j)))
                          (end (+ start1 replace-len)))
                      ((>= i end))
                      (declare (optimize (insert-array-bounds-checks 0)))
@@ -1531,6 +1540,33 @@
                 node)
                (transform-replace t node)))
          (give-up-ir1-transform)))))
+
+;;; replace + reverse
+(deftransform replace ((seq1 seq2)
+                       ((or null (simple-array * (*))) list) *
+                       :node node)
+  (upgraded-element-type-specifier-or-give-up seq1)
+  (cond ((and (lvar-matches seq2 :fun-names '(reverse sb-impl::list-reverse))
+              ;; Nothing should be modifying the original sequence
+              (almost-immediately-used-p seq2 (lvar-use seq2)
+                                         :flushable t))
+         (splice-fun-args seq2 :any 1)
+         `(when seq1
+            (let* ((list-length (length seq2))
+                   (vector-length (length seq1))
+                   (diff (- list-length vector-length)))
+              (when (> diff 0)
+                (setf seq2 (nthcdr diff seq2)))
+              (loop for i from (+ vector-length (if (< diff 0)
+                                                    (1- diff)
+                                                    -1))
+                    downto 0
+                    for elt in seq2
+                    do (setf (aref seq1 i) elt))
+              seq1)))
+        (t
+         (give-up-ir1-transform))))
+
 #+sb-unicode
 (progn
 (deftransform replace ((seq1 seq2 &key (start1 0) (start2 0) end1 end2)
@@ -1547,20 +1583,35 @@
            (type-array-element-type (lvar-type lvar))))
     (let ((type1 (element-type seq1))
           (type2 (element-type seq2)))
-      (check-sequence-ranges seq1 start1 end1 node 1 'target-sequence1)
-      (check-sequence-ranges seq2 start2 end2 node 2 'source-sequence2)
+      (check-sequence-ranges seq1 start1 end1 node :suffix 1 :name 'target-sequence1)
+      (check-sequence-ranges seq2 start2 end2 node :suffix 2 :name 'source-sequence2)
       (cond ((eq type1 *wild-type*))
-            ((eq type2 *wild-type*)
-             (when (constant-lvar-p seq2)
-               (map nil (lambda (x)
-                          (unless (ctypep x type1)
-                            (let ((*compiler-error-context* node))
-                              (compiler-warn "The source sequence has an element ~s incompatible with the target array element type ~a."
-                                             x
-                                             (type-specifier type1)))
-                            (return-from replace-ir2-hook-optimizer))
-                          x)
-                    (lvar-value seq2))))
+            ((block nil
+               (when (constant-lvar-p seq2)
+                 (let ((sequence (lvar-value seq2))
+                       (start (if start2
+                                  (and (or (constant-lvar-p start2)
+                                           (return))
+                                       (lvar-value start2))
+
+                                  0))
+                       (end (and end2
+                                 (or (constant-lvar-p end2)
+                                     (return))
+                                 (lvar-value end2))))
+                   (when (and (<= start (length sequence))
+                              (or (not end)
+                                  (<= end (length sequence))))
+                       (map nil (lambda (x)
+                                  (unless (ctypep x type1)
+                                    (let ((*compiler-error-context* node))
+                                      (compiler-warn "The source sequence has an element ~s incompatible with the target array element type ~a."
+                                                     x
+                                                     (type-specifier type1)))
+                                    (return-from replace-ir2-hook-optimizer))
+                                  x)
+                            (subseq sequence start end)))))))
+            ((eq type2 *wild-type*))
             ((not (types-equal-or-intersect type1 type2))
              (let ((*compiler-error-context* node))
                (compiler-warn "Incompatible array element types: ~a and ~a"
@@ -1585,7 +1636,9 @@
              (let ((initial-contents (lvar-value initial-contents)))
                (when (sequencep initial-contents)
                  (map nil (lambda (x)
-                            (unless (ctypep x element-type)
+                            (unless (or (ctypep x element-type)
+                                        (and (not (csubtypep (lvar-type dimensions) (specifier-type 'sequence)))
+                                             (sequencep x)))
                               (let ((*compiler-error-context* node))
                                 (compiler-warn ":initial-contents has an element ~s incompatible with :element-type ~a."
                                                x
@@ -2176,45 +2229,46 @@
 
 (defun find-derive-type (item sequence key test start end from-end &optional test-not)
   (declare (ignore start end from-end))
-  (unless test-not
-    (let ((type *universal-type*)
-          (key-identity-p (or (not key)
-                              (lvar-value-is key nil)
-                              (lvar-fun-is key '(identity)))))
-      (flet ((fun-accepts-type (fun-lvar argument)
-               (when fun-lvar
-                 (let ((fun-type (lvar-fun-type fun-lvar t t)))
-                   (when (fun-type-p fun-type)
-                     (let ((arg (nth argument (fun-type-n-arg-types (1+ argument) fun-type))))
-                       (when arg
-                         (setf type
-                               (type-intersection type arg)))))))))
-        (when (and item
-                   key-identity-p)
-          ;; Maybe FIND returns ITEM itself or a comparable type
-          (cond ((or (not test)
-                     (lvar-fun-is test '(eq eql char=))
-                     (lvar-value-is test nil))
-                 (setf type (lvar-type item)))
-                ((lvar-fun-is test '(equal))
-                 (setf type (equal-type (lvar-type item))))
-                ((lvar-fun-is test '(equalp char-equal))
-                 (setf type (equalp-type (lvar-type item))))))
-        ;; Should return something the functions can accept
-        (if key-identity-p
-            (fun-accepts-type test (if item 1 0)) ;; the -if variants.
-            (fun-accepts-type key 0)))
-      (let ((upgraded-type (type-array-element-type (lvar-type sequence))))
-        (unless (eq upgraded-type *wild-type*)
-          (setf type
-                (type-intersection type upgraded-type))))
-      (unless (eq type *empty-type*)
-        (type-union type
-                    (specifier-type 'null))))))
+  (let ((type *universal-type*)
+        (key-identity-p (or (not key)
+                            (lvar-value-is key nil)
+                            (lvar-fun-is key '(identity)))))
+    (flet ((fun-accepts-type (fun-lvar argument)
+             (when fun-lvar
+               (let ((fun-type (lvar-fun-type fun-lvar t t)))
+                 (when (fun-type-p fun-type)
+                   (let ((arg (nth argument (fun-type-n-arg-types (1+ argument) fun-type))))
+                     (when arg
+                       (setf type
+                             (type-intersection type arg)))))))))
+      (when (and item
+                 key-identity-p
+                 (not test-not))
+        ;; Maybe FIND returns ITEM itself or a comparable type
+        (cond ((or (not test)
+                   (lvar-fun-is test '(eq eql char=))
+                   (lvar-value-is test nil))
+               (setf type (lvar-type item)))
+              ((lvar-fun-is test '(equal))
+               (setf type (equal-type (lvar-type item))))
+              ((lvar-fun-is test '(equalp char-equal))
+               (setf type (equalp-type (lvar-type item))))))
+      ;; Should return something the functions can accept
+      (if key-identity-p
+          (unless (and test-not test)
+            (fun-accepts-type (or test-not test) (if item 1 0))) ;; the -if variants.
+          (fun-accepts-type key 0)))
+    (let ((upgraded-type (type-array-element-type (lvar-type sequence))))
+      (unless (eq upgraded-type *wild-type*)
+        (setf type
+              (type-intersection type upgraded-type))))
+    (unless (eq type *empty-type*)
+      (type-union type
+                  (specifier-type 'null)))))
 
-(defoptimizer (find derive-type) ((item sequence &key key test
+(defoptimizer (find derive-type) ((item sequence &key key test test-not
                                         start end from-end))
-  (find-derive-type item sequence key test start end from-end))
+  (find-derive-type item sequence key test start end from-end test-not))
 
 (defoptimizer (find-if derive-type) ((predicate sequence &key key start end from-end))
   (find-derive-type nil sequence key predicate start end from-end))
@@ -2299,68 +2353,61 @@
          (index-length (and constant-start constant-end
                             (- constant-end constant-start)))
          (list-type (specifier-type 'list)))
-    (flet ((bad ()
-             (let ((*compiler-error-context* node))
-               (compiler-warn "Bad bounding indices ~s, ~s for ~
-                               ~/sb-impl:print-type/"
-                              constant-start constant-end sequence-type))))
-      (cond ((and index-length
-                  (minusp index-length))
-             ;; Would be a good idea to transform to something like
-             ;; %compile-time-type-error
-             (bad))
-            ((csubtypep sequence-type list-type)
-             (let ((null-type (specifier-type 'null)))
-               (cond ((csubtypep sequence-type null-type)
-                      (cond ((or (and constant-start
-                                      (plusp constant-start))
-                                 (and index-length
-                                      (plusp index-length)))
-                             (bad))
-                            ((eql constant-start 0)
-                             null-type)
-                            (t
-                             list-type)))
-                     ((not index-length)
-                      list-type)
-                     ((zerop index-length)
-                      null-type)
-                     (t
-                      (specifier-type 'cons)))))
-            ((csubtypep sequence-type (specifier-type 'vector))
-             (let* ((dimensions
-                      ;; Can't trust lengths from non-simple vectors due to
-                      ;; fill-pointer and adjust-array
-                      (and (csubtypep sequence-type (specifier-type 'simple-array))
-                           (ctype-array-dimensions sequence-type)))
-                    (dimensions-length
-                      (and (singleton-p dimensions)
-                           (integerp (car dimensions))
-                           (car dimensions)))
-                    (length (cond (index-length)
-                                  ((and dimensions-length
-                                        (not end)
-                                        constant-start)
-                                   (- dimensions-length constant-start))))
-                    (simplified (simplify-vector-type sequence-type)))
-               (cond ((and dimensions-length
-                           (or
-                            (and constant-start
-                                 (> constant-start dimensions-length))
-                            (and constant-end
-                                 (> constant-end dimensions-length))))
-                      (bad))
-                     (length
-                      (type-intersection simplified
-                                         (specifier-type `(simple-array * (,length)))))
-                     (t
-                      simplified))))
-            ((not index-length)
-             nil)
-            ((zerop index-length)
-             (specifier-type '(not cons)))
-            (t
-             (specifier-type '(not null)))))))
+    (cond ((and index-length
+                (minusp index-length))
+           nil)
+          ((csubtypep sequence-type list-type)
+           (let ((null-type (specifier-type 'null)))
+             (cond ((csubtypep sequence-type null-type)
+                    (cond ((or (and constant-start
+                                    (plusp constant-start))
+                               (and index-length
+                                    (plusp index-length)))
+                           nil)
+                          ((eql constant-start 0)
+                           null-type)
+                          (t
+                           list-type)))
+                   ((not index-length)
+                    list-type)
+                   ((zerop index-length)
+                    null-type)
+                   (t
+                    (specifier-type 'cons)))))
+          ((csubtypep sequence-type (specifier-type 'vector))
+           (let* ((dimensions
+                    ;; Can't trust lengths from non-simple vectors due to
+                    ;; fill-pointer and adjust-array
+                    (and (csubtypep sequence-type (specifier-type 'simple-array))
+                         (ctype-array-dimensions sequence-type)))
+                  (dimensions-length
+                    (and (singleton-p dimensions)
+                         (integerp (car dimensions))
+                         (car dimensions)))
+                  (length (cond (index-length)
+                                ((and dimensions-length
+                                      (not end)
+                                      constant-start)
+                                 (- dimensions-length constant-start))))
+                  (simplified (simplify-vector-type sequence-type)))
+             (cond ((and dimensions-length
+                         (or
+                          (and constant-start
+                               (> constant-start dimensions-length))
+                          (and constant-end
+                               (> constant-end dimensions-length))))
+                    nil)
+                   (length
+                    (type-intersection simplified
+                                       (specifier-type `(simple-array * (,length)))))
+                   (t
+                    simplified))))
+          ((not index-length)
+           nil)
+          ((zerop index-length)
+           (specifier-type '(not cons)))
+          (t
+           (specifier-type '(not null))))))
 
 ;;; Open-code CONCATENATE for strings. It would be possible to extend
 ;;; this transform to non-strings, but I chose to just do the case that
@@ -2378,96 +2425,148 @@
 (defvar *concatenate-open-code-limit* 129)
 
 (defun string-concatenate-transform (node type lvars)
-  (let ((vars (make-gensym-list (length lvars))))
-    (if (policy node (<= speed space))
-        ;; Out-of-line
-        (let ((constants-to-string
-                ;; Strings are handled more efficiently by
-                ;; %concatenate-to-* functions
-                (loop for var in vars
-                      for lvar in lvars
-                      collect (if (and (constant-lvar-p lvar)
-                                       (proper-sequence-p (lvar-value lvar))
-                                       (every #'characterp (lvar-value lvar)))
-                                  (coerce (lvar-value lvar) 'string)
-                                  var))))
-          `(lambda (.dummy. ,@vars)
-             (declare (ignore .dummy.)
-                      (ignorable ,@vars))
-             ,(ecase type
-                ((string simple-string)
-                 `(%concatenate-to-string ,@constants-to-string))
-                ((base-string simple-base-string)
-                 `(%concatenate-to-base-string ,@constants-to-string)))))
-        ;; Inline
-        (let* ((element-type (ecase type
-                               ((string simple-string) 'character)
-                               ((base-string simple-base-string) 'base-char)))
-               (lvar-values (loop for lvar in lvars
-                                  collect (when (constant-lvar-p lvar)
-                                            (lvar-value lvar))))
-               (lengths
-                 (loop for value in lvar-values
-                       for var in vars
-                       collect (if value
-                                   (length value)
-                                   `(sb-impl::string-dispatch ((simple-array * (*))
-                                                               sequence)
-                                                              ,var
-                                      #-sb-xc-host
-                                      (declare (muffle-conditions compiler-note))
-                                      (length ,var)))))
-               (non-constant-start
-                 (loop for value in lvar-values
-                       while (and (stringp value)
-                                  (< (length value) *concatenate-open-code-limit*))
-                       sum (length value))))
-          `(lambda (.dummy. ,@vars)
-             (declare (ignore .dummy.)
-                      (ignorable ,@vars))
-             (declare (optimize (insert-array-bounds-checks 0)))
-             (let* ((.length. (+ ,@lengths))
-                    (.pos. ,non-constant-start)
-                    (.string. (make-string .length. :element-type ',element-type)))
-               (declare (type index .length. .pos.)
-                        #-sb-xc-host (muffle-conditions compiler-note)
-                        (ignorable .pos.))
-               ,@(loop with constants = -1
-                       for value in lvar-values
-                       for var in vars
-                       collect
-                       (cond ((and (stringp value)
-                                   (< (length value) *concatenate-open-code-limit*))
-                              ;; Fold the array reads for constant arguments
-                              `(progn
-                                 ,@(loop for c across value
-                                         for i from 0
-                                         collect
-                                         ;; Without truly-the we get massive numbers
-                                         ;; of pointless error traps.
-                                         `(setf (aref .string.
-                                                      (truly-the index ,(if constants
-                                                                            (incf constants)
-                                                                            `(+ .pos. ,i))))
-                                                ,c))
-                                 ,(unless constants
-                                    `(incf (truly-the index .pos.) ,(length value)))))
-                             (t
-                              (prog1
-                                  `(sb-impl::string-dispatch
-                                       (#+sb-unicode
-                                        (simple-array character (*))
-                                        (simple-array base-char (*))
-                                        t)
-                                       ,var
-                                     (replace .string. ,var
-                                              ,@(cond ((not constants)
-                                                       '(:start1 .pos.))
-                                                      ((plusp non-constant-start)
-                                                       `(:start1 ,non-constant-start))))
-                                     (incf (truly-the index .pos.) (length ,var)))
-                                (setf constants nil)))))
-               .string.))))))
+  (if (policy node (<= speed space))
+      ;; Out-of-line
+      (let* ((vars (make-gensym-list (length lvars)))
+             (constants-to-string
+               ;; Strings are handled more efficiently by
+               ;; %concatenate-to-* functions
+               (loop for var in vars
+                     for lvar in lvars
+                     collect (if (and (constant-lvar-p lvar)
+                                      (proper-sequence-p (lvar-value lvar))
+                                      (every #'characterp (lvar-value lvar)))
+                                 (coerce (lvar-value lvar) 'string)
+                                 var))))
+        `(lambda (.dummy. ,@vars)
+           (declare (ignore .dummy.)
+                    (ignorable ,@vars))
+           ,(ecase type
+              ((string simple-string)
+               `(%concatenate-to-string ,@constants-to-string))
+              ((base-string simple-base-string)
+               `(%concatenate-to-base-string ,@constants-to-string)))))
+      ;; Inline
+      (let* ((element-type (ecase type
+                             ((string simple-string) 'character)
+                             ((base-string simple-base-string) 'base-char)))
+             (lvar-values (loop for lvar in lvars
+                                collect (when (constant-lvar-p lvar)
+                                          (lvar-value lvar))))
+             (non-constant-start 0)
+             lengths
+             vars
+             fills
+             (constants -1)
+             lets)
+        (loop for (lvar . more) on lvars
+              for value in lvar-values
+              for var = (gensym)
+              for length-code = `(sb-impl::string-dispatch ((simple-array * (*))
+                                                            sequence)
+                                                           ,var
+                                   #-sb-xc-host
+                                   (declare (muffle-conditions compiler-note))
+                                   (length ,var))
+              do
+              (flet ((gen-replace (&optional start end (length `(length ,var)))
+                       `(sb-impl::string-dispatch
+                            (#+sb-unicode
+                             (simple-array character (*))
+                             (simple-array base-char (*))
+                             t)
+                            ,var
+                          (replace .string. ,var
+                                   ,@(cond ((not constants)
+                                            '(:start1 .pos.))
+                                           (t
+                                            (setf non-constant-start (1+ constants)
+                                                  constants nil)
+                                            (when (plusp non-constant-start)
+                                              `(:start1 ,non-constant-start))))
+                                   ,@(and start
+                                          `(:start2 ,start))
+                                   ,@(and end
+                                          `(:end2 ,end)))
+                          ,(unless (not more)
+                             `(incf (truly-the index .pos.) ,length)))))
+                (cond (value
+                       (push var vars)
+                       (push (length value) lengths)
+                       (push
+                        (if (and (stringp value)
+                                 (< (length value) *concatenate-open-code-limit*))
+                            ;; Fold the array reads for constant arguments
+                            `(progn
+                               ,@(loop for c across value
+                                       for i from 0
+                                       collect
+                                       ;; Without truly-the we get massive numbers
+                                       ;; of pointless error traps.
+                                       `(setf (aref .string.
+                                                    (truly-the index ,(if constants
+                                                                          (incf constants)
+                                                                          `(+ .pos. ,i))))
+                                              ,c))
+                               ,(unless constants
+                                  `(incf (truly-the index .pos.) ,(length value))))
+                            (gen-replace))
+                        fills))
+                      ((and (lvar-matches lvar :fun-names '(vector-subseq* subseq))
+                            ;; Nothing should be modifying the original sequence
+                            (almost-immediately-used-p lvar (lvar-use lvar) :flushable t))
+                       (destructuring-bind (sequence start &optional end) (combination-args (lvar-uses lvar))
+                         (declare (ignorable sequence start))
+                         (splice-fun-args lvar :any (if end 3 2))
+                         (push var vars)
+                         (let* ((start (car (push (gensym) vars)))
+                                (end (and end
+                                          (car (push (gensym) vars))))
+                                (length (gensym)))
+                           (push (list length `(- (or ,end ,length-code) ,start))
+                                 lets)
+                           (push length lengths)
+                           (push (gen-replace start end length) fills))))
+                      ((lvar-matches lvar :fun-names '(list vector))
+                       (destructuring-bind (&rest elements) (combination-args (lvar-uses lvar))
+                         (splice-fun-args lvar :any nil)
+                         (push (length elements) lengths)
+                         (push (let ((i 0))
+                                 `(progn
+                                    ,@(loop for let in elements
+                                            for var = (car (push (gensym) vars))
+                                            collect
+                                            `(setf (aref .string.
+                                                         (truly-the index ,(if constants
+                                                                               (incf constants)
+                                                                               `(+ .pos. ,i))))
+                                                   ,var)
+                                            do (incf i))
+                                    ,(unless (or constants
+                                                 (not more))
+                                       `(incf (truly-the index .pos.) ,i))))
+                               fills)))
+                      (t
+                       (push var vars)
+                       (push length-code lengths)
+                       (push (gen-replace)
+                             fills)))))
+        (setf lengths (nreverse lengths)
+              vars (nreverse vars)
+              fills (nreverse fills))
+        `(lambda (.dummy. ,@vars)
+           (declare (ignore .dummy.)
+                    (ignorable ,@vars))
+           (declare (optimize (insert-array-bounds-checks 0)))
+           (let* (,@lets
+                  (.length. (+ ,@lengths))
+                  (.pos. ,non-constant-start)
+                  (.string. (make-string .length. :element-type ',element-type)))
+             (declare (type index .length. .pos.)
+                      #-sb-xc-host (muffle-conditions compiler-note)
+                      (ignorable .pos.))
+             ,@fills
+             .string.)))))
 
 (defun vector-specifier-widetag (type)
   ;; FIXME: This only accepts vectors without dimensions even though
@@ -2537,15 +2636,64 @@
 
 ;;;; CONS accessor DERIVE-TYPE optimizers
 
+;;; Find a possible CAR type a variable bound to a constant list with
+;;; all sets in the form of (setf x (cdr x))
+(defun cons-var-car-type (lvar)
+  (let ((ref (principal-lvar-use lvar))
+        constant-lvar
+        value)
+    (when (and (ref-p ref)
+               (let ((leaf (ref-leaf ref)))
+                 (and
+                  (lambda-var-p leaf)
+                  (let ((lvar (lambda-var-ref-lvar ref t)))
+                    (flet ((good-lvar-p (lvar)
+                             (and lvar
+                                  (setf value (lvar-constant (setf constant-lvar lvar)))
+                                  (proper-or-dotted-list-p (setf value (constant-value value))))))
+                      (cond ((and (lambda-var-sets leaf)
+                                  (good-lvar-p lvar)))
+                            ;; (pop x) goes through a variable
+                            ((let* ((next-ref (principal-lvar-ref lvar))
+                                    (next-leaf (and (ref-p next-ref)
+                                                    (ref-leaf next-ref))))
+                               (when (and (lambda-var-p next-leaf)
+                                          (lambda-var-sets next-leaf))
+                                 (let ((lvar (lambda-var-ref-lvar next-ref t)))
+                                   (when (good-lvar-p lvar)
+                                     (setf leaf next-leaf)))))))))
+                  (loop for set in (lambda-var-sets leaf)
+                        for combination = (principal-lvar-ref-use (set-value set))
+                        always (and (combination-is combination '(cdr))
+                                    (let ((ref (principal-lvar-ref (car (combination-args combination)) t)))
+                                      (when ref
+                                        (eq (ref-leaf ref) leaf))))))))
+      (let ((type (sequence-elements-type constant-lvar)))
+        (if (cdr (last value))
+            type
+            (type-union type (specifier-type 'null)))))))
+
 (defoptimizer (car derive-type) ((cons))
   ;; This and CDR needs to use LVAR-CONSERVATIVE-TYPE because type inference
   ;; gets confused by things like (SETF CAR).
-  (let ((type (lvar-conservative-type cons))
-        (null-type (specifier-type 'null)))
-    (cond ((eq type null-type)
-           null-type)
-          ((cons-type-p type)
-           (cons-type-car-type type)))))
+  (or (cons-var-car-type cons)
+      (let ((type (lvar-conservative-type cons))
+            (null-type (specifier-type 'null)))
+        (cond ((eq type null-type)
+               null-type)
+              ((cons-type-p type)
+               (cons-type-car-type type))
+              ((union-type-p type)
+               (loop with cars
+                     for type in (union-type-types type)
+                     do (cond
+                          ((eq type null-type)
+                           (push type cars))
+                          ((cons-type-p type)
+                           (push (cons-type-car-type type) cars))
+                          (t
+                           (return)))
+                     finally (return (sb-kernel::%type-union cars))))))))
 
 (defoptimizer (cdr derive-type) ((cons))
   (let ((type (lvar-conservative-type cons))
@@ -2553,7 +2701,18 @@
     (cond ((eq type null-type)
            null-type)
           ((cons-type-p type)
-           (cons-type-cdr-type type)))))
+           (cons-type-cdr-type type))
+          ((union-type-p type)
+           (loop with cdrs
+                 for type in (union-type-types type)
+                 do (cond
+                      ((eq type null-type)
+                       (push type cdrs))
+                      ((cons-type-p type)
+                       (push (cons-type-cdr-type type) cdrs))
+                      (t
+                       (return)))
+                 finally (return (sb-kernel::%type-union cdrs)))))))
 
 ;;;; FIND, POSITION, and their -IF and -IF-NOT variants
 
@@ -2562,7 +2721,7 @@
 ;;; expansion, so we factor out the condition into this function.
 (defun check-inlineability-of-find-position-if (sequence from-end)
   (let ((ctype (lvar-type sequence)))
-    (cond ((csubtypep ctype (specifier-type 'vector))
+    (cond ((csubtypep ctype (specifier-type '(or null vector)))
            ;; It's not worth trying to inline vector code unless we
            ;; know a fair amount about it at compile time.
            (upgraded-element-type-specifier-or-give-up sequence)
@@ -2848,49 +3007,163 @@
                                        from-end start end key))
 
 (deftransform %find-position ((item sequence from-end start end key test)
-                              (t vector t t t function function)
+                              (t (or null vector) t t t function function)
                               *
                               :node node)
   "expand inline"
-  (check-inlineability-of-find-position-if sequence from-end)
-  (unless
-      (or (policy node (> speed space))
-          ;; These have compact inline expansion
-          (and (or (not key)
-                   (lvar-fun-is key '(identity)))
-               (and (constant-lvar-p start)
-                    (eql (lvar-value start) 0))
-               (and (constant-lvar-p end)
-                    (null (lvar-value end)))
-               (csubtypep (lvar-type sequence) (specifier-type 'simple-array))
-               (let ((element-type (array-type-upgraded-element-type (lvar-type sequence)))
-                     (test (lvar-fun-name* test))
-                     (item (lvar-type item)))
-                 (when (neq element-type *wild-type*)
-                   (case (type-specifier element-type)
-                     ((double-float single-float)
-                      (and (csubtypep item element-type)
-                           (memq test '(= eql equal equalp))))
-                     ((t)
-                      (eq test 'eq))
-                     (character
-                      (or (memq test '(eq eql equal char=))
-                          (and (eq test 'char-equal)
-                               (or (csubtypep item (specifier-type 'base-char))
-                                   (and (constant-lvar-p sequence)
-                                        (every (lambda (x) (typep x 'base-char))
-                                               (lvar-value sequence)))))))
-                     (base-char
-                      (memq test '(eq eql equal char= char-equal)))
-                     (t
-                      (and (csubtypep element-type (specifier-type 'integer))
-                           (csubtypep item element-type)
-                           (memq test '(eq eql equal equalp =)))))))))
+  (when (eq (lvar-type sequence) (specifier-type 'null))
     (give-up-ir1-transform))
-  ;; Delay to prefer the string and bit-vector transforms
-  (delay-ir1-transform node :constraint)
-  '(%find-position-vector-macro item sequence
-    from-end start end key test))
+  (check-inlineability-of-find-position-if sequence from-end)
+  (when (check-sequence-ranges sequence start end node :warn nil)
+    (give-up-ir1-transform))
+  (let ((null-p (types-equal-or-intersect (lvar-type sequence)
+                                          (specifier-type 'null))))
+    (wrap-if
+     null-p
+     '(if (not sequence) (values nil nil))
+     (block nil
+       (unless
+           (or
+            ;; These have compact inline expansion
+            (and (or (not key)
+                     (lvar-fun-is key '(identity)))
+                 (let* ((sequence-type (type-intersection (lvar-type sequence)
+                                                          (specifier-type 'array)))
+                        (element-type (array-type-upgraded-element-type sequence-type))
+                        (et-specifier (type-specifier element-type))
+                        (test (lvar-fun-name* test))
+                        (item (lvar-type item))
+                        (simple (csubtypep sequence-type (specifier-type 'simple-array))))
+                   (when (and (neq element-type *wild-type*)
+                              (case et-specifier
+                                ((double-float single-float)
+                                 (and (csubtypep item element-type)
+                                      (memq test '(= eql equal equalp))))
+                                ((t)
+                                 (eq test 'eq))
+                                (character
+                                 (or (memq test '(eq eql equal char=))
+                                     (and (eq test 'char-equal)
+                                          (or (csubtypep item (specifier-type 'base-char))
+                                              (and (constant-lvar-p sequence)
+                                                   (every (lambda (x) (typep x 'base-char))
+                                                          (lvar-value sequence)))))))
+                                (base-char
+                                 (memq test '(eq eql equal char= char-equal)))
+                                (t
+                                 (and (csubtypep element-type (specifier-type 'integer))
+                                      (or
+                                       (and (memq test '(= equalp))
+                                            (csubtypep item element-type))
+                                       (memq test '(eq eql equal)))))))
+                     (cond #+(or arm64 x86-64)
+                           ((and (member et-specifier '(base-char character
+                                                        (unsigned-byte 8)
+                                                        (signed-byte 8)
+                                                        (unsigned-byte 32)
+                                                        (signed-byte 32))
+                                         :test #'equal)
+                                 (constant-lvar-p from-end)
+                                 (neq test 'char-equal)
+                                 (not (and (eq test 'char=)
+                                           (not (csubtypep item (specifier-type 'character))))))
+                            (flet ((gen (end &optional offset)
+                                     (multiple-value-bind (size test value)
+                                         (cond
+                                           ((eq et-specifier 'character)
+                                            (values #+sb-unicode 32  #-sb-unicode 8
+                                                    '(characterp item)
+                                                    '(char-code (truly-the character item))))
+                                           #+sb-unicode
+                                           ((eq et-specifier 'base-char)
+                                            (values 8 '(base-char-p item)
+                                                    '(char-code (truly-the base-char item))))
+                                           ((equal et-specifier '(unsigned-byte 8))
+                                            (values 8 '(typep item '(unsigned-byte 8))
+                                                    '(truly-the (unsigned-byte 8) item)))
+                                           ((equal et-specifier '(signed-byte 8))
+                                            (values 8 '(typep item '(signed-byte 8))
+                                                    '(truly-the (unsigned-byte 8)
+                                                      (ldb (byte 8 0)
+                                                       (truly-the (signed-byte 8) item)))))
+                                           ((equal et-specifier '(unsigned-byte 32))
+                                            (values 32 '(typep item '(unsigned-byte 32))
+                                                    '(truly-the (unsigned-byte 32) item)))
+                                           ((equal et-specifier '(signed-byte 32))
+                                            (values 32 '(typep item '(signed-byte 32))
+                                                    '(truly-the (unsigned-byte 32)
+                                                      (ldb (byte 32 0)
+                                                       (truly-the (signed-byte 32) item))))))
+                                       `(let ((pos (and ,test
+                                                        (,(if (= size 8)
+                                                              (if (lvar-value from-end)
+                                                                  'sb-vm::simd-position8-from-end
+                                                                  'sb-vm::simd-position8)
+                                                              (if (lvar-value from-end)
+                                                                  'sb-vm::simd-position32-from-end
+                                                                  'sb-vm::simd-position32))
+                                                         ,value
+                                                         sequence start ,end))))
+                                          (truly-the ,(node-derived-type node)
+                                                     (if pos
+                                                         (values item ,(if offset
+                                                                           `(- pos offset)
+                                                                           `pos))
+                                                         (values nil nil)))))))
+                              (cond (simple
+                                     (delay-ir1-transform node :constraint)
+                                     (return
+                                       (if (policy node (zerop insert-array-bounds-checks))
+                                           (gen '(or end (length sequence)))
+                                           `(let* ((length (length sequence))
+                                                   (end (or end length)))
+                                              (unless
+                                                  (<= 0 start end length)
+                                                (sequence-bounding-indices-bad-error sequence start end))
+                                              ,(gen 'end)))))
+                                    ((policy node (> speed space))
+                                     (delay-ir1-transform node :constraint)
+                                     (return
+                                       `(with-array-data ((sequence sequence  :offset-var offset)
+                                                          (start start)
+                                                          (end end)
+                                                          :check-fill-pointer t)
+                                          ,(gen 'end 'offset)))))))
+                           ((and simple
+                                 (or
+                                  (policy node (zerop insert-array-bounds-checks))
+                                  (and (constant-lvar-p start)
+                                       (eql (lvar-value start) 0)
+                                       (constant-lvar-p end)
+                                       (null (lvar-value end)))))
+                            t)))))
+            (policy node (> speed space)))
+         (give-up-ir1-transform))
+       ;; Delay to prefer the string and bit-vector transforms
+       (delay-ir1-transform node :constraint)
+       `(%find-position-vector-macro item sequence
+                                     from-end start end key test)))))
+
+(deftransform %find-position ((item sequence from-end start end key test)
+                              (t string t t t function function)
+                              *
+                              :policy (> speed space))
+  (if (eq '* (upgraded-element-type-specifier sequence))
+      `(with-array-data ((sequence sequence :offset-var offset)
+                         (start start)
+                         (end end)
+                         :check-fill-pointer t)
+         (sb-impl::string-dispatch ((simple-array character (*))
+                                    (simple-array base-char (*)))
+                                   sequence
+           (multiple-value-bind (result position)
+               (locally (declare (optimize (insert-array-bounds-checks 0)))
+                 (%find-position item sequence from-end start end key test))
+             (if position
+                 (values result (truly-the index (- position offset)))
+                 (values nil nil)))))
+      ;; The type is known exactly, other transforms will take care of it.
+      (give-up-ir1-transform)))
 
 (deftransform %find-position ((item sequence from-end start end key test)
                               (t bit-vector t t t t t)
@@ -2919,25 +3192,10 @@
                          (otherwise (return-from not-a-bit `(values nil nil))))
                        `(,(elt #(%bit-position %bit-pos-fwd %bit-pos-rev) dir)
                          item bits ,@from-end-arg start end)))))
-           (if p
-               (values item (the index (- (truly-the index p) offset)))
-               (values nil nil))))))
-
-(deftransform %find-position ((item sequence from-end start end key test)
-                              (t string t t t function function)
-                              *
-                              :policy (> speed space))
-  (if (eq '* (upgraded-element-type-specifier sequence))
-      `(with-array-data ((sequence sequence :offset-var offset)
-                         (start start)
-                         (end end)
-                         :check-fill-pointer t)
-         (sb-impl::string-dispatch ((simple-array character (*))
-                                    (simple-array base-char (*)))
-                                   sequence
-           (%find-position-vector-macro item sequence from-end start end key test offset)))
-      ;; The type is known exactly, other transforms will take care of it.
-      (give-up-ir1-transform)))
+         (truly-the ,(node-derived-type node)
+                    (if p
+                        (values item (the index (- (truly-the index p) offset)))
+                        (values nil nil)))))))
 
 ;;; logic to unravel :TEST, :TEST-NOT, and :KEY options in FIND,
 ;;; POSITION-IF, etc.

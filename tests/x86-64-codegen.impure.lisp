@@ -14,11 +14,6 @@
 (load "compiler-test-util.lisp")
 (import 'ctu:disassembly-lines)
 
-;;; This trivial function failed to compile due to rev 88d078fe
-(defun foo (&key k)
-  (make-list (reduce #'max (mapcar #'length k))))
-(compile 'foo)
-
 (with-test (:name :lowtag-test-elision)
   ;; This tests a certain behavior that while "undefined" should at least not
   ;; be fatal. This is important for things like hash-table :TEST where we might
@@ -29,7 +24,8 @@
   (let ((f (compile nil
                     '(lambda (x)
                       (typecase x
-                        ((or character number list sb-kernel:instance function) 1)
+                        ((or character number list sb-kernel:instance function)
+                         nil)
                         ;; After eliminating the preceding cases, the compiler knows
                         ;; that the only remaining pointer type is OTHER-POINTER,
                         ;; so it just tries to read the widetag.
@@ -43,7 +39,7 @@
     (assert (> a sb-vm:static-space-start))))
 
 (sb-vm::define-vop (tryme)
-    (:generator 1 (sb-assem:inst mov :byte (sb-vm::ea :gs sb-vm::rax-tn) 0)))
+  (:generator 1 (sb-assem:inst mov :byte (sb-vm::ea :gs sb-vm::rax-tn) 0)))
 (with-test (:name :try-gs-segment)
   (assert (loop for line in (disassembly-lines
                              (compile nil
@@ -673,10 +669,12 @@
              '(lambda (x) (if (null (foo-s (truly-the foo x))) 'not 'is))))
         (f2 (disassembly-lines
              '(lambda (x) (if (stringp (foo-s (truly-the foo x))) 'is 'not)))))
-    ;; the comparison of X to NIL should be a single-byte test
-    (assert (loop for line in f1
+    ;; Comparison of X to NIL should be a single-byte test.
+    ;; Note that the disassembler always treats imm8 operands as signed
+    (let ((expect (sb-disassem:sign-extend (logand sb-vm:nil-value #xff) 8)))
+      (assert (loop for line in f1
                   thereis (and (search (format nil "CMP ") line) ; register is arbitrary
-                               (search (format nil ", ~D" (logand sb-vm:nil-value #xff)) line))))
+                               (search (format nil ", ~D" expect) line)))))
     ;; the two variations of the test compile to the identical code
     (dotimes (i 4)
       (assert (string= (nth i f1) (nth i f2))))))
@@ -1317,13 +1315,13 @@
 (with-test (:name :smaller-than-qword-cons-slot-init
                   :skipped-on (:not :mark-region-gc))
   (let ((lines (disassembly-lines
-                (compile nil '(lambda (a) (list 1 a #\a))))))
+                (compile nil '(lambda (a) (list 1 a #\a #xfff000))))))
     (assert (loop for line in lines
                   thereis (search "MOV BYTE PTR" line))) ; constant 1
     (assert (loop for line in lines
                   thereis (search "MOV WORD PTR" line))) ; constant #\a
     (assert (loop for line in lines
-                  thereis (search "MOV DWORD PTR" line))))) ; constant NIL
+                  thereis (search "MOV DWORD PTR" line))))) ; constant #xfff000
 
 (defun count-labeled-instructions (function &aux (answer 0))
   (let ((lines (disassembly-lines function)))
@@ -1345,7 +1343,7 @@
               (checked-compile
                `(lambda (x)
                   (declare (optimize (sb-c::verify-arg-count 0)))
-                  (if (sb-kernel:non-null-symbol-p x) 'zook (foo)))))
+                  (if (sb-kernel:non-null-symbol-p x) 'zook (eval x)))))
              1)))
 
 (with-test (:name :disassemble-instance-type-test
@@ -1358,3 +1356,12 @@
            thereis (and (search "CMP DWORD PTR" line)
                         (search "#<LAYOUT" line)
                         (search "for SB-THREAD:MUTEX" line))))))
+
+(with-test (:name :dx-list-push-imm :skipped-on (not :immobile-space))
+  (let ((lines
+         (disassembly-lines
+          (compile nil '(lambda (f)
+                         (sb-int:dx-let ((x (list :foo))) (funcall f x)))))))
+    (assert
+     (loop for line in lines
+           thereis (and (search "PUSH #x" line) (search "':FOO" line))))))

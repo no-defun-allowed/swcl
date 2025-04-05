@@ -383,7 +383,7 @@
   (loadw-pair cfp-tn unwind-block-cfp-slot lr unwind-block-entry-pc-slot cur-uwp)
   (loadw next-uwp cur-uwp unwind-block-current-catch-slot)
   (store-tl-symbol-value next-uwp *current-catch-block*)
-  (loadw-pair (make-random-tn :kind :normal :sc (sc-or-lose 'any-reg) :offset nfp-offset)
+  (loadw-pair (make-random-tn (sc-or-lose 'any-reg) nfp-offset)
               unwind-block-nfp-slot next-uwp unwind-block-nsp-slot cur-uwp)
   (inst mov-sp nsp-tn next-uwp)
 
@@ -401,12 +401,13 @@
   (loadw-pair cfp-tn unwind-block-cfp-slot lr unwind-block-entry-pc-slot block)
   (loadw next-uwp block unwind-block-current-catch-slot)
   (store-tl-symbol-value next-uwp *current-catch-block*)
-  (loadw-pair (make-random-tn :kind :normal :sc (sc-or-lose 'any-reg) :offset nfp-offset)
+  (loadw-pair (make-random-tn (sc-or-lose 'any-reg) nfp-offset)
               unwind-block-nfp-slot next-uwp unwind-block-nsp-slot block)
   (inst mov-sp nsp-tn next-uwp)
 
   (inst blr lr))
 
+#-sb-assembling
 (define-vop ()
   (:translate %continue-unwind)
   (:policy :fast-safe)

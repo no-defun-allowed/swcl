@@ -405,6 +405,19 @@
  ("src/compiler/{arch}/memory")
  ("src/compiler/{arch}/arith")
  ("src/compiler/{arch}/pred")
+ ("src/compiler/{arch}/c-call")
+
+ ;; The assembly files need to be compiled twice: once as
+ ;; normal lisp files, and once by sb-c:assemble-file.  We use a
+ ;; different suffix / "file type" for the :assem versions to make
+ ;; sure we don't scribble over anything we shouldn't.
+
+ ("src/assembly/{arch}/assem-rtns")
+ ("src/assembly/{arch}/array")
+ ("src/assembly/{arch}/arith")
+ ("src/assembly/{arch}/alloc")
+ ;; assembly files are all loaded by genesis before any compiled files.
+ ("src/assembly/master" :assem :not-host)
 
  ("src/compiler/float-tran")
  ("src/compiler/array-tran")
@@ -427,8 +440,8 @@
 
  ("src/compiler/{arch}/subprim")
  ("src/compiler/{arch}/debug")
- ("src/compiler/{arch}/c-call")
  ("src/compiler/{arch}/cell")
+ #+(and x86-64 sb-thread) ("src/compiler/{arch}/tls")
  ("src/compiler/{arch}/call")
  ("src/compiler/{arch}/nlx")
  ("src/compiler/generic/late-nlx")
@@ -436,18 +449,6 @@
  ("src/compiler/{arch}/array")
  ("src/compiler/generic/type-error")
  ("src/compiler/envanal")
-
- ;; The assembly files need to be compiled twice: once as
- ;; normal lisp files, and once by sb-c:assemble-file.  We use a
- ;; different suffix / "file type" for the :assem versions to make
- ;; sure we don't scribble over anything we shouldn't.
-
- ("src/assembly/{arch}/assem-rtns")
- ("src/assembly/{arch}/array")
- ("src/assembly/{arch}/arith")
- ("src/assembly/{arch}/alloc")
- ;; assembly files are all loaded by genesis before any compiled files.
- ("src/assembly/master" :assem :not-host)
 
  ("src/compiler/pseudo-vops")
 
@@ -547,7 +548,6 @@
  ("src/code/filesys"           :not-host) ; needs HOST from "code/pathname"
 
  ("src/code/target-misc"       :not-host) ; dribble-stream, used by "save"
- ("src/code/sharpm"            :not-host) ; uses stuff from "code/reader"
 
  ("src/code/early-step")                  ; target-thread needs *STEP-OUT*
 
@@ -560,6 +560,8 @@
  ("src/code/gc"                :not-host)
 
  ("src/code/interr" :not-host)
+
+ ("src/code/sharpm"            :not-host) ; uses stuff from "code/reader"
 
  ("src/code/target-load" :not-host) ; for *assembler-routines*, needed by target-disassem
 
@@ -619,6 +621,7 @@
   ;; Redefine some functions that contributed to far too numerous
   ;; xperfecthash entries due to variation by build configuration.
   "src/compiler/generic/static-syms"
+ #+(and sb-futex (or arm64 x86-64)) "src/code/rwlock"
   "src/code/icf"
   "src/code/defpackage")
 
@@ -652,6 +655,9 @@
   "src/code/external-formats/enc-jpn")
 
  ("src/code/stubs")
+
+ #+sb-devel
+ ("src/code/cold-init-helper-macros")
 
  ;; CLOS, derived from the PCL reference implementation
  ;;

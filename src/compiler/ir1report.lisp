@@ -209,7 +209,6 @@
          (when (comma-p form)
            (setf form (comma-expr form)))
          (when (atom form)
-            (aver (null current))
             (return))
           (let ((head (first form)))
             (when (symbolp head)
@@ -435,7 +434,10 @@
         (what (etypecase condition
                 (style-warning 'style-warning)
                 (warning 'warning)
-                ((or error compiler-error) 'error))))
+                ((or error compiler-error) 'error)))
+        (*print-circle* t)
+        #-sb-xc-host
+        (*print-circle-not-shared* t))
     (print-compiler-message
      *error-output*
      (format nil "caught ~S:~%~~@<  ~~@;~~A~~:>" what)

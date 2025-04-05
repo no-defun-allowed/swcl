@@ -49,6 +49,7 @@
    "*SYSINIT-PATHNAME-FUNCTION*"
 
    "*DEFAULT-EXTERNAL-FORMAT*"
+   "*DEFAULT-SOURCE-EXTERNAL-FORMAT*"
    "*DEFAULT-C-STRING-EXTERNAL-FORMAT*"
 
    ;; Compare and Swap support
@@ -359,6 +360,7 @@
    "*DISASSEMBLE-ANNOTATE*"
    "PRINT-SYMBOL-WITH-PREFIX"
    "*PRINT-VECTOR-LENGTH*"
+   "*PRINT-CIRCLE-NOT-SHARED*"
    "DECIMAL-WITH-GROUPED-DIGITS-WIDTH"
    ;;"OBJECT-SIZE"
 
@@ -847,7 +849,6 @@ possibly temporarily, because it might be used internally.")
    ;; placeholders in a target system
 
    "UNCROSS"
-   "!UNCROSS-FORMAT-CONTROL"
 
    ;; might as well be shared among the various files which
    ;; need it:
@@ -964,6 +965,10 @@ possibly temporarily, because it might be used internally.")
 
    "*REPL-PROMPT-FUN*"
    "*REPL-READ-FORM-FUN*"
+
+   ;; an experimental thing
+   "STDIO-FILE"
+   "MAKE-STDIO-FILE"
 
    ;; for SB-COVER
 
@@ -1287,12 +1292,12 @@ interface stability.")
    "ST-ATIME" "ST-BLKSIZE" "ST-BLOCKS"
    "ST-CTIME" "ST-DEV" "ST-GID" "ST-MODE" "ST-MTIME" "ST-NLINK"
    "ST-RDEV" "ST-SIZE" "ST-UID" "STAT" "TIME-T"
-   "TIMEVAL" "TIMEZONE"
+   "TIMEVAL"
    "TIOCGPGRP"
    #-avoid-clock-gettime
    "CLOCK-GETTIME" "TV-SEC" "TV-USEC"
-   "TZ-DSTTIME" "TZ-MINUTESWEST" "UID-T" "UNIX-CLOSE"
-   "UNIX-CLOSEDIR" "UNIX-DIRENT-NAME" "UNIX-DUP"
+   "UID-T" "UNIX-CLOSE"
+   "UNIX-CLOSEDIR" "UNIX-DIRENT-NAME" "UNIX-DUP" "UNIX-FCLOSE"
    "UNIX-FILE-MODE" "UNIX-FSTAT"
    "UNIX-GETHOSTNAME" "UNIX-GETPID" "UNIX-GETRUSAGE"
    "UNIX-GETTIMEOFDAY" "UNIX-GETUID" "UNIX-GID"
@@ -1301,6 +1306,7 @@ interface stability.")
    "UNIX-ISATTY" "UNIX-LSEEK" "UNIX-LSTAT" "UNIX-MKDIR"
    "UNIX-OPEN" "UNIX-OPENDIR" "UNIX-PATHNAME" "UNIX-PID"
    "UNIX-PIPE" "UNIX-POLL" "UNIX-SIMPLE-POLL"
+   "UNIX-TMPFILE"
    "UNIX-READ" "UNIX-READDIR" "UNIX-READLINK" "UNIX-REALPATH"
    "UNIX-RENAME" "UNIX-STAT" "UNIX-UID"
    "UNIX-UNLINK" "UNIX-WRITE"
@@ -1421,6 +1427,8 @@ SBCL itself")
            "%HALF-BIGNUM-REF" "%HALF-BIGFLOOR"
            "UNARY-TRUNCATE-SINGLE-FLOAT-TO-BIGNUM"
            "UNARY-TRUNCATE-DOUBLE-FLOAT-TO-BIGNUM"
+           "UNARY-TRUNCATE-SINGLE-FLOAT-TO-BIGNUM-DIV"
+           "UNARY-TRUNCATE-DOUBLE-FLOAT-TO-BIGNUM-DIV"
            "%UNARY-TRUNCATE-SINGLE-FLOAT-TO-BIGNUM"
            "%UNARY-TRUNCATE-DOUBLE-FLOAT-TO-BIGNUM"))
 
@@ -1524,12 +1532,17 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "%CONCATENATE-TO-SIMPLE-VECTOR" "%CONCATENATE-TO-SIMPLE-VECTOR-SUBSEQ"
            "%CONCATENATE-TO-LIST" "%CONCATENATE-TO-LIST-SUBSEQ"
            "%CONCATENATE-TO-VECTOR" "%CONCATENATE-TO-VECTOR-SUBSEQ"
-           "CONTAINS-HAIRY-TYPE-P" "CONTAINS-UNKNOWN-TYPE-P"
+           "CONTAINS-HAIRY-TYPE-P" "CONTAINS-UNKNOWN-TYPE-P" "OPAQUE-TYPE-P"
            "%COS" "%COS-QUICK"
-           "%COSH" "%DATA-VECTOR-AND-INDEX" "%DEPOSIT-FIELD"
+           "%COSH"
+           "%DATA-VECTOR-AND-INDEX" "%DATA-VECTOR-AND-INDEX/CHECK-BOUND"
+           "%DATA-VECTOR-AND-INDEX/KNOWN"
+           "%DATA-VECTOR-POP" "%DATA-VECTOR-PUSH"
+           "%DEPOSIT-FIELD"
            "%DOUBLE-FLOAT" "%DPB" "%EQL"
            "%EXIT"
            "%EXP" "%EXPM1"
+           "FILL-POINTER-ERROR"
            "%FIND-POSITION"
            "%FIND-POSITION-VECTOR-MACRO" "%FIND-POSITION-IF"
            "%FIND-POSITION-IF-VECTOR-MACRO" "%FIND-POSITION-IF-NOT"
@@ -1670,7 +1683,9 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "CHARACTER-SET-TYPE-PAIRS"
            #+sb-unicode "CHARACTER-STRING-P"
            "CHARPOS"
-           "CHECK-FOR-CIRCULARITY" "CHECK-TYPE-ERROR" "CLOSED-FLAME"
+           "CHECK-FOR-CIRCULARITY"
+           "CHECK-TYPE-ERROR" "CHECK-TYPE-ERROR-TRAP"
+           "CLOSED-FLAME"
            "CLASS-CLASSOID"
            "CODE-COMPONENT" "CODE-COMPONENT-P"
            "CODE-HEADER-REF" "CODE-HEADER-SET" "CODE-HEADER-WORDS"
@@ -1797,7 +1812,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "LIST-COPY-SEQ*"
            "LIST-FILL*"
            "LIST-SUBSEQ*"
-           "LIST-REVERSE-INTO-VECTOR"
+           "LIST-REVERSE-INTO-VECTOR" "LIST-REVERSE-INTO-VECTOR-CDDR"
            "ANSI-STREAM"
            "ANSI-STREAM-BIN" "ANSI-STREAM-BOUT"
            "ANSI-STREAM-IN"
@@ -1840,6 +1855,9 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "NUMERIC-TYPE-CLASS" "NUMERIC-TYPE-COMPLEXP"
            "NUMTYPE-ASPECTS-EQ" "NUMERIC-TYPE-FORMAT"
            "NUMERIC-TYPE-HIGH" "NUMERIC-TYPE-LOW" "NUMERIC-TYPE-P"
+           "NUMERIC-UNION-TYPE" "NUMERIC-UNION-TYPE-P"
+           "NUMERIC-UNION-TYPE-LOW" "NUMERIC-UNION-TYPE-HIGH"
+           "FLATTEN-NUMERIC-UNION-TYPES"
            "OBJECT-NOT-ARRAY-ERROR" "OBJECT-NOT-CHARACTER-ERROR"
            "OBJECT-NOT-BASE-STRING-ERROR" "OBJECT-NOT-BIGNUM-ERROR"
            "OBJECT-NOT-BIT-VECTOR-ERROR"
@@ -2010,7 +2028,7 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
            "CHECK-RANGE<=" "CHECK-RANGE<<=" "CHECK-RANGE<=<"
            "TYPE-*-TO-T"
            "TYPE-DIFFERENCE" "TYPE-INTERSECTION"
-           "TYPE-INTERSECTION2" "TYPE-APPROX-INTERSECTION2"
+           "TYPE-INTERSECTION2"
            "TYPE-SINGLETON-P"
            "TYPE-SINGLE-VALUE-P" "TYPE-SPECIFIER" "TYPE-UNION"
            "TYPE/=" "TYPE=" "TYPES-EQUAL-OR-INTERSECT"
@@ -2326,14 +2344,16 @@ is a good idea, but see SB-SYS re. blurring of boundaries.")
 
            "STRING>=*" "STRING>*" "STRING=*" "STRING<=*"
            "STRING<*" "STRING/=*" "%SVSET"
-           "SIMPLE-BASE-STRING=" #+sb-unicode "SIMPLE-CHARACTER-STRING="
-                                 "%SP-STRING-COMPARE" "%SP-STRING="
-                                 "%SETNTH" "%SETELT"
-                                 "%SET-ROW-MAJOR-AREF" "%SET-FILL-POINTER"
-                                 "%SET-FDEFINITION" "%SCHARSET"
-                                 "%RPLACD" "%RPLACA" "%PUT" "%CHARSET"
-                                 "%WITH-OUTPUT-TO-STRING"
-                                 "INLINE-VOP")
+           "SIMPLE-BASE-STRING="
+           #+sb-unicode "SIMPLE-CHARACTER-STRING="
+           "%SP-STRING-COMPARE" "%SP-STRING="
+           "%SETNTH" "%SETELT"
+           "%SET-ROW-MAJOR-AREF" "%SET-FILL-POINTER"
+           "%SET-FDEFINITION" "%SCHARSET"
+           "%RPLACD" "%RPLACA" "%PUT" "%CHARSET"
+           "%WITH-OUTPUT-TO-STRING"
+           "INLINE-VOP"
+           "WRAP-IF")
   #+sb-simd-pack
   (:export "SIMD-PACK"
            "SIMD-PACK-P"
@@ -2438,6 +2458,7 @@ be submitted as a CDR")
            "TOKEN-DELIMITERP" "WHITESPACE[2]P" "WITH-READ-BUFFER"
            ;; other
 
+           "INSTALL-HASH-TABLE-LOCK"
            "%MAKUNBOUND")
   (:use "CL" "SB-ALIEN" "SB-BIGNUM" "SB-EXT"
         "SB-GRAY" "SB-INT" "SB-KERNEL" "SB-SYS"))
@@ -2592,7 +2613,7 @@ be submitted as a CDR")
            "ALLOCATE-FULL-CALL-FRAME"
            "ALWAYS-TRANSLATABLE"
            "ANCESTOR-FRAME-REF" "ANCESTOR-FRAME-SET"
-           "ANY" "ASSEMBLE-FILE"
+           "ANY"
            "ATTRIBUTES" "ATTRIBUTES-INTERSECTION" "ATTRIBUTES-UNION"
            "ATTRIBUTES="
            "BRANCH"
@@ -2601,9 +2622,11 @@ be submitted as a CDR")
            "CALLEE-NFP-TN" "CALLEE-RETURN-PC-TN"
            "CATCH-BLOCK" "UNWIND-BLOCK"
            "CLOSURE-INIT" "CLOSURE-REF" "CLOSURE-INIT-FROM-FP"
+           "CODE-IMMOBILE-P"
            "COMPARE-AND-SWAP-SLOT"
            "COMPILE-IN-LEXENV"
            "COMPILE-FILES" "COMPILE-FORM-TO-FILE"
+           "COMPILE-FILE-TO-TEMPFILE"
            "%COMPILER-DEFUN" "COMPILER-ERROR" "FATAL-COMPILER-ERROR"
            "COMPILER-NOTIFY"
            "COMPILER-STYLE-WARN" "COMPILER-WARN"
@@ -3276,7 +3299,7 @@ like *STACK-TOP-HINT* and unsupported stuff like *TRACED-FUN-LIST*.")
            "CODE-LOCATION-CONTEXT"
            "CODE-LOCATION-UNKNOWN-P" "CODE-LOCATION=" "DEACTIVATE-BREAKPOINT"
            "DEBUG-BLOCK" "DEBUG-BLOCK-ELSEWHERE-P" "DEBUG-BLOCK-P"
-           "DEBUG-CONDITION" "DEBUG-ERROR"
+           "DEBUG-BLOCK-SUCCESSORS" "DEBUG-CONDITION" "DEBUG-ERROR"
            "DEBUG-FUN" "DEBUG-FUN-FUN" "DEBUG-FUN-KIND"
            "DEBUG-FUN-LAMBDA-LIST" "DEBUG-FUN-MORE-ARGS"
            "DEBUG-FUN-NAME" "DEBUG-FUN-CLOSURE-NAME"
@@ -3286,7 +3309,7 @@ like *STACK-TOP-HINT* and unsupported stuff like *TRACED-FUN-LIST*.")
            "DEBUG-SOURCE-P" "DEBUG-SOURCE-START-POSITIONS"
            "DEBUG-VAR" "DEBUG-VAR-ID" "DEBUG-VAR-INFO-AVAILABLE"
            "DEBUG-VAR-NAME" "DEBUG-VAR-P" "DEBUG-VAR-PACKAGE"
-           "DEBUG-VAR-SYMBOL" "DEBUG-VAR-VALID-VALUE"
+           "DEBUG-VAR-SYMBOL"
            "DEBUG-VAR-VALIDITY" "DEBUG-VAR-VALUE"
            "DELETE-BREAKPOINT"
            "DO-DEBUG-BLOCK-LOCATIONS" "DO-DEBUG-FUN-BLOCKS"
@@ -3342,6 +3365,7 @@ like *STACK-TOP-HINT* and unsupported stuff like *TRACED-FUN-LIST*.")
            "INTERRUPT-THREAD"
            "INTERRUPT-THREAD-ERROR"
            "INTERRUPT-THREAD-ERROR-THREAD"
+           "*INTERRUPT-HANDLER*"
            "RETURN-FROM-THREAD"
            "ABORT-THREAD"
            "MAIN-THREAD-P"

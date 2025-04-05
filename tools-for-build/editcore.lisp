@@ -253,6 +253,7 @@
                             &optional (address-mode :physical))
   (dolist (id `(,immobile-fixedobj-core-space-id
                 ,static-core-space-id
+                ,permgen-core-space-id
                 ,dynamic-core-space-id))
     (binding* ((space (get-space id spacemap) :exit-if-null)
                (start (translate-ptr (space-addr space) spacemap))
@@ -305,7 +306,7 @@
 (defun make-core (spacemap code-bounds fixedobj-bounds &key enable-pie linkage-space-info)
   (let* ((linkage-bounds
           (let ((text-space (get-space immobile-text-core-space-id spacemap)))
-            (if text-space
+            (if (and text-space (/= (space-addr text-space) 0))
                 (let ((linkage-spaces-size
                        (+ #+linkage-space (ash 1 (+ n-linkage-index-bits word-shift))
                           alien-linkage-space-size))
@@ -723,19 +724,10 @@
                    (let ((string (translate (symbol-name feature) spacemap)))
                      (push (intern string "KEYWORD") result))))
                (setq list (cdr list))))))
-    (walk-dynamic-space
-     nil
-     spacemap
-     (lambda (obj vaddr size large)
-       (declare (ignore vaddr size large))
-       (when (symbolp obj)
-         (when (or (and (eq (symbol-package-id obj) #.(symbol-package-id 'sb-impl:+internal-features+))
-                        (string= (translate (symbol-name obj) spacemap) "+INTERNAL-FEATURES+"))
-                   (and (eq (symbol-package-id obj) #.(symbol-package-id '*features*))
-                        (string= (translate (symbol-name obj) spacemap) "*FEATURES*")))
-           (scan obj))))))
-  ;;(format t "~&Target-features=~S~%" result)
-  result)
+    (scan (%find-target-symbol #.(symbol-package-id 'sb-impl:+internal-features+)
+                               "+INTERNAL-FEATURES+" spacemap) )
+    (scan (%find-target-symbol #.(symbol-package-id '*features*) "*FEATURES*" spacemap))
+    result))
 
 (defun transport-code (from-vaddr from-paddr to-vaddr to-paddr size)
   (%byte-blt from-paddr 0 to-paddr 0 size)
@@ -872,7 +864,6 @@
         (:gencgc
         (dolist (range page-ranges (aver (null codeblobs)))
           (destructuring-bind (in-use first last) range
-            ;;(format t "~&Working on range ~D..~D~%" first last)
             (loop while codeblobs
                   do (destructuring-bind (vaddr . size) (car codeblobs)
                        (let ((page (calc-page-index vaddr space)))
@@ -959,10 +950,10 @@
              (read-linkage-cells input linkage-space-info core-offset)
              (incf total-npages npages))))
         (#.page-table-core-entry-type-code
-         (aver (= len 4))
-         (symbol-macrolet ((n-ptes (%vector-raw-bits core-header (+ ptr 1)))
-                           (nbytes (%vector-raw-bits core-header (+ ptr 2)))
-                           (data-page (%vector-raw-bits core-header (+ ptr 3))))
+         (aver (= len 3))
+         (symbol-macrolet ((n-ptes (%vector-raw-bits core-header (+ ptr 0)))
+                           (nbytes (%vector-raw-bits core-header (+ ptr 1)))
+                           (data-page (%vector-raw-bits core-header (+ ptr 2))))
            (aver (= data-page total-npages))
            (setf pte-nbytes nbytes)
            (setf card-mask-nbits (%vector-raw-bits core-header ptr))
@@ -974,8 +965,8 @@
                (ecase (%vector-raw-bits core-header ptr)
                  (1 :gencgc)
                  (2 :mark-region-gc)))
-         (setf *nil-taggedptr* (%vector-raw-bits core-header (+ ptr 1)))
-         (let* ((strptr (+ ptr 2))
+         (setf *nil-taggedptr* (%vector-raw-bits core-header (+ ptr 2)))
+         (let* ((strptr (+ ptr 3))
                 (string (make-string (%vector-raw-bits core-header strptr)
                                      :element-type 'base-char)))
            (%byte-blt core-header (* (1+ strptr) n-word-bytes) string 0 (length string))
@@ -1017,8 +1008,7 @@
     (let* ((sizeof-corefile-pte (+ n-word-bytes 2))
            (pte-bytes (align-up (* sizeof-corefile-pte n-ptes) n-word-bytes)))
       (dolist (word (list  page-table-core-entry-type-code
-                           6 ; = number of words in this core header entry
-                           (core-header-card-mask-nbits parsed-header)
+                           5 ; = number of words in this core header entry
                            n-ptes (+ (* n-ptes *bitmap-bytes-per-page*) pte-bytes)
                            page-count))
         (setf (%vector-raw-bits core-header (incf offset)) word)))
@@ -1086,7 +1076,7 @@
                           (%make-lisp-obj
                            (if (= space-id static-core-space-id)
                                ;; must not visit NIL, bad things happen
-                               (translate-ptr (+ static-space-start sb-vm::static-space-objects-offset)
+                               (translate-ptr (+ (space-addr space) sb-vm::static-space-objects-offset)
                                               spacemap)
                                (sap-int paddr)))
                           (%make-lisp-obj (sap-int (sap+ paddr (space-size space)))))))
@@ -1136,7 +1126,14 @@
       (let* ((core-header (make-array +backend-page-bytes+ :element-type '(unsigned-byte 8)))
              (core-offset (read-core-header input core-header))
              (parsed-header (parse-core-header input core-header core-offset))
-             (space-list (core-header-space-list parsed-header)))
+             (parsed-spacelist (core-header-space-list parsed-header))
+             ;; Notice that save_to_filehandle() outputs IMMOBILE_TEXT_CORE_SPACE_ID even if it
+             ;; contains nothing. Perhaps that's wrong. Anyway we want to delete the space from
+             ;; the directory as parsed, otherwise two text spaces would exist.
+             (old-text-space (find immobile-text-core-space-id parsed-spacelist :key 'space-id))
+             (space-list (remove old-text-space parsed-spacelist)))
+        (when old-text-space
+          (aver (zerop (space-nwords old-text-space))))
         ;; Map the core file to memory
         (with-mapped-core (sap core-offset (core-header-total-npages parsed-header) input)
           (let* ((spacemap (cons sap (sort (copy-list space-list) #'> :key #'space-addr)))
@@ -1848,7 +1845,9 @@
          ;;; on subsequent pages, and put the end-of-page free space in a list.
          ;;; It's not worth the hassle.
          (largep (ecase *heap-arrangement*
-                   (:mark-region-gc (>= size large-object-size))
+                   ;; FIXME: once-and-only-three-times?
+                   ;; (is also in generic/utils and late-objdef)
+                   (:mark-region-gc (>= size (* 3/4 gencgc-page-bytes)))
                    (:gencgc (>= size gencgc-page-bytes))))
          (page-type (pick-page-type descriptor sap largep old-spacemap))
          (newspace (get-space dynamic-core-space-id new-spacemap))
@@ -1968,7 +1967,9 @@
     (call-with-each-static-object
        (lambda (descriptor) (trace-obj #'visit descriptor old-spacemap))
        old-spacemap)
-    (dotimes (i (length linkage-cells))
+    ;; TODO: autogenerate "#define FIRST_USABLE_LINKAGE_ELT 1" from Lisp
+    (loop for i from 1 below (length linkage-cells)
+          do
       (let ((val (aref linkage-cells i)))
         (unless (= val 0)
           (let* ((function (fun-entry->descriptor val))

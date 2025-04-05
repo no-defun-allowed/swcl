@@ -99,8 +99,9 @@ Code for options that not every system has should be conditionalised:
   sockopt-receive-low-water sockint::sol-socket sockint::so-rcvlowat)
 (define-socket-option-int
   sockopt-send-low-water sockint::sol-socket sockint::so-sndlowat)
-(define-socket-option-int
-  sockopt-type sockint::sol-socket sockint::so-type)
+(define-socket-option-int sockopt-type sockint::sol-socket sockint::so-type)
+(define-socket-option-int sockopt-error sockint::sol-socket sockint::so-error)
+
 (define-socket-option-int
   sockopt-send-buffer sockint::sol-socket sockint::so-sndbuf)
 (define-socket-option-int
@@ -110,13 +111,16 @@ Code for options that not every system has should be conditionalised:
   "Available only on Linux.")
 
 (define-socket-option-int
-  sockopt-tcp-keepcnt :tcp sockint::tcp-keepcnt :linux
-  "Available only on Linux.")
+  sockopt-tcp-keepcnt :tcp sockint::tcp-keepcnt (or :linux (and :bsd (not :openbsd)))
+  "Available only on Linux, BSD (except OpenBSD).")
 (define-socket-option-int
-  sockopt-tcp-keepidle :tcp sockint::tcp-keepidle :linux
-  "Available only on Linux.")
+  sockopt-tcp-keepidle :tcp sockint::tcp-keepidle (or :linux (and :bsd (not (or :openbsd :darwin))))
+  "Available only on Linux, BSD (except OpenBSD, Darwin).")
 (define-socket-option-int
-  sockopt-tcp-keepintvl :tcp sockint::tcp-keepintvl :linux
+  sockopt-tcp-keepintvl :tcp sockint::tcp-keepintvl (or :linux (and :bsd (not :openbsd)))
+  "Available only on Linux, BSD (except OpenBSD).")
+(define-socket-option-int
+  sockopt-tcp-user-timeout :tcp sockint::tcp-user-timeout :linux
   "Available only on Linux.")
 
 ;;; boolean options are integers really

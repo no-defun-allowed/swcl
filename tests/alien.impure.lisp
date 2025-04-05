@@ -204,15 +204,15 @@
    (eq :ok
        (handler-case
            (tagbody
-              (alien-funcall
-               (extern-alien "CallWindowProcW"
-                             (function unsigned-int
-                                       (* (function int)) unsigned-int
-                                       unsigned-int unsigned-int unsigned-int))
-               (alien-sap
-                (sb-alien::alien-callback (function unsigned-int)
-                                          #'(lambda () (go up))))
-               0 0 0 0)
+              (with-alien-callable ((callback unsigned-int ()
+                                      (go up)))
+                (alien-funcall
+                 (extern-alien "CallWindowProcW"
+                               (function unsigned-int
+                                         (* (function int)) unsigned-int
+                                         unsigned-int unsigned-int unsigned-int))
+                 callback
+                 0 0 0 0))
             up
               (funcall 0))
          (error ()
@@ -568,6 +568,23 @@
 
 (with-test (:name :no-vector-sap-of-array-nil)
   (assert-error (sb-sys:vector-sap (opaque-identity (make-array 5 :element-type nil)))))
+
+(define-alien-variable internal-errors-enabled int)
+
+(with-test (:name :direct-and-indirect-deref
+                  :fails-on :interpreter)
+  (let ((fun (checked-compile
+              `(lambda (x y b)
+                 (declare (optimize speed (safety 0)))
+                 (declare (type (alien (* (* int))) x y))
+                 (let ((xx (deref x))
+                       (yy (deref y)))
+                   (values (deref xx) (deref yy) (let ((z (if b xx yy))) (deref z))))))))
+    (with-alien ((a (* int) (addr internal-errors-enabled)))
+      (multiple-value-bind (i j k) (funcall fun (addr a) (addr a) t)
+        (assert (= i j k 1)))
+      (multiple-value-bind (i j k) (funcall fun (addr a) (addr a) nil)
+        (assert (= i j k 1))))))
 
 (cl:in-package "SB-KERNEL")
 (test-util:with-test (:name :hash-consing)

@@ -34,13 +34,13 @@
 
 ;;;; routines for dealing with static symbols
 
-;;; the byte offset of the static symbol SYMBOL
+;;; the distance from tagged ptr to NIL to tagged ptr to static SYMBOL, in bytes
 (defun static-symbol-offset (symbol)
   (if symbol
-      ;; This predicate returns a generalized boolean, integer indicating truth
-      ;; and also the index, or T if the argument is NIL, or NIL if non-static.
+      ;; STATIC-SYMBOL-P returns a generalized boolean: an integer indicating
+      ;; the index, or T if the argument is NIL, or NIL if non-static.
       (let ((posn (static-symbol-p symbol)))
-        (unless posn (error "~S is not a static symbol." symbol))
+        (unless (fixnump posn) (error "~S is not a static symbol." symbol))
         (+ (* posn (pad-data-block symbol-size))
            (pad-data-block (1- symbol-size))
            other-pointer-lowtag
@@ -59,22 +59,6 @@
   (ecase alien-linkage-table-growth-direction
     (:up   (floor (- addr alien-linkage-space-start) alien-linkage-table-entry-size))
     (:down (1- (floor (- space-end addr) space-end))))))
-
-;;; Return absolute address of the 'fun' slot in static fdefn NAME.
-(defun static-fdefn-fun-addr (name)
-  (+ nil-value
-     (static-fdefn-offset name)
-     (- other-pointer-lowtag)
-     (ash fdefn-fun-slot word-shift)))
-
-;;; Return the (byte) offset from NIL to the raw-addr slot of the
-;;; fdefn object for the static function NAME.
-(defun static-fun-offset (name)
-  #+linkage-space (error "Can't compute static-fun-offset to ~S" name)
-  #-linkage-space
-  (+ (static-fdefn-offset name)
-     (- other-pointer-lowtag)
-     (* fdefn-raw-addr-slot n-word-bytes)))
 
 
 ;;;; interfaces to IR2 conversion
@@ -106,7 +90,10 @@
                       (nth n *register-arg-offsets*))
       (make-sc+offset control-stack-sc-number n)))
 
-(defstruct fixed-call-args-state
+(defstruct (fixed-call-args-state
+            (:copier nil)
+            (:predicate nil)
+            (:constructor make-fixed-call-args-state ()))
   (descriptors -1 :type fixnum)
   #-c-stack-is-control-stack
   (non-descriptors -1 :type fixnum)
@@ -240,7 +227,15 @@
        (not (types-equal-or-intersect
              (tn-ref-type tn-ref)
              (if permit-nil
-                 (specifier-type '(or cons . #1=(#+64-bit single-float function cons instance character)))
+                 (specifier-type '(or cons . #1=(#+64-bit single-float function instance character)))
+                 (specifier-type '(or list . #1#)))))))
+
+(defun number-or-other-pointer-tn-ref-p (tn-ref &optional permit-nil)
+  (and (sc-is (tn-ref-tn tn-ref) descriptor-reg)
+       (not (types-equal-or-intersect
+             (tn-ref-type tn-ref)
+             (if permit-nil
+                 (specifier-type '(or cons . #1=(function instance character)))
                  (specifier-type '(or list . #1#)))))))
 
 ;;; Can LOWTAG be distinguished from other tn lowtags by testing a single bit?
@@ -395,9 +390,16 @@
                              (not (and ;; Can this TN be boxed after the allocator?
                                    (boxed-tn-p tn)
                                    (or (eq allocator :allocator)
-                                       (and (neq (vop-name (tn-ref-vop ref)) 'instance-set-multiple)
-                                            (sb-c::set-slot-old-p (sb-c::vop-node (tn-ref-vop ref))
-                                                                  (vop-arg-position value-tn-ref (tn-ref-vop ref))))))))
+                                       (let ((vop (tn-ref-vop ref)))
+                                        (and (neq (vop-name vop) 'instance-set-multiple)
+                                             (let ((node (sb-c::vop-node (tn-ref-vop ref))))
+                                               (multiple-value-bind (nth-object nth-value)
+                                                   (if (and (eq (vop-name vop) 'set-slot)
+                                                            (typep (sb-c::combination-fun-source-name node)
+                                                                   '(cons (eql setf))))
+                                                       (values 1 0)
+                                                       (values 0 (vop-arg-position value-tn-ref vop)))
+                                                 (sb-c::set-slot-old-p node nth-object nth-value)))))))))
                     (return t))))))
         (unless any-pointer
           (return-from require-gengc-barrier-p nil))))
@@ -481,7 +483,7 @@
 (defun compute-fastrem-coefficient (d n fraction-bits)
   (multiple-value-bind (smallest-f c)
       (flet ((is-pow2 (n)
-               (declare (unsigned-byte n))
+               (declare (type unsigned-byte n))
                (let ((l (integer-length n)))
                  (= n (ash 1 (1- l))))))
         (if (is-pow2 d)
@@ -525,8 +527,11 @@
                             ((sb-kernel::defstruct-description-p type)
                              (dd-name type)))))
         (when (and typename (sb-xc:subtypep typename 'ctype))
-          (error "~S instance constructor called in a non-system file"
-                 typename)))
+          ;; If stack-allocation occurs, we should never have to
+          ;; call this predicate to inquire which TLAB to use.
+          (#.(cl:if sb-ext:*stack-allocate-dynamic-extent* 'error 'sb-c:compiler-notify)
+             "~S instance constructor called" typename))
+        nil)
       (and node
            (env-system-tlab-p (sb-c::node-lexenv node)))))
 
@@ -564,3 +569,22 @@
            (let ((node (sb-c::vop-node sb-assem::*current-vop*)))
              (and (sb-c::combination-p node)
                   (eq (sb-c::combination-info node) :aligned-stack))))))
+
+(defun target-heap-prezeroed-p ()
+  (eq (sb-c::allocator-target *compilation*) :mark-region-gc))
+
+(defun target-heap-large-object-size ()
+  (ecase (sb-c::allocator-target *compilation*)
+    ;; Needless to say this violates the OAOO principle as the definition
+    ;; of the "constant" for this appears in late-objdef in addition to which
+    ;; it's a crummy assumption that page-size is the same for each GC.
+    ;; For I'm just trying to solve the minimal number of issues in terms
+    ;; of having the ability to target a fasl to a different GC.
+    (:gencgc (* 4 gencgc-page-bytes))
+    (:mark-region-gc (* 3/4 gencgc-page-bytes))))
+
+;;; Print registers from VOPs
+(defmacro mprint (value)
+  `(let ((*location-context* ',value))
+     (emit-error-break sb-assem::*current-vop* cerror-trap (error-number-or-lose 'sb-kernel::mprint-error)
+                       (list ,value))))

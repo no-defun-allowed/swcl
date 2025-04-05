@@ -790,7 +790,7 @@
   (assert (= (count 'sb-kernel:%check-bound
                     (ctu:ir1-named-calls
                      `(lambda (x)
-                        (declare ((vector t) x))
+                        (declare (vector x))
                         (aref x 0))
                      nil))
              0)))
@@ -872,3 +872,67 @@
       (declare ((simple-vector 8) v)
                ((integer -4 -1) n))
       (aref v (+ n 4)))))
+
+(with-test (:name :make-array-non-simple-type)
+  (assert-type
+   (lambda (x e)
+     (make-array 10
+                 :element-type e
+                 :fill-pointer (1- x)))
+   (and vector (not simple-array)))
+  (assert-type
+   (lambda (a)
+     (make-array (array-total-size a)
+                 :displaced-to a))
+   (and (vector t) (not simple-array))))
+
+(with-test (:name :storage-vector-type)
+  (assert-type
+   (lambda (x)
+     (sb-ext:array-storage-vector (the string x)))
+   simple-string))
+
+(with-test (:name :make-array-element-type)
+  (assert-type
+   (lambda (a)
+     (declare (string a))
+     (make-array 3 :element-type (array-element-type a)))
+   (simple-string 3))
+  (assert-type
+   (lambda (a)
+     (make-array 2 :element-type (the (member character base-char) a)))
+   (simple-string 2))
+  (assert-type
+   (lambda (x)
+     (make-array '(1 1)
+                 :element-type 'single-float
+                 :initial-contents x))
+   (simple-array single-float (1 1)))
+  (assert-type
+   (lambda (n)
+    (make-array (list n n)
+                :element-type 'single-float
+                :initial-contents '((1.0))))
+   (simple-array single-float (* *))))
+
+(with-test (:name :multidimensional-access-no-bounds-checks)
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     '(lambda (array i j)
+                       (array-row-major-index array i j))
+                     nil))
+             2))
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     '(lambda (array i j)
+                       (declare (optimize (sb-c:insert-array-bounds-checks 0)))
+                       (array-row-major-index array i j))
+                     nil))
+             0))
+  (assert (= (count 'sb-kernel:%check-bound
+                    (ctu:ir1-named-calls
+                     '(lambda (v)
+                       (declare ((simple-array t (4 4)) v))
+                       (aref v 3 2))
+                     nil))
+             0)))

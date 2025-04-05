@@ -10,6 +10,9 @@
 ;;;; files for more information.
 
 (in-package "SB-DEBUG")
+
+;;; used to communicate to debug-loop that we are at a step breakpoint
+(define-condition step*-condition (step-condition) ())
 
 ;;;; variables and constants
 
@@ -124,6 +127,20 @@ Stepping:
         was stepped into returns.
   STOP  Stops single-stepping.
 
+Breakpoints and steps:
+  LIST-LOCATIONS [{function | :C}]   List the locations for breakpoints.
+                                     Specify :C for the current frame.
+    Abbreviation: LL
+  LIST-BREAKPOINTS                   List the active breakpoints.
+    Abbreviations: LB, LBP
+  DELETE-BREAKPOINT [n]              Remove breakpoint n or all breakpoints.
+    Abbreviations: DEL, DBP
+  BREAKPOINT {n | :end | :start} [:break form] [:function function]
+             [{:print form}*] [:condition form]
+                                     Set a breakpoint.
+    Abbreviations: BR, BP
+  STEP* [n]                          Step to the next location or step n times.
+
 Function and macro commands:
  (SB-DEBUG:ARG n)
     Return the n'th argument in the current frame.
@@ -146,11 +163,182 @@ Other commands:
     useful when the debugger was invoked to handle an error in
     deeply nested input syntax, and now the reader is confused.)")
 
-(defmacro with-debug-io-syntax (() &body body)
-  (let ((thunk (gensym "THUNK")))
-    `(dx-flet ((,thunk ()
-                       ,@body))
-       (funcall-with-debug-io-syntax #',thunk))))
+;;;; breakpoint state
+
+(defvar *only-block-start-locations* nil
+  "When true, the LIST-LOCATIONS command only displays block start locations.
+   Otherwise, all locations are displayed.")
+
+(defvar *print-location-kind* nil
+  "When true, list the code location type in the LIST-LOCATIONS command.")
+
+;;; a list of the types of code-locations that should not be stepped
+;;; to and should not be listed when listing breakpoints
+(defvar *bad-code-location-types* '(:call-site :internal-error))
+(declaim (type list *bad-code-location-types*))
+
+;;; code locations of the possible breakpoints
+(defvar *possible-breakpoints*)
+(declaim (type list *possible-breakpoints*))
+
+;;; a list of the made and active breakpoints, each is a
+;;; BREAKPOINT-INFO structure
+(defvar *breakpoints* nil)
+(declaim (type list *breakpoints*))
+
+;;; a list of BREAKPOINT-INFO structures of the made and active step
+;;; breakpoints
+(defvar *step-breakpoints* nil)
+(declaim (type list *step-breakpoints*))
+
+;;; the number of times left to step
+(defvar *number-of-steps* 1)
+(declaim (type integer *number-of-steps*))
+
+;;; This is used when listing and setting breakpoints.
+(defvar *default-breakpoint-debug-fun* nil)
+(declaim (type (or list sb-di:debug-fun) *default-breakpoint-debug-fun*))
+
+
+;;;; the BREAKPOINT-INFO structure
+
+;;; info about a made breakpoint
+(defstruct (breakpoint-info (:copier nil)
+                            (:constructor %make-breakpoint-info))
+  ;; where we are going to stop
+  (place (missing-arg)
+   :type (or sb-di:code-location sb-di:debug-fun)
+   :read-only t)
+  ;; the breakpoint returned by SB-DI:MAKE-BREAKPOINT
+  (breakpoint (missing-arg) :type sb-di:breakpoint :read-only t)
+  ;; the function returned from SB-DI:PREPROCESS-FOR-EVAL. If result is
+  ;; non-NIL, drop into the debugger.
+  (break #'identity :type function :read-only t)
+  ;; the function returned from SB-DI:PREPROCESS-FOR-EVAL. If result is
+  ;; non-NIL, eval (each) print and print results.
+  (condition #'identity :type function :read-only t)
+  ;; the list of functions from SB-DI:PREPROCESS-FOR-EVAL to evaluate.
+  ;; Results are conditionally printed. CAR of each element is the
+  ;; function, CDR is the form it goes with.
+  (print nil :type list :read-only t)
+  ;; the number used when listing the possible breakpoints within a
+  ;; function; or could also be a symbol such as START or END
+  (code-location-selector (missing-arg) :type (or symbol integer) :read-only t)
+  ;; the number used when listing the active breakpoints, and when
+  ;; deleting breakpoints
+  (breakpoint-number (missing-arg) :type integer :read-only t))
+
+(defun create-breakpoint-info (place breakpoint code-location-selector
+                                     &key (break #'identity)
+                                     (condition #'identity) (print nil))
+  (setf *breakpoints*
+        (sort *breakpoints* #'< :key #'breakpoint-info-breakpoint-number))
+  (let ((breakpoint-number
+         (do ((i 1 (incf i)) (breakpoints *breakpoints* (rest breakpoints)))
+             ((or (> i (length *breakpoints*))
+                  (not (= i (breakpoint-info-breakpoint-number
+                             (first breakpoints)))))
+
+              i))))
+    (%make-breakpoint-info :place place
+                           :breakpoint breakpoint
+                           :code-location-selector code-location-selector
+                           :breakpoint-number breakpoint-number
+                           :break break
+                           :condition condition
+                           :print print)))
+
+(defun print-breakpoint-info (breakpoint-info)
+  (let ((place (breakpoint-info-place breakpoint-info))
+        (bp-number (breakpoint-info-breakpoint-number breakpoint-info)))
+    (case (sb-di:breakpoint-kind (breakpoint-info-breakpoint breakpoint-info))
+      (:code-location
+       (print (code-location-source-form place 0) *debug-io*)
+       (format *debug-io*
+               "~&~S: ~S in ~S"
+               bp-number
+               (breakpoint-info-code-location-selector breakpoint-info)
+               (sb-di:debug-fun-name (sb-di:code-location-debug-fun place))))
+      (:fun-start
+       (format *debug-io* "~&~S: FUN-START in ~S" bp-number
+               (sb-di:debug-fun-name place)))
+      (:fun-end
+       (format *debug-io* "~&~S: FUN-END in ~S" bp-number
+               (sb-di:debug-fun-name place))))))
+
+
+;;;; code location utilities
+
+;;; Return the first code-location in the passed debug block.
+(defun first-code-location (debug-block)
+  (let ((found nil)
+        (first-code-location nil))
+    (sb-di:do-debug-block-locations (code-location debug-block)
+      (unless found
+        (setf first-code-location code-location)
+        (setf found t)))
+    first-code-location))
+
+;;; Return a list of the next code-locations following the one passed.
+;;; One of the *BAD-CODE-LOCATION-TYPES* will not be returned.
+(defun next-code-locations (code-location)
+  (let ((debug-block (sb-di:code-location-debug-block code-location))
+        (block-code-locations nil))
+    (sb-di:do-debug-block-locations (block-code-location debug-block)
+      (unless (member (sb-di:code-location-kind block-code-location)
+                      *bad-code-location-types*)
+        (push block-code-location block-code-locations)))
+    (setf block-code-locations (nreverse block-code-locations))
+    (let* ((code-loc-list (rest (member code-location block-code-locations
+                                        :test #'sb-di:code-location=)))
+           (next-list (cond (code-loc-list
+                             (list (first code-loc-list)))
+                            ((map 'list #'first-code-location
+                                  (sb-di:debug-block-successors debug-block)))
+                            (t nil))))
+      (when (and (= (length next-list) 1)
+                 (sb-di:code-location= (first next-list) code-location))
+        (setf next-list (next-code-locations (first next-list))))
+      next-list)))
+
+;;; Return a list of code-locations of the possible breakpoints of DEBUG-FUN.
+(defun possible-breakpoints (debug-fun)
+  (let ((possible-breakpoints nil))
+    (sb-di:do-debug-fun-blocks (debug-block debug-fun)
+      (unless (sb-di:debug-block-elsewhere-p debug-block)
+        (if *only-block-start-locations*
+            (push (first-code-location debug-block) possible-breakpoints)
+            (sb-di:do-debug-block-locations (code-location debug-block)
+              (when (not (member (sb-di:code-location-kind code-location)
+                                 *bad-code-location-types*))
+                (push code-location possible-breakpoints))))))
+    (nreverse possible-breakpoints)))
+
+;;; Search the info-list for the item passed (CODE-LOCATION,
+;;; DEBUG-FUN, or BREAKPOINT-INFO). If the item passed is a debug
+;;; function then kind will be compared if it was specified. The kind
+;;; if also compared if a breakpoint-info is passed since it's in the
+;;; breakpoint. The info structure is returned if found.
+(defun location-in-list (place info-list &optional (kind nil))
+  (when (breakpoint-info-p place)
+    (setf kind (sb-di:breakpoint-kind (breakpoint-info-breakpoint place)))
+    (setf place (breakpoint-info-place place)))
+  (cond ((sb-di:code-location-p place)
+         (find place info-list
+               :key #'breakpoint-info-place
+               :test (lambda (x y) (and (sb-di:code-location-p y)
+                                        (sb-di:code-location= x y)))))
+        (t
+         (find place info-list
+               :test (lambda (x-debug-fun y-info)
+                       (let ((y-place (breakpoint-info-place y-info))
+                             (y-breakpoint (breakpoint-info-breakpoint
+                                            y-info)))
+                         (and (sb-di:debug-fun-p y-place)
+                              (eq x-debug-fun y-place)
+                              (or (not kind)
+                                  (eq kind (sb-di:breakpoint-kind
+                                            y-breakpoint))))))))))
 
 ;;; If LOC is an unknown location, then try to find the block start
 ;;; location. Used by source printing to some information instead of
@@ -166,6 +354,148 @@ Other commands:
               (t
                loc)))
       loc))
+
+
+;;;; MAIN-HOOK-FUN for steps and breakpoints
+
+;;; This must be passed as the hook function. It keeps track of where
+;;; STEP breakpoints are.
+(defun main-hook-fun (current-frame breakpoint &optional return-vals
+                                                         fun-end-cookie)
+  (setf *default-breakpoint-debug-fun*
+        (sb-di:frame-debug-fun current-frame))
+  (dolist (step-info *step-breakpoints*)
+    (sb-di:delete-breakpoint (breakpoint-info-breakpoint step-info))
+    (let ((bp-info (location-in-list step-info *breakpoints*)))
+      (when bp-info
+        (sb-di:activate-breakpoint (breakpoint-info-breakpoint bp-info)))))
+  (let ((*stack-top-hint* current-frame)
+        (step-hit-info
+          (location-in-list (sb-di:breakpoint-what breakpoint)
+                            *step-breakpoints*
+                            (sb-di:breakpoint-kind breakpoint)))
+        (bp-hit-info
+          (location-in-list (sb-di:breakpoint-what breakpoint)
+                            *breakpoints*
+                            (sb-di:breakpoint-kind breakpoint)))
+        (break)
+        (condition)
+        (string ""))
+    (setf *step-breakpoints* nil)
+    (labels ((build-string (str)
+               (setf string (concatenate 'string string str)))
+             (print-common-info ()
+               (build-string
+                (with-output-to-string (*standard-output*)
+                  (when fun-end-cookie
+                    (format *debug-io* "~%Return values: ~S" return-vals))
+                  (when condition
+                    (when (breakpoint-info-print bp-hit-info)
+                      (format *debug-io* "~%")
+                      (print-frame-call current-frame *debug-io*))
+                    (dolist (print (breakpoint-info-print bp-hit-info))
+                      (format *debug-io* "~& ~S = ~S" (rest print)
+                              (funcall (first print) current-frame))))))))
+      (when bp-hit-info
+        (setf break (funcall (breakpoint-info-break bp-hit-info)
+                             current-frame))
+        (setf condition (funcall (breakpoint-info-condition bp-hit-info)
+                                 current-frame)))
+      (cond ((and bp-hit-info step-hit-info (= 1 *number-of-steps*))
+             (build-string (format nil "~&*Step (to a breakpoint)*"))
+             (print-common-info)
+             (break string))
+            ((and bp-hit-info step-hit-info break)
+             (build-string (format nil "~&*Step (to a breakpoint)*"))
+             (print-common-info)
+             (break string))
+            ((and bp-hit-info step-hit-info)
+             (print-common-info)
+             (format *debug-io* "~A" string)
+             (decf *number-of-steps*)
+             (set-step-breakpoint current-frame))
+            ((and step-hit-info (= 1 *number-of-steps*))
+             (build-string "*Step*")
+             (%break 'break
+                     (make-condition 'step*-condition :format-control string)))
+            (step-hit-info
+             (decf *number-of-steps*)
+             (set-step-breakpoint current-frame))
+            (bp-hit-info
+             (when break
+               (build-string (format nil "~&*Breakpoint hit*")))
+             (print-common-info)
+             (if break
+                 (break string)
+                 (format *debug-io* "~A" string)))
+            (t
+             (break "unknown breakpoint"))))))
+
+;;; Set breakpoints at the next possible code-locations. After calling
+;;; this, either (CONTINUE) if in the debugger or just let program flow
+;;; return if in a hook function.
+(defun set-step-breakpoint (frame)
+  (cond
+   ((sb-di:debug-block-elsewhere-p (sb-di:code-location-debug-block
+                                    (sb-di:frame-code-location frame)))
+    (format *debug-io* "cannot step, in elsewhere code~%"))
+   (t
+    (let* ((code-location (sb-di:frame-code-location frame))
+           (next-code-locations (next-code-locations code-location)))
+      (cond
+       (next-code-locations
+        (dolist (code-location next-code-locations)
+          (let ((bp-info (location-in-list code-location *breakpoints*)))
+            (when bp-info
+              (sb-di:deactivate-breakpoint (breakpoint-info-breakpoint
+                                            bp-info))))
+          (let ((bp (sb-di:make-breakpoint #'main-hook-fun code-location
+                                           :kind :code-location)))
+            (sb-di:activate-breakpoint bp)
+            (push (create-breakpoint-info code-location bp 0)
+                  *step-breakpoints*))))
+       (t
+        (let* ((debug-fun (sb-di:frame-debug-fun *current-frame*))
+               (bp (sb-di:make-breakpoint #'main-hook-fun debug-fun
+                                          :kind :fun-end)))
+          (sb-di:activate-breakpoint bp)
+          (push (create-breakpoint-info debug-fun bp 0)
+                *step-breakpoints*))))))))
+
+(defun step-internal (function form)
+  (when (typep function 'interpreted-function)
+    ;; The stepper currently only supports compiled functions So we
+    ;; try to compile the passed-in function, bailing out if it fails.
+    (handler-case
+        (setq function (compile nil function))
+      (error (c)
+        (error "Currently only compiled code can be stepped.~%~
+                Trying to compile the passed form resulted in ~
+                the following error:~%  ~A" c))))
+  (with-debug-io-syntax ()
+    (format *debug-io* "~2&Stepping the form~%  ~S~%" form)
+    (format *debug-io* "~&using the debugger.  Type HELP for help.~2%"))
+  (let* ((debug-function (sb-di:fun-debug-fun function))
+         (bp (sb-di:make-breakpoint #'main-hook-fun debug-function
+                                    :kind :fun-start)))
+    (sb-di:activate-breakpoint bp)
+    (push (create-breakpoint-info debug-function bp 0)
+          *step-breakpoints*))
+  (funcall function))
+
+;;; This is the entry point into the breakpoint stepping mechanism,
+;;; which used to be the original STEP macro in CMU CL.
+(defmacro step* (form)
+  "STEP implements a debugging paradigm wherein the programmer is allowed
+   to step through the evaluation of a form.  We use the debugger's stepping
+   facility to step through an anonymous function containing only form.
+
+   Currently the stepping facility only supports stepping compiled code,
+   so step will try to compile the resultant anonymous function.  If this
+   fails, e.g. because it closes over a non-null lexical environment, an
+   error is signalled."
+  `(step-internal #'(lambda () ,form) ',form))
+
 
 ;;;; BACKTRACE
 
@@ -208,12 +538,10 @@ backtraces. Possible values are :MINIMAL, :NORMAL, and :FULL.
    In the this case arguments may include values internal to SBCL's method
    dispatch machinery.")
 
-(define-deprecated-function :early "1.2.15" backtrace (print-backtrace)
-    (&optional (count *backtrace-frame-count*) (stream *debug-io*))
+(defun backtrace (&optional (count *backtrace-frame-count*) (stream *debug-io*))
   (print-backtrace :count count :stream stream))
 
-(define-deprecated-function :early "1.2.15" backtrace-as-list (list-backtrace)
-    (&optional (count *backtrace-frame-count*))
+(defun backtrace-as-list (&optional (count *backtrace-frame-count*))
   (list-backtrace :count count))
 
 (defun backtrace-start-frame (frame-designator)
@@ -491,8 +819,6 @@ information."
 
 ;;;; frame printing
 
-(eval-when (:compile-toplevel :execute)
-
 ;;; This is a convenient way to express what to do for each type of
 ;;; lambda-list element.
 (sb-xc:defmacro lambda-list-element-dispatch (element
@@ -524,12 +850,21 @@ information."
               ,valid)
              (t ,other)))))
 
-) ; EVAL-WHEN
+(defun frame-arg-count (frame)
+  (let ((debug-fun (sb-di:frame-debug-fun frame)))
+    (when (eq (sb-di:debug-fun-kind debug-fun) :external)
+      (let ((first (car (sb-di:debug-fun-lambda-list debug-fun))))
+        (when (sb-di::compiled-debug-var-p first)
+          (let ((x (sb-di:debug-var-value first frame)))
+            (when (fixnump x)
+              (1+ x))))))))
 
 ;;; Extract the function argument values for a debug frame.
 (defun map-frame-args (thunk frame limit)
-  (unless (zerop limit)
-    (let ((debug-fun (sb-di:frame-debug-fun frame)))
+  (let* ((debug-fun (sb-di:frame-debug-fun frame))
+         (limit (or (frame-arg-count frame)
+                    limit)))
+    (unless (zerop limit)
       (dolist (element (sb-di:debug-fun-lambda-list debug-fun))
         (funcall thunk element)
         (when (zerop (decf limit))
@@ -572,7 +907,7 @@ information."
   (declare (type sb-di:frame frame)
            (type (and unsigned-byte fixnum) limit))
   ;;; All args are available if the function has not proceeded beyond its external
-  ;;; entry point, so every imcoming value is in its argument-passing location.
+  ;;; entry point, so every incoming value is in its argument-passing location.
   (when (sb-di::all-args-available-p frame)
     (return-from frame-args-as-list (early-frame-args frame limit)))
   (handler-case
@@ -1224,7 +1559,9 @@ and LDB (the low-level debugger).  See also ENABLE-DEBUGGER."
         (*read-suppress* nil))
     (unless (typep *debug-condition* 'step-condition)
       (clear-input *debug-io*))
-    (let ((*suppress-frame-print* (typep *debug-condition* 'step-condition)))
+    (let ((*suppress-frame-print*
+            (typep *debug-condition* '(and step-condition
+                                       (not step*-condition)))))
       (funcall *debug-loop-fun*))))
 
 ;;;; DEBUG-LOOP
@@ -1673,15 +2010,7 @@ forms that explicitly control this kind of evaluation.")
 ;;;; information commands
 
 (!def-debug-command "HELP" ()
-  ;; CMU CL had a little toy pager here, but "if you aren't running
-  ;; ILISP (or a smart windowing system, or something) you deserve to
-  ;; lose", so we've dropped it in SBCL. However, in case some
-  ;; desperate holdout is running this on a dumb terminal somewhere,
-  ;; we tell him where to find the message stored as a string.
-  (format *debug-io*
-          "~&~A~2%(The HELP string is stored in ~S.)~%"
-          *debug-help-string*
-          '*debug-help-string*))
+  (write-string *debug-help-string*))
 
 (!def-debug-command-alias "?" "HELP")
 
@@ -1772,6 +2101,210 @@ forms that explicitly control this kind of evaluation.")
              (funcall (if errorp #'error #'warn)
                       "~@<Bogus form-number: the source file has ~
                           probably changed too much to cope with.~:@>"))))))
+
+;;; breakpoint and step commands
+
+;;; Step to the next code-location.
+(!def-debug-command "STEP*" ()
+  (setf *number-of-steps* (read-if-available 1))
+  (set-step-breakpoint *current-frame*)
+  (continue *debug-condition*)
+  (error "couldn't continue"))
+
+;;; List possible breakpoint locations, which ones are active, and
+;;; where the CONTINUE restart will transfer control. Set
+;;; *POSSIBLE-BREAKPOINTS* to the code-locations which can then be
+;;; used by sbreakpoint. Takes a function as an optional argument.
+(!def-debug-command "LIST-LOCATIONS" ()
+  (let ((df (read-if-available *default-breakpoint-debug-fun*)))
+    (cond ((consp df)
+           (setf df (sb-di:fun-debug-fun (eval df)))
+           (setf *default-breakpoint-debug-fun* df))
+          ((or (eq ':c df)
+               (not *default-breakpoint-debug-fun*))
+           (setf df (sb-di:frame-debug-fun *current-frame*))
+           (setf *default-breakpoint-debug-fun* df)))
+    (setf *possible-breakpoints* (possible-breakpoints df)))
+  (let ((continue-at (sb-di:frame-code-location *current-frame*)))
+    (let ((active (location-in-list *default-breakpoint-debug-fun*
+                                    *breakpoints* :fun-start))
+          (here (sb-di:code-location=
+                 (sb-di:debug-fun-start-location
+                  *default-breakpoint-debug-fun*) continue-at)))
+      (when (or active here)
+        (format *debug-io* "::FUN-START ")
+        (when active (format *debug-io* " *Active*"))
+        (when here (format *debug-io* " *Continue here*"))))
+
+    (let ((prev-location nil)
+          (prev-num 0)
+          (this-num 0))
+      (flet ((flush ()
+               (when prev-location
+                 (let ((this-num (1- this-num)))
+                   (if (= prev-num this-num)
+                       (format *debug-io* "~&~W: " prev-num)
+                       (format *debug-io* "~&~W-~W: " prev-num this-num)))
+                 (prin1 (code-location-source-form prev-location 0) *debug-io*)
+                 (when *print-location-kind*
+                   (format *debug-io* "~S " (sb-di:code-location-kind prev-location)))
+                 (when (location-in-list prev-location *breakpoints*)
+                   (format *debug-io* " *Active*"))
+                 (when (sb-di:code-location= prev-location continue-at)
+                   (format *debug-io* " *Continue here*")))))
+
+        (dolist (code-location *possible-breakpoints*)
+          (when (or *print-location-kind*
+                    (location-in-list code-location *breakpoints*)
+                    (sb-di:code-location= code-location continue-at)
+                    (not prev-location)
+                    (not (eq (sb-di:code-location-debug-source code-location)
+                             (sb-di:code-location-debug-source prev-location)))
+                    (not (eq (sb-di:code-location-toplevel-form-offset
+                              code-location)
+                             (sb-di:code-location-toplevel-form-offset
+                              prev-location)))
+                    (not (eq (sb-di:code-location-form-number code-location)
+                             (sb-di:code-location-form-number prev-location))))
+            (flush)
+            (setq prev-location code-location  prev-num this-num))
+
+          (incf this-num))))
+
+    (when (location-in-list *default-breakpoint-debug-fun*
+                            *breakpoints*
+                            :fun-end)
+      (format *debug-io* "~&::FUN-END *Active* "))))
+
+(!def-debug-command-alias "LL" "LIST-LOCATIONS")
+
+;;; Set breakpoint at the given number.
+(!def-debug-command "BREAKPOINT" ()
+  (let ((index (read-prompting-maybe "location number, :START, or :END: "))
+        (break t)
+        (condition t)
+        (print nil)
+        (print-functions nil)
+        (function nil)
+        (bp)
+        (place *default-breakpoint-debug-fun*))
+    (flet ((get-command-line ()
+             (let ((command-line nil)
+                   (unique '(nil)))
+               (loop
+                 (let ((next-input (read-if-available unique)))
+                   (when (eq next-input unique) (return))
+                   (push next-input command-line)))
+               (nreverse command-line)))
+           (set-vars-from-command-line (command-line)
+             (do ((arg (pop command-line) (pop command-line)))
+                 ((not arg))
+               (ecase arg
+                 (:condition (setf condition (pop command-line)))
+                 (:print (push (pop command-line) print))
+                 (:break (setf break (pop command-line)))
+                 (:function
+                  (setf function (eval (pop command-line)))
+                  (setf *default-breakpoint-debug-fun*
+                        (sb-di:fun-debug-fun function))
+                  (setf place *default-breakpoint-debug-fun*)
+                  (setf *possible-breakpoints*
+                        (possible-breakpoints
+                         *default-breakpoint-debug-fun*))))))
+           (setup-fun-start ()
+             (let ((code-loc (sb-di:debug-fun-start-location place)))
+               (setf bp (sb-di:make-breakpoint #'main-hook-fun
+                                               place
+                                               :kind :fun-start))
+               (setf break (sb-di:preprocess-for-eval break code-loc))
+               (setf condition (sb-di:preprocess-for-eval condition code-loc))
+               (dolist (form print)
+                 (push (cons (sb-di:preprocess-for-eval form code-loc) form)
+                       print-functions))))
+           (setup-fun-end ()
+             (setf bp
+                   (sb-di:make-breakpoint #'main-hook-fun
+                                          place
+                                          :kind :fun-end))
+             (setf break
+                   ;; FIXME: These and any other old (COERCE `(LAMBDA ..) ..)
+                   ;; forms should be converted to shiny new (LAMBDA ..) forms.
+                   ;; (Search the sources for "coerce.*\(lambda".)
+                   (coerce `(lambda (dummy)
+                              (declare (ignore dummy)) ,break)
+                           'function))
+             (setf condition (coerce `(lambda (dummy)
+                                        (declare (ignore dummy)) ,condition)
+                                     'function))
+             (dolist (form print)
+               (push (cons
+                      (coerce `(lambda (dummy)
+                                 (declare (ignore dummy)) ,form) 'function)
+                      form)
+                     print-functions)))
+           (setup-code-location ()
+             (setf place (nth index *possible-breakpoints*))
+             (setf bp (sb-di:make-breakpoint #'main-hook-fun place
+                                             :kind :code-location))
+             (dolist (form print)
+               (push (cons
+                      (sb-di:preprocess-for-eval form place)
+                      form)
+                     print-functions))
+             (setf break (sb-di:preprocess-for-eval break place))
+             (setf condition (sb-di:preprocess-for-eval condition place))))
+      (set-vars-from-command-line (get-command-line))
+      (cond
+       ((or (eq index :start) (eq index :s))
+        (setup-fun-start))
+       ((or (eq index :end) (eq index :e))
+        (setup-fun-end))
+       (t
+        (setup-code-location)))
+      (sb-di:activate-breakpoint bp)
+      (let* ((new-bp-info (create-breakpoint-info place bp index
+                                                  :break break
+                                                  :print print-functions
+                                                  :condition condition))
+             (old-bp-info (location-in-list new-bp-info *breakpoints*)))
+        (when old-bp-info
+          (sb-di:deactivate-breakpoint (breakpoint-info-breakpoint
+                                        old-bp-info))
+          (setf *breakpoints* (remove old-bp-info *breakpoints*))
+          (format *debug-io* "previous breakpoint removed~%"))
+        (push new-bp-info *breakpoints*))
+      (print-breakpoint-info (first *breakpoints*))
+      (format *debug-io* "~&added"))))
+
+(!def-debug-command-alias "BP" "BREAKPOINT")
+
+;;; List all breakpoints which are set.
+(!def-debug-command "LIST-BREAKPOINTS" ()
+  (setf *breakpoints*
+        (sort *breakpoints* #'< :key #'breakpoint-info-breakpoint-number))
+  (dolist (info *breakpoints*)
+    (print-breakpoint-info info)))
+
+(!def-debug-command-alias "LB" "LIST-BREAKPOINTS")
+(!def-debug-command-alias "LBP" "LIST-BREAKPOINTS")
+
+;;; Remove breakpoint N, or remove all breakpoints if no N given.
+(!def-debug-command "DELETE-BREAKPOINT" ()
+  (let* ((index (read-if-available nil))
+         (bp-info
+          (find index *breakpoints* :key #'breakpoint-info-breakpoint-number)))
+    (cond (bp-info
+           (sb-di:delete-breakpoint (breakpoint-info-breakpoint bp-info))
+           (setf *breakpoints* (remove bp-info *breakpoints*))
+           (format *debug-io* "breakpoint ~S removed~%" index))
+          (index (format *debug-io* "The breakpoint doesn't exist."))
+          (t
+           (dolist (ele *breakpoints*)
+             (sb-di:delete-breakpoint (breakpoint-info-breakpoint ele)))
+           (setf *breakpoints* nil)
+           (format *debug-io* "all breakpoints deleted~%")))))
+
+(!def-debug-command-alias "DBP" "DELETE-BREAKPOINT")
 
 
 ;;; start single-stepping
@@ -1993,7 +2526,7 @@ forms that explicitly control this kind of evaluation.")
     (loop
      (let ((tag (sap-ref-lispobj sap (ash sb-vm:catch-block-tag-slot sb-vm:word-shift)))
            (link (sap-ref-sap sap (ash sb-vm:catch-block-previous-catch-slot sb-vm:word-shift))))
-       (format t "~S ~A~%" tag link)
+       (format *debug-io* "~S ~A~%" tag link)
        (setq sap link)
        (if (= (sap-int sap) 0) (return))))))
 
@@ -2023,7 +2556,44 @@ forms that explicitly control this kind of evaluation.")
         list)))
 
 ;; Yet another stack unwinder, this one via libunwind, if present.
-;; Calls lose() if runtime was not built with -lunwind.
+;; Calls lose() if runtime was not built with -lunwind, however on x86-64
+;; we will attempt frame-pointer-based unwinding which is likely to be
+;; wrong if there is a signal frame in the call chain prior to the
+;; point of interrupt (the interrupt context itself is fine) or foreign
+;; code that lacks frame pointers.
+;; You might think this presents a big problem, but it is literally no worse
+;; than what users do already. It would appear that everybody assumes that
+;; (SB-THREAD:INTERRUPT-THREAD SOMETHREAD #'SB-DEBUG:PRINT-BACKTRACE)
+;; is a reasonable way to get a backtrace in an arbitrary thread, but chances
+;; are that if the target thread is in C code, the entirety of the backtrace
+;; consists of nothing more than frames leading back to the interrupt.
+;; Try it on the finalizer thread for example:
+;;  (SB-THREAD:INTERRUPT-THREAD SB-IMPL::*FINALIZER-THREAD* 'SB-DEBUG:PRINT-BACKTRACE)
+;; Frame number 9 is a callee of finalizer_thread_wait
+;;
+;; 0: ((FLET "WITHOUT-INTERRUPTS-BODY-" :IN SB-THREAD::%INTERRUPT-THREAD))
+;; 1: (SB-UNIX::SIGURG-HANDLER #<unused argument> #<unused argument> #.(SB-SYS:INT-SAP #X7FAD3F7FE240))
+;; 2: ((FLET SB-THREAD::EXEC :IN SB-SYS:INVOKE-INTERRUPTION))
+;; 3: ((FLET "WITHOUT-INTERRUPTS-BODY-" :IN SB-SYS:INVOKE-INTERRUPTION))
+;; 4: (SB-SYS:INVOKE-INTERRUPTION #<FUNCTION (FLET SB-UNIX::INTERRUPTION :IN SB-UNIX::%INSTALL-HANDLER) {7FAD3F7FDFAB}>)
+;; 5: ((FLET SB-UNIX::RUN-HANDLER :IN SB-UNIX::%INSTALL-HANDLER) 23 #.(SB-SYS:INT-SAP #X7FAD3F7FE370) #.(SB-SYS:INT-SAP #X7FAD3F7FE240))
+;; 6: ("foreign function: call_into_lisp_")
+;; 7: ("foreign function: funcall3")
+;; 8: ("foreign function: interrupt_handle_now")
+;; 9: ("foreign function: #x55D93A1906E3")
+;;
+;; If we attach 'gdb' to figure out where that thread is, indeed the backtrace contains 5 more
+;; frames more recent than finalizer_thread_wait:
+;; #0  0x00007fad4024f1ce in __futex_abstimed_wait_common64 (...) at ./nptl/futex-internal.c:57
+;; #1  __futex_abstimed_wait_common (...) at ./nptl/futex-internal.c:87
+;; #2  0x00007fad4024f24b in __GI___futex_abstimed_wait_cancelable64 (...) at ./nptl/futex-internal.c:139
+;; #3  0x00007fad40251930 in __pthread_cond_wait_common (...) at ./nptl/pthread_cond_wait.c:503
+;; #4  ___pthread_cond_wait (...) at ./nptl/pthread_cond_wait.c:618
+;; #5  0x000055d93a18a52f in finalizer_thread_wait () at gc-common.c:1481
+;; #6  0x000000b8006b0ca1 in ?? ()
+;; but then gdb has further problems with symbolizing Lisp (0x000000b8006b0ca1
+;; is seen to be SB-IMPL::FINALIZER-THREAD-START via SB-DI::CODE-HEADER-FROM-PC)
+;;
 #+(and x86-64 sb-thread)
 (progn
 ;; get_proc_name can slow down the unwind by 100x. Depending on whether you need
@@ -2081,33 +2651,95 @@ forms that explicitly control this kind of evaluation.")
     (2 :stopped)
     (3 :dead)))
 
+(defun thread-get-backtrace (thread-sap context)
+  (let* ((pc (sb-alien:alien-funcall
+              (sb-alien:extern-alien "os_context_pc" (function sb-alien:unsigned (* os-context-t)))
+              context))
+         (fp-addr (sb-alien:alien-funcall
+                   (sb-alien:extern-alien "os_context_fp_addr"
+                                          (function system-area-pointer (* os-context-t)))
+                   context))
+         (fp (sap-ref-word fp-addr 0))
+         (stack-start
+          (sap-ref-word thread-sap (ash sb-vm::thread-control-stack-start-slot sb-vm:word-shift)))
+         (stack-end
+          (sap-ref-word thread-sap (ash sb-vm::thread-control-stack-end-slot sb-vm:word-shift)))
+         (sp-addr (sb-alien:alien-funcall
+                   (sb-alien:extern-alien "os_context_sp_addr"
+                                          (function system-area-pointer (* os-context-t)))
+                   context))
+         (sp (sap-ref-word sp-addr 0))
+         (list))
+    (flet ((store-pc (pc &aux (code (sb-di::code-header-from-pc pc)))
+             (push (if code
+                       (cons code (sap- (int-sap pc) (code-instructions code)))
+                       pc)
+                   list)))
+      (store-pc pc)
+      (cond ((and (< stack-start fp stack-end) (> fp sp))
+             (loop
+              (let ((next-fp (sap-ref-word (int-sap fp) 0))
+                    (next-pc (sap-ref-word (int-sap fp) 8)))
+                (store-pc next-pc)
+                (unless (and (> next-fp fp) (< next-fp stack-end)) (return))
+                (setq fp next-fp))))
+            (t
+             (push :end list))))
+    (nreverse list)))
+
 (export 'backtrace-all-threads)
 (defun backtrace-all-threads (&aux (stream (make-string-output-stream))
                                    results)
-  (without-gcing
-      (when (sb-kernel::try-acquire-gc-lock
-             (sb-kernel::gc-stop-the-world))
+  (let ((tls-size (sb-alien:extern-alien "dynamic_values_bytes" (sb-alien:unsigned 32)))
+        (have-libunwind
+         (/= 0 (sb-alien:alien-funcall
+                (sb-alien:extern-alien "sbcl_have_libunwind" (function sb-alien:int))))))
+    (without-gcing
+      (when (sb-kernel::try-acquire-gc-lock (sb-kernel::gc-stop-the-world))
         ;; The GC's thread list is exactly what we want to traverse here
         ;; since that is the set of threads responding to the stop signal.
         (do ((vmthread (sb-alien:extern-alien "all_threads" system-area-pointer)
                        (sap-ref-sap vmthread (ash sb-vm::thread-next-slot sb-vm:word-shift))))
             ((zerop (sap-int vmthread)))
-          (let ((tls-size (sb-alien:extern-alien "dynamic_values_bytes" (sb-alien:unsigned 32)))
-                (thread-instance
-                 (sap-ref-lispobj vmthread
-                                  (ash sb-vm::thread-lisp-thread-slot sb-vm:word-shift))))
-            (cond ((eq thread-instance sb-thread:*current-thread*)
-                   (print-backtrace :stream stream))
-                  ((eq (vmthread-state vmthread) :stopped)
-                   (format stream "Backtrace for: ~S~%" thread-instance)
-                   (let* ((ici (sb-sys:sap-ref-lispobj
-                                vmthread (symbol-tls-index '*free-interrupt-context-index*)))
-                          (context-sap
-                           (sap-ref-sap vmthread
-                                        (+ tls-size (ash (1- ici) sb-vm:word-shift))))
-                          (context (sb-alien:sap-alien context-sap (* os-context-t))))
-                     (libunwind-backtrace thread-instance vmthread context stream)))))
-          (push (get-output-stream-string stream) results))
+          (when (eq (vmthread-state vmthread) :stopped)
+            (let* ((thread-instance
+                    (sap-ref-lispobj vmthread
+                                     (ash sb-vm::thread-lisp-thread-slot sb-vm:word-shift)))
+                   (ici (sb-sys:sap-ref-lispobj
+                         vmthread (symbol-tls-index '*free-interrupt-context-index*)))
+                   (context-sap
+                    (sap-ref-sap vmthread (+ tls-size (ash (1- ici) sb-vm:word-shift))))
+                   (context (sb-alien:sap-alien context-sap (* os-context-t))))
+              (aver (neq thread-instance sb-thread:*current-thread*))
+              (push
+               (cons thread-instance
+                     (cond (have-libunwind
+                            (libunwind-backtrace thread-instance vmthread context stream)
+                            (get-output-stream-string stream))
+                           (t
+                            (thread-get-backtrace vmthread context))))
+               results))))
         (sb-kernel::gc-start-the-world)))
-  results)
+    (flet ((symbolize (backtrace &aux (num 0))
+             (let ((*print-pretty* nil))
+               (dolist (loc backtrace (get-output-stream-string stream))
+                 (cond ((eq loc :end)
+                        (format stream "(no more frames)~%"))
+                       ((integerp loc)
+                        (format stream "~D: ~A~%" num
+                                (sb-di::foreign-function-backtrace-name (int-sap loc))))
+                       (t
+                        (format stream "~D: (~A)~%" num
+                                (sb-di:debug-fun-name
+                                 (sb-di::debug-fun-from-pc (car loc) (cdr loc) nil)))))
+                 (incf num)))))
+      (unless have-libunwind
+        (dolist (result results)
+          (rplacd result (symbolize (cdr result)))))))
+  ;; We don't need the text "Backtrace for" in any of the returned strings
+  ;; as the output of this function is an alist by thread.
+  (acons sb-thread:*current-thread*
+         (progn (print-backtrace :stream stream :print-thread nil :argument-limit 0)
+                (get-output-stream-string stream))
+         results))
 ) ; end PROGN

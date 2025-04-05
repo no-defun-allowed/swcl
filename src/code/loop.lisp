@@ -103,14 +103,18 @@
 (declaim (sb-ext:freeze-type loop-collector))
 
 (sb-xc:defmacro with-loop-list-collection-head
-    ((collector head-var tail-var &optional user-head-var) &body body)
-  (let ((l (and user-head-var (list (list user-head-var nil)))))
-    `(let* ((,head-var ,(if (loop for how in (loop-collector-history collector)
-                                  always (eq how 'list))
+    ((collector head-var tail-var &optional user-head-var) &body body &environment env)
+  (let ((l (and user-head-var (list (list user-head-var nil))))
+        (debug (sb-c:policy env (= debug 3))))
+    `(let* ((,head-var ,(if (and (not debug)
+                                 (loop for how in (loop-collector-history collector)
+                                       always (eq how 'list)))
                             `(unaligned-dx-cons nil)
                             `(list nil)))
             (,tail-var ,head-var) ,@l)
        (declare (dynamic-extent ,head-var)
+                ,@(unless debug
+                    `((sb-c::no-debug ,head-var ,tail-var))) ;; half-conses are bad for the debugger
                 ,@(and user-head-var `((list ,user-head-var))))
        ,@body)))
 
@@ -1364,7 +1368,9 @@ code to be loaded.
 (defun loop-for-across (var val data-type)
   (loop-make-var var nil data-type)
   (let ((vector-var (gensym "V"))
-        (index-var (gensym "I")))
+        (data-var (gensym "D"))
+        (index-var (gensym "I"))
+        (compiling (sb-c::compiling-p (macro-environment *loop*))))
     (multiple-value-bind (vector-form constantp vector-value)
         (loop-constant-fold-if-possible val 'vector)
       (loop-make-var
@@ -1372,15 +1378,24 @@ code to be loaded.
        (if (and (consp vector-form) (eq (car vector-form) 'the))
            (cadr vector-form)
            'vector))
-      (loop-make-var index-var 0 'fixnum)
+      (cond (compiling
+             (push `(multiple-value-bind (,data-var ,index-var)
+                        (%data-vector-and-index/known ,vector-var 0))
+                   (wrappers *loop*)))
+            (t
+             (loop-make-var index-var 0 'fixnum)
+             (setf data-var vector-var)))
       (let* ((length-form (if constantp
                               (length vector-value)
                               (let ((v (gensym "LIM")))
-                                (push `(let ((,v (length ,vector-var))))
+                                (push (if compiling
+                                          `(let ((,v (+ (length ,vector-var) ,index-var)))
+                                             (sb-c::%in-bounds-constraint ,data-var ,v))
+                                          `(let ((,v (length ,vector-var)))))
                                          (wrappers *loop*))
                                    v)))
              (test `(>= ,index-var ,length-form))
-             (step `(,var (aref ,vector-var ,index-var)))
+             (step `(,var (aref ,data-var ,index-var)))
              (pstep `(,index-var (1+ ,index-var))))
         `(,test ,step () ,pstep)))))
 
@@ -1431,28 +1446,36 @@ code to be loaded.
                               `(,first-endtest ,step () ,pseudo)))))))))))
 
 (defun loop-for-in (var val data-type)
-  (if (and (typep val '(cons (eql reverse) (cons t null)))
-           (not (sb-c::fun-lexically-notinline-p 'reverse
-                                                 (macro-environment *loop*))))
-      (loop-for-across var `(list-reverse-into-vector ,(second val)) data-type)
-      (multiple-value-bind (list constantp list-value)
-          (loop-constant-fold-if-possible val)
-        (let ((listvar (gensym "L")))
-          (loop-make-var var nil data-type)
-          (loop-make-var listvar
-                         ;; Don't want to assert the type, as ENDP will do that
-                         `(the* (list :use-annotations t :source-form ,list) ,list)
-                         t)
-          (let ((list-step (loop-list-step listvar)))
-            (let* ((first-endtest `(endp ,listvar))
-                   (other-endtest first-endtest)
-                   (step `(,var (car ,listvar)))
-                   (pseudo-step `(,listvar ,list-step)))
-              (when (and constantp (listp list-value))
-                (setq first-endtest (null list-value)))
-              `(,other-endtest ,step () ,pseudo-step
-                               ,@(and (neq first-endtest other-endtest)
-                                      `(,first-endtest ,step () ,pseudo-step)))))))))
+  (cond ((and (typep val '(cons (eql reverse) (cons t null)))
+              (not (sb-c::fun-lexically-notinline-p 'reverse
+                                                    (macro-environment *loop*)))
+              (let ((stepper (and (loop-tequal (car (source-code *loop*)) :by)
+                                  (source-code *loop*))))
+                (cond ((member (cadr stepper) '(#'cddr 'cddr) :test #'equal)
+                       (loop-pop-source)
+                       (loop-pop-source)
+                       (loop-for-across var `(list-reverse-into-vector-cddr ,(second val)) data-type))
+                      ((not stepper)
+                       (loop-for-across var `(list-reverse-into-vector ,(second val)) data-type))))))
+        (t
+         (multiple-value-bind (list constantp list-value)
+             (loop-constant-fold-if-possible val)
+           (let ((listvar (gensym "L")))
+             (loop-make-var var nil data-type)
+             (loop-make-var listvar
+                            ;; Don't want to assert the type, as ENDP will do that
+                            `(the* (list :use-annotations t :source-form ,list) ,list)
+                            t)
+             (let ((list-step (loop-list-step listvar)))
+               (let* ((first-endtest `(endp ,listvar))
+                      (other-endtest first-endtest)
+                      (step `(,var (car ,listvar)))
+                      (pseudo-step `(,listvar ,list-step)))
+                 (when (and constantp (listp list-value))
+                   (setq first-endtest (null list-value)))
+                 `(,other-endtest ,step () ,pseudo-step
+                                  ,@(and (neq first-endtest other-endtest)
+                                         `(,first-endtest ,step () ,pseudo-step))))))))))
 
 ;;;; iteration paths
 

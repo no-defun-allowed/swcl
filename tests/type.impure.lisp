@@ -66,6 +66,12 @@
   (assert-error (upgraded-complex-part-type 'some-undef-type))
   (assert (subtypep (upgraded-complex-part-type 'fixnum) 'real)))
 
+(with-test (:name (upgraded-complex-part-type nil))
+  (assert (type-evidently-= 'nil (upgraded-complex-part-type nil))))
+
+(with-test (:name (upgraded-complex-part-type (eql 0)))
+  (assert (subtypep '(eql 0) (upgraded-complex-part-type '(eql 0)))))
+
 ;;; Do reasonable things with undefined types, and with compound types
 ;;; built from undefined types.
 (with-test (:name (typep :undefined :compound))
@@ -859,10 +865,6 @@
                  (array (unsigned-byte 7))
                  (array (unsigned-byte 3)))
 
-  (disunity-test (:array-type-union :disjoint-element-types :dont-unite)
-                 (array (integer 15 27))
-                 (array (integer 17 30)))
-
   (unity-test (:array-type-union :wild-element-type :unites)
               array
               (array (unsigned-byte 8))
@@ -937,32 +939,6 @@
        (equal (sb-kernel:type-specifier
                (sb-kernel:specifier-type `(or bit-vector ,@(u 1))))
               'vector)))))
-
-(with-test (:name :source-transform-union-of-arrays-typep)
-  ;; Ensure we don't pessimize rank 1 specialized array.
-  ;; (SIMPLE unboxed vector is done differently)
-  (let* ((hair (sb-kernel:specifier-type '(sb-kernel:unboxed-array 1)))
-         (xform (sb-c::source-transform-union-typep 'myobj hair)))
-    (assert (equal xform
-                   '(or (typep myobj
-                               '(and vector (not (array t)) (not (array nil))))))))
-
-  ;; Exclude one subtype at a time and make sure they all work.
-  (dotimes (i (length sb-vm:*specialized-array-element-type-properties*))
-    (let* ((excluded-type
-            (sb-vm:saetp-specifier
-             (aref sb-vm:*specialized-array-element-type-properties* i)))
-           (hair
-            (loop for x across sb-vm:*specialized-array-element-type-properties*
-                  for j from 0
-                  unless (eql i j)
-                  collect `(array ,(sb-vm:saetp-specifier x))))
-           (xform
-             (sb-c::source-transform-union-typep 'myobj
-             (sb-kernel:specifier-type `(or ,@(shuffle hair) fixnum)))))
-      (assert (equal xform
-                     `(or (typep myobj '(and array (not (array ,excluded-type))))
-                          (typep myobj 'fixnum)))))))
 
 (with-test (:name :interned-type-specifiers)
   ;; In general specifiers can repeatedly parse the same due to

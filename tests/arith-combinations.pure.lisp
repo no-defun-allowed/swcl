@@ -11,6 +11,9 @@
 
 (enable-test-parallelism)
 
+;;; Can't properly decode errors where the call stack is not pinned.
+#-(or arm64 mips ppc64 riscv x86 x86-64) (invoke-restart 'run-tests::skip-file)
+
 (defun test-ops (ops types arguments &key (result-types types) (b-arguments arguments))
   (flet ((normalize-type (type)
            (sb-kernel:type-specifier (sb-kernel:specifier-type type))))
@@ -61,7 +64,7 @@
                                                   (force-output))
                                                 (handler-case
                                                     (apply fun args)
-                                                  (error (c)
+                                                  (type-error (c)
                                                     (if (typep result result-type)
                                                         (error "~a => ~a /= ~a" (list* lambda args) c result)
                                                         (let ((x (type-error-datum c))
@@ -74,6 +77,10 @@
                                                                  (error "~a => type error ~a /= ~a" (list* lambda args)
                                                                         c
                                                                         x))))))
+                                                  (error (c)
+                                                    (error "~a => type error ~a /= ~a" (list* lambda args)
+                                                           c
+                                                           result-type))
                                                   (:no-error (x)
                                                     (if (typep result result-type)
                                                         (unless (eql x result)

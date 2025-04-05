@@ -207,11 +207,10 @@
   (:ignore eax)
   (:generator 1
    (inst movsx res
-         (make-random-tn :kind :normal
-                         :sc (sc-or-lose (ecase size
-                                           (8 'byte-reg)
-                                           (16 'word-reg)))
-                         :offset (tn-offset val)))))
+         (make-random-tn (sc-or-lose (ecase size
+                                       (8 'byte-reg)
+                                       (16 'word-reg)))
+           (tn-offset val)))))
 
 #-sb-xc-host
 (defun sign-extend (x size)
@@ -408,17 +407,8 @@ pointer to the arguments."
               (inst push eax)                       ; arg1
               (inst push (ash index 2))             ; arg0
 
-              #+sb-thread
-              (progn
-                (inst mov eax (foreign-symbol-address "callback_wrapper_trampoline"))
-                (inst call eax))
-
-              #-sb-thread
-              (progn
-                (inst push (make-ea :dword ; function
-                                    :disp (static-fdefn-fun-addr 'enter-alien-callback)))
-                (inst mov  eax (foreign-symbol-address "funcall3"))
-                (inst call eax))
+              (inst mov eax (foreign-symbol-address "callback_wrapper_trampoline"))
+              (inst call eax)
 
               ;; now put the result into the right register
               (cond

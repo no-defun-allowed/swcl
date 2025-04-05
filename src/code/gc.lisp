@@ -66,6 +66,7 @@ and submit it as a patch."
   (+ (dynamic-usage)
      *n-bytes-freed-or-purified*))
 
+(declaim (ftype (sfunction (t) sb-vm:word) primitive-object-size))
 (defun primitive-object-size (object)
   "Return number of bytes of heap or stack directly consumed by OBJECT"
   (cond ((not (sb-vm:is-lisp-pointer (get-lisp-obj-address object))) 0)
@@ -310,6 +311,7 @@ used to specify the oldest generation guaranteed to be collected."
   (scrub-power-cache)
   (setf sb-unicode::*name->char-buffers* nil)
   (setf sb-c::*phash-lambda-cache* nil)
+  (setf sb-impl::*read-line-buffers* nil)
   ;; Clear caches depending on the generation being collected.
   (cond ((eql 0 gen)
          ;; Drop strings because the hash is address-based, but there
@@ -554,10 +556,6 @@ Experimental: interface subject to change."
     (let ((addr (get-lisp-obj-address x)))
       (and (sb-vm:is-lisp-pointer addr)
            (cases)))))
-
-;;; Internal use only. FIXME: I think this duplicates code that exists
-;;; somewhere else which I could not find.
-(defun lisp-space-p (sap &aux (addr (sap-int sap))) (cases))
 ) ; end MACROLET
 
 (define-condition memory-fault-error (system-condition error) ()

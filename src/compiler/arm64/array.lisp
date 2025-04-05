@@ -106,7 +106,7 @@
                  (sb-c::combination-p bound-use)
                  (eq (sb-c::combination-fun-source-name bound-use nil) 'sb-c::vector-length))
         (let ((ref2 (sb-c::principal-lvar-ref (car (sb-c::combination-args bound-use)))))
-          (and ref
+          (and ref2
                (eq (sb-c::ref-leaf ref)
                    (sb-c::ref-leaf ref2))))))))
 
@@ -559,3 +559,4 @@
                                other-pointer-lowtag))
     (inst add lip object offset)
     (inst ldaddal diff result lip)))
+

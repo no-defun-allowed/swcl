@@ -190,7 +190,7 @@
                                           (and (defined-fun-p leaf)
                                                (eq (defined-fun-inlinep leaf) 'notinline))
                                           (fun-lexically-notinline-p (leaf-%source-name leaf)
-                                                                     (node-lexenv (lvar-dest (node-lvar node)))))
+                                                                     (node-lexenv node)))
                                       (setf asserted nil)
                                       lvar-type)
                                      (t
@@ -199,7 +199,7 @@
                                (cond ((or (and (defined-fun-p leaf)
                                                (eq (defined-fun-inlinep leaf) 'notinline))
                                           (fun-lexically-notinline-p (leaf-%source-name leaf)
-                                                                     (node-lexenv (lvar-dest (node-lvar node)))))
+                                                                     (node-lexenv node)))
                                       lvar-type)
                                      (t
                                       (global-ftype (leaf-%source-name leaf)))))
@@ -215,6 +215,8 @@
                           ((and (functional-p entry-fun)
                                 (fun-type-p (functional-type entry-fun)))
                            (functional-type entry-fun))
+                          ((and (intersection-type-p lvar-type)
+                                (find-if #'fun-type-p (intersection-type-types lvar-type))))
                           ((and (not (fun-type-p lvar-type))
                                 (lambda-p entry-fun)
                                 (functional-kind-eq entry-fun nil)
@@ -255,8 +257,7 @@
          (type (cond ((fun-type-p lvar-type)
                       lvar-type)
                      ((symbolp fun-name)
-                      (if (or (fun-lexically-notinline-p fun-name
-                                                         (node-lexenv (lvar-dest (node-lvar node))))
+                      (if (or (fun-lexically-notinline-p fun-name (node-lexenv node))
                               (and (or asserted-type
                                        defined-here)
                                    (neq (info :function :where-from fun-name) :declared)))
@@ -274,22 +275,48 @@
 (defun lvar-fun-type (lvar &optional defined-here asserted-type)
   (let* ((use (principal-lvar-use lvar))
          (lvar-type (lvar-type lvar)))
-    (if (ref-p use)
-        (multiple-value-bind (type fun-name leaf asserted) (node-fun-type use defined-here asserted-type)
-          (let ((int (if (fun-type-p lvar-type)
-                         ;; save the cast type
-                         (type-intersection type lvar-type)
-                         type)))
-            (values (if (neq int *empty-type*)
-                        int
-                        lvar-type)
-                    fun-name leaf asserted)))
-        (values lvar-type
-                (typecase use
-                  (node
-                   (node-source-form use))
-                  (t
-                   '.anonymous.))))))
+    (cond ((ref-p use)
+           (multiple-value-bind (type fun-name leaf asserted) (node-fun-type use defined-here asserted-type)
+             (let* ((lvar-type (or (and (intersection-type-p lvar-type)
+                                        (find-if #'fun-type-p (intersection-type-types lvar-type)))
+                                   lvar-type))
+                    (int (if (fun-type-p lvar-type)
+                             ;; save the cast type
+                             (type-intersection type lvar-type)
+                             type)))
+               (values (if (neq int *empty-type*)
+                           int
+                           lvar-type)
+                       fun-name leaf asserted))))
+          ((and (listp use)
+                (every #'ref-p use))
+           (let ((union *empty-type*)
+                 (all-asserted t))
+             (loop for ref in use
+                   do
+                   (multiple-value-bind (type fun-name leaf asserted) (node-fun-type ref defined-here asserted-type)
+                     (declare (ignore fun-name))
+                     (unless (and (global-var-p leaf)
+                                  (eq (global-var-kind leaf) :global-function)
+                                  (eq (global-var-%source-name leaf) nil))
+                       (let* ((lvar-type (or (and (intersection-type-p lvar-type)
+                                                  (find-if #'fun-type-p (intersection-type-types lvar-type)))
+                                             lvar-type))
+                              (int (if (fun-type-p lvar-type)
+                                       ;; save the cast type
+                                       (type-intersection type lvar-type)
+                                       type)))
+                         (setf all-asserted (and all-asserted asserted)
+                               union (type-union union int))))))
+             (values union '.anonymous. nil all-asserted)))
+          (t
+           (values lvar-type
+                   (typecase use
+                     (node
+                      (node-source-form use))
+                     (t
+                      '.anonymous.))
+                   nil nil)))))
 
 (defun callable-argument-lossage-kind (fun-name leaf soft hard)
   (if (or (not leaf)
@@ -503,11 +530,11 @@
   (when (lambda-p leaf)
     (let ((once nil))
       ;; TODO: what if all destinations can disable arg count checking.
-      (map-leaf-refs (lambda (dest)
-                       (declare (ignore dest))
-                       (when (shiftf once t)
-                         (return-from disable-arg-count-checking)))
-                     leaf))
+      (map-refs (lambda (dest)
+                  (declare (ignore dest))
+                  (when (shiftf once t)
+                    (return-from disable-arg-count-checking)))
+                leaf))
     (multiple-value-bind (min max) (fun-type-arg-limits type)
       (when (and min
                  (if max

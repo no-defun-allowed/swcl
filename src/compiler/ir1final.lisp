@@ -155,10 +155,6 @@
       (> two-arg->)
       (<= two-arg-<=)
       (>= two-arg->=)
-      #+sb-xc-host
-      ,@'((sb-xc:< two-arg-<)
-          (sb-xc:= two-arg-=)
-          (sb-xc:> two-arg->))
       (char-equal two-arg-char-equal)
       (char-greaterp two-arg-char-greaterp)
       (char-lessp two-arg-char-lessp)
@@ -231,6 +227,8 @@
                   (unlink-node if)
                   (%delete-lvar-use combination)
                   (use-lvar combination ref-lvar)
+                  (push "unwrap-predicates" (node-source-path con-ref))
+                  (push "unwrap-predicates" (node-source-path alt-ref))
                   (link-blocks block (node-block next)))))))))))
 
 ;;; Convert function designators to functions in calls to known functions
@@ -255,7 +253,7 @@
                (labels ((translate-two-args (name)
                           (and (eql arg-count 2)
                                (not (fun-lexically-notinline-p name (node-lexenv node)))
-                               (cadr (assoc name *two-arg-functions*))))
+                               (cadr (assoc (uncross name) *two-arg-functions*))))
                         (translate (ref)
                           (let* ((leaf (ref-leaf ref))
                                  (fun-name (and (constant-p leaf)
@@ -306,7 +304,7 @@
   (let ((combination-name (lvar-fun-name (combination-fun combination) t))
         (args (combination-args combination)))
     (cond ((eq (combination-kind combination) :known)
-           (let ((two-arg (assoc combination-name *two-arg-functions*)))
+           (let ((two-arg (assoc (uncross combination-name) *two-arg-functions*)))
              (when (and two-arg
                         (= (length args) 2))
                (destructuring-bind (name two-arg &optional types typed-two-arg) two-arg
@@ -322,17 +320,17 @@
                        (mv-bind-unused-p lvar 1))
                (let ((single-value-fun (getf '(truncate sb-kernel::truncate1
                                                floor sb-kernel::floor1
-                                               ceiling sb-kernel::ceiling1)
+                                               ceiling sb-kernel::ceiling1
+                                               round sb-kernel::round1
+                                               ftruncate sb-kernel::ftruncate1
+                                               ffloor sb-kernel::ffloor1
+                                               fceiling sb-kernel::fceiling1
+                                               fround sb-kernel::fround1)
                                              combination-name)))
                  (when single-value-fun
                    (unless (cdr args)
-                     (let* ((leaf (find-constant 1))
-                            (ref (make-ref leaf))
-                            (lvar (make-lvar combination)))
-                       (use-lvar ref lvar)
-                       (push ref (leaf-refs leaf))
-                       (insert-ref-before ref combination-name)
-                       (setf (cdr args) (list lvar))))
+                     (setf (cdr args)
+                           (list (insert-ref-before (find-constant 1) combination))))
                    (change-full-call combination single-value-fun)
                    (setf (node-derived-type combination)
                          (make-single-value-type (single-value-type (node-derived-type combination)))))))))

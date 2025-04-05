@@ -1624,6 +1624,12 @@
          (error "")))
    (and sequence (not null) (or (not array) (vector t))))
   (assert-type
+   (lambda (y)
+     (if (position #\a y :test-not #'char=)
+         y
+         (error "")))
+   (and sequence (not null)))
+  (assert-type
    (lambda (x y)
      (declare (simple-array y))
      (if (find x y :key #'car)
@@ -1778,13 +1784,14 @@
    (integer 4 4)))
 
 (with-test (:name :inherit-length-var)
-  (assert (not (ctu:ir1-named-calls
-                `(lambda (x y n)
-                   (declare (optimize (space 0))
-                            (fixnum n)
-                            (simple-base-string y))
-                   (when (< n (length y))
-                     (find x y :start n))))))
+  (assert (not (find 'sb-int:sequence-bounding-indices-bad-error
+                     (ctu:ir1-named-calls
+                      `(lambda (x y n)
+                         (declare (optimize (space 0))
+                                  (fixnum n)
+                                  (simple-base-string y))
+                         (when (< n (length y))
+                           (find x y :start n)))))))
   (assert-type
    (lambda (x y)
      (declare (simple-vector x))
@@ -1854,14 +1861,123 @@
    (or double-float null))
   (assert-type
    (lambda (m)
+     (if (typep (truncate m) 'fixnum)
+         m))
+   (or real null))
+  (assert-type
+   (lambda (m)
      (if (typep (nth-value 1 (truncate m 2.0)) 'double-float)
          m))
    (or double-float null)))
 
-(with-test (:name :ignore-delays)
+(with-test (:name :ignore-delays
+            :fails-on :arm)
   (assert-type
    (lambda (x)
      (declare (optimize debug))
      (when (typep (nth-value 1 (truncate x 1)) 'float)
        x))
    (or null real)))
+
+(with-test (:name :not-eq-eql)
+  (assert-type
+   (lambda (a b)
+     (and (eql a b)
+          (not (eq a b))))
+   boolean))
+
+(with-test (:name :equal-no-notes)
+  (checked-compile
+   `(lambda (a b)
+      (if (eq a b)
+          (equal a b)
+          nil))
+   :allow-notes nil))
+
+(with-test (:name :contagion-alt)
+  (assert-type
+   (lambda (x y)
+     (declare (real x y))
+     (if (typep (+ x y) 'double-float)
+         (error "")
+         x))
+   (or rational single-float))
+  (assert-type
+   (lambda (x)
+     (declare (real x))
+     (if (typep (+ x 1.0) 'single-float)
+         (error "")
+         x))
+   double-float)
+  (assert-type
+   (lambda (x)
+     (if (typep (+ x 1.0) 'single-float)
+         (error "")
+         x))
+   (and number (not rational) (not single-float)))
+  (assert-type
+   (lambda (x)
+     (declare (real x))
+     (if (typep (+ x 1) 'single-float)
+         (error "")
+         x))
+   (or double-float rational))
+  (assert-type
+   (lambda (x)
+     (if (typep (+ x 1) 'single-float)
+         (error "")
+         x))
+   (and number (not single-float)))
+  (assert-type
+   (lambda (x)
+     (if (typep (+ x 1) 'double-float)
+         (error "")
+         x))
+   (and number (not double-float)))
+  (assert-type
+   (lambda (x)
+     (if (typep (+ x 1d0) 'double-float)
+         (error "")
+         x))
+   complex)
+  (assert-type
+   (lambda (x)
+     (if (typep (+ x 1.0) 'double-float)
+         (error "")
+         x))
+   (and number (not double-float)))
+  (assert-type
+   (lambda (x)
+     (if (typep (+ x 1.0) 'real)
+         (error "")
+         x))
+   (and number (not real)))
+  (assert-type
+   (lambda (x)
+     (if (typep (+ x 1.0) 'float)
+         (error "")
+         x))
+   (and number (not real)))
+  (assert-type
+   (lambda (x)
+     (if (typep (+ x 1) 'float)
+         (error "")
+         x))
+   (and number (not float)))
+  (assert-type
+   (lambda (x)
+     (if (typep (* x 3) 'integer)
+         (error "")
+         x))
+   (and number (not integer))))
+
+(with-test (:name :call-vars-with-setf)
+  (assert-type
+   (lambda (j)
+     (labels ((foo (x)
+                (when (symbolp j)
+                  (setf x j))
+                x))
+       (foo 1)
+       (foo 2)))
+   (or (integer 1 2) symbol)))

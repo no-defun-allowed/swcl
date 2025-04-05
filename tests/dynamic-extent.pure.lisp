@@ -1820,7 +1820,6 @@
   (let ((array (make-array 4)))
     (declare (dynamic-extent array))
     (assert (equalp (known-function-autodx-transform-2 array 3 '(1 2 3 4)) #(4 5 6 7)))
-    #+(or) ; appears to not work on some platforms for some reason?
     (assert-no-consing (known-function-autodx-transform-2 array 3 '(1 2 3 4)))))
 
 (defun auto-dx-cleaned-up-too-many-times (off array)
@@ -2143,24 +2142,30 @@
              (values z)))))
      ((1) 0))))
 
-(with-test (:name :stack-allocated-vector-checks-overflow
-            :broken-on (not (and :x86-64 :linux)))
+(with-test (:name :stack-allocated-vector-checks-overflow)
   (checked-compile-and-assert
    (:optimize :safe)
    '(lambda ()
-     (let ((x (make-array
-               ;; guaranteed to overflow the stack.
-               (abs (- (sb-sys:sap-int
-                        (sb-vm::current-thread-offset-sap sb-vm::thread-control-stack-start-slot))
-                       (sb-sys:sap-int
-                        (sb-int:descriptor-sap sb-vm:*control-stack-end*)))))))
-       (declare (dynamic-extent x))
-       (dotimes (i (length x))
-         (setf (aref x i) i))
-       123))
-   ;; This condition will be different depending on whether the
-   ;; explicit stack check signals or the guard page gets hit.
-   (() (condition 'sb-kernel::storage-condition))))
+     (let ((size
+             ;; guaranteed to overflow the stack.
+             (abs (- (sb-sys:sap-int
+                      (sb-vm::current-thread-offset-sap sb-vm::thread-control-stack-start-slot))
+                     (sb-sys:sap-int
+                      (sb-int:descriptor-sap sb-vm:*control-stack-end*))))))
+       (block nil
+         (handler-bind ((sb-kernel::stack-allocated-object-overflows-stack
+                          (lambda (c)
+                            (assert (= (sb-kernel::stack-allocated-object-overflows-stack-size c)
+                                       (sb-vm::primitive-object-size (make-array size))))
+                            (return :good)))
+                        (condition
+                          (lambda (c) (return c))))
+           (let ((x (make-array size)))
+             (declare (dynamic-extent x))
+             (dotimes (i (length x))
+               (setf (aref x i) i))
+             (aref x 0))))))
+   (() :good)))
 
 (with-test (:name :stack-allocated-vector-integer-size-arg)
   (checked-compile-and-assert
@@ -2216,3 +2221,31 @@
      (let ((x (make-list 100000 :initial-element 1)))
        (declare (dynamic-extent x))
        (reduce #'+ x)))))
+
+(with-test (:name :dynamic-extent-constantly-function-branch)
+  (let ((sb-c::*check-consistency* t))
+    (checked-compile-and-assert
+     ()
+     '(lambda (x)
+       (let ((function (if x
+                           (constantly x)
+                           (constantly t))))
+         (declare (dynamic-extent function))
+         (funcall function)))
+     ((1) 1)
+     ((nil) t))))
+
+(with-test (:name :dynamic-extent-function-branch)
+  (let ((sb-c::*check-consistency* t))
+    (checked-compile-and-assert
+     ()
+     '(lambda (x)
+       (let ((function (if x
+                           (lambda () x)
+                           (lambda () t))))
+         (declare (dynamic-extent function))
+         (when x
+           (assert (sb-ext:stack-allocated-p function)))
+         (funcall function)))
+     ((1) 1)
+     ((nil) t))))

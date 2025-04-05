@@ -104,17 +104,19 @@
 ;;; type weakenings, then look for any predicate that is cheaper.
 (defun maybe-weaken-check (type policy)
   (declare (type ctype type))
-  (typecase type
-    ;; Can't do much functional type checking at run-time
-    (fun-designator-type
-     (specifier-type 'function-designator))
-    (fun-type
-     (specifier-type 'function))
-    (t
-     (ecase (policy policy type-check)
-       (0 *wild-type*)
-       (2 (weaken-values-type type))
-       (3 type)))))
+  (let ((policy (policy policy type-check)))
+    (if (zerop policy)
+        *wild-type*
+        (typecase type
+          ;; Can't do much functional type checking at run-time
+          (fun-designator-type
+           (specifier-type 'function-designator))
+          (fun-type
+           (specifier-type 'function))
+          (t
+           (ecase policy
+             (2 (weaken-values-type type))
+             (3 type)))))))
 
 (defun lvar-types-to-check (types original-types n-required)
   (loop for type in types
@@ -269,19 +271,27 @@
                         (t
                          (values-subtypep (lvar-externally-checkable-type lvar)
                                           (cast-type-to-check cast))))))
+            ;; Turn (the fixnum (the integer x)) into (the fixnum x)
             ((and (cast-p dest)
                   (cast-type-check dest)
                   (atom (lvar-uses (node-lvar cast)))
                   (atom (lvar-uses (cast-value dest)))
-                  (lvar-single-value-p (node-lvar cast))
-                  (cond ((and (values-type-p (cast-asserted-type dest))
-                              (values-type-p (cast-asserted-type cast)))
-                         (values-subtypep (cast-asserted-type dest)
-                                          (cast-asserted-type cast)))
-                        ((not (or (values-type-p (cast-asserted-type dest))
-                                  (values-type-p (cast-asserted-type cast))))
-                         (csubtypep (cast-asserted-type dest)
-                                    (cast-asserted-type cast)))))
+                  (let ((asserted-type (cast-asserted-type cast))
+                        (dest-asserted-type (cast-asserted-type dest)))
+                    (cond ((and (values-type-p asserted-type)
+                                (values-type-p dest-asserted-type)
+                                (= (length (values-type-required asserted-type))
+                                   (length (values-type-required dest-asserted-type)))
+                                (= (length (values-type-optional asserted-type))
+                                   (length (values-type-optional dest-asserted-type)))
+                                (eql (values-type-rest asserted-type)
+                                     (values-type-rest dest-asserted-type)))
+                           (values-subtypep dest-asserted-type
+                                            asserted-type))
+                          ((not (or (values-type-p asserted-type)
+                                    (values-type-p dest-asserted-type)))
+                           (csubtypep dest-asserted-type
+                                      asserted-type)))))
              (setf (cast-asserted-type cast) (cast-asserted-type dest)
                    (cast-type-to-check cast) (cast-type-to-check dest)
                    (cast-%type-check dest) nil)
@@ -479,6 +489,28 @@
                         (values-list args)))
                  (multiple-value-call #'values-type-check ,dummy)))))))))
 
+(defun cast-ignore-nil-use (use type)
+  (labels ((ref (use)
+             (and (ref-p use)
+                  (constant-p (ref-leaf use))
+                  (null (constant-value (ref-leaf use)))))
+           (refs (lvar)
+             (do-uses (use lvar t)
+               (unless (ref use)
+                 (return)))))
+    (or (ref use)
+        (and (exit-p use)
+             (refs (exit-value use)))
+        (and (combination-is use '(values))
+             (let ((new-type (make-values-type
+                              (loop for arg in (combination-args use)
+                                    for arg-type = (lvar-type arg)
+                                    collect (if (and (eq arg-type (specifier-type 'null))
+                                                     (refs arg))
+                                                *universal-type*
+                                                arg-type)))))
+               (values-types-equal-or-intersect new-type type))))))
+
 ;;; Check all possible arguments of CAST and emit type warnings for
 ;;; those with type errors. If the value of USE is being used for a
 ;;; variable binding, we figure out which one for source context. If
@@ -491,7 +523,8 @@
          (atype (cast-asserted-type cast))
          bad)
     (do-uses (use value)
-      (unless (values-types-equal-or-intersect (node-derived-type use) atype)
+      (unless (or (values-types-equal-or-intersect (node-derived-type use) atype)
+                  (cast-ignore-nil-use use atype))
         (push use bad)))
     (loop for use in bad
           for path = (source-path-before-transforms use)

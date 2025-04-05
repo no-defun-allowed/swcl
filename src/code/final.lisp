@@ -249,8 +249,10 @@ Examples:
   ;; I believe that most finalizers will *not* have the :DONT-SAVE flag set.
   ;; As evidence the https://github.com/trivial-garbage/trivial-garbage portability
   ;; library does not offer a way to specify :DONT-SAVE.
+  ;;
+  ;; FIXME: This is quite a lousy reason to reach for MAKE-VALUE-CELL.
   (let ((action
-         (if dont-save (sb-sys:%primitive sb-vm::make-value-cell function nil) function)))
+          (if dont-save (sb-vm::make-value-cell function) function)))
     (with-pinned-objects (object)
       #+weak-vector-readbarrier
       (with-system-mutex (*finalizer-lock*)
@@ -456,8 +458,9 @@ Examples:
 (progn
 (defun finalizer-thread-notify (run-hooks)
   (declare (bit run-hooks))
-  (alien-funcall (extern-alien "finalizer_thread_wake" (function void int))
-                 run-hooks)
+  (without-interrupts ;; don't unwind while holding finalizer_mutex
+    (alien-funcall (extern-alien "finalizer_thread_wake" (function void int))
+                   run-hooks))
   nil)
 
 ;;; The following operations are synchronized by *MAKE-THREAD-LOCK* -
@@ -501,7 +504,8 @@ Examples:
     (sb-thread:join-thread thread))
   (let ((thread *finalizer-thread*))
     (aver (sb-thread::thread-p thread))
-    (alien-funcall (extern-alien "finalizer_thread_stop" (function void)))
+    (without-interrupts ;; don't unwind while holding finalizer_mutex
+      (alien-funcall (extern-alien "finalizer_thread_stop" (function void))))
     (sb-thread:join-thread thread)))
 )
 

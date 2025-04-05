@@ -484,11 +484,9 @@
   #-darwin
   (defun alien-callback-assembler-wrapper (index result-type argument-types)
     (flet ((make-gpr (n)
-             (make-random-tn :kind :normal :sc (sc-or-lose 'any-reg) :offset n))
+             (make-random-tn (sc-or-lose 'any-reg) n))
            (make-fpr (n)
-             (make-random-tn :kind :normal :sc (sc-or-lose
-                                                'double-reg) :offset
-                                                n)))
+             (make-random-tn (sc-or-lose 'double-reg) n)))
       (let* ((segment (make-segment)))
         (assemble (segment 'nil)
           ;; Copy args from registers or stack to new position
@@ -629,16 +627,14 @@
                             argument-types))
 
               ;; Arranged the args, allocated the return area.  Now
-              ;; actuall call funcall3:  funcall3 (call-alien-function,
+              ;; actuall call callback_wrapper_trampoline:  callback_wrapper_trampoline (
               ;; index, args, return-area)
 
-              (destructuring-bind (arg1 arg2 arg3 arg4)
-                  (mapcar #'make-gpr '(3 4 5 6))
-                (load-address-into arg1 (static-fdefn-fun-addr 'enter-alien-callback))
-                (loadw arg1 arg1)
-                (inst li arg2 (fixnumize index))
-                (inst addi arg3 stack-pointer (- arg-store-pos))
-                (inst addi arg4 stack-pointer (- return-area-pos)))
+              (destructuring-bind (arg1 arg2 arg3)
+                  (mapcar #'make-gpr '(3 4 5))
+                (inst li arg1 (fixnumize index))
+                (inst addi arg2 stack-pointer (- arg-store-pos))
+                (inst addi arg3 stack-pointer (- return-area-pos)))
 
               ;; Setup everything.  Now save sp, setup the frame.
               (inst mflr r0)
@@ -648,9 +644,7 @@
               ;; And make the call.
               (load-address-into
                r0
-               (foreign-symbol-address
-                #-sb-thread "funcall3"
-                #+sb-thread "callback_wrapper_trampoline"))
+               (foreign-symbol-address "callback_wrapper_trampoline"))
               (inst mtlr r0)
               (inst blrl)
 
@@ -702,9 +696,9 @@
   #+darwin
   (defun alien-callback-assembler-wrapper (index result-type argument-types)
     (flet ((make-gpr (n)
-             (make-random-tn :kind :normal :sc (sc-or-lose 'any-reg) :offset n))
+             (make-random-tn (sc-or-lose 'any-reg) n))
            (make-fpr (n)
-             (make-random-tn :kind :normal :sc (sc-or-lose 'double-reg) :offset n)))
+             (make-random-tn (sc-or-lose 'double-reg) n)))
       (let* ((segment (make-segment)))
         (assemble (segment)
           ;; To save our arguments, we follow the algorithm sketched in the
@@ -767,7 +761,7 @@
                                           args-size
                                           +stack-alignment-bytes+)
                                        +stack-alignment-bytes+)))
-            (destructuring-bind (sp r0 arg1 arg2 arg3 arg4)
+            (destructuring-bind (sp r0 arg1 arg2 arg3)
                 (mapcar #'make-gpr '(1 0 3 4 5 6))
               ;; FIXME: This is essentially the same code as LR in
               ;; insts.lisp, but attempting to use (INST LR ...) instead
@@ -779,22 +773,20 @@
                          (inst lis reg high)
                          (inst ori reg reg low))))
                 ;; Setup the args
-                (load-address-into arg1 (static-fdefn-fun-addr 'enter-alien-callback))
-                (loadw arg1 arg1)
-                (inst li arg2 (fixnumize index))
-                (inst addi arg3 sp n-foreign-linkage-area-bytes)
+                (inst li arg1 (fixnumize index))
+                (inst addi arg2 sp n-foreign-linkage-area-bytes)
                 ;; FIXME: This was (- (* RETURN-AREA-SIZE N-WORD-BYTES)), while
                 ;; RETURN-AREA-SIZE was (* N-RETURN-AREA-WORDS N-WORD-BYTES):
                 ;; I assume the intention was (- N-RETURN-AREA-BYTES), but who knows?
                 ;; --NS 2005-06-11
-                (inst addi arg4 sp (- n-return-area-bytes))
+                (inst addi arg3 sp (- n-return-area-bytes))
                 ;; FIXME! FIXME FIXME: What does this FIXME refer to?
                 ;; Save sp, setup the frame
                 (inst mflr r0)
                 (inst stw r0 sp (* 2 n-word-bytes)) ; FIXME: magic constant
                 (inst stwu sp sp (- frame-size))
                 ;; Make the call
-                (load-address-into r0 (foreign-symbol-address "funcall3"))
+                (load-address-into r0 (foreign-symbol-address "callback_wrapper_trampoline"))
                 (inst mtlr r0)
                 (inst blrl))
               ;; We're back!  Restore sp and lr, load the return value from just

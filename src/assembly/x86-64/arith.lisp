@@ -13,11 +13,19 @@
 
 #-sb-assembling ; avoid redefinition warning
 (macrolet ((static-fun-addr (name)
-             #+immobile-code `(rip-relative-ea (make-fixup ,name :linkage-cell))
              #-immobile-code
              `(progn
                 (inst mov rax-tn (thread-slot-ea sb-vm::thread-linkage-table-slot))
-                (ea (make-fixup ,name :linkage-cell) rax-tn))))
+                (ea (make-fixup ,name :linkage-cell) rax-tn))
+             ;; Caution: this looks like it jumps to the linkage cell's address,
+             ;; and that is indeed what it would do if it were not for the fact that
+             ;; genesis recognizes that this isn't right, and instead does what you mean.
+             ;; i.e. genesis resolves a :LINKAGE-CELL fixup differently in asm code.
+             ;; Though a new fixup flavor would be technically correct, it would not
+             ;; be generally usable after self-build because we don't have direct jumps
+             ;; between simple-funs. (However, editcore can and will cause it to occur)
+             #+immobile-code `(make-fixup ,name :linkage-cell)))
+
 (defun both-fixnum-p (temp x y)
   (inst mov :dword temp x)
   (inst or :dword temp y)
@@ -353,12 +361,14 @@
 ;;; It just doesn't seem worth the effort to do all that.
 (defparameter eql-dispatch nil)
 (define-assembly-routine (generic-eql (:return-style :none)
-                                      (:export eql-ratio))
+                                      (:export generic-eql* eql-ratio))
     ((:temp rcx unsigned-reg rcx-offset)  ; callee-saved
      (:temp rax unsigned-reg rax-offset)  ; vop temps
      (:temp rsi unsigned-reg rsi-offset)
      (:temp rdi unsigned-reg rdi-offset)
      (:temp r11 unsigned-reg r11-offset))
+  (inst mov :byte rax (ea (- other-pointer-lowtag) rdi))
+  (inst sub :byte rax bignum-widetag)
   ;; SINGLE-FLOAT is included in this table because its widetag within the range
   ;; of accepted widetags in the precondition for calling this routine.
   ;; Technically it would be an error to see an other-pointer object with that tag.
@@ -379,6 +389,7 @@
   ;; widetags are spaced 4 apart, and we've subtracted BIGNUM_WIDETAG,
   ;; so scaling by 2 gets a multiple of 8 with bignum at offset 0 etc.
   ;; But the upper 3 bytes of EAX hold junk presently, so clear them.
+  GENERIC-EQL*
   (inst and :dword rax #x7f)
   (inst lea r11 eql-dispatch)
   (inst jmp (ea r11 rax 2))

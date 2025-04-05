@@ -1,4 +1,288 @@
 ;;;; -*- coding: utf-8; fill-column: 78 -*-
+changes relative to sbcl-2.5.3:
+  * bug fix: incorrect rounding when converting some bignums to floats.
+  * bug fix: the second value of the truncation functions is more consistently
+    computed for bignum floats.
+  * platform support:
+    ** save-lisp-and-die with :callable-exports can be used for sbcl.dll on
+       Windows.
+    ** Building with UCRT64 on Windows is now fully supported.
+  * optimization: ROUND is faster for floats.
+
+changes in sbcl-2.5.3 relative to sbcl-2.5.2:
+  * enhancement: breakpoint debugger commands have been added.  Included is a
+    stepper based on breakpoints requiring no extra instrumentation.  However,
+    it still has less functionality than the existing single stepper.  See the
+    new debugger manual section titled "Breakpoint Commands" for more
+    information on the new commands.
+  * minor incompatible change: the behaviour of :save-runtime-options has been
+    restored to match the documentation.  (lp#2096995, reported by Zach Beane)
+  * minor incompatible change: invoking CHANGE-CLASS from user code no longer
+    grabs the CLOS world lock.  Callers must take responsibility for ordering
+    execution of CHANGE-CLASS and any changes to the class hierarchy.
+  * platform support:
+    ** (CAS SAP) is implemented on ARM v8.1 directly with CAS instructions.
+    ** on x86-64, list constructors emit more compact code sequences,
+       particularly in the presence of multiple references to the same object.
+    ** on x86 and x86-64, fix the stack overflow check to use signed
+       comparisons.
+    ** on Darwin/arm64 and Linux/x86-64, provide a restart to disable
+       floating-point exceptions of the type signalled, and another to disable
+       all floating-point exceptions.
+  * bug fix: cycle detection in class precedence lists happens before adding
+    classes to the direct subclasses of the parent.
+  * bug fix: stack-allocated unaligned cons cells no longer cause errors in
+    the debugger.
+  * bug fix: local function type declarations no longer inhibit tail calls in
+    (SAFETY 0) code.  (lp#2039301)
+  * bug fix: bad or unknown type specifiers in CHECK-TYPE do not crash or slow
+    down the compiler.  (lp#2102644, lp#2102653, lp#2102714, lp#2104048)
+  * bug fix: numerous bug fixes relating to the type system's handling of
+    arrays make SUBTYPEP more reliable and less likely to express a
+    contradiction.  (lp#1996980, lp#2100563, lp#2100728, lp#2100779,
+    lp#2100784, lp#2100812, lp#2100825, lp#2101192, lp#2101215, lp#2101803,
+    lp#2102684)
+  * bug fix: improve other aspects of the type system's self-consistency.
+    (lp#2101073, lp#2101170, lp#2101183, lp#2101189, lp#2101399, lp#2101589)
+  * bug fix: fix compiler type error when deriving the type of FTRUNCATE.
+    (lp#2101073)
+  * bug fix: fix compiler error when deriving constraints for single-floats.
+    (lp#2102759)
+  * bug fix: startup tuning for particular microarchitectures no longer
+    accidentally disables one of the optimizations.
+  * optimization: ROW-MAJOR-AREF is transformed to use the same array
+    machinery as one-dimensional array references.  (Thanks to Scott Burson
+    for the suggestion)
+  * optimization: list constructors emit shorter code sequences on x86-64,
+    particularly in the presence of multiple references to the same object.
+  * optimization: FLOOR and CEILING on ratios do not unnecessarily cons.
+  * optimization: provide specialized CALL-NEXT-METHOD functions for the
+    no-argument and full-argument cases.
+
+changes in sbcl-2.5.2 relative to sbcl-2.5.1:
+  * minor incompatible change: in some instances when the compiler cannot
+    prove that a NIL-valued branch is unreachable, where NIL is not compatible
+    with the expected type, a type warning will no longer be issued.
+  * minor incompatible change: the compiler will more strictly treat type
+    declarations for &OPTIONAL and &KEY arguments in FTYPE declarations, no
+    longer effectively adding an implicit (OR ... <default>) type when the
+    function itself has a default value not matching the declared type for
+    that argument.
+  * enhancement: type errors in structure constructors are now restartable,
+    with a USE-VALUE restart provided.
+  * enhancement: CHECK-TYPE warns about type conflicts at compile-time.
+  * enhancement: FTYPE declarations for functions which set their parameters
+    are checked.
+  * enhancement: new print control variable SB-EXT:*PRINT-CIRCLE-NOT-SHARED*,
+    when used in conjunction with *PRINT-CIRCLE*, prints #1# only for
+    circularities and not simple sharing.
+  * platform support
+    ** on Windows, make sure to commit memory after zeroing during
+       save-lisp-and-die. (lp#2097197, reported by _3b)
+    ** on Linux, add the TCP_USER_TIMEOUT constant to SB-BSD-SOCKETS.  (thanks
+       to Mihai Bazon)
+    ** on *BSD, make TCP_KEEPCNT, TCP_KEEPIDLE and TCP_KEEPINTVL available
+       where the OS supports it.
+    ** on x86-64, optimize BOUNDP for known-global symbols.
+    ** on x86-64, optimize KEYWORDP for some arguments.
+    ** on arm64, don't trigger an assertion when using FMOV on complex
+       single-float registers.
+    ** on arm64, improve type checking for (AND SYMBOL (NOT NULL)).
+  * bug fix: using structure read macros with shared structure markers no
+    longer signals type errors when the shared structure is in a slot with a
+    type.  (lp#308936)
+  * bug fix: non-conforming user macros which modify their source no longer
+    trigger internal errors.  (lp#1371719, reported by _3b)
+  * bug fix: the combination of CONSTANTLY and DYNAMIC-EXTENT declarations no
+    longer causes an internal compiler error.  (lp#2059950, reported by
+    bohonghuang)
+  * bug fix: treat inlined functions analogously to constants in the compiler.
+    (lp#2095560, reported by Vasiliy Postnicov)
+  * bug fix: FTYPE declarations for &optional and &key arguments do not
+    include default values when checking types.
+  * bug fix: Storing coverage data no longer leads to miscompilations allowing
+    reachability of unreachable code.  (lp#2092451, reported by mrkissinger)
+  * optimization: elide bounds-checking for multidimensional arrays with known
+    dimensions.  (reported by aeth)
+  * optimization: alien callbacks are generally less heavyweight.
+  * optimization: REMOVE shares the tail of the input list when there's
+    nothing to remove.
+
+changes in sbcl-2.5.1 relative to sbcl-2.5.0:
+  * minor incompatible change: SBCL now reveals details of its COMPLEX
+    representations through UPGRADED-COMPLEX-PART-TYPE, rather than hiding
+    them.
+  * minor incompatible change: the compiler will warn on the use of a
+    SATISFIES type with an undefined function.  (lp#576608, reported by Roman
+    Marynchak)
+  * minor incompatible change: (room t) now counts the space taken by the
+    internals of hash-tables and CLOS instances.
+  * platform support
+    ** fixes to the included version of ASDF, and to sockets functions, for
+       the Haiku operating system.  (thanks to Alexandru Popa)
+    ** add support for CAS (compare-and-swap) on SAPs for arm64, x86-64 and
+       (partially) RISC-V.  (lp#1894057, reported by Yukari Hafner)
+    ** the system is now consistent with 64-bit time_t on 32-bit linux
+       platforms. (lp#2063340, reported by Peter van Eynde)
+    ** restore building on 32-bit ARM with newer gcc versions.  (lp#1839783,
+       reported by Sébastien Villemot)
+    ** fix large stack allocation on 64-bit Windows.
+  * CL portability fixes to the definitions of certain compiler structures,
+    detected by CLISP.  (lp#2064301, lp#2064312, thanks to Robert Brown)
+  * bug fix: a misplaced assertion regarding weak hash tables would trigger
+    if a garbage collection hit at just the wrong time.  (lp#2096998)
+  * bug fix: structure BOA constructors with &REST arguments no longer cause
+    structure slots named NIL or T to be unconditionally initialized with the
+    values NIL and T respectively.
+  * bug fix: structure BOA constructors without values for some slots no
+    longer cause compilation errors for initforms that are not a single
+    variable.
+  * bug fix: sequence functions handle :TEST and :TEST-NOT both being given
+    uniformly.  (lp#309143)
+  * bug fix: the type system is better equipped to handle complicated unions
+    of numeric types.  (lp#308937, lp#1694839, lp#1734959, lp#2073544)
+  * bug fix: misoptimization of VALUES-LIST in the presence of intervening
+    stack operations.  (reported by haruhi.s)
+  * bug fix: apply the limit to inline expansions more selectively.
+    (lp#2092518, reported by Andrew Kravchuk)
+  * bug fix: compiler-detected type mismatches are reported even given the
+    presence of inlined functions.  (lp#2092613, reported by Vasily Postnicov)
+  * bug fix: improved type error detection for inlined array construction forms.
+    (lp#2092889, reported by Vasily Postnicov)
+  * bug fix: accesses to multidimensional arrays are now checked based on the
+    (internal) INSERT-ARRAY-BOUNDS-CHECKS declaration, as with one-dimensional
+    arrays.  (lp#2095155, thanks to Vasily Postnicov)
+  * bug fix: sb-bsd-sockets:socket-connect handles EINTR caused by GC signals.
+
+changes in sbcl-2.5.0 relative to sbcl-2.4.11:
+  * platform support:
+    ** improve support for the Haiku operating system.  (thanks to Al Hoang,
+       Estevan Castilho and Alexandru Popa)
+  * bug fix: generic functions with a large number of required arguments, with
+    methods with specializations on exactly STANDARD-OBJECT or
+    FUNCALLABLE-STANDARD-OBJECT, test the types of their arguments more
+    correctly.
+  * bug fix: defining a method on SB-MOP:SLOT-VALUE-USING-CLASS where the
+    object argument is specialized to a CONDITION-CLASS no longer leads to an
+    internal error.
+  * bug fix: the dissassembler on x86-64 correctly disassembles the vcvttpd2dq
+    AVX2 instruction.
+  * bug fix: ensure that the dispatch function for generic functions is
+    compiled with a known compilation policy.  (reported by Neil Goldman)
+  * bug fix: the compiler retains less intermediate data between COMPILE-FILE
+    forms.  (lp#1557590, reported by andy arvid)
+  * bug fix: the (invalid) :INITARGS slot option keyword is reported on.
+    (lp#1887014, reported by Wayne Rittiman, Jr)
+  * bug fix: the SB-SIMD s16.8-maddubs accepts packs of 16 8-bit quantities,
+    not 8 16-bit quantities.  (lp#2069538, reported by Georgios Makris)
+  * bug fix: compiling a TYPECASE to dispatch between many user-defined
+    classes no longer takes exponential time.  (lp#2089311, reported by Tomas
+    Hlavaty)
+  * bug fix: derive the new type for a variable when setting it to a function
+    of its previous version.  (lp#2090997, reported by Vasily Postnicov)
+  * bug fix: properly clear compiler annotations on variables set to new
+    values involving functions of themselves.  (lp#2090967, reported by Kirill
+    A. Korinskiy)
+  * bug fix: handle BY in LOOP forms involving iteration on the reverse of a
+    list.  (lp#2091210, reported by James Kalenius)
+  * bug fix: fix miscompilation of IF where the consequent and alternative
+    would have the same value but for an intervening side-effect.
+    (lp#2092588, reported by JA)
+  * optimization: SLOT-VALUE and (SETF SLOT-VALUE) on method arguments
+    specialized to structure classes are compiled to the corresponding
+    structure accessor.
+  * optimization: calls to SLOT-VALUE (and related operators) on method
+    arguments specialized to instances of SB-MOP:FUNCALLABLE-STANDARD-CLASS
+    are optimized similarly to calls on method arguments specialized to
+    instances of STANDARD-CLASS.
+  * optimization: (coerce (reverse list) 'vector) doesn't cons a list.
+  * optimization: (replace vector (reverse list)) doesn't cons a list.
+
+changes in sbcl-2.4.11 relative to sbcl-2.4.10:
+  * enhancement: define SB-EXT:*DEFAULT-SOURCE-EXTERNAL-FORMAT* as the
+    external format for reading source files (for direct use in LOAD and
+    COMPILE-FILE).  On Windows, this defaults to an external format with CRLF
+    line-endings.  (lp#720517, reported by Mark David)
+  * minor incompatible change: the documentation of
+    SB-SEQUENCE:MAKE-SEQUENCE-LIKE has been altered to match its
+    implementation regarding the (un)initialization of the sequence if neither
+    :INITIAL-CONTENTS nor :INITIAL-ELEMENT is provided.
+  * minor incompatible change: the outputs from SB-GROVEL no longer contain
+    calls to SB-GROVEL::DEFINE-FOREIGN-ROUTINE, but call
+    SB-ALIEN:DEFINE-ALIEN-ROUTINE directly; the definitions of some other
+    SB-GROVEL utilities has also changed.
+  * platform support:
+    ** The system is more likely to build with the musl C library.  (thanks to
+       Masatoshi SANO)
+    ** It is possible to build 32-bit binaries on NetBSD/x86-64 systems.
+       (thanks to Masatoshi SANO)
+    ** Stale big-endian ARM code in callbacks is no longer present.
+       (lp#2087866, reported by Rongcui Dong)
+    ** Correct the encoding of the VPSHUFD AVX2 instruction.  (reported by
+       Dmitry Ignatiev)
+    ** Implement the PINSRQ SSE instruction and provide access to it in
+       SB-SIMD.
+    ** Fix some signed/unsigned and 32-bit issues in the runtime leading to
+       problems with large --dynamic-space-size.  (lp#2087986)
+  * bug fix: cross-reference information about structure accessors is
+    preserved when compilation policy requires it.
+  * bug fix: changing &ALLOW-OTHER-KEYS in a generic function's lambda list
+    needs to invalidate the effective methods cache.  (reported by Robert
+    Strandh)
+  * bug fix: calling DISASSEMBLE on a method-function provides a more useful
+    disassembly.
+  * bug fix: PROCESS-CLOSE no longer leaks a zombie process.
+  * bug fix: interaction between SYMBOL-MACROLET and SPECIAL declarations is
+    handled more correctly in the code walker.  (lp#1053198)
+  * bug fix: better scaling when compiling large numbers of calls to local
+    functions.  (lp#1379661, reported by 3b and Burton Samograd)
+  * bug fix: allow the compiler to approximate types involving large bignums
+    or ratios with large numerator or denominator.  (lp#2085637)
+  * bug fix: miscompilation of type tests involving STRUCTURE-OBJECT.
+    (lp#2088417)
+  * optimization: CONCATENATE with consing arguments can elide some of the
+    intermediate consing.
+  * optimization: the implementations of various external-formats have been
+    sped up.
+  * optimization: elide %SAP-ALIEN calls if all uses dereference the resulting
+    ALIEN object.
+  * optimization: faster (expt integer integer) when computing fixnum results.
+  * optimization: (ash unknown-integer right) can use modular arithmetic.
+  * optimization: (apply x ... list) avoids consing intermediate lists in more
+    situations.
+  * optimizations for arm64, x86-64:
+    ** AREF on non-simple arrays with known element type is faster, along with
+       uses such as LOOP ACROSS, VECTOR-PUSH/POP/EXTEND.
+    ** SIMD variants for POSITION for strings, 8 and 32 bit integer arrays.
+    ** faster overflow checking for (the fixnum (+ fixnum fixnum))
+
+changes in sbcl-2.4.10 relative to sbcl-2.4.9:
+  * minor incompatible change: SB-POSIX::POSIX-FORK is no longer exported from
+    SB-POSIX.  (The interface function, SB-POSIX:FORK, remains exported).
+  * platform support:
+    ** fix bugs in instruction encoding on RISC-V; (reported by Guillaume Le
+       Vaillant)
+    ** fix the location of the linkage-table comment in disassembly on 64-bit
+       powerpc;
+    ** elide allocation of empty number stack frames on arm64;
+    ** fix crash on x86 platforms in compiling array dereferencing with
+       computed offsets with negative intermediate results.  (lp#2084943)
+  * enhancement: the error message from standard object slot typecheck
+    functions in optimized constructors is clearer about the context of the
+    failed type check.
+  * enhancement: BREAK is no longer tail-called, even when in tail position.
+  * enhancement: on arm64 and x86-64, specialized entry points for functions
+    known to take or return fixed numbers of double floats are generated and
+    can be automatically called without boxing intermediate floats.
+  * bug fix: RUN-PROGRAM no longer leaks memory by referencing otherwise
+    unreachable stream instances.
+  * bug fix: exporting or unexporting symbols during package iteration no
+    longer causes any symbol to be visited more times than expected.
+  * bug fix: DISASSEMBLE preserves the comment marker across line-breaks for
+    long function or segment names.  (lp#1889456, thanks to Fedorov Alexander)
+  * bug fix: the compiler no longer loops infinitely trying to compile
+    NOTINLINE calls to known functions with source transform definitions.
+    (lp#2085451, reported by Fedorov Alexander)
 
 changes in sbcl-2.4.9 relative to sbcl-2.4.8:
   * minor incompatible change: FIND, POSITION (and variants) now check :START

@@ -734,24 +734,29 @@ invoked. In that case it will store into PLACE and start over."
   ;; variable to work around Python's blind spot in type derivation.
   ;; For more complex places getting the type derived should not
   ;; matter so much anyhow.
-  (let ((expanded (%macroexpand place env))
-        (type (let ((ctype (sb-c::careful-specifier-type type)))
-                (if ctype
-                    (type-specifier ctype)
-                    type))))
-    (if (symbolp expanded)
-        `(do ()
-             ((typep ,place ',type))
-           (setf ,place (check-type-error ',place ,place ',type
-                                          ,@(and type-string
-                                                 `(,type-string)))))
-        (let ((value (gensym)))
-          `(do ((,value ,place ,place))
-               ((typep ,value ',type))
-             (setf ,place
-                   (check-type-error ',place ,value ',type
-                                     ,@(and type-string
-                                            `(,type-string)))))))))
+  (let* ((expanded (%macroexpand place env))
+         (ctype (sb-c::careful-specifier-type type))
+         (type (if ctype
+                   (type-specifier ctype)
+                   type))
+         (value (gensym)))
+    (cond ((stringp type)
+           `(the ,type ,place)) ;; bad type
+          ((symbolp expanded)
+           `(let ((,value ,(wrap-if ctype `(the* (,ctype :use-annotations t)) place)))
+              (unless (typep ,value ',type)
+                (setf ,place
+                      ,(if type-string
+                           `(check-type-error-trap '(,place . ,type) ,value (the string ,type-string))
+                           `(check-type-error-trap ',place ,value ',type)))
+                nil)))
+          (t
+           `(do ((,value ,(wrap-if ctype `(the* (,ctype :use-annotations t)) place) ,place))
+                ((typep ,value ',type))
+              (setf ,place
+                    (check-type-error ',place ,value ',type
+                                      ,@(and type-string
+                                             `(,type-string)))))))))
 
 ;;;; DEFINE-SYMBOL-MACRO
 
@@ -829,7 +834,7 @@ invoked. In that case it will store into PLACE and start over."
     (lambda (condition stream)
       (format stream
         "Duplicate key ~S in ~S form, ~
-         occurring in~{~#[~; and~]~{ the ~:R clause:~%~<  ~S~:>~}~^,~}."
+         occurring in~{~#[~; and~]~{ clause ~a:~%~<  ~S~:>~}~^,~}."
         (case-warning-key condition)
         (case-warning-case-kind condition)
         (duplicate-case-key-warning-occurrences condition)))))
@@ -1059,11 +1064,6 @@ invoked. In that case it will store into PLACE and start over."
     (when (and (some #'symbolp keys) (or (some #'integerp keys) (some #'characterp keys)))
       (incf minimum 2))
     (>= (length keys) minimum)))
-
-(defun wrap-if (condition with form)
-  (if condition
-      (append with (list form))
-      form))
 
 ;;; CASE-BODY returns code for all the standard "case" macros. NAME is
 ;;; the macro name, and KEYFORM is the thing to case on.
@@ -1378,6 +1378,13 @@ invoked. In that case it will store into PLACE and start over."
                 (setq ,abortp nil))
            (when ,stream
              (close ,stream :abort ,abortp)))))))
+
+(sb-xc:defmacro sb-debug::with-debug-io-syntax (() &body body)
+  (let ((thunk (gensym "THUNK")))
+    `(dx-flet ((,thunk ()
+                 ,@body))
+       (sb-debug::funcall-with-debug-io-syntax #',thunk))))
+
 
 ;;;; Iteration macros:
 
@@ -1843,7 +1850,7 @@ of PLACE: if the returned value is EQ to OLD, the swap was carried out.
 PLACE must be an CAS-able place. Built-in CAS-able places are accessor forms
 whose CAR is one of the following:
 
- CAR, CDR, FIRST, REST, SVREF, SYMBOL-PLIST, SYMBOL-VALUE, SVREF, SLOT-VALUE
+ CAR, CDR, FIRST, REST, SVREF, SYMBOL-PLIST, SYMBOL-VALUE, SLOT-VALUE
  SB-MOP:STANDARD-INSTANCE-ACCESS, SB-MOP:FUNCALLABLE-STANDARD-INSTANCE-ACCESS,
 
 or the name of a DEFSTRUCT created accessor for a slot whose storage type

@@ -174,8 +174,9 @@
 ;;; Return the shift amount needed to turn length as number of elements
 ;;; into length as number of bits.
 (defun saetp-n-bits-shift (saetp)
-  (max (1- (integer-length (saetp-n-bits saetp)))
-       0)) ;; because of NIL
+  (if (zerop (saetp-n-bits saetp))
+      (1- sb-vm:n-word-bits) ;; nil-vector, will overflow modular arithmetic to zero.
+      (1- (integer-length (saetp-n-bits saetp)))))
 
 #-sb-xc-host ; not computable as constant in make-host-1
 (defconstant-eqx %%simple-array-n-bits-shifts%%
@@ -191,11 +192,6 @@
   #-sb-xc-host (if (= widetag simple-array-nil-widetag)
                    0
                    (ash 1 (aref %%simple-array-n-bits-shifts%% widetag))))
-
-(defun saetp-index-or-lose (element-type)
-  (or (position element-type sb-vm:*specialized-array-element-type-properties*
-                :key #'sb-vm:saetp-specifier :test #'equal)
-      (error "No saetp for ~S" element-type)))
 
 ;;; I don't understand why we didn't use this more often, instead of
 ;;; having introduced special cases. Oh well, what's done is done.

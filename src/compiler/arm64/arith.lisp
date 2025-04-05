@@ -2295,6 +2295,29 @@
           (inst adds r x y))
       (inst b :vs error))))
 
+(define-vop (overflow+-fixnum)
+  (:translate overflow+)
+  (:args (x :scs (any-reg))
+         (y :scs (any-reg immediate)))
+  (:arg-types tagged-num tagged-num)
+  (:info type)
+  (:results (r :scs (any-reg)))
+  (:result-types tagged-num)
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:generator 1
+    (let* ((*location-context* (unless (eq type 'fixnum)
+                                 type))
+           (error (generate-error-code vop 'sb-kernel::add-sub-overflow-error r)))
+      (if (sc-is y immediate)
+          (let ((y (fixnumize (tn-value y))))
+            (if (and (minusp y)
+                     (/= y #.(fixnumize most-negative-fixnum)))
+                (inst subs r x (add-sub-immediate (- y)))
+                (inst adds r x (add-sub-immediate y))))
+          (inst adds r x y))
+      (inst b :vs error))))
+
 (define-vop (overflow+-signed=>unsigned)
   (:translate overflow+)
   (:args (x :scs (signed-reg))
@@ -2311,9 +2334,7 @@
     (let* ((*location-context* (unless (eq type 'fixnum)
                                  type))
            (error (generate-error-code vop 'sb-kernel::add-sub-overflow-error
-                                       (make-random-tn :kind :normal
-                                                       :sc (sc-or-lose 'signed-reg)
-                                                       :offset (tn-offset r)))))
+                                       (make-random-tn (sc-or-lose 'signed-reg) (tn-offset r)))))
       (inst asr temp1 x 63)
       (inst asr temp2 y 63)
       (inst adds r x y)
@@ -2413,6 +2434,29 @@
       (if (sc-is y immediate)
           (let ((y (tn-value y)))
             (if (minusp y)
+                (inst adds r x (add-sub-immediate (- y)))
+                (inst subs r x (add-sub-immediate y))))
+          (inst subs r x y))
+      (inst b :vs error))))
+
+(define-vop (overflow-fixnum)
+  (:translate overflow-)
+  (:args (x :scs (any-reg))
+         (y :scs (any-reg immediate)))
+  (:arg-types tagged-num tagged-num)
+  (:info type)
+  (:results (r :scs (any-reg)))
+  (:result-types tagged-num)
+  (:policy :fast-safe)
+  (:vop-var vop)
+  (:generator 1
+    (let* ((*location-context* (unless (eq type 'fixnum)
+                                 type))
+           (error (generate-error-code vop 'sb-kernel::add-sub-overflow-error r)))
+      (if (sc-is y immediate)
+          (let ((y (fixnumize (tn-value y))))
+            (if (and (minusp y)
+                     (/= y #.(fixnumize most-negative-fixnum)))
                 (inst adds r x (add-sub-immediate (- y)))
                 (inst subs r x (add-sub-immediate y))))
           (inst subs r x y))
@@ -2665,11 +2709,10 @@
                             nil)
                            (t
                             (setf amount-error
-                                  (make-random-tn :kind :normal
-                                                  :sc (sc-or-lose (if (typep amount 'word)
-                                                                      'unsigned-reg
-                                                                      'signed-reg))
-                                                  :offset (tn-offset tmp-tn)))
+                                  (make-random-tn (sc-or-lose (if (typep amount 'word)
+                                                                  'unsigned-reg
+                                                                  'signed-reg))
+                                                  (tn-offset tmp-tn)))
 
                             (lambda ()
                               (load-immediate-word amount-error amount)))))
@@ -2723,8 +2766,6 @@
              (inst b :ne error))))
     done))
 
-
-
 (define-vop (overflow-ash-unsigned)
   (:translate overflow-ash)
   (:args (number :scs (unsigned-reg))
@@ -2749,11 +2790,10 @@
                             nil)
                            (t
                             (setf amount-error
-                                  (make-random-tn :kind :normal
-                                                  :sc (sc-or-lose (if (typep amount 'word)
-                                                                      'unsigned-reg
-                                                                      'signed-reg))
-                                                  :offset (tn-offset tmp-tn)))
+                                  (make-random-tn (sc-or-lose (if (typep amount 'word)
+                                                                  'unsigned-reg
+                                                                  'signed-reg))
+                                                  (tn-offset tmp-tn)))
 
                             (lambda ()
                               (load-immediate-word amount-error amount)))))
@@ -3274,7 +3314,8 @@
                                               (load-immediate-word tmp-tn diff))
                                           (setf loaded tmp-tn))
                                         (cond
-                                          ((< diff lowest-bignum-address)
+                                          ((and (< -1 lo lowest-bignum-address)
+                                                (< -1 hi lowest-bignum-address))
                                            (inst cmp temp loaded))
                                           (tbz-label
                                            (inst tbnz* x 0 (if branch-not

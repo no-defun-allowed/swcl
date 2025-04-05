@@ -15,12 +15,16 @@
 
 (defconstant +max-register-args+ 8)
 
-(defstruct arg-state
+(defstruct (arg-state
+            (:copier nil)
+            (:predicate nil)
+            (:constructor make-arg-state ()))
   (num-register-args 0)
   (fp-registers 0)
   (stack-frame-size 0))
 
-(defstruct (result-state (:copier nil))
+(defstruct (result-state (:copier nil) (:predicate nil)
+                         (:constructor make-result-state ()))
   (num-results 0))
 
 (defun result-reg-offset (slot)
@@ -260,10 +264,7 @@
                                          (list #-immobile-space r9-offset ;; invoke-foreign-routine doesn't touch it
                                                r10-offset lexenv-offset))
               do (inst mov
-                       (make-random-tn
-                        :kind :normal
-                        :sc (sc-or-lose 'descriptor-reg)
-                        :offset reg)
+                       (make-random-tn (sc-or-lose 'descriptor-reg) reg)
                        0))
         ;; No longer OK to run GC except at safepoints.
         #+sb-safepoint
@@ -343,25 +344,12 @@
 ;;; Callback
 #-sb-xc-host
 (defun alien-callback-accessor-form (type sap offset)
-  (let ((parsed-type type))
-    (if (alien-integer-type-p parsed-type)
-        (let ((bits (sb-alien::alien-integer-type-bits parsed-type)))
-               (let ((byte-offset
-                      (cond ((< bits n-word-bits)
-                             (- n-word-bytes
-                                (ceiling bits n-byte-bits)))
-                            (t 0))))
-                 `(deref (sap-alien (sap+ ,sap
-                                          ,(+ byte-offset offset))
-                                    (* ,type)))))
-        `(deref (sap-alien (sap+ ,sap ,offset) (* ,type))))))
+  `(deref (sap-alien (sap+ ,sap ,offset) (* ,type))))
 
 #-sb-xc-host
 (defun alien-callback-assembler-wrapper (index result-type argument-types)
   (flet ((make-tn (offset &optional (sc-name 'any-reg))
-           (make-random-tn :kind :normal
-                           :sc (sc-or-lose sc-name)
-                           :offset offset)))
+           (make-random-tn (sc-or-lose sc-name) offset)))
     (let* ((segment (make-segment))
            ;; How many arguments have been copied
            (arg-count 0)
@@ -371,7 +359,6 @@
            (r1-tn (make-tn 1))
            (r2-tn (make-tn 2))
            (r3-tn (make-tn 3))
-           (r4-tn (make-tn 4))
            (temp-tn (make-tn 9))
            (nsp-save-tn (make-tn 10))
            (gprs (loop for i below 8
@@ -448,23 +435,18 @@
                    (incf arg-count))
                   (t
                    (bug "Unknown alien type: ~S" type)))))
-        ;; arg0 to FUNCALL3 (function)
-        (load-immediate-word r0-tn (static-fdefn-fun-addr 'enter-alien-callback))
-        (loadw r0-tn r0-tn)
         ;; arg0 to ENTER-ALIEN-CALLBACK (trampoline index)
-        (inst mov r1-tn (fixnumize index))
+        (inst mov r0-tn (fixnumize index))
         ;; arg1 to ENTER-ALIEN-CALLBACK (pointer to argument vector)
-        (inst mov-sp r2-tn nsp-tn)
+        (inst mov-sp r1-tn nsp-tn)
         ;; add room on stack for return value
         (inst sub nsp-tn nsp-tn (* n-word-bytes 2))
         ;; arg2 to ENTER-ALIEN-CALLBACK (pointer to return value)
-        (inst mov-sp r3-tn nsp-tn)
+        (inst mov-sp r2-tn nsp-tn)
 
         ;; Call
-        (load-immediate-word r4-tn (foreign-symbol-address
-                                    #-sb-thread "funcall3"
-                                    #+sb-thread "callback_wrapper_trampoline"))
-        (inst blr r4-tn)
+        (load-immediate-word r3-tn (foreign-symbol-address "callback_wrapper_trampoline"))
+        (inst blr r3-tn)
 
         ;; Result now on top of stack, put it in the right register
         (cond

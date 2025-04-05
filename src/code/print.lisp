@@ -30,13 +30,18 @@
   "How many levels should be printed before abbreviating with \"#\"?")
 (defvar *print-length* nil
   "How many elements at any level should be printed before abbreviating
-  with \"...\"?")
+with \"...\"?")
 (defvar *print-vector-length* nil
   "Like *PRINT-LENGTH* but works on strings and bit-vectors.
 Does not affect the cases that are already controlled by *PRINT-LENGTH*")
 (defvar *print-circle* nil
   "Should we use #n= and #n# notation to preserve uniqueness in general (and
-  circularity in particular) when printing?")
+circularity in particular) when printing?")
+
+(defvar *print-circle-not-shared* nil
+  "If this variable and *PRINT-CIRCLE* are both T only circular
+structures are printed with #n#.")
+
 (defvar *print-case* :upcase
   "What case should the printer should use default?")
 (defvar *print-array* t
@@ -74,7 +79,8 @@ variable: an unreadable object representing the error is printed instead.")
         (*print-level* nil)
         (*print-lines* nil)
         (*print-miser-width* nil)
-        (*print-pprint-dispatch* sb-pretty::*standard-pprint-dispatch-table*)
+        (*print-pprint-dispatch* (truly-the sb-pretty:pprint-dispatch-table
+                                            sb-pretty::*standard-pprint-dispatch-table*))
         (*print-pretty* nil)
         (*print-radix* nil)
         (*print-readably* t)
@@ -85,7 +91,8 @@ variable: an unreadable object representing the error is printed instead.")
         (*read-suppress* nil)
         (*readtable* *standard-readtable*)
         (*suppress-print-errors* nil)
-        (*print-vector-length* nil))
+        (*print-vector-length* nil)
+        (*print-circle-not-shared* nil))
     (funcall function)))
 
 ;;;; routines to print objects
@@ -335,7 +342,7 @@ variable: an unreadable object representing the error is printed instead.")
   (let ((circularity-hash-table *circularity-hash-table*))
     (cond
         ((null circularity-hash-table)
-          (values nil :initiate))
+            (values nil :initiate))
         ((null *circularity-counter*)
          (ecase (gethash object circularity-hash-table)
            ((nil)
@@ -433,28 +440,43 @@ variable: an unreadable object representing the error is printed instead.")
             (write-char #\= stream)
             t)))))
 
-(defmacro with-circularity-detection ((object stream) &body body)
+(defmacro with-circularity-detection ((object stream state) &body body)
   (with-unique-names (marker body-name)
-    `(labels ((,body-name ()
+    `(labels ((,body-name (stream ,state)
                 ,@body))
        (cond ((or (not *print-circle*)
                   (uniquely-identified-by-print-p ,object))
-              (,body-name))
+              (,body-name stream ,state))
              (*circularity-hash-table*
               (let ((,marker (check-for-circularity ,object t :logical-block)))
-                (if ,marker
-                    (when (handle-circularity ,marker ,stream)
-                      (,body-name))
-                    (,body-name))))
+                (cond (,marker
+                       (when (handle-circularity ,marker ,stream)
+                         (,body-name stream ,state)))
+                      (t
+                       (,body-name stream ,state)
+                       (when (and *print-circle-not-shared*
+                                  (eql (gethash ,object *circularity-hash-table*) :logical-block))
+                         (if (listp ,object)
+                             (let ((list ,object))
+                               (loop until (or (atom list)
+                                               (not (memq (gethash list *circularity-hash-table*) '(t :logical-block))))
+                                     do
+                                     (remhash list *circularity-hash-table*)
+                                     (pop list)))
+                             (remhash ,object *circularity-hash-table*)))))))
              (t
               (let ((*circularity-hash-table* (make-hash-table :test 'eq)))
-                (output-object ,object *null-broadcast-stream*)
+                (let* ((stream (sb-pretty::make-pretty-stream *null-broadcast-stream*))
+                       (state (cons 0 stream)))
+                  (declare (inline sb-pretty::make-pretty-stream))
+                  (declare (dynamic-extent state stream))
+                  (,body-name stream state))
                 (let ((*circularity-counter* 0))
                   (let ((,marker (check-for-circularity ,object t
                                                         :logical-block)))
                     (when ,marker
                       (handle-circularity ,marker ,stream)))
-                  (,body-name))))))))
+                  (,body-name stream ,state))))))))
 
 ;;;; level and length abbreviations
 
@@ -539,19 +561,28 @@ variable: an unreadable object representing the error is printed instead.")
                    (print-it stream))
                  (print-it stream)))
            (check-it (stream)
-             (multiple-value-bind (marker initiate)
-                 (check-for-circularity object t)
-               (if (eq initiate :initiate)
-                   (let ((*circularity-hash-table*
-                          (make-hash-table :test 'eq)))
-                     (check-it *null-broadcast-stream*)
-                     (let ((*circularity-counter* 0))
-                       (check-it stream)))
-                   ;; otherwise
-                   (if marker
-                       (when (handle-circularity marker stream)
-                         (handle-it stream))
-                       (handle-it stream))))))
+             (multiple-value-bind (marker initiate) (check-for-circularity object t)
+               (cond ((eq initiate :initiate)
+                      (let ((*circularity-hash-table*
+                              (make-hash-table :test 'eq)))
+                        (check-it *null-broadcast-stream*)
+                        (let ((*circularity-counter* 0))
+                          (check-it stream))))
+                     (marker
+                      (when (handle-circularity marker stream)
+                        (handle-it stream)))
+                     (t
+                      (handle-it stream)
+                      (when (and *print-circle-not-shared*
+                                 (memq (gethash object *circularity-hash-table*) '(t :logical-block)))
+                        (if (listp object)
+                            (let ((list object))
+                              (loop until (or (atom list)
+                                              (not (memq (gethash list *circularity-hash-table*) '(t :logical-block))))
+                                    do
+                                    (remhash list *circularity-hash-table*)
+                                    (pop list)))
+                            (remhash object *circularity-hash-table*))))))))
     (cond (;; Maybe we don't need to bother with circularity detection.
            (or (not *print-circle*)
                (uniquely-identified-by-print-p object))

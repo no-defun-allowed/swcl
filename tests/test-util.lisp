@@ -109,12 +109,12 @@
 ;;; This isn't a great name. Prefer to use TYPE-SPECIFIERS-EQUAL instead
 (defun ctype= (a b) (type-specifiers-equal a b))
 
-(defmacro assert-tri-eq (expected-result expected-certainp form)
-  (sb-int:with-unique-names (result certainp)
-    `(multiple-value-bind (,result ,certainp) ,form
-       (assert (eq ,expected-result ,result))
-       (assert (eq ,expected-certainp ,certainp)))))
+(defun elements-eq (list1 list2)
+  (every #'eq list1 list2))
 
+(defmacro assert-tri-eq (expected-result expected-certainp form)
+  `(assert (elements-eq '(,expected-result ,expected-certainp)
+                        (multiple-value-list ,form))))
 
 ;;; Thread tools
 
@@ -458,7 +458,8 @@
                      (= safety 3))))
     ((eql :safe)
      (list :filter (lambda (&key speed safety &allow-other-keys)
-                     (and (> safety 0) (>= safety speed)))))
+                     (and (> safety 0) (>= safety speed)))
+           :compilation-speed 1 :space 1))
     ((eql :quick)
      '(:compilation-speed 1 :space 1))
     ((eql :quick/incomplete)

@@ -89,7 +89,7 @@
                            ;; Must be just before NIL.
                            (safepoint ,(symbol-value '+backend-page-bytes+))
                            (static ,small-space-size)
-                           (permgen 8388608) ; 8MiB
+                           (permgen 33554432) ; 32MiB
                            #+darwin-jit
                            (static-code ,small-space-size))
                          #+immobile-space
@@ -104,19 +104,17 @@
                                           #+relocatable-static-space safepoint
                                           #+relocatable-static-space static
                                           read-only)))
-                        (start ptr)
-                        (end (+ ptr size)))
-                   (setf ptr end)
+                        (overrides
+                         (case space
+                           (text (cons text-space-start* text-space-size*))
+                           (fixedobj (cons fixedobj-space-start* fixedobj-space-size*))))
+                        (effective-size (or (cdr overrides) size))
+                        (start (or (car overrides) ; use specified value
+                                   (prog1 ptr (incf ptr effective-size)))) ; else bump PTR
+                        (end (+ start effective-size)))
                    (if var-name
                        `((defconstant ,var-name ,start))
                        (let ((start-sym (symbolicate space "-SPACE-START")))
-                         ;; Allow expressly given addresses / sizes for immobile space.
-                         ;; The addresses are for testing only - you should not need them.
-                         (case space
-                           (text (setq start (or text-space-start* start)
-                                       end (+ start text-space-size*)))
-                           (fixedobj (setq start (or fixedobj-space-start* start)
-                                           end (+ start fixedobj-space-size*))))
                          `(,(defconstantish relocatable start-sym start)
                            ,(cond ((eq space 'alien-linkage-table)) ; nothing for the -END
                                   ((not relocatable)
@@ -224,7 +222,6 @@
     *immobile-codeblob-vector* ; for pseudo-static-generation
     *dynspace-codeblob-tree*
     *linkage-name-map*
-    *elf-linkage-cell-modified*
     sb-impl::**finalizer-store**
     sb-impl::*finalizer-rehashlist*
     sb-impl::*finalizers-triggered*
@@ -425,8 +422,8 @@
        (defconstant n-symbol-hash-discard-bits
          (let ((precision (+ 32 n-symbol-hash-prng-bits))) ; total N bits
            (- 64 precision)))
-       ;; Allow .5 million global names, expandable to 4 million (22 bits)
        (defconstant n-linkage-index-bits (or #+linkage-space 19 0))
+       (defconstant symbol-linkage-index-pos 3) ; low 3 bits are reserved
        (defconstant-eqx sb-impl::symbol-hash-prng-byte
          (byte n-symbol-hash-prng-bits (- 32 n-symbol-hash-prng-bits))
          #'equal))

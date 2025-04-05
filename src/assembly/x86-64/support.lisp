@@ -25,7 +25,7 @@
 
 (defun invoke-asm-routine (inst routine vop)
   (inst* (the (member jmp call) inst)
-         (if (or (null vop) (sb-c::code-immobile-p vop))
+         (if (or (null vop) (code-immobile-p vop))
              (make-fixup routine :assembly-routine)
              (ea (make-fixup routine :assembly-routine)))))
 
@@ -64,6 +64,8 @@
     ((:none :full-call-no-return))))
 
 (defconstant xsave-area-size (+ 512 64 256))
+(defconstant xsave-area-alignment 64)
+
 ;;; Save or restore all FPRs at the stack pointer as it existed just prior
 ;;; to the call to the asm routine.
 (defun call-fpr-save/restore-routine (selector)
@@ -71,7 +73,7 @@
                    (:save 'fpr-save)
                    (:restore 'fpr-restore))))
     (if (or (not (boundp 'sb-c:*component-being-compiled*))
-            (sb-c::code-immobile-p sb-c:*component-being-compiled*))
+            (code-immobile-p sb-c:*component-being-compiled*))
         ;; direct call from asm routine or immobile code
         (inst call (make-fixup routine :assembly-routine))
         ;; indirect call from dynamic space
@@ -100,7 +102,7 @@
   (aver (member convention '(lisp c)))
   (aver (eql card-table-reg 12)) ; change detector
   (let* ((save-fpr (neq except 'fp))
-         (fpr-align 64)
+         (fpr-align xsave-area-alignment)
          (except (if (eq except 'fp) nil (ensure-list except)))
          (clobberables
            (remove frame-reg
@@ -179,7 +181,7 @@
              #+win32 '(rcx-tn rdx-tn r8-tn r9-tn)
              #-win32 '(rdi-tn rsi-tn rdx-tn rcx-tn r8-tn r9-tn)
              collect
-             (if (typep arg '(cons (eql *)))
+             (if (typep arg '(cons (eql addressof)))
                  `(inst lea ,c-arg ,(cadr arg))
                  `(inst mov ,c-arg ,arg)))
      (inst call ,fun)

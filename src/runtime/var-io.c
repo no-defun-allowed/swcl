@@ -19,7 +19,10 @@
 # include "genesis/cons.h"
 # include "genesis/compiled-debug-info.h"
 # include "code.h"
+# include "interr.h" // for lose()
+# include "thread.h"
 #endif
+#include <string.h>
 
 // Read a variable-length encoded 32-bit integer from SOURCE and
 // return its value.
@@ -138,7 +141,7 @@ int compress_vector(lispobj vector, size_t used_length) {
     char prefix[5];
     int prefix_length = pack_varint(used_length, prefix);
     size_t buf_size = ZSTD_compressBound(used_length);
-    char* buf = successful_malloc(buf_size);
+    char* buf = checked_malloc(buf_size);
     size_t new_length = ZSTD_compress(buf, buf_size, v->data, used_length, 22);
     if (ZSTD_isError(new_length)) {
         free(buf);
@@ -182,10 +185,56 @@ int decompress_vector(lispobj l_input, int input_offset,
     struct vector *iv = VECTOR(l_input);
     unsigned char* src = (unsigned char*)iv->data + input_offset;
     int compressedsize = vector_len(iv) - input_offset;
+
+#ifdef ZSTD_STATIC_LINKING_ONLY
+    ZSTD_frameHeader zfh;
+    ZSTD_DCtx* dctx = 0;
+    bool context_borrowed = 0;
+    if (ZSTD_getFrameHeader(&zfh, src, compressedsize)) lose("could not get ZSTD frame header\n");
+    gc_assert(buffer_length == (int)zfh.frameContentSize);
+    struct thread* th = get_sb_vm_thread();
+    if (th) {
+        struct extra_thread_data *extra_data = thread_extra_data(th);
+        void* my_dcontext = extra_data->zstd_dcontext;
+        /* Indicate that the thread's zstd_dcontext is momentarily in-use so that another invocation of
+         * backtrace in this thread _might_ work.  Granted such use will probably crash/deadlock anyway,
+         * but let's at least ensure that separate invocations don't stomp on the same context. */
+        if (my_dcontext &&
+            __sync_bool_compare_and_swap(&extra_data->zstd_dcontext, my_dcontext, 0)) {
+            dctx = my_dcontext;
+            context_borrowed = 1;
+        }
+    }
+    if (!dctx) dctx = ZSTD_createDCtx();
+    ZSTD_decompressBegin(dctx);
+    size_t regeneratedSize = 0;
+    char* input_ptr = (char*)src;
+    char* input_end = input_ptr + compressedsize;
+    size_t remainingCapacity = buffer_length;
+    char* output_ptr = (char*)output_buffer;
+    while (input_ptr < input_end) {
+        size_t iSize = ZSTD_nextSrcSizeToDecompress(dctx);
+        if (iSize == 0) lose("ZSTD API usage error");
+        size_t decodedSize = ZSTD_decompressContinue(dctx, output_ptr, remainingCapacity,
+                                                     input_ptr, iSize);
+        if (ZSTD_isError(decodedSize))
+            lose("ZSTD_decompressContinue failed: %s", ZSTD_getErrorName(decodedSize));
+        input_ptr += iSize;
+        regeneratedSize += decodedSize;
+        output_ptr += decodedSize;
+        remainingCapacity -= decodedSize;
+    }
+    gc_assert((int)regeneratedSize == buffer_length);
+    if (context_borrowed)
+        thread_extra_data(th)->zstd_dcontext = dctx;
+    else
+        ZSTD_freeDCtx(dctx);
+#else
     size_t result = ZSTD_decompress(output_buffer, buffer_length, src, compressedsize);
     if (result != (size_t)buffer_length)
-        lose("Zstd uncompressed size is wrong for input %"OBJ_FMTX": %ld vs %d (%s)",
-             l_input, result, buffer_length, ZSTD_getErrorName(result));
+        lose("Zstd uncompressed size is wrong for input %p: %ld vs %d (%s)",
+             (void*)l_input, result, buffer_length, ZSTD_getErrorName(result));
+#endif
 
     return 1;
 }

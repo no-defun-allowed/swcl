@@ -258,14 +258,15 @@
 ;;; You could always make it SB-XC:FIXNUM at the risk of forcing the host to
 ;;; deal in bignums. Why cause it undue slowness when we don't need so many bits?
 ;;; NOTE: we _do_ use the sign bit, leaving us 25 pseudorandom bits, but
-;;; the 2 bits of least significance are NOT pseudorandom, so it's best
+;;; the 3 bits of least significance are NOT pseudorandom, so it's best
 ;;; not to use them directly in the hash index.
 (defconstant ctype-hash-size  30)  ; all significant bits, for the slot type specifier
 (defconstant ctype-PRNG-nbits 25)  ; from pseudorandom number generator
-(defconstant ctype-contains-unknown #b01)
-(defconstant ctype-contains-hairy   #b10) ; any hairy type, including UNKNOWN
-(defconstant +ctype-flag-mask+ #b11)
-(defconstant +ctype-hash-mask+ (logandc2 (1- (ash 1 ctype-PRNG-nbits)) #b11))
+(defconstant ctype-contains-unknown #b001)
+(defconstant ctype-contains-hairy   #b010) ; any hairy type, including UNKNOWN
+(defconstant ctype-contains-class   #b100) ; standard-class
+(defconstant +ctype-flag-mask+ #b111)
+(defconstant +ctype-hash-mask+ (logandc2 (1- (ash 1 ctype-PRNG-nbits)) #b111))
 
 (defstruct (ctype (:conc-name type-)
                    (:constructor nil)
@@ -277,11 +278,15 @@
 
 ;;; Apparently the old CONTAINS-UNKNOWN-TYPE-P function could accept NIL
 ;;; and return NIL. This seems kinda sloppy. Can we get rid of that "feature"?
-(declaim (inline contains-unknown-type-p contains-hairy-type-p))
+(declaim (inline contains-unknown-type-p contains-hairy-type-p opaque-type-p))
 (defun contains-unknown-type-p (ctype)
   (if ctype (oddp (type-%bits ctype)) nil))
 (defun contains-hairy-type-p (ctype)
   (logbitp 1 (type-%bits ctype)))
+
+;;; Can't do optimizations for satisfies, unknown types or standard-class.
+(defun opaque-type-p (ctype)
+  (logtest (type-%bits ctype) +ctype-flag-mask+))
 
 (defun ok-to-memoize-p (arg)
   (etypecase arg
@@ -331,7 +336,7 @@
       (intersection  intersection-type)
       (union         union-type)
       (negation      negation-type)
-      (number        numeric-type)
+      (numeric-union numeric-union-type)
       (array         array-type)
       (character-set character-set-type)
       (member        member-type)
@@ -650,7 +655,7 @@
 ;;;  2. it inserts (:COPIER NIL)
 ;;;  3. it adds :READ-ONLY T to all slots
 ;;;  4. it has slot options to help with hash-consing
-(defmacro def-type-model ((name &rest options) &rest direct-slots)
+(defmacro def-type-model ((name &rest options) &body direct-slots)
   ;; :CONSTRUCTOR* reminds you that it's not a direct translation to defstruct.
   (aver (<= (count :constructor* options :key #'car) 1))
   ;; The private constructor is always positional.
@@ -1061,9 +1066,9 @@
              (setf (aref *numeric-aspects-v* index)
                    (!make-numeric-aspects complexp class precision index)))))
 
-(defmacro get-numtype-aspects (&rest rest)
+(defmacro get-numtype-aspects (complexp class precision)
   `(the (not null)
-        (aref *numeric-aspects-v* (!compute-numtype-aspect-id ,@rest))))
+        (aref *numeric-aspects-v* (!compute-numtype-aspect-id ,complexp ,class ,precision))))
 
 (macrolet ((numbound-hash (b)
              ;; It doesn't matter what the hash of a number is, as long as it's stable.
@@ -1082,21 +1087,66 @@
              `(let ((a ,a) (b ,b))
                 (if (listp a)
                     (and (listp b) (eql (car a) (car b)))
-                    (eql a b)))))
-;;; A NUMERIC-TYPE represents any numeric type, including things
-;;; such as FIXNUM.
-(def-type-model (numeric-type
-                 (:extra-mix-step)
-                 (:constructor* nil (aspects low high)))
-  (aspects (missing-arg) :type numtype-aspects :hasher numtype-aspects-id :test eq)
-  (low nil :type (or real (cons real null) null)
-       :hasher numbound-hash :test numbound-eql)
-  (high nil :type (or real (cons real null) null)
-        :hasher numbound-hash :test numbound-eql)))
+                    (eql a b))))
+           (hash-ranges (a)
+             `(let ((vector ,a)
+                    (h 0))
+                (loop for e across vector
+                      do
+                      (setf h (mix h (numbound-hash e))))
+                h)))
+
+  (def-type-model (numeric-union-type
+                   (:extra-mix-step)
+                   (:constructor* nil (aspects ranges)))
+    (aspects (missing-arg) :type numtype-aspects :hasher numtype-aspects-id :test eq)
+    ;; Ranges are sorted in ascending order by their low bound.
+    ;; Rational ranges are represented by three entries,
+    ;; #(run low high ...) where run is one of range-integer-run,
+    ;; range-ratio-run, range-rational-run.
+    ;; Floats are just #(low high ...)
+    (ranges #() :type simple-vector :hasher hash-ranges :test equalp)))
+
+(declaim (inline numeric-type-aspects))
+(defun numeric-type-aspects (x)
+  (numeric-union-type-aspects x))
+
 (declaim (inline numeric-type-complexp numeric-type-class numeric-type-format))
 (defun numeric-type-complexp (x) (numtype-aspects-complexp (numeric-type-aspects x)))
 (defun numeric-type-class (x) (numtype-aspects-class (numeric-type-aspects x)))
 (defun numeric-type-format (x) (numtype-aspects-precision (numeric-type-aspects x)))
+
+;;; A single-range type. Similar to the old model.
+(deftype numeric-type () `(satisfies numeric-type-p))
+
+(defun numeric-type-p (x)
+  (typecase x
+    (numeric-union-type
+     (<= (length (numeric-union-type-ranges x)) 3))))
+
+
+
+(defun numeric-type-low (x)
+  (let ((ranges (numeric-union-type-ranges x)))
+    (ecase (length ranges)
+      (3 (aref ranges 1))
+      (2 (aref ranges 0)))))
+
+(defun numeric-type-high (x)
+  (let ((ranges (numeric-union-type-ranges x)))
+    (ecase (length ranges)
+      (3 (aref ranges 2))
+      (2 (aref ranges 1)))))
+
+(defun numeric-union-type-low (x)
+  (let ((ranges (numeric-union-type-ranges x)))
+    (case (numeric-type-class x)
+      ((integer rational) (aref ranges 1))
+      (t (aref ranges 0)))))
+
+(defun numeric-union-type-high (x)
+  (let ((ranges (numeric-union-type-ranges x)))
+    (aref ranges (1- (length ranges)))))
 
 ;;; A CONS-TYPE is used to represent a CONS type.
 (def-type-model (cons-type (:constructor* nil (car-type cdr-type)))

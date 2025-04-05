@@ -23,8 +23,8 @@
 /* constants derived from the fundamental constants in passed by GENESIS */
 #define READ_ONLY_SPACE_SIZE (READ_ONLY_SPACE_END - READ_ONLY_SPACE_START)
 #define STATIC_SPACE_SIZE (STATIC_SPACE_END - STATIC_SPACE_START)
-#define NIL_SYMBOL_SLOTS_START (STATIC_SPACE_START + NIL_SYMBOL_SLOTS_OFFSET)
-#define NIL_SYMBOL_SLOTS_END (STATIC_SPACE_START + NIL_SYMBOL_SLOTS_END_OFFSET)
+#define NIL_SYMBOL_SLOTS_START (lispobj*)(STATIC_SPACE_START + NIL_SYMBOL_SLOTS_OFFSET)
+#define NIL_SYMBOL_SLOTS_END (ALIGN_UP(SYMBOL_SIZE,2)+NIL_SYMBOL_SLOTS_START)
 #define STATIC_SPACE_OBJECTS_START (STATIC_SPACE_START + STATIC_SPACE_OBJECTS_OFFSET)
 
 #ifdef LISP_FEATURE_DARWIN_JIT
@@ -93,7 +93,11 @@
 #define BINDING_STACK_RETURN_GUARD_PAGE(th) \
     (BINDING_STACK_GUARD_PAGE(th) - os_vm_page_size)
 
-extern void allocate_lisp_dynamic_space(bool);
+#ifdef LISP_FEATURE_OS_PROVIDES_DLOPEN
+extern void ensure_undefined_alien(void);
+#else
+#define ensure_undefined_alien() {}
+#endif
 extern bool allocate_hardwired_spaces(bool);
 
 extern void

@@ -95,7 +95,7 @@ copied_realpath(const char *pathname)
      * an absolute path, so we prepend the cwd to relative paths */
     messy = NULL;
     if (pathname[0] != '/') {
-        messy = successful_malloc(PATH_MAX + 1);
+        messy = checked_malloc(PATH_MAX + 1);
         if (getcwd(messy, PATH_MAX + 1) == NULL) {
             free(messy);
             return NULL;
@@ -104,7 +104,7 @@ copied_realpath(const char *pathname)
         snprintf(messy + len, PATH_MAX + 1 - len, "/%s", pathname);
     }
 
-    tidy = successful_malloc(PATH_MAX + 1);
+    tidy = checked_malloc(PATH_MAX + 1);
 #ifdef LISP_FEATURE_ANSI_COMPLIANT_LOAD_TRUENAME
     if (realpath((messy ? messy : pathname), tidy) == NULL) {
         if (messy)
@@ -257,7 +257,7 @@ search_for_executable(const char *argv0)
     if (search == NULL)
         return NULL;
     search = copied_string(search);
-    buf = successful_malloc(PATH_MAX + 1);
+    buf = checked_malloc(PATH_MAX + 1);
     for (start = search; (end = strchr(start, ':')) != NULL; start = end + 1) {
         *end = '\0';
         snprintf(buf, PATH_MAX + 1, "%s/%s", start, argv0);
@@ -360,7 +360,7 @@ char *dir_name(char *path) {
 
     if (slash) {
         int prefixlen = slash - path + 1; // keep the slash in the prefix
-        result = successful_malloc(prefixlen + 1);
+        result = checked_malloc(prefixlen + 1);
         memcpy(result, path, prefixlen);
         result[prefixlen] = 0;
         return result;
@@ -456,31 +456,39 @@ parse_argv(struct memsize_options memsize_options,
         dynamic_space_size = memsize_options.dynamic_space_size;
         thread_control_stack_size = memsize_options.thread_control_stack_size;
         dynamic_values_bytes = memsize_options.thread_tls_bytes;
-        int stop_parsing = 0; // have we seen '--'
-        int output_index = 1;
-
+        if (memsize_options.present_in_core == 2) {
+            int stop_parsing = 0; // have we seen '--'
+            int output_index = 1;
 #ifndef LISP_FEATURE_WIN32
-        sbcl_argv = successful_malloc((argc + 1) * sizeof(char *));
-        char **argv_source = argv;
+            sbcl_argv = checked_malloc((argc + 1) * sizeof(char *));
+            char **argv_source = argv;
 #else
-        int wargc;
-        wchar_t **argv_source;
-        argv_source = CommandLineToArgvW(GetCommandLineW(), &wargc);
-        sbcl_argv = successful_malloc((wargc + 1) * sizeof(wchar_t *));
+            int wargc;
+            wchar_t **argv_source;
+            argv_source = CommandLineToArgvW(GetCommandLineW(), &wargc);
+            sbcl_argv = checked_malloc((wargc + 1) * sizeof(wchar_t *));
 #endif
-        sbcl_argv[0] = argv_source[0];
+            sbcl_argv[0] = argv_source[0];
 
-        while (argi < argc) {
-            if (stop_parsing) // just copy it over
-                sbcl_argv[output_index++] = argv_source[argi++];
-            else if (!strcmp(argv[argi], "--")) // keep it, but parse nothing else
-                sbcl_argv[output_index++] = argv_source[argi++], stop_parsing = 1;
-            else if ((n_consumed = is_memsize_arg(argv, argi, argc, &merge_core_pages)))
-                argi += n_consumed; // eat it
-            else // default action - copy it
-                sbcl_argv[output_index++] = argv_source[argi++];
+            while (argi < argc) {
+                if (stop_parsing) // just copy it over
+                    sbcl_argv[output_index++] = argv_source[argi++];
+                else if (!strcmp(argv[argi], "--")) // keep it, but parse nothing else
+                    sbcl_argv[output_index++] = argv_source[argi++], stop_parsing = 1;
+                else if ((n_consumed = is_memsize_arg(argv, argi, argc, &merge_core_pages)))
+                    argi += n_consumed; // eat it
+                else // default action - copy it
+                    sbcl_argv[output_index++] = argv_source[argi++];
+            }
+            sbcl_argv[output_index] = 0;
+        } else {
+#ifndef LISP_FEATURE_WIN32
+            sbcl_argv = argv;
+#else
+            int wargc;
+            sbcl_argv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+#endif
         }
-        sbcl_argv[output_index] = 0;
     } else {
         bool end_runtime_options = 0;
         /* Parse our any of the command-line options that we handle from C,
@@ -553,7 +561,7 @@ parse_argv(struct memsize_options memsize_options,
 #ifndef LISP_FEATURE_WIN32
             /* (argc - argi) for the arguments, one for the binary,
                and one for the terminating NULL. */
-            sbcl_argv = successful_malloc((2 + argc - argi) * sizeof(char *));
+            sbcl_argv = checked_malloc((2 + argc - argi) * sizeof(char *));
             sbcl_argv[0] = argv[0];
             while (argi < argc) {
                 char *arg = argv[argi++];
@@ -575,7 +583,7 @@ parse_argv(struct memsize_options memsize_options,
             int wargc;
             wchar_t** wargv;
             wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
-            sbcl_argv = successful_malloc((((argi < wargc) ? (wargc - argi) : 0) + 2)
+            sbcl_argv = checked_malloc((((argi < wargc) ? (wargc - argi) : 0) + 2)
                                           * sizeof(wchar_t *));
             sbcl_argv[0] = wargv[0];
             while (argi < wargc) {
@@ -635,6 +643,8 @@ initialize_lisp(int argc, char *argv[], char *envp[])
     lispobj initial_function;
     struct memsize_options memsize_options;
     memsize_options.present_in_core = 0;
+    extern void sb_query_os_page_size();
+    sb_query_os_page_size();
 
     bool have_hardwired_spaces = os_preinit(argv, envp);
 
@@ -695,7 +705,7 @@ initialize_lisp(int argc, char *argv[], char *envp[])
     // FIXME: if the 'have' flag is 0 and you've disabled disabling of ASLR
     // then we haven't done an exec(), nor unmapped the mappings that were obtained
     // already obtained (if any) so it is unhelpful to try again here.
-    allocate_lisp_dynamic_space(have_hardwired_spaces);
+    if (!have_hardwired_spaces) allocate_hardwired_spaces(1);
     gc_init();
 
     /* If no core file was specified, look for one. */
@@ -763,14 +773,23 @@ initialize_lisp(int argc, char *argv[], char *envp[])
     if (!options.disable_lossage_handler_p)
         enable_lossage_handler();
 
+    ensure_undefined_alien();
     os_link_runtime();
-#ifdef LISP_FEATURE_IMMOBILE_SPACE
-#ifdef CALLBACK_WRAPPER_TRAMPOLINE // not defined if #-sb-thread
-     // Assign the static lisp symbol's value the address of the C function
-    // of the same name. Needed when alien linkage table is relocatable.
+
+#ifdef CALLBACK_WRAPPER_TRAMPOLINE
+    // Assign the static lisp symbol's value the address of the C function
+    // that assists calling C from Lisp.
+    // t'would be nicer if this went into x86-64-arch.c perhaps ?
+#ifdef LISP_FEATURE_SB_THREAD
     extern void callback_wrapper_trampoline();
     SYMBOL(CALLBACK_WRAPPER_TRAMPOLINE)->value = (lispobj)callback_wrapper_trampoline;
+#else
+    extern void funcall_alien_callback();
+    SYMBOL(CALLBACK_WRAPPER_TRAMPOLINE)->value = (lispobj)funcall_alien_callback;
 #endif
+#endif
+
+#ifdef LISP_FEATURE_IMMOBILE_SPACE
     /* Delayed until after dynamic space has been mapped, fixups made,
      * and/or immobile-space linkage entries written,
      * since it was too soon earlier to handle write faults. */
@@ -805,3 +824,5 @@ initialize_lisp(int argc, char *argv[], char *envp[])
     create_main_lisp_thread(initial_function);
     return 0;
 }
+
+int lisp_gc_strategy_id() { return GC_STRATEGY_ID; }

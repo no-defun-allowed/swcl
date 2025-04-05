@@ -26,6 +26,9 @@
 #ifndef LISP_FEATURE_WIN32
 #include <sys/wait.h>
 #endif
+#ifdef ZSTD_STATIC_LINKING_ONLY
+#include <zstd.h>
+#endif
 
 #include "runtime.h"
 #include "validate.h"           /* for BINDING_STACK_SIZE etc */
@@ -40,6 +43,7 @@
 #include "genesis/instance.h"
 #include "genesis/vector.h"
 #include "interr.h"             /* for lose() */
+#include "gc-assert.h"
 #include "gc.h"
 #include "pseudo-atomic.h"
 #include "interrupt.h"
@@ -87,9 +91,23 @@ static pthread_mutex_t in_gc_lock = PTHREAD_MUTEX_INITIALIZER;
 extern lispobj call_into_lisp_first_time(lispobj fun, lispobj *args, int nargs);
 #endif
 
+#ifdef ZSTD_STATIC_LINKING_ONLY
+static bool asan_cleanup_called;
+#endif
 static void
 link_thread(struct thread *th)
 {
+#ifdef ZSTD_STATIC_LINKING_ONLY
+    if (!asan_cleanup_called) {
+    /* A thread has a preallocated dcontext if and only if it is in all_threads,
+     * unless cleanup has already been called, in which case we just hope that
+     * no backtrace occurs thereafter, or else that allocating a context
+     * just-in-time (in decompress_vector) works, which it may not */
+        struct extra_thread_data *extra_data = thread_extra_data(th);
+        gc_assert(!extra_data->zstd_dcontext);
+        extra_data->zstd_dcontext = ZSTD_createDCtx();
+    }
+#endif
     if (all_threads) all_threads->prev=th;
     th->next=all_threads;
     th->prev=0;
@@ -100,6 +118,11 @@ link_thread(struct thread *th)
 static void
 unlink_thread(struct thread *th)
 {
+#ifdef ZSTD_STATIC_LINKING_ONLY
+    struct extra_thread_data *extra_data = thread_extra_data(th);
+    if (extra_data->zstd_dcontext) ZSTD_freeDCtx(extra_data->zstd_dcontext);
+    extra_data->zstd_dcontext = 0;
+#endif
     if (th->prev)
         th->prev->next = th->next;
     else
@@ -229,6 +252,10 @@ int sb_GetTID()
 int sb_GetTID() {
     return pthread_mach_thread_np(pthread_self());
 }
+#elif defined __HAIKU__ && defined LISP_FEATURE_SB_THREAD
+int sb_GetTID() {
+    return get_pthread_thread_id(pthread_self());
+}
 #else
 #define sb_GetTID() 0
 #endif
@@ -328,6 +355,31 @@ char* thread_name_from_pthread(pthread_t pointer){
     return 0;
 }
 #endif
+
+/* This function is seemingly unused by the C runtime, but DO NOT DELETE.
+ * It's needed when the C runtime is compiled with --fsanitize=address, because the sanitizer
+ * falsely reports that all the threads running at exit have leaked their zstd_dcontext.
+ * While it's possible to make the sanitizer shut up about particular allocations,
+ * you need to know the size in order to pass it to the unpoisoning routine.
+ * The allocator of the ZSTD context object is opaque; we don't know the size.
+ * Interestingly the sanitizer does not complain about the thread structure per se,
+ * and I think that's because it does not track mmap().
+ * I wanted to register this function using atexit() but apparently that's not soon enough
+ * to solve the problem. It has to to be called by *EXIT-HOOKS* instead */
+void asan_lisp_thread_cleanup() {
+    ignore_value(mutex_acquire(&all_threads_lock));
+#if defined ADDRESS_SANITIZER && defined ZSTD_STATIC_LINKING_ONLY
+    asan_cleanup_called = 1;
+    struct thread* th;
+    for_each_thread(th) {
+        struct extra_thread_data *extra_data = thread_extra_data(th);
+        void* dctx = extra_data->zstd_dcontext;
+        if (dctx && __sync_bool_compare_and_swap(&extra_data->zstd_dcontext, dctx, 0))
+            ZSTD_freeDCtx(dctx);
+    }
+#endif
+    ignore_value(mutex_release(&all_threads_lock));
+}
 
 void create_main_lisp_thread(lispobj function) {
 #ifdef LISP_FEATURE_WIN32
@@ -834,17 +886,7 @@ extern void funcall_alien_callback(lispobj arg1, lispobj arg2, lispobj arg0,
 /* This function's address is assigned into a static symbol's value slot,
  * so it has to look like a fixnum. lp#1991485 */
 void __attribute__((aligned(8)))
-callback_wrapper_trampoline(
-#if !(defined(LISP_FEATURE_X86) || defined(LISP_FEATURE_X86_64))
-    /* On the x86oid backends, the assembly wrapper happens to not pass
-     * in ENTER_ALIEN_CALLBACK explicitly for safepoints.  However, the
-     * platforms with precise GC are tricky enough already, and I want
-     * to minimize the read-time conditionals.  For those platforms, I'm
-     * only replacing funcall3 with callback_wrapper_trampoline while
-     * keeping the arguments unchanged. --DFL */
-    lispobj __attribute__((__unused__)) fun,
-#endif
-    lispobj arg0, lispobj arg1, lispobj arg2)
+callback_wrapper_trampoline(lispobj arg0, lispobj arg1, lispobj arg2)
 {
     struct thread* th = get_sb_vm_thread();
     if (!th) {                  /* callback invoked in non-lisp thread */
@@ -925,14 +967,14 @@ alloc_thread_struct(void* spaces) {
      * from failing to obtain contiguous memory. Note that the OS may have a smaller
      * alignment granularity than BACKEND_PAGE_BYTES so we may have to adjust the
      * result to make it conform to our guard page alignment requirement. */
-    bool zeroize_stack = 0;
+    bool is_recycled = 0;
     if (spaces) {
         // If reusing memory from a previously exited thread, start by removing
         // some old junk from the stack. This is imperfect since we only clear a little
         // at the top, but doing so enables diagnosing some garbage-retention issues
         // using a fine-toothed comb. It would not be possible at all to diagnose
         // if any newly started thread could refer a dead thread's heap objects.
-        zeroize_stack = 1;
+        is_recycled = 1;
     } else {
         spaces = os_alloc_gc_space(THREAD_STRUCT_CORE_SPACE_ID, MOVABLE,
                                    NULL, THREAD_STRUCT_SIZE);
@@ -989,7 +1031,7 @@ alloc_thread_struct(void* spaces) {
         (lispobj*)((char*)th->control_stack_start+thread_control_stack_size);
     th->control_stack_end = th->binding_stack_start;
 
-    if (zeroize_stack) {
+    if (is_recycled) {
 #if GENCGC_IS_PRECISE
     /* Clear the entire control stack. Without this I was able to induce a GC failure
      * in a test which hammered on thread creation for hours. The control stack is
@@ -1136,9 +1178,11 @@ uword_t create_lisp_thread(struct thread* th)
     struct extra_thread_data *data = thread_extra_data(th);
     data->blocked_signal_set = deferrable_sigset;
     // It's somewhat customary in the win32 API to start threads as suspended.
+    // Don't use STACK_SIZE_PARAM_IS_A_RESERVATION because
+    // dx-allocation accesses the stack non-linearly.
     th->os_thread =
       _beginthreadex(NULL, thread_control_stack_size, new_thread_trampoline, th,
-                     CREATE_SUSPENDED | STACK_SIZE_PARAM_IS_A_RESERVATION, &tid);
+                     CREATE_SUSPENDED, &tid);
     bool success = th->os_thread != 0;
     if (success) {
         th->os_kernel_tid = tid;
@@ -1350,67 +1394,6 @@ thread_yield()
     return 0;
 #endif
 }
-
-#ifdef LISP_FEATURE_SB_SAFEPOINT
-/* If the thread id given does not belong to a running thread (it has
- * exited or never even existed) pthread_kill _may_ fail with ESRCH,
- * but it is also allowed to just segfault, see
- * <http://udrepper.livejournal.com/16844.html>.
- *
- * Relying on thread ids can easily backfire since ids are recycled
- * (NPTL recycles them extremely fast) so a signal can be sent to
- * another process if the one it was sent to exited.
- *
- * For these reasons, we must make sure that the thread is still alive
- * when the pthread_kill is called and return if the thread is
- * exiting.
- *
- * Note (DFL, 2011-06-22): At the time of writing, this function is only
- * used for INTERRUPT-THREAD, hence the wake_thread special-case for
- * Windows is OK. */
-void wake_thread(struct thread_instance* lispthread)
-{
-#ifdef LISP_FEATURE_WIN32
-        /* META: why is this comment about safepoint builds mentioning
-         * gc_stop_the_world() ? Never the twain shall meet. */
-
-        /* Kludge (on safepoint builds): At the moment, this isn't just
-         * an optimization; rather it masks the fact that
-         * gc_stop_the_world() grabs the all_threads mutex without
-         * releasing it, and since we're not using recursive pthread
-         * mutexes, the pthread_mutex_lock() around the all_threads loop
-         * would go wrong.  Why are we running interruptions while
-         * stopping the world though?  Test case is (:ASYNC-UNWIND
-         * :SPECIALS), especially with s/10/100/ in both loops. */
-
-        /* Frequent special case: resignalling to self.  The idea is
-         * that leave_region safepoint will acknowledge the signal, so
-         * there is no need to take locks, roll thread to safepoint
-         * etc. */
-        struct thread* thread = (void*)lispthread->uw_primitive_thread;
-        if (thread == get_sb_vm_thread()) {
-            sb_pthr_kill(thread, 1); // can't fail
-            check_pending_thruptions(NULL);
-            return;
-        }
-        // block_deferrables + mutex_lock looks very unnecessary here,
-        // but without them, make-target-contrib hangs in bsd-sockets.
-        sigset_t oldset;
-        block_deferrable_signals(&oldset);
-        mutex_acquire(&all_threads_lock);
-        sb_pthr_kill(thread, 1); // can't fail
-# ifdef LISP_FEATURE_SB_SAFEPOINT
-        wake_thread_impl(lispthread);
-# endif
-        mutex_release(&all_threads_lock);
-        thread_sigmask(SIG_SETMASK,&oldset,0);
-#elif defined LISP_FEATURE_SB_SAFEPOINT
-    wake_thread_impl(lispthread);
-#else
-    pthread_kill(lispthread->uw_os_thread, SIGURG);
-#endif
-}
-#endif
 
 #ifdef LISP_FEATURE_ULTRAFUTEX
 extern int futex_wake(int *lock_word, int n);

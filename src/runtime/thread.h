@@ -90,6 +90,9 @@ struct extra_thread_data
 #endif
     int arena_count; // number of structures in arena_saveareas
     arena_state* arena_savearea;
+    // opaque pointer to zstd decompression context so it doesn't matter whether
+    // core-compression and/or static linking are enabled.
+    void* zstd_dcontext;
     // These values influence get_alloc_start_page() when arenas are in use
     // and allocation switches back and forth between arena and heap.
     page_index_t mixed_page_hint;
@@ -294,11 +297,6 @@ void thread_in_safety_transition(os_context_t *ctx);
 void thread_in_lisp_raised(os_context_t *ctx);
 void thread_interrupted(os_context_t *ctx);
 extern void thread_register_gc_trigger();
-
-# ifdef LISP_FEATURE_SB_SAFEPOINT
-void wake_thread(struct thread_instance*),
-     wake_thread_impl(struct thread_instance*);
-# endif
 
 #define csp_around_foreign_call(thread) *(((lispobj*)thread)-(1+THREAD_HEADER_SLOTS))
 
