@@ -2923,7 +2923,8 @@
   (def s-fadd #b0 #b0 #b11010)
   (def s-fsub #b0 #b1 #b11010)
   (def s-fmul #b1 #b0 #b11011)
-  (def s-fdiv #b1 #b0 #b11111))
+  (def s-fdiv #b1 #b0 #b11111)
+  (def fcmeq #b0 #b0 #b11100))
 
 (macrolet ((def (name u neg op)
              `(define-instruction ,name (segment rd rn &optional (size :16b))
@@ -3601,12 +3602,12 @@
   (op2 :field (byte 6 24) :value #b001110)
   (size :field (byte 2 22))
   (op3 :field (byte 1 21) :value #b0)
-  (rm :fields (list (byte 1 30) (byte 5 16)) :type 'simd-reg)
+  (rm :fields (list (byte 1 30) (byte 2 22) (byte 5 16)) :type 'simd-reg)
   (op4 :field (byte 1 15) :value #b0)
   (op :field (byte 3 12))
   (op5 :field (byte 2 10) :value #b10)
-  (rn :fields (list (byte 1 30) (byte 5 5)) :type 'simd-reg)
-  (rd :fields (list (byte 1 30) (byte 5 0)) :type 'simd-reg))
+  (rn :fields (list (byte 1 30) (byte 2 22) (byte 5 5)) :type 'simd-reg)
+  (rd :fields (list (byte 1 30) (byte 2 22) (byte 5 0)) :type 'simd-reg))
 
 (macrolet
     ((def (name op)
@@ -3622,10 +3623,11 @@
                                 (fpr-offset rn)
                                 (fpr-offset rd)))))))
   (def uzp1 #b001)
-  (def trn1 #b011)
-  (def zip1 #b101)
-  (def uzp2 #b110)
-  (def trn2 #b111))
+  (def trn1 #b010)
+  (def zip1 #b011)
+  (def uzp2 #b101)
+  (def trn2 #b110)
+  (def zip #b111))
 
 
 ;;; Inline constants

@@ -328,7 +328,7 @@
                   double-real-complex-name double-complex-real-name)
              (flet ((gen (real-complex-name complex-real-name
                           real-type complex-type real-sc complex-sc
-                          real-inst-size complex-inst-size)
+                          complex-inst-size)
                       (list
                        (when real-complex-name
                          `(define-vop (,real-complex-name)
@@ -341,8 +341,7 @@
                             (:result-types ,complex-type)
                             (:generator ,cost
                                ,@(if duplicatep
-                                     `((inst s-mov dup x ,complex-inst-size)
-                                       (inst ins dup 1 dup 0 ,real-inst-size)
+                                     `((inst zip1 dup x x ,complex-inst-size)
                                        (inst ,inst r dup y ,complex-inst-size))
                                      `((inst ,inst r x y ,complex-inst-size))))))
                        (when complex-real-name
@@ -356,17 +355,16 @@
                             (:result-types ,complex-type)
                             (:generator ,cost
                                ,@(if duplicatep
-                                     `((inst s-mov dup y ,complex-inst-size)
-                                       (inst ins dup 1 dup 0 ,real-inst-size)
+                                     `((inst zip1 dup y y ,complex-inst-size)
                                        (inst ,inst r x dup ,complex-inst-size))
                                      `((inst ,inst r x y ,complex-inst-size)))))))))
                `(progn
                   ,@(gen single-real-complex-name single-complex-real-name
                          'single-float 'complex-single-float
-                         'single-reg 'complex-single-reg ':s ':2s)
+                         'single-reg 'complex-single-reg ':2s)
                   ,@(gen double-real-complex-name double-complex-real-name
                          'double-float 'complex-double-float
-                         'double-reg 'complex-double-reg ':d ':2d)))))
+                         'double-reg 'complex-double-reg ':2d)))))
   (frob + s-fadd 3 nil
         +/real-complex-single-float +/complex-real-single-float
         +/real-complex-double-float +/complex-real-double-float)
