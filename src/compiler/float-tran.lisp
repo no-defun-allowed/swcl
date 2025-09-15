@@ -1343,7 +1343,6 @@
                 ;; conjugate of complex number
                 (deftransform conjugate ((z) ((complex ,type)) * :important nil)
                   '(complex (realpart z) (- (imagpart z))))
-                )
                 ;; comparison
                 (deftransform = ((w z) ((complex ,type) (complex ,type)) * :important nil)
                   '(and (= (realpart w) (realpart z))
@@ -1352,6 +1351,7 @@
                   '(and (= (realpart w) z) (zerop (imagpart w))))
                 (deftransform = ((w z) (real (complex ,type)) * :important nil)
                   '(and (= (realpart z) w) (zerop (imagpart z))))
+                )
                 ;; Multiply two complex numbers.
                 (deftransform * ((x y) ((complex ,type) (complex ,type)) * :important nil)
                   '(let* ((rx (realpart x))
