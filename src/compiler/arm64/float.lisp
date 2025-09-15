@@ -290,9 +290,12 @@
                 (:arg-types ,ptype ,ptype)
                 (:result-types ,ptype))))
   (frob single-float-op single-reg single-float)
-  (frob double-float-op double-reg double-float))
+  (frob double-float-op double-reg double-float)
+  (frob complex-single-op complex-single-reg complex-single-float)
+  (frob complex-double-op complex-double-reg complex-double-float))
 
-(macrolet ((frob (op inst sname scost dname dcost)
+(macrolet ((frob (op inst sname scost dname dcost
+                  &optional cinst csname cscost cdname cdcost)
              `(progn
                 (define-vop (,sname single-float-op)
                   (:translate ,op)
@@ -301,9 +304,21 @@
                 (define-vop (,dname double-float-op)
                   (:translate ,op)
                   (:generator ,dcost
-                    (inst ,inst r x y))))))
-  (frob + fadd +/single-float 2  +/double-float 2)
-  (frob - fsub -/single-float 2 -/double-float 2)
+                    (inst ,inst r x y)))
+                ,(when csname
+                   `(define-vop (,csname complex-single-op)
+                      (:translate ,op)
+                      (:generator ,cscost
+                        (inst ,cinst r x y))))
+                ,(when cdname
+                   `(define-vop (,cdname complex-double-op)
+                      (:translate ,op)
+                      (:generator ,cdcost
+                        (inst ,cinst r x y)))))))
+  (frob + fadd +/single-float 2  +/double-float 2
+          s-fadd +/complex-single-float 3 +/complex-double-float 3)
+  (frob - fsub -/single-float 2 -/double-float 2
+          s-fsub -/complex-single-float 3 -/complex-double-float 3)
   (frob * fmul */single-float 4  */double-float 5)
   (frob / fdiv //single-float 12 //double-float 19))
 

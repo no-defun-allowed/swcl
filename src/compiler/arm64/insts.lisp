@@ -2761,6 +2761,20 @@
   (rn 5 5)
   (rd 5 0))
 
+(def-emitter simd-three-same-float
+  (#b0 1 31)
+  (q 1 30)
+  (u 1 29)
+  (#b01110 5 24)
+  (neg 1 23)
+  (size 1 22)
+  (#b1 1 21)
+  (rm 5 16)
+  (opc 5 11)
+  (#b1 1 10)
+  (rn 5 5)
+  (rd 5 0))
+
 (define-instruction-format (simd-three-same 32
                             :default-printer '(:name :tab rd ", " rn ", " rm))
   (op3 :field (byte 1 31) :value #b0)
@@ -2780,6 +2794,20 @@
   (rm :fields (list (byte 1 30) (byte 2 22) (byte 5 16)) :type 'simd-reg)
   (rn :fields (list (byte 1 30) (byte 2 22) (byte 5 5)) :type 'simd-reg)
   (rd :fields (list (byte 1 30) (byte 2 22) (byte 5 0)) :type 'simd-reg))
+
+(define-instruction-format (simd-three-same-float 32
+                            :default-printer '(:name :tab rd ", " rn ", " rm))
+  (op3 :field (byte 1 31) :value #b0)
+  (u :field (byte 1 29))
+  (op4 :field (byte 5 24) :value #b01110)
+  (neg :field (byte 1 23))
+  (size :field (byte 1 22))
+  (op5 :field (byte 1 21) :value #b1)
+  (rm :fields (list (byte 1 30) (byte 5 16)) :type 'simd-reg)
+  (op :field (byte 5 11))
+  (op6 :field (byte 1 10) :value #b1)
+  (rn :fields (list (byte 1 30) (byte 5 5)) :type 'simd-reg)
+  (rd :fields (list (byte 1 30) (byte 5 0)) :type 'simd-reg))
 
 (defun encode-vector-size (size)
   (ecase size
@@ -2848,6 +2876,26 @@
   (def umax #b1 #b01100)
   (def smin #b0 #b01101)
   (def smax #b0 #b01100))
+
+(macrolet ((def (name u neg op)
+             `(define-instruction ,name (segment rd rn rm &optional (size :16b))
+                (:printer simd-three-same-float ((u ,u) (neg ,neg) (op ,op)))
+                (:emitter
+                 (multiple-value-bind (q size) (encode-vector-size size)
+                   (emit-simd-three-same-float
+                    segment
+                    q
+                    ,u
+                    ,neg
+                    (logand 1 size)
+                    (fpr-offset rm)
+                    ,op
+                    (fpr-offset rn)
+                    (fpr-offset rd)))))))
+  (def s-fadd #b0 #b0 #b11010)
+  (def s-fsub #b0 #b1 #b11010)
+  (def s-fmul #b1 #b0 #b11011)
+  (def s-fdiv #b1 #b0 #b11111))
 
 (def-emitter simd-scalar-three-same
     (#b01 2 30)
