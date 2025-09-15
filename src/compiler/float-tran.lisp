@@ -1340,10 +1340,10 @@
                   '(complex (* (realpart w) z) (* (imagpart w) z)))
                 (deftransform * ((z w) (real (complex ,type)) * :important nil)
                   '(complex (* (realpart w) z) (* (imagpart w) z)))
-                )
                 ;; conjugate of complex number
                 (deftransform conjugate ((z) ((complex ,type)) * :important nil)
                   '(complex (realpart z) (- (imagpart z))))
+                )
                 ;; comparison
                 (deftransform = ((w z) ((complex ,type) (complex ,type)) * :important nil)
                   '(and (= (realpart w) (realpart z))

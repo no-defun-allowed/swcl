@@ -322,6 +322,7 @@
   (frob * fmul */single-float 4  */double-float 5)
   (frob / fdiv //single-float 12 //double-float 19))
 
+;;; Real-complex and complex-real arithmetic
 (macrolet ((frob (op inst cost duplicatep
                   single-real-complex-name single-complex-real-name
                   double-real-complex-name double-complex-real-name)
@@ -372,10 +373,10 @@
   (frob - s-fsub 3 nil
         -/real-complex-single-float -/complex-real-single-float
         -/real-complex-double-float -/complex-real-double-float)
-  (frob * s-fmul 3 t
+  (frob * s-fmul 6 t
         */real-complex-single-float */complex-real-single-float
         */real-complex-double-float */complex-real-double-float)
-  (frob / s-fdiv 3 t
+  (frob / s-fdiv 20 t
         nil //complex-real-single-float
         nil //complex-real-double-float))
 
@@ -401,6 +402,21 @@
         complex-single-reg complex-single-float :2s)
   (frob %negate/complex-double-float s-fneg %negate
         complex-double-reg complex-double-float :2d))
+
+(macrolet ((frob (name sc type real-inst-size complex-inst-size)
+             `(define-vop (,name)
+                (:args (x :scs (,sc)))
+                (:results (r :scs (,sc) :from :load))
+                (:translate conjugate)
+                (:policy :fast-safe)
+                (:arg-types ,type)
+                (:result-types ,type)
+                (:generator 1
+                   (inst s-mov r x ,complex-inst-size)
+                   (inst s-fneg r r ,complex-inst-size)
+                   (inst ins r 0 x 0 ,real-inst-size)))))
+  (frob conjugate/complex-single-float complex-single-reg complex-single-float :s :2s)
+  (frob conjugate/complex-double-float complex-double-reg complex-double-float :d :2d))
 
 (define-vop (fsqrtd)
   (:args (x :scs (double-reg)))
@@ -910,6 +926,26 @@
   (:translate imagpart)
   (:note "complex double float imagpart")
   (:variant :imag))
+
+(defknown swap-complex ((complex float)) (complex float)
+    (foldable flushable movable always-translatable))
+(defoptimizer (swap-complex derive-type) ((x))
+  (sb-c::lvar-type x))
+(defun swap-complex (x)
+  (complex (imagpart x) (realpart x)))
+(macrolet ((def (name sc type &body insts)
+             `(define-vop (,name)
+                (:translate swap-complex)
+                (:policy :fast-safe)
+                (:args (x :scs (,sc)))
+                (:arg-types ,type)
+                (:results (r :scs (,sc)))
+                (:result-types ,type)
+                (:generator 2 ,@insts))))
+  (def swap-complex/complex-single-float complex-single-reg complex-single-float
+    (inst rev64 r x :2s))
+  (def swap-complex/complex-double-float complex-double-reg complex-double-float
+    (inst ext r x x 8)))
 
 (define-vop ()
   (:translate round-double)
