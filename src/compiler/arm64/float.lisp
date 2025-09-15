@@ -410,8 +410,7 @@
                 (:arg-types ,type)
                 (:result-types ,type)
                 (:generator 1
-                   (inst s-mov r x ,complex-inst-size)
-                   (inst s-fneg r r ,complex-inst-size)
+                   (inst s-fneg r x ,complex-inst-size)
                    (inst ins r 0 x 0 ,real-inst-size)))))
   (frob conjugate/complex-single-float complex-single-reg complex-single-float :s :2s)
   (frob conjugate/complex-double-float complex-double-reg complex-double-float :d :2d))
