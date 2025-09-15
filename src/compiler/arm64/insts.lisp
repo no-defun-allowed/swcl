@@ -112,6 +112,7 @@
 
   (define-arg-type simd-copy-reg :printer #'print-simd-copy-reg)
   (define-arg-type simd-dup-reg :printer #'print-simd-dup-reg)
+  (define-arg-type simd-float-reg :printer #'print-simd-float-reg)
 
   (define-arg-type simd-immh-reg :printer #'print-simd-immh-reg)
   (define-arg-type simd-immh-shift-left :printer #'print-simd-immh-shift-left)
@@ -2817,11 +2818,11 @@
   (neg :field (byte 1 23))
   (size :field (byte 1 22))
   (op5 :field (byte 1 21) :value #b1)
-  (rm :fields (list (byte 1 30) (byte 5 16)) :type 'simd-reg)
+  (rm :fields (list (byte 1 30) (byte 1 22) (byte 5 16)) :type 'simd-float-reg)
   (op :field (byte 5 11))
   (op6 :field (byte 1 10) :value #b1)
-  (rn :fields (list (byte 1 30) (byte 5 5)) :type 'simd-reg)
-  (rd :fields (list (byte 1 30) (byte 5 0)) :type 'simd-reg))
+  (rn :fields (list (byte 1 30) (byte 1 22) (byte 5 5)) :type 'simd-float-reg)
+  (rd :fields (list (byte 1 30) (byte 1 22) (byte 5 0)) :type 'simd-float-reg))
 
 (define-instruction-format (simd-two-same-float 32
                             :default-printer '(:name :tab rd ", " rn))
@@ -2834,8 +2835,8 @@
   (op6 :field (byte 5 16) :value #b00000)
   (op :field (byte 5 11))
   (op7 :field (byte 1 10) :value #b0)
-  (rn :fields (list (byte 1 30) (byte 5 5)) :type 'simd-reg)
-  (rd :fields (list (byte 1 30) (byte 5 0)) :type 'simd-reg))
+  (rn :fields (list (byte 1 30) (byte 1 22) (byte 5 5)) :type 'simd-float-reg)
+  (rd :fields (list (byte 1 30) (byte 1 22) (byte 5 0)) :type 'simd-float-reg))
 
 (defun encode-vector-size (size)
   (ecase size
