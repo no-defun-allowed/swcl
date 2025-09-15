@@ -1340,6 +1340,7 @@
                   '(complex (* (realpart w) z) (* (imagpart w) z)))
                 (deftransform * ((z w) (real (complex ,type)) * :important nil)
                   '(complex (* (realpart w) z) (* (imagpart w) z)))
+                )
                 ;; conjugate of complex number
                 (deftransform conjugate ((z) ((complex ,type)) * :important nil)
                   '(complex (realpart z) (- (imagpart z))))
@@ -1362,7 +1363,6 @@
                 ;; Divide a complex by a real.
                 (deftransform / ((w z) ((complex ,type) real) * :important nil)
                   '(complex (/ (realpart w) z) (/ (imagpart w) z)))
-                )
 
                 ;; Divide two complex numbers.
                 (deftransform / ((x y) ((complex ,type) (complex ,type)) * :important nil)

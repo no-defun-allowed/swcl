@@ -309,20 +309,77 @@
                    `(define-vop (,csname complex-single-op)
                       (:translate ,op)
                       (:generator ,cscost
-                        (inst ,cinst r x y))))
+                        (inst ,cinst r x y :2s))))
                 ,(when cdname
                    `(define-vop (,cdname complex-double-op)
                       (:translate ,op)
                       (:generator ,cdcost
-                        (inst ,cinst r x y)))))))
-  (frob + fadd +/single-float 2  +/double-float 2
+                        (inst ,cinst r x y :2d)))))))
+  (frob + fadd +/single-float 2 +/double-float 2
           s-fadd +/complex-single-float 3 +/complex-double-float 3)
   (frob - fsub -/single-float 2 -/double-float 2
           s-fsub -/complex-single-float 3 -/complex-double-float 3)
   (frob * fmul */single-float 4  */double-float 5)
   (frob / fdiv //single-float 12 //double-float 19))
 
-(macrolet ((frob (name inst translate sc type)
+(macrolet ((frob (op inst cost duplicatep
+                  single-real-complex-name single-complex-real-name
+                  double-real-complex-name double-complex-real-name)
+             (flet ((gen (real-complex-name complex-real-name
+                          real-type complex-type real-sc complex-sc
+                          real-inst-size complex-inst-size)
+                      (list
+                       (when real-complex-name
+                         `(define-vop (,real-complex-name)
+                            (:translate ,op)
+                            (:policy :fast-safe)
+                            (:args (x :scs (,real-sc)) (y :scs (,complex-sc)))
+                            (:results (r :scs (,complex-sc)))
+                            ,@(when duplicatep `((:temporary (:sc ,complex-sc) dup)))
+                            (:arg-types ,real-type ,complex-type)
+                            (:result-types ,complex-type)
+                            (:generator ,cost
+                               ,@(if duplicatep
+                                     `((inst s-mov dup x ,complex-inst-size)
+                                       (inst ins dup 1 dup 0 ,real-inst-size)
+                                       (inst ,inst r dup y ,complex-inst-size))
+                                     `((inst ,inst r x y ,complex-inst-size))))))
+                       (when complex-real-name
+                         `(define-vop (,complex-real-name)
+                            (:translate ,op)
+                            (:policy :fast-safe)
+                            (:args (x :scs (,complex-sc)) (y :scs (,real-sc)))
+                            (:results (r :scs (,complex-sc)))
+                            ,@(when duplicatep `((:temporary (:sc ,complex-sc) dup)))
+                            (:arg-types ,complex-type ,real-type)
+                            (:result-types ,complex-type)
+                            (:generator ,cost
+                               ,@(if duplicatep
+                                     `((inst s-mov dup y ,complex-inst-size)
+                                       (inst ins dup 1 dup 0 ,real-inst-size)
+                                       (inst ,inst r x dup ,complex-inst-size))
+                                     `((inst ,inst r x y ,complex-inst-size)))))))))
+               `(progn
+                  ,@(gen single-real-complex-name single-complex-real-name
+                         'single-float 'complex-single-float
+                         'single-reg 'complex-single-reg ':s ':2s)
+                  ,@(gen double-real-complex-name double-complex-real-name
+                         'double-float 'complex-double-float
+                         'double-reg 'complex-double-reg ':d ':2d)))))
+  (frob + s-fadd 3 nil
+        +/real-complex-single-float +/complex-real-single-float
+        +/real-complex-double-float +/complex-real-double-float)
+  (frob - s-fsub 3 nil
+        -/real-complex-single-float -/complex-real-single-float
+        -/real-complex-double-float -/complex-real-double-float)
+  (frob * s-fmul 3 t
+        */real-complex-single-float */complex-real-single-float
+        */real-complex-double-float */complex-real-double-float)
+  (frob / s-fdiv 3 t
+        nil //complex-real-single-float
+        nil //complex-real-double-float))
+
+(macrolet ((frob (name inst translate sc type &rest suffix)
              `(define-vop (,name)
                 (:args (x :scs (,sc)))
                 (:results (y :scs (,sc)))
@@ -335,11 +392,15 @@
                 (:save-p :compute-only)
                 (:generator 1
                   (note-this-location vop :internal-error)
-                  (inst ,inst y x)))))
+                  (inst ,inst y x ,@suffix)))))
   (frob abs/single-float fabs abs single-reg single-float)
   (frob abs/double-float fabs abs double-reg double-float)
   (frob %negate/single-float fneg %negate single-reg single-float)
-  (frob %negate/double-float fneg %negate double-reg double-float))
+  (frob %negate/double-float fneg %negate double-reg double-float)
+  (frob %negate/complex-single-float s-fneg %negate
+        complex-single-reg complex-single-float :2s)
+  (frob %negate/complex-double-float s-fneg %negate
+        complex-double-reg complex-double-float :2d))
 
 (define-vop (fsqrtd)
   (:args (x :scs (double-reg)))
