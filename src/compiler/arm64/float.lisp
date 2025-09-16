@@ -415,6 +415,31 @@
   (frob conjugate/complex-single-float complex-single-reg complex-single-float :s :2s)
   (frob conjugate/complex-double-float complex-double-reg complex-double-float :d :2d))
 
+(macrolet ((frob (name sc type complex-inst-size real-inst-size cost swap-y)
+             `(define-vop (,name)
+                (:args (x :scs (,sc)) (y :scs (,sc)))
+                (:results (r :scs (,sc)))
+                (:translate *)
+                (:policy :fast-safe)
+                (:arg-types ,type ,type)
+                (:result-types ,type)
+                (:temporary (:sc ,sc) real imag swap-y)
+                (:generator ,cost
+                   (inst trn1 real x x ,complex-inst-size)
+                   (inst trn2 imag x x ,complex-inst-size)
+                   ,swap-y
+                   ;; real := [rx*ry rx*iy]
+                   (inst s-fmul real real y ,complex-inst-size)
+                   ;; imag := [-ix*iy ix*ry]
+                   (inst s-fmul imag imag swap-y ,complex-inst-size)
+                   (inst s-fneg swap-y imag ,complex-inst-size)
+                   (inst ins imag 0 swap-y 0 ,real-inst-size)
+                   (inst s-fadd r real imag ,complex-inst-size)))))
+  (frob */complex-single-float complex-single-reg complex-single-float :2s :s 20
+        (inst rev64 swap-y y :2s))
+  (frob */complex-double-float complex-double-reg complex-double-float :2d :d 25
+        (inst ext swap-y y y 8)))
+
 (define-vop (fsqrtd)
   (:args (x :scs (double-reg)))
   (:results (y :scs (double-reg)))

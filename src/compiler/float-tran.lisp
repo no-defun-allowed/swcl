@@ -1351,7 +1351,6 @@
                   '(and (= (realpart w) z) (zerop (imagpart w))))
                 (deftransform = ((w z) (real (complex ,type)) * :important nil)
                   '(and (= (realpart z) w) (zerop (imagpart z))))
-                )
                 ;; Multiply two complex numbers.
                 (deftransform * ((x y) ((complex ,type) (complex ,type)) * :important nil)
                   '(let* ((rx (realpart x))
@@ -1363,6 +1362,7 @@
                 ;; Divide a complex by a real.
                 (deftransform / ((w z) ((complex ,type) real) * :important nil)
                   '(complex (/ (realpart w) z) (/ (imagpart w) z)))
+                )
 
                 ;; Divide two complex numbers.
                 (deftransform / ((x y) ((complex ,type) (complex ,type)) * :important nil)
