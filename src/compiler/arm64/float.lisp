@@ -425,15 +425,25 @@
                 (:result-types ,type)
                 (:temporary (:sc ,sc) real imag swap-y)
                 (:generator ,cost
+                   ;; We want x * y = (rx*ry - ix*iy) + (rx*iy + ix*ry)*i.
+                   ;; We separate that into x * y = real + imag where
+                   ;;   real =  rx*ry + rx*iy*i
+                   ;;   imag = -ix*iy + ix*ry*i
+                   ;; (named after the parts of x that appear in them).
+                   ;; Denote a vector which holds real part r and
+                   ;; imaginary part i as [r i].
+                   ;; Start with [ rx rx]
                    (inst trn1 real x x ,complex-inst-size)
+                   ;;        and [-ix ix]
                    (inst trn2 imag x x ,complex-inst-size)
+                   (inst s-fneg imag imag ,complex-inst-size)
+                   (inst ins imag 1 x 1 ,real-inst-size)
                    ,swap-y
-                   ;; real := [rx*ry rx*iy]
+                   ;; Then we compute real = [ rx*ry rx*iy]
                    (inst s-fmul real real y ,complex-inst-size)
-                   ;; imag := [-ix*iy ix*ry]
+                   ;;             and imag = [-ix*iy ix*ry]
                    (inst s-fmul imag imag swap-y ,complex-inst-size)
-                   (inst s-fneg swap-y imag ,complex-inst-size)
-                   (inst ins imag 0 swap-y 0 ,real-inst-size)
+                   ;; and finally add those to obtain x * y.
                    (inst s-fadd r real imag ,complex-inst-size)))))
   (frob */complex-single-float complex-single-reg complex-single-float :2s :s 20
         (inst rev64 swap-y y :2s))
