@@ -555,6 +555,7 @@
 
 (macrolet ((define-complex-float-=
                (complex-complex-name complex-real-name real-complex-name
+                eql-complex-complex-name
                 complex-sc complex-type real-sc real-type
                 float-size byte-size)
              `(progn
@@ -571,6 +572,19 @@
                      (inst uminv mask mask ,byte-size)
                      (inst umov min mask 0 :b)
                      (inst cmp min 0)))
+                (define-vop (,eql-complex-complex-name)
+                  (:translate eql)
+                  (:args (x :scs (,complex-sc)) (y :scs (,complex-sc)))
+                  (:arg-types ,complex-type ,complex-type)
+                  (:temporary (:sc ,complex-sc) mask)
+                  (:temporary (:sc unsigned-reg) min)
+                  (:conditional :ne)
+                  (:policy :fast-safe)
+                  (:generator 3
+                     (inst cmeq mask x y ,byte-size)
+                     (inst uminv mask mask ,byte-size)
+                     (inst umov min mask 0 :b)
+                     (inst cmp min 0)))
                 (define-vop (,real-complex-name ,complex-complex-name)
                   (:args (x :scs (,real-sc)) (y :scs (,complex-sc)))
                   (:arg-types ,real-type ,complex-type))
@@ -578,10 +592,12 @@
                   (:args (x :scs (,complex-sc)) (y :scs (,real-sc)))
                   (:arg-types ,complex-type ,real-type)))))
   (define-complex-float-=
-      =/complex-single-float =/complex-real-single-float =/real-complex-single-float
+      =/complex-single-float =/complex-real-single-float
+      =/real-complex-single-float eql/complex-single-float
     complex-single-reg complex-single-float single-reg single-float :2s :8b)
   (define-complex-float-=
-      =/complex-double-float =/complex-real-double-float =/real-complex-double-float
+      =/complex-double-float =/complex-real-double-float
+      =/real-complex-double-float eql/complex-double-float
     complex-double-reg complex-double-float double-reg double-float :2d :16b))
 
 ;;;; Conversion:
