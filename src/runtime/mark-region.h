@@ -67,9 +67,9 @@ struct allocator_state {
 extern bool try_allocate_general_from_pages(uword_t nbytes, struct alloc_region *region,
                                             int page_type, generation_index_t gen,
                                             struct allocator_state *start, page_index_t end);
-extern bool try_allocate_small_from_pages(uword_t nbytes, struct alloc_region *region,
-                                          int page_type, generation_index_t gen,
-                                          struct allocator_state *start, page_index_t end);
+extern page_index_t try_find_small_page(int page_type, generation_index_t gen,
+                                        struct allocator_state *start, page_index_t end);
+extern bool try_allocate_small_in_page(uword_t nbytes, struct alloc_region *region, page_index_t page);
 extern bool try_allocate_small_after_region(uword_t nbytes, struct alloc_region *region);
 extern page_index_t try_allocate_free_page(int page_type, generation_index_t gen,
                                            struct allocator_state *start, page_index_t end);

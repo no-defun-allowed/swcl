@@ -262,9 +262,8 @@ bool try_allocate_general_from_pages(uword_t nbytes, struct alloc_region *region
 
 /* try_allocate_small_from_pages updates the start pointer to after the
  * claimed page. */
-bool try_allocate_small_from_pages(uword_t nbytes, struct alloc_region *region,
-                                   int page_type, generation_index_t gen,
-                                   struct allocator_state *start, page_index_t end) {
+page_index_t try_find_small_page(int page_type, generation_index_t gen,
+                                 struct allocator_state *start, page_index_t end) {
   gc_assert(gen != SCRATCH_GENERATION);
  again:
   for (page_index_t where = start->page; where < end; where++) {
@@ -272,8 +271,7 @@ bool try_allocate_small_from_pages(uword_t nbytes, struct alloc_region *region,
         !target_pages[where] &&
         ((start->allow_free_pages && page_free_p(where)) ||
          (page_table[where].type == page_type &&
-          page_table[where].gen != PSEUDO_STATIC_GENERATION)) &&
-        try_allocate_small(nbytes, region, page_to_line(where), page_to_line(where + 1))) {
+          page_table[where].gen != PSEUDO_STATIC_GENERATION))) {
       // mark-region has a different way of zeroing, so just tell prepare_pages
       // that the page is unboxed if it's boxed, so that it doesn't try to zero.
       if (!page_table[where].type)
@@ -291,14 +289,18 @@ bool try_allocate_small_from_pages(uword_t nbytes, struct alloc_region *region,
       generations[gen].bytes_allocated += claimed;
       set_page_bytes_used(where, GENCGC_PAGE_BYTES);
       if (where + 1 > next_free_page) next_free_page = where + 1;
-      return true;
+      return where;
     }
   }
   if (!start->allow_free_pages) {
     *start = (struct allocator_state){0, true};
     goto again;
   }
-  return false;
+  return -1;
+}
+
+bool try_allocate_small_in_page(uword_t nbytes, struct alloc_region *region, page_index_t page) {
+  return try_allocate_small(nbytes, region, page_to_line(page), page_to_line(page + 1));
 }
 
 page_index_t try_allocate_free_page(int page_type, generation_index_t gen,

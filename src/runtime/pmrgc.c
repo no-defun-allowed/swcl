@@ -1426,52 +1426,55 @@ lisp_alloc(__attribute__((unused)) int flags,
     ensure_region_closed(region, page_type);
     struct allocator_state alloc_start = get_alloc_start_page(page_type);
     if (largep) {
-        int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
-        gc_assert(ret);
+        acquire_gc_page_table_lock();
         uword_t largest_hole;
         page_index_t new_page = try_allocate_large(nbytes, page_type, gc_alloc_generation,
                                                    &alloc_start, page_table_pages, &largest_hole);
         if (new_page == -1) gc_heap_exhausted_error_or_lose(largest_hole, nbytes);
         set_alloc_start_page(page_type, alloc_start);
-        ret = mutex_release(&free_pages_lock);
-        gc_assert(ret);
+        release_gc_page_table_lock();
         new_obj = page_address(new_page);
         set_allocation_bit_mark(new_obj);
         gc_memclear(page_type, new_obj, nbytes);
     } else if (mediump) {
         /* Grab an unused page. */
         alloc_start = get_alloc_start_page(FREE_PAGE_FLAG);
-        int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
-        gc_assert(ret);
+        acquire_gc_page_table_lock();
         if (!gc_active_p) medium_allocation_count++;
         page_index_t new_page = try_allocate_free_page(page_type, gc_alloc_generation,
                                                        &alloc_start, page_table_pages);
         if (new_page == -1) gc_heap_exhausted_error_or_lose(0, nbytes);
         set_alloc_start_page(FREE_PAGE_FLAG, alloc_start);
-        ret = mutex_release(&free_pages_lock);
-        gc_assert(ret);
+        release_gc_page_table_lock();
         new_obj = page_address(new_page);
         region->start_addr = new_obj;
         region->free_pointer = (char*)new_obj + nbytes;
         region->end_addr = page_address(new_page + 1);
         gc_memclear(page_type, new_obj, GENCGC_PAGE_BYTES);
-    } else {
-        int __attribute__((unused)) ret = mutex_acquire(&free_pages_lock);
-        gc_assert(ret);
-        if (!gc_active_p) small_allocation_count++;
-        bool success;
-        if (page_type == PAGE_TYPE_CODE)
-            success = try_allocate_general_from_pages(nbytes, region, page_type,
-                                                      gc_alloc_generation,
-                                                      &alloc_start, page_table_pages);
-        else
-            success = try_allocate_small_from_pages(nbytes, region, page_type,
-                                                    gc_alloc_generation,
-                                                    &alloc_start, page_table_pages);
+    } else if (page_type == PAGE_TYPE_CODE) {
+        /* All threads share a code allocator, so just use
+         * the generic lock-happy allocation routine. */
+        acquire_gc_page_table_lock();
+        bool success = try_allocate_general_from_pages(nbytes, region, page_type,
+                                                       gc_alloc_generation,
+                                                       &alloc_start, page_table_pages);
         if (!success) gc_heap_exhausted_error_or_lose(0, nbytes);
         set_alloc_start_page(page_type, alloc_start);
-        ret = mutex_release(&free_pages_lock);
-        gc_assert(ret);
+        release_gc_page_table_lock();
+        new_obj = region->start_addr;
+        gc_memclear(page_type, new_obj, addr_diff(region->end_addr, new_obj));
+    } else {
+        /* Find a reusable page in the lock... */
+        acquire_gc_page_table_lock();
+        if (!gc_active_p) small_allocation_count++;
+        page_index_t new_page = try_find_small_page(page_type, gc_alloc_generation,
+                                                    &alloc_start, page_table_pages);
+        if (new_page == -1) gc_heap_exhausted_error_or_lose(0, nbytes);
+        set_alloc_start_page(page_type, alloc_start);
+        release_gc_page_table_lock();
+        /* ...and find which lines to reuse outside the lock. */
+        if (!try_allocate_small_in_page(nbytes, region, new_page))
+          lose("No free lines on page %d?\n", find_page_index(region->start_addr));
         new_obj = region->start_addr;
         gc_memclear(page_type, new_obj, addr_diff(region->end_addr, new_obj));
     }
