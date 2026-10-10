@@ -596,6 +596,11 @@ during backtrace.
   (symbol-tlab :c-type "struct alloc_region" :length 3)
   (sys-mixed-tlab :c-type "struct alloc_region" :length 3)
   (sys-cons-tlab :c-type "struct alloc_region" :length 3)
+  #+mark-region-gc (medium-boxed-tlab :c-type "struct alloc_region" :length 3)
+  #+mark-region-gc (medium-mixed-tlab :c-type "struct alloc_region" :length 3)
+  ;; We can allocate a lot of cons cells in one allocation, even though
+  ;; cons cells themselves are small.
+  #+mark-region-gc (medium-cons-tlab :c-type "struct alloc_region" :length 3)
   (remset)
   ;; allocation instrumenting
   (slow-path-allocs)
