@@ -505,14 +505,12 @@ static _Thread_local lispobj *source_object;
 
 static void mark(lispobj object, lispobj *where, enum source source_type) {
   if (is_lisp_pointer(object) && in_dynamic_space(object)) {
-
     lispobj *np = native_pointer(object);
     if (gc_gen_of(object, 0) < dirty_generation_source)
       /* Used to find dirty pages in mr_scavenge_root_gens. */
       dirty = 1;
     if (gc_gen_of(object, 0) > generation_to_collect)
       return;
-
     /* Fix up embedded simple-fun objects. */
     if (functionp(object) && embedded_obj_p(widetag_of(np))) {
       lispobj *base = (lispobj*)fun_code_header((struct simple_fun*)np);
@@ -1281,7 +1279,7 @@ void mrgc_init() {
   compactor_init();
 }
 
-void mr_pre_gc(generation_index_t generation) {
+void mr_pre_gc(generation_index_t generation, bool raise) {
   collection++;
 #ifdef LOG_COLLECTIONS
   fprintf(stderr, "\n[GC #%4d gen %d %5luM / %5luM ", collection, generation,
@@ -1292,12 +1290,13 @@ void mr_pre_gc(generation_index_t generation) {
   reset_statistics();
 #if ENABLE_COMPACTION
   if (generation != PSEUDO_STATIC_GENERATION)
-    METER(consider, consider_compaction(generation_to_collect));
+    METER(consider, consider_compaction(generation_to_collect, raise));
 #endif
 }
 
-void mr_collect_garbage(bool raise) {
+struct collection_result mr_collect_garbage(bool raise) {
   extern void reset_alloc_start_pages(bool allow_free_pages);
+  struct collection_result res = { .more = false };
   if (generation_to_collect != PSEUDO_STATIC_GENERATION) {
     METER(scavenge, mr_scavenge_root_gens());
   }
@@ -1311,7 +1310,11 @@ void mr_collect_garbage(bool raise) {
      * we could snoop TLS of each GC thread instead. */
     run_on_thread_pool(commit_thread_local_remset);
     reset_alloc_start_pages(true);
-    METER(compact, run_compaction(&meters.copy, &meters.fix, &meters.compact_resweep));
+    struct compaction_result c;
+    METER(compact, c = run_compaction(&meters.copy, &meters.fix, &meters.compact_resweep));
+    /* Tell the caller to GC another generation if this compaction was useless. */
+    raise |= c.useless;
+    res.more = c.useless;
   }
 #endif
   /* scan_finalizers checks forwarding pointers, so we need to
@@ -1331,6 +1334,7 @@ void mr_collect_garbage(bool raise) {
   if (gencgc_verbose>1) mr_print_meters();
   reset_alloc_start_pages(false);
   reset_pinned_pages();
+  return res;
 }
 
 void zero_all_free_ranges() {

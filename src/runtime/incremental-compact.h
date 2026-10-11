@@ -13,10 +13,14 @@ extern uword_t bytes_to_copy;
 /* Entry-points for compactor */
 extern bool compacting;
 extern void compactor_init();
-extern void consider_compaction(generation_index_t gen);
-extern void run_compaction(_Atomic(uword_t) *copy_meter,
-                           _Atomic(uword_t) *fix_meter,
-                           _Atomic(uword_t) *resweep_meter);
+extern void consider_compaction(generation_index_t gen, bool raise);
+struct compaction_result {
+  bool useless;
+};
+extern struct compaction_result
+run_compaction(_Atomic(uword_t) *copy_meter,
+               _Atomic(uword_t) *fix_meter,
+               _Atomic(uword_t) *resweep_meter);
 
 /* Tracing/logging interface */
 extern unsigned char *target_pages;

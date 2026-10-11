@@ -759,7 +759,7 @@ int check_hash_tables;
 
 /* Garbage collect a generation. If raise is 0 then the remains of the
  * generation are not raised to the next generation. */
-void NO_SANITIZE_ADDRESS NO_SANITIZE_MEMORY
+struct collection_result NO_SANITIZE_ADDRESS NO_SANITIZE_MEMORY
 garbage_collect_generation(generation_index_t generation, int raise,
                            void* cur_thread_approx_stackptr)
 {
@@ -817,7 +817,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
         /* Don't try to allocate into pseudo-static, when we collect it */
         if (generation == PSEUDO_STATIC_GENERATION)
           gc_alloc_generation = 0;
-        mr_pre_gc(generation);
+        mr_pre_gc(generation, raise);
 
         if (pin_all_dynamic_space_code) {
           /* This needs to happen before ambiguous root pinning, as the mechanisms
@@ -969,7 +969,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
         }
     }
 
-    mr_collect_garbage(raise);
+    struct collection_result res = mr_collect_garbage(raise);
     reset_alloc_start_pages(false);
     struct generation* g = &generations[generation];
     /* Set the new gc trigger for the GCed generation. */
@@ -991,6 +991,7 @@ garbage_collect_generation(generation_index_t generation, int raise,
     extern int n_unboxed_instances;
     n_unboxed_instances = 0;
     gc_alloc_generation = original_alloc_generation;
+    return res;
 }
 
 static page_index_t
@@ -1161,7 +1162,8 @@ collect_garbage(generation_index_t last_gen)
                 generations[gen+1].bytes_allocated;
         }
 
-        garbage_collect_generation(gen, raise, cur_thread_approx_stackptr);
+        struct collection_result res = garbage_collect_generation(gen, raise, cur_thread_approx_stackptr);
+        more |= res.more;
 
         /* Don't keep panicking if we freed enough now. */
         if (panic && (float)bytes_allocated / (float)dynamic_space_size < PANIC_THRESHOLD) {

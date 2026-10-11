@@ -96,8 +96,12 @@ extern void mr_trace_bump_range(lispobj* start, lispobj *end);
 //extern bool pointer_survived_gc_yet(lispobj object);
 
 /* Running the GC */
-extern void mr_pre_gc(generation_index_t generation);
-extern void mr_collect_garbage(bool raise);
+extern void mr_pre_gc(generation_index_t generation, bool raise);
+struct collection_result {
+  /* Should we should collect another generation? */
+  bool more;
+};
+extern struct collection_result mr_collect_garbage(bool raise);
 extern void zero_all_free_ranges();
 extern void prepare_lines_for_final_gc();
 #endif

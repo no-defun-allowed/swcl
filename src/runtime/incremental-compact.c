@@ -44,6 +44,8 @@ float page_utilisation_threshold = 0.5;
 uword_t bytes_to_copy = 30000000;
 /* Minimum generation to consider compacting when collecting. */
 generation_index_t minimum_compact_gen = 1;
+/* Minimum ratio of pages which had nothing freed to deem a compaction useless. */
+float minimum_useless_pages_threshold = 0.25;
 /* To force compacting GC or not. Set by prepare_dynamic_space_for_final_gc. */
 bool force_compaction = 0;
 
@@ -99,8 +101,11 @@ static void pick_targets() {
   }
 }
 
-void consider_compaction(generation_index_t gen) {
-  if (gen >= minimum_compact_gen && should_compact("Enabling remset")) {
+void consider_compaction(generation_index_t gen, bool raise) {
+  /* We always compact before raising, to avoid fragmenting the
+   * next generation, as we will be less prompt in collecting and
+   * defragmenting each subsequent generation. */
+  if (gen >= minimum_compact_gen && (raise || should_compact("Enabling remset"))) {
     compacting = 1;
     target_generation = gen;
     pick_targets();
@@ -269,8 +274,11 @@ static void fix_slots() {
   }
 }
 
-static void resweep_moved_lines() {
+/* Returns the ratio of pages which the collector targeted for compaction,
+ * but did not actually have any lines moved by the collector. */
+static float resweep_moved_lines() {
   unsigned char *allocation = (unsigned char*)allocation_bitmap;
+  int targeted = 0, useless = 0;
   for (page_index_t p = 0; p < page_table_pages; p++) {
     if (target_pages[p] && !page_single_obj_p(p)) {
       uword_t decrement = 0;
@@ -280,6 +288,10 @@ static void resweep_moved_lines() {
           allocation[l] = 0;
           decrement++;
         }
+      targeted++;
+      /* TODO: Should this only be if the decrement is 0? What if e.g.
+       * we only manage to remove one line on a page with two lines used? */
+      if (decrement == 0 && page_bytes_used(p) > 0) useless++;
       set_page_bytes_used(p, page_bytes_used(p) - LINE_SIZE * decrement);
       generations[target_generation].bytes_allocated -= LINE_SIZE * decrement;
       bytes_allocated -= LINE_SIZE * decrement;
@@ -294,11 +306,13 @@ static void resweep_moved_lines() {
       }
     }
   }
+  return targeted ? (float)useless / (float)targeted : 0.0;
 }
 
-void run_compaction(_Atomic(uword_t) *copy_meter,
-                    _Atomic(uword_t) *fix_meter,
-                    _Atomic(uword_t) *resweep_meter) {
+struct compaction_result run_compaction(_Atomic(uword_t) *copy_meter,
+                                        _Atomic(uword_t) *fix_meter,
+                                        _Atomic(uword_t) *resweep_meter) {
+  struct compaction_result res = { .useless = false };
   if (compacting) {
     /* Check again, in case fragmentation somehow improves.
      * Not likely, but it's a cheap test which avoids effort. */
@@ -307,7 +321,9 @@ void run_compaction(_Atomic(uword_t) *copy_meter,
       METER(copy_meter, move_objects());
       gc_close_collector_regions(0);
       METER(fix_meter, fix_slots());
-      METER(resweep_meter, resweep_moved_lines());
+      float useless_ratio;
+      METER(resweep_meter, useless_ratio = resweep_moved_lines());
+      res.useless = useless_ratio > minimum_useless_pages_threshold;
       should_compact("I just moved, but still");
       extern int check_hash_tables;
       if (check_hash_tables) check_hash_tables = 2;
@@ -317,4 +333,5 @@ void run_compaction(_Atomic(uword_t) *copy_meter,
     suballoc_release(&remset_suballocator);
   }
   compacting = 0;
+  return res;
 }
